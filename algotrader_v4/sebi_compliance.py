@@ -147,14 +147,17 @@ class SEBICompliance:
             self._pause_reason = reason
         logger.warning("SEBI: Trading paused — {}", reason)
 
-    def resume_trading(self) -> None:
+    def resume_trading(self) -> tuple[bool, str]:
+        """Returns (success, message). Kill switch requires reset_kill_switch() first."""
         with self._lock:
             if self._state == KillSwitchState.KILLED:
-                logger.error("Cannot resume — kill switch is ACTIVE. Call reset first.")
-                return
+                msg = f"Cannot resume — kill switch is active: {self._kill_reason}"
+                logger.error("SEBI: {}", msg)
+                return False, msg
             self._state        = KillSwitchState.ACTIVE
             self._pause_reason = ""
         logger.info("SEBI: Trading resumed")
+        return True, "ACTIVE"
 
     def reset_kill_switch(self) -> None:
         with self._lock:

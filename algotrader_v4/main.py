@@ -396,7 +396,9 @@ def trigger_kill_switch(reason: str = "Manual kill switch"):
 
 @app.post("/sebi/resume", tags=["SEBI Compliance"])
 def resume_trading():
-    sebi_compliance.resume_trading()
+    ok, msg = sebi_compliance.resume_trading()
+    if not ok:
+        raise HTTPException(409, f"SEBI: {msg}")
     return {"status": "ACTIVE"}
 
 @app.post("/sebi/pause", tags=["SEBI Compliance"])
@@ -414,6 +416,11 @@ def get_algo_ids(): return {"algo_ids": APPROVED_ALGO_IDS, "total": len(APPROVED
 
 @app.get("/sebi/strategy-disclosure/{strategy}", tags=["SEBI Compliance"])
 def strategy_disclosure(strategy: str): return sebi_compliance.get_strategy_logic_disclosure(strategy)
+
+@app.post("/sebi/reset-kill-switch", tags=["SEBI Compliance"])
+def reset_kill_switch():
+    sebi_compliance.reset_kill_switch()
+    return {"status": "ACTIVE", "note": "Kill switch reset. Trading re-enabled."}
 
 @app.post("/sebi/whitelist-ip", tags=["SEBI Compliance"])
 def whitelist_ip(req: WhitelistIPRequest):
