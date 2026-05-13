@@ -108,7 +108,7 @@ class MasterAgent:
         ))
         return report
 
-    def stop(self) -> None:
+    async def stop(self) -> None:
         self.running = False
         tick_engine.stop()
         for a in ALL_AGENTS.values():
@@ -117,7 +117,7 @@ class MasterAgent:
             self._scheduler.shutdown(wait=False)
         except Exception:
             pass
-        asyncio.create_task(send_telegram("<b>AlgoTrader Pro v5 stopped</b>"))
+        await send_telegram("<b>AlgoTrader Pro v5 stopped</b>")
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
 

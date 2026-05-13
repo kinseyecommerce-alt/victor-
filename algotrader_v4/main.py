@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from loguru import logger
 
 from config import settings
@@ -45,6 +45,12 @@ tick_engine.ws_broadcast = broadcast
 class TokenRequest(BaseModel):
     request_token: str | None = None
     access_token:  str | None = None
+
+    @model_validator(mode="after")
+    def at_least_one_token(self) -> "TokenRequest":
+        if not self.request_token and not self.access_token:
+            raise ValueError("Provide request_token or access_token")
+        return self
 
 class BacktestRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
@@ -116,7 +122,9 @@ async def start_bot(req: BotStartRequest):
             "watchlist": [w["symbol"] for w in watchlist], "report": report}
 
 @app.post("/bot/stop", tags=["Bot"])
-def stop_bot(): master_agent.stop(); return {"status": "stopped"}
+async def stop_bot():
+    await master_agent.stop()
+    return {"status": "stopped"}
 
 @app.get("/bot/status", tags=["Bot"])
 def bot_status(): return master_agent.get_status()
