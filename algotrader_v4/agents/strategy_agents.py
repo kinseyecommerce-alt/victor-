@@ -203,7 +203,7 @@ class SwingAgent(BaseAgent):
         # Price pulling back to EMA50 (within 1.5%)
         ema50_near = ind.ema50 > 0 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
         # Short EMA above long EMA
-        ema_up     = ind.ema20 > 0 and ind.ema50 > 0 and ind.ema20 > ind.ema50  # using ema21 as proxy
+        ema_up     = ind.ema21 > 0 and ind.ema50 > 0 and ind.ema21 > ind.ema50
         # RSI in accumulation zone
         rsi_ok     = 40 < ind.rsi_14 < 60
         # Low volatility pullback (ATR not spiking)
@@ -269,7 +269,8 @@ class ScalpingAgent(BaseAgent):
 
         # ── Spread filter (avoid wide spreads on scalp) ──────────────
         max_spread = ltp * 0.0003   # 0.03% max allowed spread
-        if snap.tick.spread > max_spread:
+        spread = snap.tick.ask - snap.tick.bid
+        if spread > max_spread:
             return "HOLD", None
 
         # ── Bullish micro-cross ──────────────────────────────────
