@@ -1,0 +1,219 @@
+"""
+agents/master_agent.py  (v3 — tick-driven)
+Starts TickEngine, feeds queues to all strategy agents, reviews every 5 min via Claude.
+"""
+from __future__ import annotations
+import asyncio, json
+from datetime import datetime
+import anthropic
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from loguru import logger
+from config import settings
+from kite_client import kite_client
+from risk_manager import risk_manager
+from order_guard import order_guard
+from backtest_engine import backtest_engine
+from tick_engine import tick_engine
+from market_regime import regime_detector, Regime, REGIME_PLANS
+from agents.base_agent import send_telegram
+from agents.strategy_agents import ALL_AGENTS
+
+MASTER_SYSTEM_PROMPT = """You are the MASTER TRADING AGENT for an NSE/BSE algo trading system.
+You receive real-time live indicator snapshots for every symbol and agent statuses.
+Return ONLY valid JSON (no markdown):
+{"market_regime":"trending_up|trending_down|ranging|volatile","regime_confidence":0-100,
+"agent_directives":{"intraday":{"action":"run|pause|reduce_size","reason":"..."},"fno":{"action":"run","reason":"..."},"swing":{"action":"run","reason":"..."},"scalping":{"action":"run","reason":"..."}},
+"capital_allocation":{"intraday":0-100,"fno":0-100,"swing":0-100,"scalping":0-100},
+"risk_override":{"halt_new_trades":false,"reason":""},
+"summary":"one sentence"}
+Rules: capital_allocation sums to 100. Never >40% one strategy. Pause agents with pnl<-2000 or >3 errors. Volatile→favour scalping. Trending→favour swing."""
+
+
+class MasterAgent:
+    def __init__(self):
+        self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self._scheduler = AsyncIOScheduler()
+        self.running = False
+        self._agent_watchlists: dict[str, list[dict]] = {}
+        self.last_directives: dict = {}
+
+    def start(self, strategies: list[str], watchlist: list[dict]) -> dict:
+        self.running = True
+        report = {}
+
+        for strat in strategies:
+            agent = ALL_AGENTS.get(strat)
+            if not agent: continue
+            approved = agent.filter_watchlist(watchlist)
+            self._agent_watchlists[strat] = approved
+            report[strat] = {"total": len(watchlist), "approved": len(approved),
+                             "symbols": [a["symbol"] for a in approved]}
+
+        tick_engine.subscribe(watchlist)
+
+        for strat in strategies:
+            agent = ALL_AGENTS.get(strat)
+            if not agent: continue
+            if self._agent_watchlists.get(strat):
+                q = tick_engine.add_subscriber(f"agent_{strat}")
+                agent.start(q)
+
+        self._scheduler.add_job(self._master_review, "interval", seconds=300, id="master_review")
+        sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
+        self._scheduler.add_job(self._auto_squareoff, "cron", hour=sq_h, minute=sq_m,
+                                 day_of_week="mon-fri", id="squareoff")
+        self._scheduler.add_job(self._daily_reset, "cron", hour=9, minute=15,
+                                 day_of_week="mon-fri", id="daily_reset")
+        self._scheduler.start()
+        logger.info("[master] v3 tick-driven started")
+        asyncio.create_task(send_telegram(
+            f"<b>AlgoTrader Pro v3</b> started\nMode: {settings.trading_mode} | Tick: 1s\n" +
+            "\n".join(f"  {s}: {r['approved']}/{r['total']} symbols" for s, r in report.items())
+        ))
+        return report
+
+    def stop(self):
+        self.running = False
+        tick_engine.stop()
+        for a in ALL_AGENTS.values(): a.stop()
+        try: self._scheduler.shutdown(wait=False)
+        except: pass
+        asyncio.create_task(send_telegram("<b>AlgoTrader Pro v3 stopped</b>"))
+
+    async def _master_review(self):
+        if not self.running: return
+
+        # 1. Detect current market regime from live NSE data
+        try:
+            regime, plan = await regime_detector.update()
+        except Exception as exc:
+            logger.error("[master] Regime detection failed: {}", exc)
+            regime, plan = regime_detector.current_regime, regime_detector.current_plan
+
+        # 2. Apply regime-based strategy directives immediately
+        self._apply_regime_plan(regime, plan)
+
+        # 3. Build enhanced report for Claude
+        report = {
+            "timestamp":    datetime.now().isoformat(),
+            "mode":         settings.trading_mode,
+            "regime":       regime.value,
+            "regime_plan":  {
+                "active":      plan.active,
+                "paused":      plan.paused,
+                "allocation":  plan.allocation,
+                "size_factor": plan.size_factor,
+            },
+            "regime_signals": regime_detector.current_signals.to_dict()
+                              if regime_detector.current_signals else {},
+            "live_market":  tick_engine.all_latest(),
+            "risk":         risk_manager.status(),
+            "guard":        order_guard.status(),
+            "agents":       {n: a.get_status() for n, a in ALL_AGENTS.items()},
+        }
+
+        # 4. Claude adds nuanced overrides on top of regime plan
+        try:
+            msg = self._client.messages.create(
+                model="claude-sonnet-4-20250514", max_tokens=600,
+                system=MASTER_SYSTEM_PROMPT,
+                messages=[{"role":"user","content":json.dumps(report,indent=2,default=str)}],
+            )
+            raw = msg.content[0].text.strip().replace("```json","").replace("```","").strip()
+            d   = json.loads(raw)
+            self.last_directives = {**d, "regime": regime.value,
+                                    "regime_reasoning": plan.reasoning}
+            # Claude can override individual agent actions
+            for strat, directive in d.get("agent_directives", {}).items():
+                agent = ALL_AGENTS.get(strat)
+                if not agent: continue
+                action = directive.get("action","run")
+                if action == "pause" and agent.state.running:
+                    agent.stop()
+                elif action == "run" and not agent.state.running:
+                    if self._agent_watchlists.get(strat):
+                        q = tick_engine.add_subscriber(f"agent_{strat}")
+                        agent.start(q)
+            if d.get("risk_override",{}).get("halt_new_trades"):
+                risk_manager.is_trading_halted = True
+        except Exception as e:
+            logger.error("[master] Claude override error: {}", e)
+            self.last_directives = {
+                "regime":            regime.value,
+                "regime_reasoning":  plan.reasoning,
+                "strategy_plan":     {
+                    "active":      plan.active, "paused": plan.paused,
+                    "allocation":  plan.allocation,
+                },
+                "summary": f"Regime {regime.value} detected. {plan.reasoning[:80]}",
+            }
+
+        summary = self.last_directives.get("summary","")
+        if summary:
+            asyncio.create_task(send_telegram(
+                f"<b>Market Regime: {regime.value}</b>\n"
+                f"Active: {', '.join(plan.active)}\n"
+                f"Paused: {', '.join(plan.paused) or 'none'}\n"
+                f"Size: {int(plan.size_factor*100)}%\n{summary}"
+            ))
+
+    def _apply_regime_plan(self, regime: Regime, plan) -> None:
+        """Immediately start/stop agents based on regime plan."""
+        for strat in plan.paused:
+            agent = ALL_AGENTS.get(strat)
+            if agent and agent.state.running:
+                agent.stop()
+                logger.info("[master] Regime {} → paused {}", regime.value, strat)
+
+        for strat in plan.active:
+            agent = ALL_AGENTS.get(strat)
+            if agent and not agent.state.running:
+                if self._agent_watchlists.get(strat):
+                    q = tick_engine.add_subscriber(f"agent_{strat}")
+                    agent.start(q)
+                    logger.info("[master] Regime {} → started {}", regime.value, strat)
+
+    def _apply(self, d: dict):
+        for strat, directive in d.get("agent_directives", {}).items():
+            agent = ALL_AGENTS.get(strat)
+            if not agent: continue
+            action = directive.get("action", "run")
+            if action == "pause" and agent.state.running:
+                agent.stop()
+            elif action == "run" and not agent.state.running:
+                if self._agent_watchlists.get(strat):
+                    q = tick_engine.add_subscriber(f"agent_{strat}")
+                    agent.start(q)
+        if d.get("risk_override", {}).get("halt_new_trades"):
+            risk_manager.is_trading_halted = True
+        summary = d.get("summary", "")
+        if summary:
+            asyncio.create_task(send_telegram(
+                f"<b>Master review</b>\nRegime: {d.get('market_regime','?')}\n{summary}"
+            ))
+
+    async def _auto_squareoff(self):
+        ids = kite_client.squareoff_all_positions()
+        if ids:
+            await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
+
+    async def _daily_reset(self):
+        risk_manager.reset_daily(); order_guard.reset_daily()
+        for a in ALL_AGENTS.values(): a.reset_daily()
+        await send_telegram("<b>New trading day</b> — counters reset")
+
+    def get_status(self) -> dict:
+        return {
+            "master_running":    self.running,
+            "mode":              settings.trading_mode,
+            "architecture":      "tick-driven 1s",
+            "regime":            regime_detector.status(),
+            "live_market":       tick_engine.all_latest(),
+            "last_directives":   self.last_directives,
+            "agents":            {n: a.get_status() for n, a in ALL_AGENTS.items()},
+            "risk":              risk_manager.status(),
+            "guard":             order_guard.status(),
+            "backtest_approved": {n: backtest_engine.get_approved_symbols(n) for n in ALL_AGENTS},
+        }
+
+master_agent = MasterAgent()
