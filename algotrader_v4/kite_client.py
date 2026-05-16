@@ -1,42 +1,130 @@
 """
-kite_client.py  (v4 — ORDERS ONLY)
+kite_client.py  (v5 — Kite API limit-aware)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Zerodha Kite is used EXCLUSIVELY for:
-  • Authentication (login URL, access token)
-  • Order placement (place, modify, cancel)
-  • Position & holding queries (portfolio state)
-  • Square-off (emergency close all)
+Zerodha Kite used EXCLUSIVELY for orders + portfolio.
+Market data comes from NSE India API + yfinance (market_data.py).
 
-Market data (quotes, OHLCV, ticks) comes from:
-  → NSEClient   (live quotes — market_data.py)
-  → YFinanceClient (historical OHLCV — market_data.py)
-
-REMOVED from this file vs v1/v2/v3:
-  ✗ quote()          — now via NSEClient
-  ✗ ltp()            — now via NSEClient
-  ✗ ohlc()           — now via NSEClient
-  ✗ historical_data()— now via YFinanceClient
-  ✗ instruments()    — now via YFinanceClient
-  ✗ start_ticker()   — now via TickEngine (NSE API)
-  ✗ stop_ticker()    — same
+Kite Connect API limits enforced here
+──────────────────────────────────────
+  Rate limits
+    • REST API (general)  : 10 req/sec  → token bucket
+    • Order placement     : 10 req/sec  → shared bucket
+    • Historical data     : 3 req/sec   → separate bucket
+  Retry / resilience
+    • NetworkException    : up to 4 retries, exponential backoff (1s→2s→4s→8s)
+    • 429 / rate-limit    : wait until bucket refills, then retry
+    • TokenException      : no retry — surface immediately (token must be refreshed)
+  Order constraints
+    • Tag                 : max 20 chars (Kite hard limit) — auto-truncated
+    • Quantity            : must be > 0
+    • F&O lot-size        : quantity must be multiple of instrument lot size
+    • Margin check        : pre-flight check in LIVE mode before placing entry
+  Historical data
+    • Minute candles      : max 60-day window per request — auto-chunked
+    • Day candles         : max 2 000-day window per request
 """
 from __future__ import annotations
 
+import math
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from threading import Lock
 from typing import Optional
 
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import (
+    NetworkException, TokenException, InputException,
+    OrderException, DataException, GeneralException,
+)
 from loguru import logger
 
 from config import settings
 
 
+# ── Kite-documented limits ─────────────────────────────────────────────────
+_KITE_ORDER_TAG_MAX   = 20      # chars
+_KITE_REST_RPS        = 10      # requests/second (general + orders)
+_KITE_HIST_RPS        = 3       # requests/second (historical data)
+_KITE_HIST_MIN_DAYS   = 60      # max days per minute-candle request
+_KITE_HIST_DAY_DAYS   = 2_000   # max days per day-candle request
+_RETRY_MAX            = 4
+_RETRY_BASE_SEC       = 1.0     # doubles each attempt: 1 2 4 8
+
+
+# ── F&O lot sizes (NSE — as of 2025, update after each expiry revision) ────
+_FON_LOT_SIZES: dict[str, int] = {
+    "NIFTY": 75, "BANKNIFTY": 30, "FINNIFTY": 65, "MIDCPNIFTY": 120,
+    "RELIANCE": 250, "TCS": 150, "INFY": 300, "HDFCBANK": 550,
+    "ICICIBANK": 700, "SBIN": 1500, "AXISBANK": 1200, "KOTAKBANK": 400,
+    "LT": 300, "WIPRO": 1500, "BAJFINANCE": 125, "MARUTI": 100,
+    "TATAMOTORS": 1425, "HINDUNILVR": 300, "SUNPHARMA": 700,
+    "DRREDDY": 125, "CIPLA": 650, "ONGC": 1925, "TATASTEEL": 5500,
+    "JSWSTEEL": 1350, "ADANIPORTS": 625, "TITAN": 375,
+}
+
+
+# ── Token-bucket rate limiter ──────────────────────────────────────────────
+
+class _TokenBucket:
+    """Thread-safe token bucket for rate limiting."""
+
+    def __init__(self, rate: float) -> None:
+        self._rate     = rate          # tokens per second
+        self._tokens   = rate          # start full
+        self._last     = time.monotonic()
+        self._lock     = Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            now   = time.monotonic()
+            delta = now - self._last
+            self._tokens = min(self._rate, self._tokens + delta * self._rate)
+            self._last   = now
+            if self._tokens < 1:
+                wait = (1 - self._tokens) / self._rate
+                time.sleep(wait)
+                self._tokens = 0
+            else:
+                self._tokens -= 1
+
+
+_rest_bucket = _TokenBucket(_KITE_REST_RPS)
+_hist_bucket = _TokenBucket(_KITE_HIST_RPS)
+
+
+# ── Retry helper ───────────────────────────────────────────────────────────
+
+def _with_retry(fn, bucket: _TokenBucket = _rest_bucket, label: str = ""):
+    """
+    Call fn() with rate-limiting and exponential-backoff retry.
+    TokenException is re-raised immediately (token must be refreshed externally).
+    """
+    delay = _RETRY_BASE_SEC
+    for attempt in range(_RETRY_MAX + 1):
+        bucket.acquire()
+        try:
+            return fn()
+        except TokenException:
+            raise
+        except (NetworkException, DataException, GeneralException) as exc:
+            if attempt == _RETRY_MAX:
+                raise
+            logger.warning("[kite{}] {} — retry {}/{} in {:.0f}s",
+                           f"/{label}" if label else "", exc, attempt + 1, _RETRY_MAX, delay)
+            time.sleep(delay)
+            delay *= 2
+        except InputException as exc:
+            raise   # bad input — don't retry
+
+
+# ── Main client ────────────────────────────────────────────────────────────
+
 class KiteClient:
     """
-    Thin wrapper around KiteConnect.
-    Only order and portfolio methods are exposed.
-    In PAPER mode every mutating call is simulated in memory.
+    Thin wrapper around KiteConnect — orders and portfolio only.
+    PAPER mode: every mutating call is simulated in memory.
+    LIVE mode : all Kite API limits are enforced.
     """
 
     def __init__(self) -> None:
@@ -44,7 +132,7 @@ class KiteClient:
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
 
-    # ── Auth ───────────────────────────────────────────────────────────
+    # ── Auth ───────────────────────────────────────────────────────────────
 
     def login_url(self) -> str:
         return KiteConnect(api_key=settings.kite_api_key).login_url()
@@ -61,10 +149,9 @@ class KiteClient:
             token = data["access_token"]
         else:
             token = access_token or settings.kite_access_token
-
         kite.set_access_token(token)
         self._kite = kite
-        logger.info("Kite auth OK (orders-only mode)")
+        logger.info("Kite auth OK (orders-only, rate-limited mode)")
         return token
 
     @property
@@ -75,63 +162,79 @@ class KiteClient:
             )
         return self._kite
 
-    # ── Portfolio (read-only, needed for P&L + exit decisions) ─────────
+    # ── Portfolio (read-only) ──────────────────────────────────────────────
 
     def positions(self) -> dict:
         if settings.trading_mode == "PAPER":
             return {"net": self._paper_positions, "day": self._paper_positions}
-        return self.kite.positions()
+        return _with_retry(self.kite.positions, label="positions")
 
     def holdings(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
             return []
-        return self.kite.holdings()
+        return _with_retry(self.kite.holdings, label="holdings")
 
     def orders(self) -> list[dict]:
         if settings.trading_mode == "PAPER":
             return self._paper_orders
-        return self.kite.orders()
+        return _with_retry(self.kite.orders, label="orders")
 
     def order_history(self, order_id: str) -> list[dict]:
         if settings.trading_mode == "PAPER":
             return [o for o in self._paper_orders if o["order_id"] == order_id]
-        return self.kite.order_history(order_id)
+        return _with_retry(
+            lambda: self.kite.order_history(order_id), label="order_history"
+        )
 
-    # ── Order placement ─────────────────────────────────────────────────
+    def margins(self) -> dict:
+        """Live margin snapshot — used for pre-flight order check."""
+        if settings.trading_mode == "PAPER":
+            return {"equity": {"available": {"live_balance": settings.max_position_size * 5}}}
+        return _with_retry(self.kite.margins, label="margins")
+
+    # ── Order placement ────────────────────────────────────────────────────
 
     def place_order(
         self,
         tradingsymbol:    str,
         exchange:         str,
-        transaction_type: str,          # BUY | SELL
+        transaction_type: str,
         quantity:         int,
-        order_type:       str = "MARKET",
-        product:          str = "MIS",  # MIS | CNC | NRML
+        order_type:       str   = "MARKET",
+        product:          str   = "MIS",
         price:            float = 0.0,
         trigger_price:    float = 0.0,
-        validity:         str = "DAY",
-        tag:              str = "AlgoTraderPro",
+        validity:         str   = "DAY",
+        tag:              str   = "AlgoTraderPro",
     ) -> str:
+        tag      = tag[:_KITE_ORDER_TAG_MAX]          # enforce 20-char limit
+        quantity = self._validated_quantity(tradingsymbol, exchange, product, quantity)
+
         if settings.trading_mode == "PAPER":
-            return self._paper_place(
-                tradingsymbol, exchange, transaction_type,
-                quantity, order_type, product, price, trigger_price, tag,
+            return self._paper_place(tradingsymbol, exchange, transaction_type,
+                                     quantity, order_type, product, price,
+                                     trigger_price, tag)
+        # Pre-flight margin check for BUY entries
+        if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
+            self._check_margin(tradingsymbol, quantity, price)
+
+        def _place():
+            return self.kite.place_order(
+                variety=KiteConnect.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                product=product,
+                order_type=order_type,
+                price=price or None,
+                trigger_price=trigger_price or None,
+                validity=validity,
+                tag=tag,
             )
 
-        order_id = self.kite.place_order(
-            variety=KiteConnect.VARIETY_REGULAR,
-            exchange=exchange,
-            tradingsymbol=tradingsymbol,
-            transaction_type=transaction_type,
-            quantity=quantity,
-            product=product,
-            order_type=order_type,
-            price=price or None,
-            trigger_price=trigger_price or None,
-            validity=validity,
-            tag=tag,
-        )
-        logger.info("LIVE order placed | {} {} {} qty={} @ {} | id={}",
+        order_id = _with_retry(_place, label="place_order")
+        logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
                     transaction_type, tradingsymbol, order_type,
                     quantity, price, order_id)
         return order_id
@@ -147,10 +250,13 @@ class KiteClient:
                     if quantity:      o["quantity"]       = quantity
                     if trigger_price: o["trigger_price"]  = trigger_price
             return order_id
-        return self.kite.modify_order(
-            variety=KiteConnect.VARIETY_REGULAR, order_id=order_id,
-            price=price or None, quantity=quantity or None,
-            trigger_price=trigger_price or None,
+        return _with_retry(
+            lambda: self.kite.modify_order(
+                variety=KiteConnect.VARIETY_REGULAR, order_id=order_id,
+                price=price or None, quantity=quantity or None,
+                trigger_price=trigger_price or None,
+            ),
+            label="modify_order",
         )
 
     def cancel_order(self, order_id: str) -> str:
@@ -159,8 +265,11 @@ class KiteClient:
                 if o["order_id"] == order_id:
                     o["status"] = "CANCELLED"
             return order_id
-        return self.kite.cancel_order(
-            variety=KiteConnect.VARIETY_REGULAR, order_id=order_id
+        return _with_retry(
+            lambda: self.kite.cancel_order(
+                variety=KiteConnect.VARIETY_REGULAR, order_id=order_id
+            ),
+            label="cancel_order",
         )
 
     def squareoff_all_positions(self) -> list[str]:
@@ -183,7 +292,98 @@ class KiteClient:
             logger.info("Square-off {} {} qty={}", side, pos["tradingsymbol"], qty)
         return order_ids
 
-    # ── Paper trading helpers ───────────────────────────────────────────
+    # ── Historical data (rate-limited + auto-chunked) ──────────────────────
+
+    def historical_data(
+        self,
+        instrument_token: int,
+        from_date: datetime,
+        to_date: datetime,
+        interval: str = "day",          # "minute" | "day" | "5minute" etc.
+        continuous: bool = False,
+        oi: bool = False,
+    ) -> list[dict]:
+        """
+        Fetch OHLCV data respecting Kite's window limits:
+          minute data → 60-day chunks
+          day data    → 2 000-day chunks
+        Chunks are merged and returned as a single list.
+        """
+        if settings.trading_mode == "PAPER":
+            return []
+
+        is_minute = "minute" in interval
+        max_days  = _KITE_HIST_MIN_DAYS if is_minute else _KITE_HIST_DAY_DAYS
+        window    = timedelta(days=max_days)
+        records: list[dict] = []
+        chunk_start = from_date
+
+        while chunk_start < to_date:
+            chunk_end = min(chunk_start + window, to_date)
+
+            def _fetch(cs=chunk_start, ce=chunk_end):
+                return self.kite.historical_data(
+                    instrument_token=instrument_token,
+                    from_date=cs, to_date=ce,
+                    interval=interval, continuous=continuous, oi=oi,
+                )
+
+            try:
+                chunk = _with_retry(_fetch, bucket=_hist_bucket,
+                                    label="historical_data")
+                records.extend(chunk)
+            except Exception as exc:
+                logger.warning("[kite/historical] chunk {}-{} failed: {}",
+                               chunk_start.date(), chunk_end.date(), exc)
+
+            chunk_start = chunk_end + timedelta(days=1)
+
+        logger.debug("[kite/historical] {} bars fetched for token={} ({} → {})",
+                     len(records), instrument_token,
+                     from_date.date(), to_date.date())
+        return records
+
+    # ── Internal helpers ───────────────────────────────────────────────────
+
+    def _validated_quantity(
+        self, symbol: str, exchange: str, product: str, quantity: int
+    ) -> int:
+        """
+        Enforce quantity > 0.
+        For F&O products (NRML) snap to the nearest lot-size multiple.
+        """
+        if quantity <= 0:
+            raise InputException(f"Invalid quantity {quantity} for {symbol}")
+
+        if product == "NRML" or exchange in ("NFO", "BFO", "CDS", "MCX"):
+            lot = _FON_LOT_SIZES.get(symbol)
+            if lot and quantity % lot != 0:
+                snapped = max(lot, math.ceil(quantity / lot) * lot)
+                logger.warning(
+                    "[kite] {} qty={} not a multiple of lot {}  → snapped to {}",
+                    symbol, quantity, lot, snapped,
+                )
+                return snapped
+        return quantity
+
+    def _check_margin(self, symbol: str, quantity: int, price: float) -> None:
+        """
+        Warn (not block) if estimated order value exceeds available live balance.
+        Only called in LIVE mode for BUY orders.
+        """
+        try:
+            m         = self.margins()
+            available = m.get("equity", {}).get("available", {}).get("live_balance", 0)
+            order_val = quantity * max(price, 1)
+            if order_val > available:
+                logger.warning(
+                    "[kite] Margin warning: order ₹{:,.0f} > available ₹{:,.0f} for {}",
+                    order_val, available, symbol,
+                )
+        except Exception as exc:
+            logger.warning("[kite] Margin check failed (non-blocking): {}", exc)
+
+    # ── Paper trading ──────────────────────────────────────────────────────
 
     def _paper_place(
         self, tradingsymbol, exchange, transaction_type,

@@ -1,5 +1,6 @@
+import re
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import Literal
 
 
@@ -16,6 +17,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Security
+    api_key: str = ""                   # X-API-Key header for mutating routes
+    kill_switch_reset_secret: str = ""  # Separate secret required to reset kill switch
+
     # Trading
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
 
@@ -28,23 +33,33 @@ class Settings(BaseSettings):
     squareoff_time: str = "15:10"
 
     # Backtest gate thresholds
-    bt_min_win_rate: float = 55.0       # % — reject symbol if below
+    bt_min_win_rate: float = 55.0
     bt_min_sharpe: float = 1.0
-    bt_max_drawdown_pct: float = 15.0   # % — reject if drawdown exceeds
-    bt_min_trades: int = 20             # reject if sample too small
-    bt_lookback_days: int = 180         # historical window
+    bt_max_drawdown_pct: float = 15.0
+    bt_min_trades: int = 20
+    bt_lookback_days: int = 180
 
     # Overtrade prevention (per strategy per day)
     max_trades_intraday: int = 8
     max_trades_fno: int = 4
     max_trades_swing: int = 3
     max_trades_scalping: int = 20
-    cooldown_after_loss_sec: int = 300  # 5 min pause after a losing trade
+    cooldown_after_loss_sec: int = 300
 
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
+
+    @field_validator("squareoff_time")
+    @classmethod
+    def validate_squareoff_time(cls, v: str) -> str:
+        if not re.match(r"^\d{2}:\d{2}$", v):
+            raise ValueError("squareoff_time must be HH:MM format")
+        h, m = int(v[:2]), int(v[3:])
+        if not (9 <= h <= 15 and 0 <= m <= 59):
+            raise ValueError("squareoff_time must be between 09:00 and 15:59")
+        return v
 
     class Config:
         env_file = ".env"

@@ -5,10 +5,19 @@ Kite used ONLY for order placement. Market data from NSE India API + yfinance.
 """
 from __future__ import annotations
 import asyncio
+import re
+import time
+from collections import defaultdict
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
+from pydantic import BaseModel, Field, model_validator
+from pydantic.networks import IPvAnyAddress
 from loguru import logger
 
 from config import settings
@@ -24,48 +33,179 @@ from agents.strategy_agents import ALL_AGENTS
 from trailing_sl_engine import trailing_sl_engine, TRAIL_CONFIGS
 from symbol_scanner import symbol_scanner, CRITERIA, FULL_UNIVERSE
 from market_regime import regime_detector, REGIME_PLANS
+from adaptive_engine import adaptive_engine
 from sebi_compliance import sebi_compliance, KillSwitchState, APPROVED_ALGO_IDS
 from atomic_bracket import atomic_bracket_engine
 
-app = FastAPI(title="AlgoTrader Pro v4", version="4.0.0",
-              description="Tick-driven · NSE India API · yfinance · Kite for orders only")
-app.add_middleware(CORSMiddleware, allow_origins=settings.origins_list,
-                   allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+import swagger_ui_bundle
 
+app = FastAPI(
+    title="AlgoTrader Pro v4", version="4.0.0",
+    description="Tick-driven · NSE India API · yfinance · Kite for orders only",
+    docs_url=None, redoc_url=None,
+)
+app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
+
+# MED-1: restrict CORS to explicit methods and headers (no wildcard)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.origins_list,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_headers=["Content-Type", "X-API-Key", "Authorization"],
+)
+
+# Swagger UI 4.x only supports OpenAPI ≤3.0.x; override to 3.0.3
+from fastapi.openapi.utils import get_openapi
+def _custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    app.openapi_schema = get_openapi(
+        title=app.title, version=app.version,
+        openapi_version="3.0.3", description=app.description,
+        routes=app.routes,
+    )
+    return app.openapi_schema
+app.openapi = _custom_openapi
+
+
+# ── CRIT-1: API key gate (all mutating routes + sensitive GETs) ───────────────
+_EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url"})
+_EXEMPT_PREFIXES = ("/swagger-static",)
+_SENSITIVE_GETS = frozenset({
+    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
+    "/docs", "/redoc",
+})
+
+@app.middleware("http")
+async def _api_key_gate(request: Request, call_next):
+    mutates = request.method in ("POST", "PUT", "PATCH", "DELETE")
+    is_sensitive_get = request.url.path in _SENSITIVE_GETS
+    needs_auth = mutates or is_sensitive_get
+    is_exempt = (
+        request.url.path in _EXEMPT_PATHS
+        or any(request.url.path.startswith(p) for p in _EXEMPT_PREFIXES)
+    )
+    if needs_auth and not is_exempt and settings.api_key:
+        key = request.headers.get("X-API-Key", "")
+        if key != settings.api_key:
+            return JSONResponse({"detail": "Unauthorized: invalid or missing X-API-Key"}, status_code=401)
+    return await call_next(request)
+
+
+# ── HIGH-5: IP whitelist enforcement for orders and SEBI admin ────────────────
+_IP_GUARDED_PREFIXES = ("/orders/", "/sebi/kill-switch", "/sebi/resume",
+                         "/sebi/reset-kill-switch", "/sebi/pause")
+
+@app.middleware("http")
+async def _ip_whitelist_gate(request: Request, call_next):
+    if any(request.url.path.startswith(p) for p in _IP_GUARDED_PREFIXES):
+        client_ip = request.client.host if request.client else "0.0.0.0"
+        if not sebi_compliance.is_ip_allowed(client_ip):
+            return JSONResponse({"detail": f"IP {client_ip} not whitelisted"}, status_code=403)
+    return await call_next(request)
+
+
+# ── MED-2: In-memory rate limiter for orders and AI signals ───────────────────
+_rate_store: dict[str, list[float]] = defaultdict(list)
+_RATE_WINDOW = 60.0
+_RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10}
+
+@app.middleware("http")
+async def _rate_limiter(request: Request, call_next):
+    for path, limit in _RATE_LIMITS.items():
+        if request.url.path == path and request.method == "POST":
+            client_ip = request.client.host if request.client else "unknown"
+            key = f"{client_ip}:{path}"
+            now = time.monotonic()
+            calls = _rate_store[key]
+            calls[:] = [t for t in calls if now - t < _RATE_WINDOW]
+            if len(calls) >= limit:
+                return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+            calls.append(now)
+    return await call_next(request)
+
+
+# ── HIGH-2: Input validation helpers (prompt injection / path traversal) ──────
+_SYMBOL_RE = re.compile(r"^[A-Z0-9\-&]{1,20}$")
+_VALID_STRATEGIES = frozenset({"intraday", "fno", "swing", "scalping"})
+
+def _clean_symbol(sym: str) -> str:
+    s = sym.strip().upper()
+    if not _SYMBOL_RE.match(s):
+        raise HTTPException(422, f"Invalid symbol: {sym!r}")
+    return s
+
+def _clean_strategy(strategy: str) -> str:
+    s = strategy.strip().lower()
+    if s not in _VALID_STRATEGIES:
+        raise HTTPException(422, f"Unknown strategy: {strategy!r}. Valid: {sorted(_VALID_STRATEGIES)}")
+    return s
+
+
+# ── WebSocket connection pool ─────────────────────────────────────────────────
+_MAX_WS_CONNECTIONS = 50
 ws_clients: list[WebSocket] = []
 
+
+# ── LOW-4: fixed broadcast — no bare except, explicit dead-client removal ─────
 async def broadcast(data: dict) -> None:
+    dead: list[WebSocket] = []
     for ws in ws_clients[:]:
-        try:    await ws.send_json(data)
-        except: ws_clients.remove(ws)
+        try:
+            await ws.send_json(data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        if ws in ws_clients:
+            ws_clients.remove(ws)
 
 tick_engine.ws_broadcast = broadcast
 
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
 
 class TokenRequest(BaseModel):
     request_token: str | None = None
     access_token:  str | None = None
 
+    @model_validator(mode="after")
+    def at_least_one_token(self) -> "TokenRequest":
+        if not self.request_token and not self.access_token:
+            raise ValueError("Provide request_token or access_token")
+        return self
+
 class BacktestRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
-    lookback_days: int | None = None
+    lookback_days: int | None = None; walk_forward: bool = True
 
 class BatchBacktestRequest(BaseModel):
-    symbols: list[dict]; strategy: str = "intraday"
+    symbols: list[dict]; strategy: str = "intraday"; walk_forward: bool = True
 
+class CompareRequest(BaseModel):
+    symbol: str; exchange: str = "NSE"
+    lookback_days: int | None = None; walk_forward: bool = True
+
+# HIGH-3: Literal types on all enum-like fields to prevent injection via order type
 class OrderRequest(BaseModel):
-    symbol: str; exchange: str = "NSE"; transaction_type: str
-    quantity: int; order_type: str = "MARKET"; product: str = "MIS"
-    price: float = 0.0; trigger_price: float = 0.0
+    symbol: str
+    exchange: Literal["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"] = "NSE"
+    transaction_type: Literal["BUY", "SELL"]
+    quantity: int
+    order_type: Literal["MARKET", "LIMIT", "SL", "SL-M"] = "MARKET"
+    product: Literal["MIS", "CNC", "NRML"] = "MIS"
+    price: float = 0.0
+    trigger_price: float = 0.0
 
 class SignalRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
 
+# CRIT-3: Field(gt=0) bounds prevent negative/zero risk parameters
 class RiskUpdateRequest(BaseModel):
-    max_daily_loss: float | None = None
-    max_position_size: float | None = None
-    stop_loss_pct: float | None = None
-    target_pct: float | None = None
+    max_daily_loss:    float | None = Field(default=None, gt=0)
+    max_position_size: float | None = Field(default=None, gt=0)
+    stop_loss_pct:     float | None = Field(default=None, gt=0, le=20.0)
+    target_pct:        float | None = Field(default=None, gt=0, le=50.0)
 
 class BotStartRequest(BaseModel):
     strategies: list[str]
@@ -85,11 +225,31 @@ class TSLUpdateRequest(BaseModel):
     activation_pct:  float | None = None
     target1_pct:     float | None = None
 
+# MED-3: IPvAnyAddress validates both IPv4 and IPv6
 class WhitelistIPRequest(BaseModel):
-    ip: str
+    ip: IPvAnyAddress
+
+# CRIT-2: kill-switch reset requires a separate secret
+class KillSwitchResetRequest(BaseModel):
+    secret: str
 
 
-# ── Auth ─────────────────────────────────────────────────────────────────────────────
+# ── Docs (LOW-3: protected by _api_key_gate middleware above) ─────────────────
+@app.get("/docs", include_in_schema=False)
+def swagger_ui() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="AlgoTrader Pro v4 - Swagger UI",
+        swagger_js_url="/swagger-static/swagger-ui-bundle.js",
+        swagger_css_url="/swagger-static/swagger-ui.css",
+    )
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_ui() -> HTMLResponse:
+    return get_redoc_html(openapi_url="/openapi.json", title="AlgoTrader Pro v4 - ReDoc")
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 @app.get("/auth/login-url", tags=["Auth"])
 def login_url(): return {"login_url": kite_client.login_url()}
 
@@ -99,7 +259,7 @@ def set_token(req: TokenRequest):
     return {"status": "ok", "access_token": t[:6] + "…"}
 
 
-# ── Bot control ───────────────────────────────────────────────────────────────────
+# ── Bot control ───────────────────────────────────────────────────────────────
 @app.post("/bot/start", tags=["Bot"])
 async def start_bot(req: BotStartRequest):
     if master_agent.running:
@@ -109,14 +269,18 @@ async def start_bot(req: BotStartRequest):
         selected = await symbol_scanner.run(strategies=req.strategies, force=req.force_scan)
         watchlist = symbol_scanner.all_selected_flat()
         if not watchlist:
-            raise HTTPException(400, "Symbol scanner returned no symbols.")
+            from symbol_scanner import NIFTY_50
+            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
+            logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
     report = master_agent.start(req.strategies, watchlist)
     return {"status": "started", "architecture": "tick-driven 1s",
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
             "watchlist": [w["symbol"] for w in watchlist], "report": report}
 
 @app.post("/bot/stop", tags=["Bot"])
-def stop_bot(): master_agent.stop(); return {"status": "stopped"}
+async def stop_bot():
+    await master_agent.stop()
+    return {"status": "stopped"}
 
 @app.get("/bot/status", tags=["Bot"])
 def bot_status(): return master_agent.get_status()
@@ -125,12 +289,13 @@ def bot_status(): return master_agent.get_status()
 def directives(): return master_agent.last_directives
 
 
-# ── Market data ───────────────────────────────────────────────────────────────────
+# ── Market data ───────────────────────────────────────────────────────────────
 @app.get("/market/live", tags=["Market"])
 def live_market(): return tick_engine.all_latest()
 
 @app.get("/market/live/{symbol}", tags=["Market"])
 def live_symbol(symbol: str):
+    symbol = _clean_symbol(symbol)
     tick, ind = tick_engine.latest(symbol)
     if not tick: raise HTTPException(404, f"{symbol} not subscribed")
     return {"symbol": symbol, "ltp": tick.ltp, "bid": tick.bid, "ask": tick.ask,
@@ -154,12 +319,13 @@ async def market_status():
 
 @app.get("/market/option-chain/{symbol}", tags=["Market"])
 async def option_chain(symbol: str):
+    symbol = _clean_symbol(symbol)
     data = await tick_engine.get_option_chain(symbol)
     if not data: raise HTTPException(404, f"Option chain not available for {symbol}")
     return data
 
 
-# ── Agents ───────────────────────────────────────────────────────────────────────────
+# ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])
 def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
 
@@ -180,25 +346,74 @@ def resume_agent(name: str):
     return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
 
 
-# ── Backtest ───────────────────────────────────────────────────────────────────────
+# ── Backtest ──────────────────────────────────────────────────────────────────
 @app.post("/backtest/run", tags=["Backtest"])
 def run_bt(req: BacktestRequest):
-    return backtest_engine.run(req.symbol, req.exchange, req.strategy, req.lookback_days, force=True).to_dict()
+    sym = _clean_symbol(req.symbol)
+    strat = _clean_strategy(req.strategy)
+    return backtest_engine.run(sym, req.exchange, strat, req.lookback_days,
+                               force=True, walk_forward=req.walk_forward).to_dict()
 
 @app.post("/backtest/batch", tags=["Backtest"])
 def batch_bt(req: BatchBacktestRequest):
-    results = backtest_engine.run_batch(req.symbols, req.strategy)
-    return {"strategy": req.strategy,
-            "passed": [s for s, r in results.items() if r.passed],
-            "failed": [s for s, r in results.items() if not r.passed],
+    strat = _clean_strategy(req.strategy)
+    results = backtest_engine.run_batch(req.symbols, strat, walk_forward=req.walk_forward)
+    return {"strategy": strat,
+            "passed":  [s for s, r in results.items() if r.passed],
+            "failed":  [s for s, r in results.items() if not r.passed],
             "details": {s: r.to_dict() for s, r in results.items()}}
 
 @app.get("/backtest/approved/{strategy}", tags=["Backtest"])
 def approved(strategy: str):
+    strategy = _clean_strategy(strategy)
     return {"strategy": strategy, "approved": backtest_engine.get_approved_symbols(strategy)}
 
+@app.post("/backtest/compare", tags=["Backtest"])
+def compare_strategies(req: CompareRequest):
+    """Run all 4 strategies on a symbol and rank by Sharpe ratio."""
+    sym = _clean_symbol(req.symbol)
+    return backtest_engine.compare_strategies(sym, req.exchange, req.lookback_days, req.walk_forward)
 
-# ── Orders ───────────────────────────────────────────────────────────────────────────
+@app.get("/backtest/trades/{symbol}/{strategy}", tags=["Backtest"])
+def download_trades(symbol: str, strategy: str):
+    """Download the full trade log for a symbol/strategy as CSV."""
+    symbol = _clean_symbol(symbol)
+    strategy = _clean_strategy(strategy)
+    key = (symbol, strategy)
+    result = backtest_engine._cache.get(key)
+    if result is None:
+        raise HTTPException(404, f"No backtest result cached for {symbol}/{strategy}. Run /backtest/run first.")
+    csv_data = result.to_csv()
+    return StreamingResponse(
+        iter([csv_data]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={symbol}_{strategy}_trades.csv"},
+    )
+
+@app.get("/backtest/equity/{symbol}/{strategy}", tags=["Backtest"])
+def equity_chart(symbol: str, strategy: str):
+    """Return equity curve chart as PNG image."""
+    symbol = _clean_symbol(symbol)
+    strategy = _clean_strategy(strategy)
+    key = (symbol, strategy)
+    result = backtest_engine._cache.get(key)
+    if result is None:
+        raise HTTPException(404, f"No backtest result cached for {symbol}/{strategy}. Run /backtest/run first.")
+    png_bytes = result.equity_chart_png()
+    return StreamingResponse(
+        iter([png_bytes]),
+        media_type="image/png",
+        headers={"Content-Disposition": f"inline; filename={symbol}_{strategy}_equity.png"},
+    )
+
+@app.post("/backtest/weekly", tags=["Backtest"])
+async def trigger_weekly_backtest():
+    """Manually trigger the weekly auto-backtest across full universe."""
+    asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest))
+    return {"status": "weekly backtest started", "note": "runs in background, check logs"}
+
+
+# ── Orders ────────────────────────────────────────────────────────────────────
 @app.post("/orders/place", tags=["Orders"])
 async def place_order(req: OrderRequest):
     ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
@@ -230,25 +445,35 @@ async def squareoff():
     ids = kite_client.squareoff_all_positions()
     return {"status": "ok", "squared_off": len(ids)}
 
+# HIGH-6: generic error messages, raw exceptions logged server-side only
 @app.get("/portfolio/positions", tags=["Portfolio"])
 def positions():
     try: return kite_client.positions()
-    except Exception as e: raise HTTPException(500, str(e))
+    except Exception as e:
+        logger.error("Portfolio positions error: {}", e)
+        raise HTTPException(500, "Unable to fetch positions")
 
 @app.get("/portfolio/orders", tags=["Portfolio"])
 def orders():
     try: return kite_client.orders()
-    except Exception as e: raise HTTPException(500, str(e))
+    except Exception as e:
+        logger.error("Portfolio orders error: {}", e)
+        raise HTTPException(500, "Unable to fetch orders")
 
 
-# ── Signals / Risk ──────────────────────────────────────────────────────────────────
+# ── Signals / Risk ────────────────────────────────────────────────────────────
 @app.post("/signals/generate", tags=["AI Signal"])
 async def gen_signal(req: SignalRequest):
+    # HIGH-2: sanitise inputs before they reach Claude prompt
+    sym   = _clean_symbol(req.symbol)
+    strat = _clean_strategy(req.strategy)
     try:
-        sig = signal_engine.generate(req.symbol, req.exchange, req.strategy)
-        await broadcast({"event": "signal", "symbol": req.symbol, "signal": sig})
+        sig = signal_engine.generate(sym, req.exchange, strat)
+        await broadcast({"event": "signal", "symbol": sym, "signal": sig})
         return sig
-    except Exception as e: raise HTTPException(500, str(e))
+    except Exception as e:
+        logger.error("Signal generation error for {}: {}", sym, e)
+        raise HTTPException(500, "Signal generation failed")
 
 @app.get("/risk/status", tags=["Risk"])
 def risk_st(): return risk_manager.status()
@@ -262,9 +487,17 @@ def risk_update(req: RiskUpdateRequest):
     return risk_manager.status()
 
 
-# ── WebSocket ─────────────────────────────────────────────────────────────────────
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+# HIGH-1: token auth via ?token= query param + max connection cap
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    token = ws.query_params.get("token", "")
+    if settings.api_key and token != settings.api_key:
+        await ws.close(code=4001, reason="Unauthorized")
+        return
+    if len(ws_clients) >= _MAX_WS_CONNECTIONS:
+        await ws.close(code=4002, reason="Too many connections")
+        return
     await ws.accept()
     ws_clients.append(ws)
     try:
@@ -273,10 +506,11 @@ async def ws_endpoint(ws: WebSocket):
             if data == "ping":
                 await ws.send_json({"event": "pong", "ts": datetime.now().isoformat()})
     except WebSocketDisconnect:
-        ws_clients.remove(ws)
+        if ws in ws_clients:
+            ws_clients.remove(ws)
 
 
-# ── Regime ───────────────────────────────────────────────────────────────────────
+# ── Regime ────────────────────────────────────────────────────────────────────
 @app.get("/regime/status", tags=["Market Regime"])
 def regime_status(): return regime_detector.status()
 
@@ -298,7 +532,22 @@ def regime_plans():
             for r, p in REGIME_PLANS.items()}
 
 
-# ── Symbol scanner ──────────────────────────────────────────────────────────────────
+# ── Adaptive engine ───────────────────────────────────────────────────────────
+@app.get("/adaptive/status", tags=["Adaptive Engine"])
+def adaptive_status():
+    return adaptive_engine.summary()
+
+# MED-5: bounded vix parameter
+@app.post("/adaptive/review", tags=["Adaptive Engine"])
+async def adaptive_review(
+    vix: float = Query(default=14.0, ge=0.0, le=200.0, description="VIX value"),
+    regime_changed: bool = False,
+):
+    report = await adaptive_engine.nightly_review(vix, regime_changed)
+    return report
+
+
+# ── Symbol scanner ────────────────────────────────────────────────────────────
 @app.post("/symbols/scan", tags=["Symbol Scanner"])
 async def run_scan(strategies: list[str] | None = None):
     result = await symbol_scanner.run(strategies=strategies, force=True)
@@ -335,7 +584,7 @@ def get_universe():
             "nifty_bank": NIFTY_BANK, "total": len(FULL_UNIVERSE)}
 
 
-# ── Trailing SL ───────────────────────────────────────────────────────────────────
+# ── Trailing SL ───────────────────────────────────────────────────────────────
 @app.get("/trailing-sl/status", tags=["Trailing SL"])
 def tsl_status(): return trailing_sl_engine.status_summary()
 
@@ -358,7 +607,7 @@ def update_tsl_config(req: TSLUpdateRequest):
     return {"status": "updated", "strategy": req.strategy}
 
 
-# ── Brackets ───────────────────────────────────────────────────────────────────────
+# ── Brackets ──────────────────────────────────────────────────────────────────
 @app.get("/brackets", tags=["Brackets"])
 def get_all_brackets(active_only: bool = False):
     return {"brackets": atomic_bracket_engine.all_brackets(active_only),
@@ -382,7 +631,7 @@ async def manual_bracket(req: ManualBracketRequest):
     return bracket.to_dict()
 
 
-# ── SEBI ──────────────────────────────────────────────────────────────────────────────
+# ── SEBI ──────────────────────────────────────────────────────────────────────
 @app.get("/sebi/status", tags=["SEBI Compliance"])
 def sebi_status(): return sebi_compliance.status()
 
@@ -417,18 +666,21 @@ def get_algo_ids(): return {"algo_ids": APPROVED_ALGO_IDS, "total": len(APPROVED
 @app.get("/sebi/strategy-disclosure/{strategy}", tags=["SEBI Compliance"])
 def strategy_disclosure(strategy: str): return sebi_compliance.get_strategy_logic_disclosure(strategy)
 
+# CRIT-2: reset kill switch requires a separate secret (not just API key)
 @app.post("/sebi/reset-kill-switch", tags=["SEBI Compliance"])
-def reset_kill_switch():
-    sebi_compliance.reset_kill_switch()
+def reset_kill_switch(req: KillSwitchResetRequest):
+    ok, msg = sebi_compliance.reset_kill_switch(req.secret)
+    if not ok:
+        raise HTTPException(403, f"SEBI: {msg}")
     return {"status": "ACTIVE", "note": "Kill switch reset. Trading re-enabled."}
 
 @app.post("/sebi/whitelist-ip", tags=["SEBI Compliance"])
 def whitelist_ip(req: WhitelistIPRequest):
-    sebi_compliance.add_whitelisted_ip(req.ip)
-    return {"status": "added", "ip": req.ip}
+    sebi_compliance.add_whitelisted_ip(str(req.ip))
+    return {"status": "added", "ip": str(req.ip)}
 
 
-# ── Health ────────────────────────────────────────────────────────────────────────────
+# ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["System"])
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
@@ -442,7 +694,7 @@ def health():
             "time": datetime.now().strftime("%H:%M:%S IST")}
 
 
-# ── Startup ─────────────────────────────────────────────────────────────────────────
+# ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
     tick_engine.start_loop()
@@ -451,6 +703,7 @@ async def on_startup():
     asyncio.create_task(symbol_scanner.run())
 
 
+# HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host=settings.host, port=settings.port, reload=True)
+    uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)

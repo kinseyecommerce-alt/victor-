@@ -14,16 +14,20 @@ SEBI Algo Trading Compliance Module — 10 regulations implemented:
 """
 from __future__ import annotations
 
+import json
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from enum import Enum
+from pathlib import Path
 from threading import Lock
 from typing import Optional
 
 from loguru import logger
 from config import settings
+
+_AUDIT_LOG_DIR = Path("logs")
 
 
 # ── Reg 1: Approved algo registry ─────────────────────────────────────────────
@@ -159,11 +163,16 @@ class SEBICompliance:
         logger.info("SEBI: Trading resumed")
         return True, "ACTIVE"
 
-    def reset_kill_switch(self) -> None:
+    def reset_kill_switch(self, secret: str = "") -> tuple[bool, str]:
+        """Requires KILL_SWITCH_RESET_SECRET env var when configured."""
+        if settings.kill_switch_reset_secret and secret != settings.kill_switch_reset_secret:
+            logger.error("SEBI: Unauthorized kill-switch reset attempt (bad secret)")
+            return False, "Invalid reset secret"
         with self._lock:
             self._state       = KillSwitchState.ACTIVE
             self._kill_reason = ""
         logger.warning("SEBI: Kill switch reset — trading ACTIVE")
+        return True, "ACTIVE"
 
     # ── Reg 5: IP whitelist ────────────────────────────────────────────────────
     def add_whitelisted_ip(self, ip: str) -> None:
@@ -269,6 +278,14 @@ class SEBICompliance:
         )
         today = date.today().isoformat()
         self._audit_log[today].append(rec)
+        # MED-4: persist to append-only NDJSON file
+        try:
+            _AUDIT_LOG_DIR.mkdir(exist_ok=True)
+            log_file = _AUDIT_LOG_DIR / f"sebi_audit_{today}.json"
+            with open(log_file, "a") as fh:
+                fh.write(json.dumps(rec.__dict__) + "\n")
+        except Exception as exc:
+            logger.error("SEBI audit log file write error: {}", exc)
 
     def query_audit_log(
         self,

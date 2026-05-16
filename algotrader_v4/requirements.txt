@@ -6,17 +6,24 @@ yfinance==0.2.40
 httpx==0.27.0
 
 # ── API server ────────────────────────────────────────────────────
-fastapi==0.111.0
+# LOW-1: fastapi 0.115.x pulls starlette>=0.40.0 (fixes CVE-2024-47874)
+fastapi==0.115.5
+starlette==0.41.2
 uvicorn[standard]==0.30.1
 websockets==12.0
 
-# ── AI ─────────────────────────────────────────────────────────────
-anthropic==0.28.0
+# ── Security ──────────────────────────────────────────────────────
+slowapi==0.1.9
 
-# ── Technical analysis ────────────────────────────────────────────
+# ── AI ─────────────────────────────────────────────────────────────
+# LOW-1: updated for security patches
+anthropic==0.40.0
+
+# ── Technical analysis + charting ────────────────────────────────
 pandas==2.2.2
 numpy==1.26.4
 ta==0.11.0
+matplotlib==3.10.9
 
 # ── Scheduling + utilities ────────────────────────────────────────
 apscheduler==3.10.4
@@ -25,3 +32,5 @@ python-telegram-bot==21.3
 pydantic==2.7.3
 pydantic-settings==2.3.4
 loguru==0.7.2
+aiofiles==23.2.1
+swagger-ui-bundle==0.0.9
