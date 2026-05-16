@@ -37,17 +37,19 @@ class AgentState:
 
 
 async def send_telegram(text: str) -> None:
+    # HIGH-4: use python-telegram-bot library — keeps token out of URL paths/logs
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         return
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
-    async with httpx.AsyncClient(timeout=5) as client:
-        try:
-            await client.post(url, json={
-                "chat_id": settings.telegram_chat_id,
-                "text": text, "parse_mode": "HTML"
-            })
-        except Exception:
-            pass
+    try:
+        from telegram import Bot
+        bot = Bot(token=settings.telegram_bot_token)
+        async with bot:
+            await bot.send_message(
+                chat_id=settings.telegram_chat_id,
+                text=text, parse_mode="HTML",
+            )
+    except Exception:
+        pass
 
 
 class BaseAgent(ABC):
@@ -151,12 +153,27 @@ class BaseAgent(ABC):
         if not allowed:
             return
 
+        # LOW-2: SEBI pre-order compliance check
+        from sebi_compliance import sebi_compliance
+        from market_regime import regime_detector
+        sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
+            strategy=self.name, symbol=sym, exchange=exch,
+            transaction_type=action, quantity=qty,
+            order_type="MARKET", price_at_signal=ltp,
+            signal_source=f"agent_{self.name}",
+            regime=regime_detector.current_regime.value,
+        )
+        if not sebi_ok:
+            logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
+            return
+
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange=exch,
             transaction_type=action, quantity=qty,
             order_type="MARKET", product=signal.get("product", self.product),
             tag=f"Agent-{self.name}",
         )
+        sebi_compliance.record_order_id(self.name, sym, order_id)
         order_guard.register_order(sym, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
