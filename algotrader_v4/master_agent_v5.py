@@ -100,6 +100,8 @@ class MasterAgent:
                                  day_of_week="mon-fri", id="daily_reset")
         self._scheduler.add_job(self._nightly_adaptive,"cron", hour=21, minute=0,
                                  day_of_week="mon-fri", id="nightly_adaptive")
+        self._scheduler.add_job(self._weekly_backtest, "cron", hour=20, minute=0,
+                                 day_of_week="sun", id="weekly_backtest")
         self._scheduler.start()
         logger.info("[master_v5] started — tick-driven 1s")
         asyncio.create_task(send_telegram(
@@ -213,6 +215,20 @@ class MasterAgent:
                         len(report["strategies_retire"]))
         except Exception as exc:
             logger.error("[master] Nightly adaptive review failed: {}", exc)
+
+    async def _weekly_backtest(self) -> None:
+        """Every Sunday 8 PM — re-backtest the full symbol universe, refresh approved cache."""
+        try:
+            logger.info("[master] Weekly backtest starting…")
+            summary = await asyncio.to_thread(backtest_engine.weekly_auto_backtest)
+            lines = ["<b>Weekly Backtest Complete</b>"]
+            for strat, data in summary.items():
+                lines.append(
+                    f"  {strat}: {data['pass_count']} pass / {data['fail_count']} fail"
+                )
+            await send_telegram("\n".join(lines))
+        except Exception as exc:
+            logger.error("[master] Weekly backtest failed: {}", exc)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 

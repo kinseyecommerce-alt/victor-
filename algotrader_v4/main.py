@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, model_validator
 from loguru import logger
@@ -54,10 +55,14 @@ class TokenRequest(BaseModel):
 
 class BacktestRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
-    lookback_days: int | None = None
+    lookback_days: int | None = None; walk_forward: bool = True
 
 class BatchBacktestRequest(BaseModel):
-    symbols: list[dict]; strategy: str = "intraday"
+    symbols: list[dict]; strategy: str = "intraday"; walk_forward: bool = True
+
+class CompareRequest(BaseModel):
+    symbol: str; exchange: str = "NSE"
+    lookback_days: int | None = None; walk_forward: bool = True
 
 class OrderRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; transaction_type: str
@@ -191,19 +196,64 @@ def resume_agent(name: str):
 # ── Backtest ───────────────────────────────────────────────────────────────────────
 @app.post("/backtest/run", tags=["Backtest"])
 def run_bt(req: BacktestRequest):
-    return backtest_engine.run(req.symbol, req.exchange, req.strategy, req.lookback_days, force=True).to_dict()
+    return backtest_engine.run(
+        req.symbol, req.exchange, req.strategy,
+        req.lookback_days, force=True, walk_forward=req.walk_forward,
+    ).to_dict()
 
 @app.post("/backtest/batch", tags=["Backtest"])
 def batch_bt(req: BatchBacktestRequest):
-    results = backtest_engine.run_batch(req.symbols, req.strategy)
+    results = backtest_engine.run_batch(req.symbols, req.strategy, walk_forward=req.walk_forward)
     return {"strategy": req.strategy,
-            "passed": [s for s, r in results.items() if r.passed],
-            "failed": [s for s, r in results.items() if not r.passed],
+            "passed":  [s for s, r in results.items() if r.passed],
+            "failed":  [s for s, r in results.items() if not r.passed],
             "details": {s: r.to_dict() for s, r in results.items()}}
 
 @app.get("/backtest/approved/{strategy}", tags=["Backtest"])
 def approved(strategy: str):
     return {"strategy": strategy, "approved": backtest_engine.get_approved_symbols(strategy)}
+
+@app.post("/backtest/compare", tags=["Backtest"])
+def compare_strategies(req: CompareRequest):
+    """Run all 4 strategies on a symbol and rank by Sharpe ratio."""
+    return backtest_engine.compare_strategies(
+        req.symbol, req.exchange, req.lookback_days, req.walk_forward,
+    )
+
+@app.get("/backtest/trades/{symbol}/{strategy}", tags=["Backtest"])
+def download_trades(symbol: str, strategy: str):
+    """Download the full trade log for a symbol/strategy as CSV."""
+    key = (symbol.upper(), strategy)
+    result = backtest_engine._cache.get(key)
+    if result is None:
+        raise HTTPException(404, f"No backtest result cached for {symbol}/{strategy}. Run /backtest/run first.")
+    csv_data = result.to_csv()
+    return StreamingResponse(
+        iter([csv_data]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={symbol}_{strategy}_trades.csv"},
+    )
+
+@app.get("/backtest/equity/{symbol}/{strategy}", tags=["Backtest"])
+def equity_chart(symbol: str, strategy: str):
+    """Return equity curve chart as PNG image."""
+    key = (symbol.upper(), strategy)
+    result = backtest_engine._cache.get(key)
+    if result is None:
+        raise HTTPException(404, f"No backtest result cached for {symbol}/{strategy}. Run /backtest/run first.")
+    png_bytes = result.equity_chart_png()
+    return StreamingResponse(
+        iter([png_bytes]),
+        media_type="image/png",
+        headers={"Content-Disposition": f"inline; filename={symbol}_{strategy}_equity.png"},
+    )
+
+@app.post("/backtest/weekly", tags=["Backtest"])
+async def trigger_weekly_backtest():
+    """Manually trigger the weekly auto-backtest across full universe."""
+    import asyncio
+    asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest))
+    return {"status": "weekly backtest started", "note": "runs in background, check logs"}
 
 
 # ── Orders ───────────────────────────────────────────────────────────────────────────
