@@ -25,6 +25,7 @@ from agents.strategy_agents import ALL_AGENTS
 from trailing_sl_engine import trailing_sl_engine, TRAIL_CONFIGS
 from symbol_scanner import symbol_scanner, CRITERIA, FULL_UNIVERSE
 from market_regime import regime_detector, REGIME_PLANS
+from adaptive_engine import adaptive_engine
 from sebi_compliance import sebi_compliance, KillSwitchState, APPROVED_ALGO_IDS
 from atomic_bracket import atomic_bracket_engine
 
@@ -120,7 +121,10 @@ async def start_bot(req: BotStartRequest):
         selected = await symbol_scanner.run(strategies=req.strategies, force=req.force_scan)
         watchlist = symbol_scanner.all_selected_flat()
         if not watchlist:
-            raise HTTPException(400, "Symbol scanner returned no symbols.")
+            # Fallback: use Nifty 50 as default when scanner can't fetch data
+            from symbol_scanner import NIFTY_50
+            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
+            logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
     report = master_agent.start(req.strategies, watchlist)
     return {"status": "started", "architecture": "tick-driven 1s",
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
@@ -354,6 +358,17 @@ def regime_plans():
     return {r.value: {"active": p.active, "paused": p.paused, "allocation": p.allocation,
             "size_factor": p.size_factor, "reasoning": p.reasoning}
             for r, p in REGIME_PLANS.items()}
+
+
+# ── Adaptive engine ─────────────────────────────────────────────────────────────────
+@app.get("/adaptive/status", tags=["Adaptive Engine"])
+def adaptive_status():
+    return adaptive_engine.summary()
+
+@app.post("/adaptive/review", tags=["Adaptive Engine"])
+async def adaptive_review(vix: float = 14.0, regime_changed: bool = False):
+    report = await adaptive_engine.nightly_review(vix, regime_changed)
+    return report
 
 
 # ── Symbol scanner ──────────────────────────────────────────────────────────────────
