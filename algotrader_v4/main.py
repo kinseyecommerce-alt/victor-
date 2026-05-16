@@ -7,8 +7,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from pydantic import BaseModel, model_validator
 from loguru import logger
 
@@ -29,10 +31,42 @@ from adaptive_engine import adaptive_engine
 from sebi_compliance import sebi_compliance, KillSwitchState, APPROVED_ALGO_IDS
 from atomic_bracket import atomic_bracket_engine
 
-app = FastAPI(title="AlgoTrader Pro v4", version="4.0.0",
-              description="Tick-driven · NSE India API · yfinance · Kite for orders only")
+import swagger_ui_bundle
+
+app = FastAPI(
+    title="AlgoTrader Pro v4", version="4.0.0",
+    description="Tick-driven · NSE India API · yfinance · Kite for orders only",
+    docs_url=None, redoc_url=None,   # serve locally to avoid CDN dependency
+)
+app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
 app.add_middleware(CORSMiddleware, allow_origins=settings.origins_list,
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+@app.get("/docs", include_in_schema=False)
+def swagger_ui() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="AlgoTrader Pro v4 - Swagger UI",
+        swagger_js_url="/swagger-static/swagger-ui-bundle.js",
+        swagger_css_url="/swagger-static/swagger-ui.css",
+    )
+
+@app.get("/redoc", include_in_schema=False)
+def redoc_ui() -> HTMLResponse:
+    return get_redoc_html(openapi_url="/openapi.json", title="AlgoTrader Pro v4 - ReDoc")
+
+# Swagger UI 4.x only supports OpenAPI ≤3.0.x; override to 3.0.3
+from fastapi.openapi.utils import get_openapi
+def _custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    app.openapi_schema = get_openapi(
+        title=app.title, version=app.version,
+        openapi_version="3.0.3", description=app.description,
+        routes=app.routes,
+    )
+    return app.openapi_schema
+app.openapi = _custom_openapi
 
 ws_clients: list[WebSocket] = []
 
