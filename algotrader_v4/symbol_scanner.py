@@ -34,7 +34,7 @@ from market_data import nse_client, yf_client
 
 # ── NSE universe lists ─────────────────────────────────────────────────────────
 
-# Nifty 50 — most liquid, tight spreads
+# Nifty 50 — ranks 1-50 by free-float market cap
 NIFTY_50 = [
     "RELIANCE","TCS","HDFCBANK","BHARTIARTL","ICICIBANK","INFOSYS","SBIN",
     "HINDUNILVR","ITC","KOTAKBANK","LT","AXISBANK","BAJFINANCE","MARUTI",
@@ -46,7 +46,7 @@ NIFTY_50 = [
     "BAJAJ-AUTO","M&M","HINDALCO","LTIM","ADANIENT",
 ]
 
-# Nifty Next 50 — good for swing / F&O
+# Nifty Next 50 — ranks 51-100 by free-float market cap
 NIFTY_NEXT_50 = [
     "DMART","PIDILITIND","ABB","HAVELLS","SIEMENS","MUTHOOTFIN","BERGEPAINT",
     "GODREJCP","MARICO","DABUR","COLPAL","PGHH","AUROPHARMA","TORNTPHARM",
@@ -58,17 +58,20 @@ NIFTY_NEXT_50 = [
     "ADANIGREEN","ADANITRANS","CANBK","PNB","BANKBARODA",
 ]
 
-# Nifty Bank — for BANKNIFTY F&O trades
-NIFTY_BANK = [
-    "HDFCBANK","ICICIBANK","SBIN","AXISBANK","KOTAKBANK","INDUSINDBK",
-    "BANKBARODA","PNB","IDFCFIRSTB","FEDERALBNK","AUBANK","BANDHANBNK",
-]
+# Top 100 NSE companies = Nifty 50 + Nifty Next 50 (no duplicates)
+NSE_TOP_100: list[str] = list(dict.fromkeys(NIFTY_50 + NIFTY_NEXT_50))
 
-# Indices (always included for F&O)
+# Backward-compat aliases
+NIFTY_BANK = [s for s in NSE_TOP_100 if s in {
+    "HDFCBANK","ICICIBANK","SBIN","AXISBANK","KOTAKBANK","INDUSINDBK",
+    "BANKBARODA","PNB","CANBK",
+}]
+
+# Indices (for F&O — not equity symbols)
 INDICES = ["NIFTY50","BANKNIFTY","FINNIFTY","MIDCPNIFTY"]
 
-# Complete universe for scanning
-FULL_UNIVERSE = list(dict.fromkeys(NIFTY_50 + NIFTY_NEXT_50 + NIFTY_BANK))
+# Single canonical universe used everywhere
+FULL_UNIVERSE: list[str] = NSE_TOP_100
 
 
 # ── Symbol score dataclass ─────────────────────────────────────────────────────
@@ -147,51 +150,51 @@ class SelectionCriteria:
 
 CRITERIA: dict[str, SelectionCriteria] = {
     "intraday": SelectionCriteria(
-        universe        = NIFTY_50 + NIFTY_NEXT_50[:20],
+        universe        = NSE_TOP_100,          # all 100 — scanner picks best 8
         top_n           = 8,
         min_avg_volume  = 500_000,
-        min_atr_pct     = 0.8,     # needs movement to trade
-        max_atr_pct     = 4.0,     # not too wild
+        min_atr_pct     = 0.8,
+        max_atr_pct     = 4.0,
         require_trend   = True,
         rsi_min         = 35,
         rsi_max         = 70,
-        min_adx         = 20,      # confirmed trend
+        min_adx         = 20,
         fo_eligible_only= False,
         score_weights   = {"liquidity":35, "trend":35, "momentum":20, "volatility":10},
-        description     = "High-volume trending stocks for intraday momentum trades",
+        description     = "Top-100 NSE stocks — trending + high-volume for intraday momentum",
     ),
     "fno": SelectionCriteria(
-        universe        = NIFTY_50 + NIFTY_BANK + INDICES,
+        universe        = NSE_TOP_100,          # F&O gate applied inside scorer
         top_n           = 6,
         min_avg_volume  = 1_000_000,
         min_atr_pct     = 1.0,
         max_atr_pct     = 6.0,
-        require_trend   = False,   # F&O works on reversals too
+        require_trend   = False,
         rsi_min         = 0,
         rsi_max         = 100,
         min_adx         = 15,
         fo_eligible_only= True,
         score_weights   = {"liquidity":40, "trend":20, "momentum":20, "volatility":20},
-        description     = "F&O-eligible stocks with high OI and liquid options chain",
+        description     = "Top-100 NSE F&O-eligible stocks with high OI and liquid options",
     ),
     "swing": SelectionCriteria(
-        universe        = FULL_UNIVERSE,
+        universe        = NSE_TOP_100,          # full 100 for swing diversity
         top_n           = 6,
         min_avg_volume  = 200_000,
-        min_atr_pct     = 1.5,     # needs room to swing
+        min_atr_pct     = 1.5,
         max_atr_pct     = 5.0,
         require_trend   = True,
-        rsi_min         = 38,      # pullback zone
-        rsi_max         = 62,      # not overbought
+        rsi_min         = 38,
+        rsi_max         = 62,
         min_adx         = 22,
         fo_eligible_only= False,
         score_weights   = {"liquidity":20, "trend":40, "momentum":25, "volatility":15},
-        description     = "Trending mid/large caps in RSI pullback zone for 3-7 day holds",
+        description     = "Top-100 NSE stocks in RSI pullback zone for 3-7 day holds",
     ),
     "scalping": SelectionCriteria(
-        universe        = NIFTY_50,  # Nifty 50 only — tightest spreads
+        universe        = NIFTY_50,             # Nifty 50 only — tightest spreads
         top_n           = 5,
-        min_avg_volume  = 2_000_000, # very high liquidity needed
+        min_avg_volume  = 2_000_000,
         min_atr_pct     = 0.5,
         max_atr_pct     = 2.5,
         require_trend   = False,
@@ -200,11 +203,11 @@ CRITERIA: dict[str, SelectionCriteria] = {
         min_adx         = 0,
         fo_eligible_only= False,
         score_weights   = {"liquidity":50, "trend":15, "momentum":15, "volatility":20},
-        description     = "Nifty 50 stocks with highest liquidity for tight bid-ask spreads",
+        description     = "Nifty 50 only — highest liquidity for tight bid-ask scalping",
     ),
 }
 
-# Known F&O eligible symbols (subset — full list from NSE API)
+# F&O eligible = all Nifty 50 + bank stocks within top 100
 FO_ELIGIBLE = set(NIFTY_50 + NIFTY_BANK + ["NIFTY50","BANKNIFTY","FINNIFTY"])
 
 
