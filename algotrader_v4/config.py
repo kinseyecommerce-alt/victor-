@@ -17,9 +17,16 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
-    # Security
+    # Security — API access
     api_key: str = ""                   # X-API-Key header for mutating routes
     kill_switch_reset_secret: str = ""  # Separate secret required to reset kill switch
+
+    # Security — App login (JWT)
+    admin_username: str = "admin"
+    admin_password: str = ""            # plain fallback for dev only
+    admin_password_hash: str = ""       # bcrypt hash — takes precedence
+    jwt_secret_key: str = ""
+    jwt_expire_hours: int = 8
 
     # Trading
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"

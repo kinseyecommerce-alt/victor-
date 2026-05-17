@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AlgoTrader Pro — Login</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .logo {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      color: #58a6ff;
+    }
+    .logo span { color: #3fb950; }
+
+    .subtitle {
+      color: #8b949e;
+      font-size: 0.85rem;
+      margin-bottom: 36px;
+    }
+
+    .cards {
+      display: flex;
+      gap: 24px;
+      width: 100%;
+      max-width: 780px;
+    }
+
+    .card {
+      flex: 1;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 28px;
+    }
+
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: #e6edf3;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .badge {
+      font-size: 0.65rem;
+      padding: 2px 6px;
+      border-radius: 20px;
+      font-weight: 500;
+    }
+    .badge-blue  { background: #1f3352; color: #58a6ff; }
+    .badge-green { background: #1b3a2d; color: #3fb950; }
+
+    .card-desc {
+      font-size: 0.8rem;
+      color: #8b949e;
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      color: #8b949e;
+      margin-bottom: 4px;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-size: 0.9rem;
+      padding: 9px 12px;
+      outline: none;
+      transition: border-color 0.15s;
+      margin-bottom: 14px;
+    }
+
+    input:focus { border-color: #58a6ff; }
+
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-blue  { background: #1f6feb; color: #fff; }
+    .btn-blue:hover:not(:disabled)  { background: #388bfd; }
+    .btn-green { background: #238636; color: #fff; }
+    .btn-green:hover:not(:disabled) { background: #2ea043; }
+
+    .status {
+      margin-top: 12px;
+      font-size: 0.8rem;
+      min-height: 20px;
+      text-align: center;
+    }
+    .status.ok  { color: #3fb950; }
+    .status.err { color: #f85149; }
+    .status.info { color: #58a6ff; }
+
+    .divider {
+      border: none;
+      border-top: 1px solid #30363d;
+      margin: 18px 0;
+    }
+
+    .kite-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      color: #8b949e;
+      margin-bottom: 16px;
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-green { background: #3fb950; }
+    .dot-red   { background: #f85149; }
+    .dot-yellow { background: #d29922; }
+
+    .token-row {
+      font-size: 0.75rem;
+      color: #8b949e;
+      word-break: break-all;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-top: 10px;
+      display: none;
+    }
+
+    @media (max-width: 600px) {
+      .cards { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="logo">AlgoTrader <span>Pro</span></div>
+  <p class="subtitle">NSE · Tick-driven · SEBI Compliant</p>
+
+  <div class="cards">
+
+    <!-- ── Panel 1: App Login ─────────────────────────────────── -->
+    <div class="card">
+      <div class="card-title">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="#58a6ff">
+          <path d="M8 0a4 4 0 1 0 0 8A4 4 0 0 0 8 0zm0 10c-4 0-6 1.8-6 2.7V14h12v-1.3C14 11.8 12 10 8 10z"/>
+        </svg>
+        Dashboard Login
+        <span class="badge badge-blue">JWT</span>
+      </div>
+      <p class="card-desc">Access the trading dashboard and API</p>
+
+      <label for="username">Username</label>
+      <input id="username" type="text" placeholder="admin" autocomplete="username"/>
+
+      <label for="password">Password</label>
+      <input id="password" type="password" placeholder="••••••••" autocomplete="current-password"/>
+
+      <button class="btn btn-blue" id="login-btn" onclick="doLogin()">Sign In</button>
+
+      <div class="status" id="login-status"></div>
+
+      <div class="token-row" id="token-display"></div>
+    </div>
+
+    <!-- ── Panel 2: Kite OAuth ────────────────────────────────── -->
+    <div class="card">
+      <div class="card-title">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="#3fb950">
+          <path d="M2 2h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm1 3v7h10V5H3zm2 2h6v1H5V7zm0 2h4v1H5V9z"/>
+        </svg>
+        Zerodha Kite
+        <span class="badge badge-green">Broker</span>
+      </div>
+      <p class="card-desc">Connect your Kite account to place live orders</p>
+
+      <div class="kite-status">
+        <div class="dot" id="kite-dot" style="background:#d29922"></div>
+        <span id="kite-status-text">Checking connection…</span>
+      </div>
+
+      <button class="btn btn-green" id="kite-btn" onclick="doKiteLogin()">
+        Connect Kite Account
+      </button>
+
+      <hr class="divider"/>
+
+      <label for="manual-token">Paste Access Token (optional)</label>
+      <input id="manual-token" type="text" placeholder="kite access token"/>
+      <button class="btn btn-blue" onclick="setManualToken()" style="margin-top:-6px">
+        Set Token
+      </button>
+
+      <div class="status" id="kite-msg"></div>
+    </div>
+
+  </div>
+
+  <script>
+    const BASE = window.location.origin;
+
+    // ── Restore existing JWT on page load ───────────────────────
+    window.addEventListener('DOMContentLoaded', async () => {
+      const stored = localStorage.getItem('jwtToken');
+      if (stored) {
+        const ok = await validateToken(stored);
+        if (ok) {
+          setLoginStatus('ok', `Signed in as ${localStorage.getItem('username') || 'admin'}`);
+          showToken(stored);
+        } else {
+          localStorage.removeItem('jwtToken');
+        }
+      }
+      checkKiteStatus();
+    });
+
+    // ── App login ────────────────────────────────────────────────
+    async function doLogin() {
+      const btn = document.getElementById('login-btn');
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!username || !password) {
+        setLoginStatus('err', 'Enter username and password');
+        return;
+      }
+      btn.disabled = true;
+      setLoginStatus('info', 'Signing in…');
+
+      try {
+        const res = await fetch(`${BASE}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Login failed');
+
+        localStorage.setItem('jwtToken', data.access_token);
+        localStorage.setItem('username', username);
+        setLoginStatus('ok', `Welcome, ${username}! Expires in ${data.expires_in / 3600}h`);
+        showToken(data.access_token);
+      } catch (e) {
+        setLoginStatus('err', e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // ── Token validation ─────────────────────────────────────────
+    async function validateToken(token) {
+      try {
+        const res = await fetch(`${BASE}/auth/me`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        return res.ok;
+      } catch { return false; }
+    }
+
+    function showToken(token) {
+      const el = document.getElementById('token-display');
+      el.style.display = 'block';
+      el.innerHTML = `<b>Bearer token</b> (copy for API calls):<br>${token.slice(0, 40)}…`;
+    }
+
+    // ── Kite OAuth ───────────────────────────────────────────────
+    async function doKiteLogin() {
+      const btn = document.getElementById('kite-btn');
+      btn.disabled = true;
+      setKiteMsg('info', 'Fetching Kite login URL…');
+      try {
+        const headers = authHeaders();
+        const res = await fetch(`${BASE}/auth/login-url`, { headers });
+        const data = await res.json();
+        if (!data.login_url) throw new Error('No login URL returned');
+        setKiteMsg('info', 'Opening Kite login…');
+        window.open(data.login_url, '_blank');
+        setKiteMsg('ok', 'Complete login in the Kite tab. Token will auto-capture on callback.');
+      } catch (e) {
+        setKiteMsg('err', e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function setManualToken() {
+      const token = document.getElementById('manual-token').value.trim();
+      if (!token) { setKiteMsg('err', 'Paste an access token first'); return; }
+      setKiteMsg('info', 'Setting token…');
+      try {
+        const res = await fetch(`${BASE}/auth/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ access_token: token }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Failed');
+        setKiteMsg('ok', 'Kite token set — broker connected');
+        checkKiteStatus();
+      } catch (e) {
+        setKiteMsg('err', e.message);
+      }
+    }
+
+    async function checkKiteStatus() {
+      try {
+        const res = await fetch(`${BASE}/auth/kite/status`, { headers: authHeaders() });
+        const data = await res.json();
+        const dot = document.getElementById('kite-dot');
+        const txt = document.getElementById('kite-status-text');
+        if (data.connected) {
+          dot.className = 'dot dot-green';
+          txt.textContent = `Connected — ${data.account_id || 'Kite'}`;
+        } else {
+          dot.className = 'dot dot-red';
+          txt.textContent = data.message || 'Not connected';
+        }
+      } catch {
+        document.getElementById('kite-status-text').textContent = 'Unable to reach server';
+      }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────
+    function authHeaders() {
+      const jwt = localStorage.getItem('jwtToken');
+      const apiKey = localStorage.getItem('apiKey') || '';
+      const h = {};
+      if (jwt) h['Authorization'] = `Bearer ${jwt}`;
+      if (apiKey) h['X-API-Key'] = apiKey;
+      return h;
+    }
+
+    function setLoginStatus(type, msg) {
+      const el = document.getElementById('login-status');
+      el.className = `status ${type}`;
+      el.textContent = msg;
+    }
+
+    function setKiteMsg(type, msg) {
+      const el = document.getElementById('kite-msg');
+      el.className = `status ${type}`;
+      el.textContent = msg;
+    }
+
+    // Enter key submits login form
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        if (document.activeElement.closest('.card') === document.querySelector('.card')) {
+          doLogin();
+        }
+      }
+    });
+  </script>
+
+</body>
+</html>

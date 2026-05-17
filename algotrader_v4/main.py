@@ -21,6 +21,7 @@ from pydantic.networks import IPvAnyAddress
 from loguru import logger
 
 from config import settings
+from auth import authenticate, create_token, decode_token
 from market_data import nse_client, yf_client, is_market_open
 from kite_client import kite_client
 from risk_manager import risk_manager
@@ -37,6 +38,7 @@ from adaptive_engine import adaptive_engine
 from sebi_compliance import sebi_compliance, KillSwitchState, APPROVED_ALGO_IDS
 from atomic_bracket import atomic_bracket_engine
 
+from fastapi.security import OAuth2PasswordRequestForm
 import swagger_ui_bundle
 
 app = FastAPI(
@@ -45,6 +47,7 @@ app = FastAPI(
     docs_url=None, redoc_url=None,
 )
 app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # MED-1: restrict CORS to explicit methods and headers (no wildcard)
 app.add_middleware(
@@ -84,12 +87,19 @@ async def _api_key_gate(request: Request, call_next):
     needs_auth = mutates or is_sensitive_get
     is_exempt = (
         request.url.path in _EXEMPT_PATHS
+        or request.url.path in ("/auth/login", "/login")
         or any(request.url.path.startswith(p) for p in _EXEMPT_PREFIXES)
     )
     if needs_auth and not is_exempt and settings.api_key:
-        key = request.headers.get("X-API-Key", "")
-        if key != settings.api_key:
-            return JSONResponse({"detail": "Unauthorized: invalid or missing X-API-Key"}, status_code=401)
+        # Accept X-API-Key (programmatic) OR JWT Bearer (browser/UI)
+        api_key = request.headers.get("X-API-Key", "")
+        auth_hdr = request.headers.get("Authorization", "")
+        has_key = api_key == settings.api_key
+        has_jwt = False
+        if auth_hdr.startswith("Bearer ") and settings.jwt_secret_key:
+            has_jwt = decode_token(auth_hdr[7:]) is not None
+        if not has_key and not has_jwt:
+            return JSONResponse({"detail": "Unauthorized: provide X-API-Key or Bearer token"}, status_code=401)
     return await call_next(request)
 
 
@@ -232,6 +242,78 @@ class WhitelistIPRequest(BaseModel):
 # CRIT-2: kill-switch reset requires a separate secret
 class KillSwitchResetRequest(BaseModel):
     secret: str
+
+
+# ── Login page ───────────────────────────────────────────────────────────────
+@app.get("/login", include_in_schema=False)
+def login_page():
+    """Serve the browser login UI (app + Kite OAuth)."""
+    with open("static/login.html", "r") as f:
+        return HTMLResponse(f.read())
+
+
+# ── App auth (JWT) ────────────────────────────────────────────────────────────
+@app.post("/auth/login", tags=["Auth"])
+def app_login(form: OAuth2PasswordRequestForm = Depends()):
+    """Exchange username + password for a JWT access token."""
+    if not authenticate(form.username, form.password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password",
+                            headers={"WWW-Authenticate": "Bearer"})
+    token, expires_in = create_token(form.username)
+    return {"access_token": token, "token_type": "bearer", "expires_in": expires_in}
+
+@app.get("/auth/me", tags=["Auth"])
+def me(request: Request):
+    """Return currently authenticated user (JWT or API key)."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        user = decode_token(auth[7:])
+        if user:
+            return {"user": user, "auth_method": "jwt"}
+    if request.headers.get("X-API-Key") == settings.api_key and settings.api_key:
+        return {"user": "api-key-user", "auth_method": "api_key"}
+    raise HTTPException(401, "Not authenticated")
+
+@app.get("/auth/kite/status", tags=["Auth"])
+def kite_status():
+    """Check whether a valid Kite access token is loaded."""
+    try:
+        profile = kite_client.profile()
+        return {"connected": True, "account_id": profile.get("user_id", ""),
+                "name": profile.get("user_name", ""), "email": profile.get("email", "")}
+    except Exception:
+        return {"connected": False, "message": "No valid Kite session. Use Connect Kite Account."}
+
+@app.get("/auth/kite/callback", tags=["Auth"], include_in_schema=False)
+def kite_callback(request_token: str = "", action: str = "", status: str = ""):
+    """Zerodha redirects here after OAuth. Auto-captures the request_token."""
+    if status != "success" or not request_token:
+        return HTMLResponse(
+            "<h2 style='font-family:sans-serif;color:#f85149'>Kite login failed or cancelled.</h2>"
+            "<p><a href='/login'>← Back to login</a></p>",
+            status_code=400,
+        )
+    try:
+        token = kite_client.set_access_token(request_token=request_token)
+        return HTMLResponse(f"""
+        <html><head><title>Kite Connected</title></head>
+        <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
+                     display:flex;align-items:center;justify-content:center;height:100vh">
+          <div style="text-align:center">
+            <div style="font-size:3rem">✅</div>
+            <h2 style="color:#3fb950">Kite Connected!</h2>
+            <p style="color:#8b949e">Token: {token[:8]}…</p>
+            <p style="margin-top:16px"><a href="/login" style="color:#58a6ff">Back to dashboard</a></p>
+          </div>
+        </body></html>
+        """)
+    except Exception as e:
+        logger.error("Kite callback error: {}", e)
+        return HTMLResponse(
+            "<h2 style='font-family:sans-serif;color:#f85149'>Token exchange failed.</h2>"
+            "<p><a href='/login'>← Try again</a></p>",
+            status_code=500,
+        )
 
 
 # ── Docs (LOW-3: protected by _api_key_gate middleware above) ─────────────────
