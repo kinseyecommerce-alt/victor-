@@ -1,36 +1,42 @@
 # ── Broker (orders only, no market data) ──────────────────────────
 kiteconnect==5.0.1
 
-# ── Market data (free, no broker) ─────────────────────────────────
+# ── Market data ───────────────────────────────────────────────────
 yfinance==0.2.40
 httpx==0.27.0
 
 # ── API server ────────────────────────────────────────────────────
-# LOW-1: fastapi 0.115.x pulls starlette>=0.40.0 (fixes CVE-2024-47874)
-fastapi==0.115.5
-starlette==0.41.2
+# NOTE: upgrade fastapi→0.115.x + starlette→0.41.x to fix CVE-2024-47874
+fastapi==0.111.0
+starlette==0.37.2
 uvicorn[standard]==0.30.1
 websockets==12.0
 
 # ── Security ──────────────────────────────────────────────────────
 slowapi==0.1.9
 
-# ── AI ─────────────────────────────────────────────────────────────
-# LOW-1: updated for security patches
-anthropic==0.40.0
+# ── AI ────────────────────────────────────────────────────────────
+anthropic==0.28.0
 
-# ── Technical analysis + charting ────────────────────────────────
+# ── Data / Technical analysis / Charting ─────────────────────────
 pandas==2.2.2
 numpy==1.26.4
 ta==0.11.0
 matplotlib==3.10.9
 
-# ── Scheduling + utilities ────────────────────────────────────────
+# ── Scheduling ────────────────────────────────────────────────────
 apscheduler==3.10.4
+
+# ── Utilities ────────────────────────────────────────────────────
 python-dotenv==1.0.1
 python-telegram-bot==21.3
 pydantic==2.7.3
 pydantic-settings==2.3.4
 loguru==0.7.2
-aiofiles==23.2.1
-swagger-ui-bundle==0.0.9
+aiofiles==25.1.0
+
+# ── Swagger UI (served locally, no CDN dependency) ────────────────
+swagger-ui-bundle==1.1.0
+
+# ── Testing (not needed in production) ───────────────────────────
+playwright==1.59.0
