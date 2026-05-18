@@ -162,8 +162,15 @@ class PlatformScheduler:
 
         strategies = [s.strip() for s in settings.auto_start_strategies.split(",") if s.strip()]
 
-        # Build watchlist — explicit list in config, or run the symbol scanner
-        if settings.auto_start_watchlist:
+        # Build watchlist — Nifty 100 flag takes priority, then explicit list, then scanner
+        if settings.use_nifty100_watchlist:
+            from nifty100 import get_strategy_watchlist, NIFTY_100, as_watchlist
+            if len(strategies) == 1:
+                watchlist = get_strategy_watchlist(strategies[0])
+            else:
+                watchlist = as_watchlist(NIFTY_100)
+            logger.info("[platform] Using full Nifty 100 watchlist ({} symbols)", len(watchlist))
+        elif settings.auto_start_watchlist:
             watchlist = [
                 {"symbol": s.strip(), "exchange": "NSE"}
                 for s in settings.auto_start_watchlist.split(",")

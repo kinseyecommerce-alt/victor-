@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -75,6 +76,28 @@ class BaseAgent(ABC):
     # ── Backtest filter ───────────────────────────────────────────────
 
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
+        # Fast path: pre-learned system — skip per-symbol backtests
+        if settings.skip_startup_backtest:
+            approved_path = Path("logs/approved_symbols.json")
+            if approved_path.exists():
+                import json
+                pre = json.loads(approved_path.read_text()).get(self.name, [])
+                pre_set = set(pre)
+                approved = [i for i in watchlist if i["symbol"] in pre_set] if pre_set \
+                           else list(watchlist)
+                label = f"pre-learned ({len(pre_set)} approved symbols on file)"
+            else:
+                # No file yet — approve everything (user trusts their watchlist)
+                approved = list(watchlist)
+                label = "skip_backtest=true, no seed file — approving all"
+
+            for item in approved:
+                self._approved.add(item["symbol"])
+            self.state.approved_symbols = [a["symbol"] for a in approved]
+            logger.info("[{}] {} | {} symbols ready", self.name, label, len(approved))
+            return approved
+
+        # Normal path: run backtest per symbol (first-time setup)
         approved = []
         for item in watchlist:
             sym, exch = item["symbol"], item.get("exchange", "NSE")

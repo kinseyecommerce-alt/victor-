@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     max_trades_scalping: int = 20
     cooldown_after_loss_sec: int = 300
 
+    # Pre-learned system (set after running historical_learner.py)
+    skip_startup_backtest: bool = False   # use pre-learned approved_symbols.json
+    use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
+
     # Intelligence layer
     use_claude_trade_gate: bool = True    # per-trade Claude assessment via Sonnet
     claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
