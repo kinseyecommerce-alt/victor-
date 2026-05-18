@@ -1,0 +1,32 @@
+[Unit]
+Description=AlgoTrader Pro
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=algotrader
+WorkingDirectory=/opt/algotrader
+EnvironmentFile=/opt/algotrader/.env
+
+# Single worker — required because kill-switch, positions, and tick engine
+# are held in-memory; multiple workers would produce split-brain state.
+ExecStart=/opt/algotrader/venv/bin/uvicorn main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --loop uvloop \
+    --http httptools \
+    --log-level warning \
+    --access-log
+
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/algotrader/app.log
+StandardError=append:/var/log/algotrader/app.log
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
