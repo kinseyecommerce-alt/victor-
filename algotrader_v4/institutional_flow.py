@@ -262,11 +262,17 @@ def _build_cache_entry(
     delivery_map: dict[str, float],
     deal_map: dict[str, dict],
 ) -> dict:
-    """Construct and return a fully-scored cache entry for one symbol."""
+    """
+    Construct and return a fully-scored cache entry for one symbol.
+
+    `is_default` is True when neither delivery data nor deal data was available
+    for the symbol, meaning all values are filled with safe defaults.
+    """
     sym_upper = symbol.upper()
 
-    delivery_pct   = delivery_map.get(sym_upper, 50.0)
-    delivery_score = _compute_delivery_score(delivery_pct)
+    has_delivery_data = sym_upper in delivery_map
+    delivery_pct      = delivery_map.get(sym_upper, 50.0)
+    delivery_score    = _compute_delivery_score(delivery_pct)
 
     deal = deal_map.get(sym_upper)
     has_block_deal       = deal is not None
@@ -277,6 +283,9 @@ def _build_cache_entry(
         delivery_score, delivery_pct, has_block_deal, block_deal_direction
     )
 
+    # Mark as default only when we genuinely had no data for this symbol
+    is_default = not has_delivery_data and not has_block_deal
+
     return {
         "symbol":               sym_upper,
         "delivery_pct":         delivery_pct,
@@ -286,7 +295,7 @@ def _build_cache_entry(
         "block_deal_qty":       block_deal_qty,
         "institutional_score":  round(institutional_score, 2),
         "refreshed_at":         datetime.now().isoformat(),
-        "is_default":           False,
+        "is_default":           is_default,
     }
 
 
