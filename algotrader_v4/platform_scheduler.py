@@ -32,11 +32,23 @@ class PlatformScheduler:
             hour=8, minute=50, day_of_week="mon-fri", id="kite_refresh",
         )
         self._sched.add_job(
+            self._pre_market_report, "cron",
+            hour=9, minute=0, day_of_week="mon-fri", id="pre_market",
+        )
+        self._sched.add_job(
+            self._morning_data_refresh, "cron",
+            hour=9, minute=10, day_of_week="mon-fri", id="morning_data",
+        )
+        self._sched.add_job(
             self._auto_start_bot, "cron",
             hour=9, minute=16, day_of_week="mon-fri", id="auto_start",
         )
+        self._sched.add_job(
+            self._options_cache_refresh, "interval",
+            minutes=5, id="options_cache",
+        )
         self._sched.start()
-        logger.info("[platform] scheduler started (Kite@08:50, AutoStart@09:16 IST)")
+        logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, Start@09:16 IST)")
 
     async def stop(self) -> None:
         try:
@@ -45,6 +57,65 @@ class PlatformScheduler:
             pass
 
     # ── Jobs ──────────────────────────────────────────────────────────────────
+
+    async def _pre_market_report(self) -> None:
+        try:
+            from pre_market_report import generate_pre_market_report
+            await generate_pre_market_report()
+        except Exception as exc:
+            logger.error("[platform] Pre-market report failed: {}", exc)
+
+    async def _morning_data_refresh(self) -> None:
+        """Refresh all static daily data: levels, events, institutional flow, correlation matrix."""
+        from tick_engine import tick_engine
+        symbols = list(tick_engine._subscribers.keys()) if hasattr(tick_engine, "_subscribers") else []
+        if not symbols:
+            logger.info("[platform] Morning data refresh: no symbols yet — will retry after bot start")
+            return
+        results = []
+        try:
+            from levels_engine import refresh_daily as levels_refresh
+            await levels_refresh(symbols)
+            results.append("levels ✓")
+        except Exception as exc:
+            logger.warning("[platform] Levels refresh failed: {}", exc)
+
+        try:
+            from event_calendar import refresh_calendar
+            await refresh_calendar()
+            results.append("events ✓")
+        except Exception as exc:
+            logger.warning("[platform] Event calendar refresh failed: {}", exc)
+
+        try:
+            from institutional_flow import refresh_daily
+            await refresh_daily(symbols)
+            results.append("institutional ✓")
+        except Exception as exc:
+            logger.warning("[platform] Institutional flow refresh failed: {}", exc)
+
+        try:
+            from correlation_guard import refresh_matrix
+            await refresh_matrix(symbols)
+            results.append("correlation ✓")
+        except Exception as exc:
+            logger.warning("[platform] Correlation matrix refresh failed: {}", exc)
+
+        logger.info("[platform] Morning data refresh: {}", ", ".join(results) or "all failed")
+
+    async def _options_cache_refresh(self) -> None:
+        """Refresh options IV cache every 5 minutes during market hours."""
+        from market_data import is_market_open
+        if not is_market_open():
+            return
+        try:
+            from tick_engine import tick_engine
+            from options_intelligence import update_cache
+            symbols = [s for s in (tick_engine.all_latest() or {}).keys()]
+            if symbols:
+                await update_cache(symbols[:20])  # limit to top 20 to avoid rate limits
+        except Exception as exc:
+            logger.debug("[platform] Options cache refresh: {}", exc)
 
     async def _kite_token_refresh(self) -> None:
         logger.info("[platform] Kite token refresh starting…")
