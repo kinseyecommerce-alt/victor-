@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     max_trades_scalping: int = 20
     cooldown_after_loss_sec: int = 300
 
+    # Intelligence layer
+    use_claude_trade_gate: bool = True    # per-trade Claude assessment via Sonnet
+    claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
+    use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
+    mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
+    use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty
+
     # Auto-start (set to enable fully-lights-out operation)
     # Comma-separated strategy names e.g. "intraday,scalping"
     auto_start_strategies: str = ""

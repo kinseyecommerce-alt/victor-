@@ -131,6 +131,31 @@ class BaseAgent(ABC):
                 await self._check_exits_on_tick(snap)
                 action, signal = self.evaluate_tick(snap)
                 if action in ("BUY", "SELL") and signal:
+                    # ── Multi-timeframe alignment ──────────────────────────
+                    if settings.use_multi_timeframe:
+                        from multi_timeframe import check as mtf_check
+                        mtf = mtf_check(snap, action)
+                        if not mtf.aligned:
+                            logger.debug("[{}] {} MTF skip {}/3 TFs aligned",
+                                         self.name, snap.symbol, mtf.score)
+                            continue
+
+                    # ── Claude per-trade intelligence gate ────────────────
+                    if settings.use_claude_trade_gate:
+                        from claude_trade_gate import assess as gate_assess
+                        from master_agent_v5 import record_gate_decision
+                        gate = await gate_assess(snap, action, signal, self.name)
+                        record_gate_decision(gate.enter)
+                        if not gate.enter:
+                            continue
+                        # Apply Claude's SL/target/size adjustments
+                        if gate.adjusted_sl_pct:
+                            signal["stop_loss_pct"]  = gate.adjusted_sl_pct
+                        if gate.adjusted_target_pct:
+                            signal["target_pct"]     = gate.adjusted_target_pct
+                        signal["_gate_size_factor"]  = gate.size_factor
+                        signal["_gate_confidence"]   = gate.confidence
+
                     await self._try_enter(snap, action, signal)
             except Exception as exc:
                 err = f"{snap.symbol}: {str(exc)[:100]}"
@@ -143,6 +168,11 @@ class BaseAgent(ABC):
         ltp  = snap.tick.ltp
         exch = signal.get("exchange", "NSE")
         qty  = risk_manager.calculate_quantity(ltp)
+
+        # Apply Kelly-adjusted size (gate may have set a size_factor)
+        size_factor = signal.pop("_gate_size_factor", 1.0)
+        if settings.use_kelly_sizing and size_factor < 1.0:
+            qty = max(1, int(qty * size_factor))
 
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
