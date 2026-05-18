@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     kite_api_key: str = ""
     kite_api_secret: str = ""
     kite_access_token: str = ""
+    # Kite auto-login (Playwright) — set these to enable morning auto-refresh
+    kite_user_id: str = ""
+    kite_password: str = ""
+    kite_totp_secret: str = ""      # TOTP seed from Zerodha 2FA setup
+    kite_redirect_url: str = ""     # e.g. https://yourdomain.com/auth/kite/callback
 
     # Anthropic
     anthropic_api_key: str = ""
@@ -52,6 +57,12 @@ class Settings(BaseSettings):
     max_trades_swing: int = 3
     max_trades_scalping: int = 20
     cooldown_after_loss_sec: int = 300
+
+    # Auto-start (set to enable fully-lights-out operation)
+    # Comma-separated strategy names e.g. "intraday,scalping"
+    auto_start_strategies: str = ""
+    # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
+    auto_start_watchlist: str = ""
 
     # Server
     host: str = "0.0.0.0"

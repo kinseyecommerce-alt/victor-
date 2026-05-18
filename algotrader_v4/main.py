@@ -783,6 +783,8 @@ async def on_startup():
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
+    from platform_scheduler import platform_scheduler
+    platform_scheduler.start()
 
 
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware
