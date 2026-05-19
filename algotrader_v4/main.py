@@ -563,6 +563,19 @@ def orders():
         raise HTTPException(500, "Unable to fetch orders")
 
 
+# ── Claude Gate Log (dashboard) ──────────────────────────────────────────────
+@app.get("/gate/log", tags=["AI Signal"])
+def gate_log(n: int = 50):
+    """Return last n Claude trade-gate decisions (newest first). Used by dashboard."""
+    from claude_trade_gate import get_gate_log
+    decisions = get_gate_log(n)
+    # Normalise: add `enter` bool from decision string if needed
+    for d in decisions:
+        if "enter" not in d:
+            d["enter"] = d.get("decision", "").upper() == "ENTER"
+    return {"decisions": decisions, "count": len(decisions)}
+
+
 # ── Signals / Risk ────────────────────────────────────────────────────────────
 @app.post("/signals/generate", tags=["AI Signal"])
 async def gen_signal(req: SignalRequest):
