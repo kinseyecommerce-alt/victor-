@@ -1412,6 +1412,36 @@
           </label>
         </div>
 
+        <!-- Per-Agent Daily Limits -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="gauge"></i> Per-Agent Daily Trade Limits</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Intraday (max trades/day)</label>
+              <input type="number" id="tl-intraday" min="1" max="100" class="risk-input" style="width:100%" placeholder="8">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">F&amp;O (max trades/day)</label>
+              <input type="number" id="tl-fno" min="1" max="50" class="risk-input" style="width:100%" placeholder="4">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Swing (max trades/day)</label>
+              <input type="number" id="tl-swing" min="1" max="30" class="risk-input" style="width:100%" placeholder="3">
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Scalping (max trades/day)</label>
+              <input type="number" id="tl-scalping" min="1" max="200" class="risk-input" style="width:100%" placeholder="20">
+            </div>
+          </div>
+          <div style="margin-bottom:14px">
+            <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Loss Cooldown (seconds between trades after a loss)</label>
+            <input type="number" id="tl-cooldown" min="0" max="3600" class="risk-input" style="width:100%;max-width:200px" placeholder="300">
+          </div>
+          <button class="btn btn-blue btn-sm" onclick="saveTradingLimits()">
+            <i data-lucide="save"></i> Save Limits
+          </button>
+        </div>
+
         <!-- Admin -->
         <div class="settings-section">
           <div class="settings-title"><i data-lucide="terminal"></i> Admin</div>
@@ -2345,6 +2375,46 @@ function settingToggle(key, val) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   TRADING LIMITS: fetch + save
+═══════════════════════════════════════════════════════════════ */
+async function fetchTradingLimits() {
+  try {
+    const d = await api('GET', '/settings/trading-limits');
+    document.getElementById('tl-intraday').value = d.max_trades_intraday  ?? 8;
+    document.getElementById('tl-fno').value      = d.max_trades_fno       ?? 4;
+    document.getElementById('tl-swing').value    = d.max_trades_swing     ?? 3;
+    document.getElementById('tl-scalping').value = d.max_trades_scalping  ?? 20;
+    document.getElementById('tl-cooldown').value = d.cooldown_after_loss_sec ?? 300;
+  } catch (_) {}
+}
+
+async function saveTradingLimits() {
+  const btn = document.querySelector('#tab-settings .btn-blue[onclick="saveTradingLimits()"]');
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div> Saving…';
+  try {
+    const _int = id => { const v = parseInt(document.getElementById(id).value); return isNaN(v) ? undefined : v; };
+    const body = {
+      max_trades_intraday:     _int('tl-intraday'),
+      max_trades_fno:          _int('tl-fno'),
+      max_trades_swing:        _int('tl-swing'),
+      max_trades_scalping:     _int('tl-scalping'),
+      cooldown_after_loss_sec: _int('tl-cooldown'),
+    };
+    Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+    await api('PATCH', '/settings/trading-limits', body);
+    toast('Trading limits saved', 'ok');
+  } catch (e) {
+    toast(`Save error: ${e.message}`, 'error');
+  } finally {
+    btn.disabled  = false;
+    btn.innerHTML = orig;
+    lucide.createIcons({ nodes: [btn] });
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
    POLLING: fetch all state
 ═══════════════════════════════════════════════════════════════ */
 async function pollAll() {
@@ -2359,6 +2429,7 @@ async function pollAll() {
     fetchGateLog(),
     fetchKite(),
     fetchAdaptive(),
+    fetchTradingLimits(),
   ]);
 
   renderStats();

@@ -244,6 +244,13 @@ class WhitelistIPRequest(BaseModel):
 class KillSwitchResetRequest(BaseModel):
     secret: str
 
+class TradingLimitsRequest(BaseModel):
+    max_trades_intraday:  int | None = Field(default=None, ge=1, le=100)
+    max_trades_fno:       int | None = Field(default=None, ge=1, le=50)
+    max_trades_swing:     int | None = Field(default=None, ge=1, le=30)
+    max_trades_scalping:  int | None = Field(default=None, ge=1, le=200)
+    cooldown_after_loss_sec: int | None = Field(default=None, ge=0, le=3600)
+
 
 # ── UI pages ─────────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
@@ -600,6 +607,25 @@ def risk_update(req: RiskUpdateRequest):
     if req.stop_loss_pct     is not None: settings.stop_loss_pct     = req.stop_loss_pct
     if req.target_pct        is not None: settings.target_pct        = req.target_pct
     return risk_manager.status()
+
+@app.get("/settings/trading-limits", tags=["Settings"])
+def get_trading_limits():
+    return {
+        "max_trades_intraday":     settings.max_trades_intraday,
+        "max_trades_fno":          settings.max_trades_fno,
+        "max_trades_swing":        settings.max_trades_swing,
+        "max_trades_scalping":     settings.max_trades_scalping,
+        "cooldown_after_loss_sec": settings.cooldown_after_loss_sec,
+    }
+
+@app.patch("/settings/trading-limits", tags=["Settings"])
+def patch_trading_limits(req: TradingLimitsRequest):
+    if req.max_trades_intraday     is not None: settings.max_trades_intraday     = req.max_trades_intraday
+    if req.max_trades_fno          is not None: settings.max_trades_fno          = req.max_trades_fno
+    if req.max_trades_swing        is not None: settings.max_trades_swing        = req.max_trades_swing
+    if req.max_trades_scalping     is not None: settings.max_trades_scalping     = req.max_trades_scalping
+    if req.cooldown_after_loss_sec is not None: settings.cooldown_after_loss_sec = req.cooldown_after_loss_sec
+    return get_trading_limits()
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
