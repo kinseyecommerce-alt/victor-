@@ -5,7 +5,7 @@ Entry logic reads from live LiveIndicators (EMA, RSI, VWAP, MACD, BB, ATR).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from typing import Optional
 
 from agents.base_agent import BaseAgent
@@ -243,15 +243,35 @@ class SwingAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class ScalpingAgent(BaseAgent):
+    """
+    High-frequency intraday scalper.
+
+    Entry: EMA9 micro-cross confirmed by 8-factor score (≥5 required).
+    SL/Target: ATR-based (0.6×ATR / 1.2×ATR) for dynamic risk sizing.
+    Filters: time-of-day, level proximity, volatility regime, loss-streak cooldown.
+    """
     name    = "scalping"
     product = "MIS"
-    min_candles_1min = 10
-    SL_PCT  = 0.25    # tight SL for scalping
-    TGT_PCT = 0.50
+    min_candles_1min = 15
 
-    # Track previous EMA9 for cross detection
-    _prev_ema9: dict[str, float] = {}
-    _prev_ltp:  dict[str, float] = {}
+    # ATR multipliers — 1:2 R:R
+    SL_ATR   = 0.6
+    TGT_ATR  = 1.2
+
+    # Fixed fallbacks when ATR is unavailable
+    SL_PCT   = 0.25
+    TGT_PCT  = 0.50
+
+    # Minimum score (out of 8 factors) required to enter
+    MIN_SCORE = 5
+
+    # Per-symbol rolling state (class-level — shared across instances)
+    _prev_ema9:      dict[str, float]    = {}
+    _prev_ltp:       dict[str, float]    = {}
+    _loss_streak:    dict[str, int]      = {}
+    _cooldown_until: dict[str, datetime] = {}
+
+    # ── Entry ─────────────────────────────────────────────────────────────────
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         sym = snap.symbol
@@ -261,83 +281,227 @@ class ScalpingAgent(BaseAgent):
         if not ind.ema9:
             return "HOLD", None
 
+        # ── Guard 1: time-of-day ────────────────────────────────────────────
+        t = datetime.now().time()
+        if time(9, 15) <= t < time(9, 30):   # chaotic open — skip
+            return "HOLD", None
+        if t >= time(14, 40):                 # wind-down — no new scalps
+            return "HOLD", None
+
+        # ── Guard 2: loss-streak cooldown ───────────────────────────────────
+        cd = self._cooldown_until.get(sym)
+        if cd and datetime.now() < cd:
+            return "HOLD", None
+
+        # ── Guard 3: spread filter ───────────────────────────────────────────
+        spread = snap.tick.ask - snap.tick.bid
+        if spread > ltp * 0.0004:             # 0.04% max spread
+            return "HOLD", None
+
+        # ── Guard 4: volatility regime ──────────────────────────────────────
+        atr = ind.atr_14 or 0.0
+        atr_ratio = atr / ltp if ltp > 0 else 0.0
+        if atr_ratio > 0.005:                 # too volatile — wide stops required
+            return "HOLD", None
+        if atr_ratio < 0.0003:                # dead market — no movement
+            return "HOLD", None
+
+        # ── EMA9 micro-cross detection ───────────────────────────────────────
         prev_ema9 = self._prev_ema9.get(sym, ind.ema9)
         prev_ltp  = self._prev_ltp.get(sym, ltp)
-
         self._prev_ema9[sym] = ind.ema9
         self._prev_ltp[sym]  = ltp
 
-        # ── Spread filter (avoid wide spreads on scalp) ──────────────
-        max_spread = ltp * 0.0003   # 0.03% max allowed spread
-        spread = snap.tick.ask - snap.tick.bid
-        if spread > max_spread:
+        bull_cross = prev_ltp < prev_ema9 and ltp > ind.ema9
+        bear_cross = prev_ltp > prev_ema9 and ltp < ind.ema9
+        if not (bull_cross or bear_cross):
             return "HOLD", None
 
-        # ── Bullish micro-cross ──────────────────────────────────
-        bull_cross = prev_ltp < prev_ema9 and ltp > ind.ema9
-        rsi_ok     = 52 < ind.rsi_7 < 72
-        vol_spike  = ind.volume_ratio >= 1.4
-        momentum   = ind.momentum in ("STRONG_UP", "WEAK_UP")
+        action = "BUY" if bull_cross else "SELL"
 
-        if bull_cross and rsi_ok and vol_spike and momentum:
-            sl  = round(ltp * (1 - self.SL_PCT  / 100), 2)
-            tgt = round(ltp * (1 + self.TGT_PCT / 100), 2)
-            return "BUY", {
-                "symbol":    sym,
-                "exchange":  "NSE",
-                "side":      "BUY",
-                "price":     ltp,
-                "stop_loss": sl,
-                "target":    tgt,
-                "product":   self.product,
-                "trigger":   f"EMA9-CROSS vol={ind.volume_ratio:.1f}x rsi={ind.rsi_7:.0f}",
-            }
+        # ── Multi-factor scoring ─────────────────────────────────────────────
+        score, reasons = self._score_setup(snap, ind, ltp, action)
+        if score < self.MIN_SCORE:
+            return "HOLD", None
 
-        # ── Bearish micro-cross ──────────────────────────────────
-        bear_cross  = prev_ltp > prev_ema9 and ltp < ind.ema9
-        rsi_bear    = 28 < ind.rsi_7 < 48
-        mom_down    = ind.momentum in ("STRONG_DOWN", "WEAK_DOWN")
+        # ── Level proximity guard ────────────────────────────────────────────
+        if not self._level_ok(sym, ltp, action):
+            return "HOLD", None
 
-        if bear_cross and rsi_bear and vol_spike and mom_down:
-            sl  = round(ltp * (1 + self.SL_PCT  / 100), 2)
-            tgt = round(ltp * (1 - self.TGT_PCT / 100), 2)
-            return "SELL", {
-                "symbol":    sym,
-                "exchange":  "NSE",
-                "side":      "SELL",
-                "price":     ltp,
-                "stop_loss": sl,
-                "target":    tgt,
-                "product":   self.product,
-                "trigger":   f"EMA9-CROSS-SHORT vol={ind.volume_ratio:.1f}x",
-            }
+        # ── ATR-based SL & target ────────────────────────────────────────────
+        sl_dist  = max(atr * self.SL_ATR,  ltp * self.SL_PCT  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * self.TGT_PCT / 100)
 
-        return "HOLD", None
+        if action == "BUY":
+            sl  = round(ltp - sl_dist, 2)
+            tgt = round(ltp + tgt_dist, 2)
+        else:
+            sl  = round(ltp + sl_dist, 2)
+            tgt = round(ltp - tgt_dist, 2)
+
+        return action, {
+            "symbol":       sym,
+            "exchange":     "NSE",
+            "side":         action,
+            "price":        ltp,
+            "stop_loss":    sl,
+            "target":       tgt,
+            "stop_loss_pct": round(sl_dist / ltp * 100, 3),
+            "target_pct":   round(tgt_dist / ltp * 100, 3),
+            "product":      self.product,
+            "trigger":      f"SCALP-{action} score={score}/{self.MIN_SCORE}min "
+                            f"{' '.join(reasons[:4])}",
+        }
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+
+    def _score_setup(
+        self, snap: MarketSnapshot, ind: LiveIndicators, ltp: float, action: str
+    ) -> tuple[int, list[str]]:
+        score = 0
+        reasons: list[str] = []
+        is_buy = action == "BUY"
+
+        # 1. VWAP alignment (price on correct side of VWAP)
+        if ind.vwap and ind.vwap > 0:
+            if (is_buy and ltp > ind.vwap) or (not is_buy and ltp < ind.vwap):
+                score += 1; reasons.append("VWAP✓")
+
+        # 2. RSI-7 in healthy zone — not extended
+        rsi = ind.rsi_7
+        if is_buy and 50 < rsi < 70:
+            score += 1; reasons.append(f"RSI{rsi:.0f}")
+        elif not is_buy and 30 < rsi < 50:
+            score += 1; reasons.append(f"RSI{rsi:.0f}")
+
+        # 3. Volume surge ≥ 1.5×
+        if ind.volume_ratio >= 1.5:
+            score += 1; reasons.append(f"VOL{ind.volume_ratio:.1f}x")
+        elif ind.volume_ratio >= 1.3:
+            score += 1  # partial — count but don't annotate
+
+        # 4. ADX confirms trend is established (not choppy)
+        if ind.adx_14 >= 22:
+            score += 1; reasons.append(f"ADX{ind.adx_14:.0f}")
+
+        # 5. MACD histogram confirms direction
+        if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
+            score += 1; reasons.append("MACD✓")
+
+        # 6. Candle microstructure — ≥2 of last 3 candles confirm direction
+        if len(snap.candles_1min) >= 3:
+            last3 = snap.candles_1min[-3:]
+            if is_buy:
+                green = sum(1 for c in last3 if c.close >= c.open)
+                if green >= 2:
+                    score += 1; reasons.append(f"{green}G")
+            else:
+                red = sum(1 for c in last3 if c.close <= c.open)
+                if red >= 2:
+                    score += 1; reasons.append(f"{red}R")
+
+        # 7. Price velocity — last 5 closes moving in signal direction
+        if len(snap.candles_1min) >= 5:
+            closes = [c.close for c in snap.candles_1min[-5:]]
+            if (is_buy and closes[-1] > closes[0]) or (not is_buy and closes[-1] < closes[0]):
+                score += 1; reasons.append("VEL✓")
+
+        # 8. EMA21 macro-trend alignment (trade with the bigger trend)
+        if ind.ema21 and ind.ema21 > 0:
+            if (is_buy and ltp > ind.ema21) or (not is_buy and ltp < ind.ema21):
+                score += 1; reasons.append("EMA21✓")
+
+        return score, reasons
+
+    # ── Level proximity guard ─────────────────────────────────────────────────
+
+    def _level_ok(self, sym: str, ltp: float, side: str) -> bool:
+        try:
+            from levels_engine import get_levels
+            lvls = get_levels(sym)
+            if not lvls:
+                return True
+            threshold = ltp * 0.0015   # block if within 0.15% of opposing level
+            resistance_keys = ("r1", "r2", "pdh", "weekly_high", "vwap_upper_1")
+            support_keys    = ("s1", "s2", "pdl", "weekly_low",  "vwap_lower_1")
+            if side == "BUY":
+                for k in resistance_keys:
+                    v = lvls.get(k)
+                    if v and 0 < v - ltp < threshold:
+                        return False   # buying into resistance wall
+            else:
+                for k in support_keys:
+                    v = lvls.get(k)
+                    if v and 0 < ltp - v < threshold:
+                        return False   # selling into support wall
+        except Exception:
+            pass
+        return True
+
+    # ── Loss-streak tracking ──────────────────────────────────────────────────
+
+    def _record_outcome(self, sym: str, won: bool) -> None:
+        if won:
+            self._loss_streak[sym] = 0
+        else:
+            streak = self._loss_streak.get(sym, 0) + 1
+            self._loss_streak[sym] = streak
+            if streak >= 3:
+                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=20)
+                from loguru import logger
+                logger.warning("[scalping] {} 3-loss streak — 20-min cooldown", sym)
+            elif streak >= 2:
+                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=5)
+
+    # ── Exit ──────────────────────────────────────────────────────────────────
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)
         ltp   = ind.ltp
+        sym   = pos.get("tradingsymbol", "")
         side  = "BUY" if pos.get("quantity", 0) > 0 else "SELL"
-        if not entry:
+        if not entry or not ltp:
             return False, ""
 
-        if side == "BUY":
-            sl  = entry * (1 - self.SL_PCT  / 100)
-            tgt = entry * (1 + self.TGT_PCT / 100)
-            if ltp <= sl:   return True, f"Scalp SL ₹{ltp:.2f}"
-            if ltp >= tgt:  return True, f"Scalp target ₹{ltp:.2f}"
-            if ind.momentum in ("STRONG_DOWN", "WEAK_DOWN"):
-                            return True, "Momentum reversal exit"
-        else:
-            sl  = entry * (1 + self.SL_PCT  / 100)
-            tgt = entry * (1 - self.TGT_PCT / 100)
-            if ltp >= sl:   return True, f"Scalp SL ₹{ltp:.2f}"
-            if ltp <= tgt:  return True, f"Scalp target ₹{ltp:.2f}"
-            if ind.momentum in ("STRONG_UP", "WEAK_UP"):
-                            return True, "Momentum reversal exit"
+        atr      = ind.atr_14 or 0.0
+        sl_dist  = max(atr * self.SL_ATR,  entry * self.SL_PCT  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, entry * self.TGT_PCT / 100)
 
-        now = datetime.now().time()
-        if now.hour >= 15:  return True, "Auto square-off 3:00 PM"
+        if side == "BUY":
+            sl, tgt = entry - sl_dist, entry + tgt_dist
+            if ltp <= sl:
+                self._record_outcome(sym, False)
+                return True, f"Scalp SL ₹{ltp:.2f}"
+            if ltp >= tgt:
+                self._record_outcome(sym, True)
+                return True, f"Scalp target ₹{ltp:.2f}"
+            # Early exit: strong reversal confirmed by MACD flip
+            if ind.momentum == "STRONG_DOWN" and ind.macd_hist < 0:
+                self._record_outcome(sym, ltp > entry)
+                return True, "Strong momentum reversal"
+            # VWAP breakdown — losing VWAP support on a long is a bad sign
+            if ind.vwap and ltp < ind.vwap * 0.9985:
+                self._record_outcome(sym, ltp > entry)
+                return True, "VWAP breakdown exit"
+        else:
+            sl, tgt = entry + sl_dist, entry - tgt_dist
+            if ltp >= sl:
+                self._record_outcome(sym, False)
+                return True, f"Scalp SL ₹{ltp:.2f}"
+            if ltp <= tgt:
+                self._record_outcome(sym, True)
+                return True, f"Scalp target ₹{ltp:.2f}"
+            if ind.momentum == "STRONG_UP" and ind.macd_hist > 0:
+                self._record_outcome(sym, ltp < entry)
+                return True, "Strong momentum reversal"
+            if ind.vwap and ltp > ind.vwap * 1.0015:
+                self._record_outcome(sym, ltp < entry)
+                return True, "VWAP breakout exit"
+
+        # Hard auto-exit well before close (leave 15 min for TSL to close)
+        if datetime.now().time() >= time(14, 55):
+            return True, "Auto square-off 2:55 PM"
+
         return False, ""
 
 

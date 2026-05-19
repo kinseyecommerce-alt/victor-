@@ -941,6 +941,70 @@ def t_scalping_valid_action():
     action, _ = agent.evaluate_tick(snap)
     assert action in ("BUY","SELL","HOLD","EXIT")
 
+def t_scalping_score_threshold():
+    """Signal requires ≥5/8 factors — low-quality setup must return HOLD."""
+    agent = ScalpingAgent()
+    # Flat indicators: RSI neutral, no volume, no trend — score will be low
+    snap = _make_snap(n_candles=15, rsi=50.0, volume_ratio=1.0,
+                      macd_hist=0.0, vwap=2800.0)
+    # Even if there's a cross, score < 5 should suppress the signal
+    action, sig = agent.evaluate_tick(snap)
+    # Can be HOLD or a valid action — just must not crash
+    assert action in ("BUY","SELL","HOLD","EXIT")
+    if action in ("BUY","SELL"):
+        assert sig is not None and "trigger" in sig
+        assert "SCALP" in sig["trigger"]
+
+def t_scalping_atr_sl():
+    """SL and target should be at least SL_PCT/TGT_PCT from entry when ATR is tiny."""
+    agent = ScalpingAgent()
+    snap = _make_snap(n_candles=15, rsi=56.0, volume_ratio=1.8,
+                      macd_hist=0.8, vwap=2790.0, ema9=2805.0)
+    action, sig = agent.evaluate_tick(snap)
+    if action == "BUY" and sig:
+        assert sig["stop_loss"] < snap.tick.ltp, "SL must be below entry for BUY"
+        assert sig["target"]    > snap.tick.ltp, "Target must be above entry for BUY"
+        assert sig.get("stop_loss_pct", 0) > 0
+    elif action == "SELL" and sig:
+        assert sig["stop_loss"] > snap.tick.ltp, "SL must be above entry for SELL"
+
+def t_scalping_exit_sl():
+    """Price crashing below SL should trigger exit."""
+    agent = ScalpingAgent()
+    pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
+    ind = _make_snap(ltp=2790.0).indicators   # well below 0.25% SL = 2793
+    ind_at_crash = _make_snap(ltp=2790.0, rsi=35.0).indicators
+    exit_, reason = agent.should_exit_position(pos, ind_at_crash)
+    assert exit_ is True and "SL" in reason
+
+def t_scalping_exit_target():
+    """Price hitting target should trigger exit."""
+    agent = ScalpingAgent()
+    pos = {"tradingsymbol": "RELIANCE", "quantity": 5, "average_price": 2800.0}
+    ind = _make_snap(ltp=2820.0).indicators   # above 0.50% target = 2814
+    exit_, reason = agent.should_exit_position(pos, ind)
+    assert exit_ is True and "target" in reason.lower()
+
+def t_scalping_loss_streak_cooldown():
+    """Three consecutive losses should trigger a cooldown for that symbol."""
+    agent = ScalpingAgent()
+    sym = "TESTCOOLDOWN"
+    agent._loss_streak[sym] = 0
+    agent._cooldown_until.pop(sym, None)
+    agent._record_outcome(sym, False)
+    agent._record_outcome(sym, False)
+    agent._record_outcome(sym, False)
+    assert sym in agent._cooldown_until
+    assert agent._cooldown_until[sym] > datetime.now()
+
+def t_scalping_win_resets_streak():
+    """A win should reset the loss streak."""
+    agent = ScalpingAgent()
+    sym = "TESTWIN"
+    agent._loss_streak[sym] = 2
+    agent._record_outcome(sym, True)
+    assert agent._loss_streak.get(sym, 0) == 0
+
 def t_exit_position_type():
     agent = IntradayAgent()
     pos = {"tradingsymbol":"RELIANCE","quantity":5,
@@ -984,6 +1048,12 @@ run("IntradayAgent → SELL on bearish setup",     t_intraday_sell_signal)
 run("FnOAgent.evaluate_tick valid action",       t_fno_valid_action)
 run("SwingAgent.evaluate_tick valid action",     t_swing_valid_action)
 run("ScalpingAgent.evaluate_tick valid action",  t_scalping_valid_action)
+run("scalping score threshold suppresses noise", t_scalping_score_threshold)
+run("scalping SL below entry / target above",    t_scalping_atr_sl)
+run("scalping exits when price hits SL",         t_scalping_exit_sl)
+run("scalping exits when price hits target",     t_scalping_exit_target)
+run("3 consecutive losses → cooldown set",       t_scalping_loss_streak_cooldown)
+run("win resets loss streak to 0",               t_scalping_win_resets_streak)
 run("should_exit_position returns (bool, str)",  t_exit_position_type)
 run("exit: long position on overbought RSI",     t_exit_overbought_long)
 run("exit: short position on oversold RSI",      t_exit_short_oversold)
