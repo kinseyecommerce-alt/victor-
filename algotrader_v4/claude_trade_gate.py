@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -20,6 +21,9 @@ import anthropic
 from loguru import logger
 
 from config import settings
+
+# ── Gate decision log (ring buffer, read by /gate/log endpoint) ───────────────
+_gate_log: deque[dict] = deque(maxlen=100)
 
 
 _SYSTEM_PROMPT = """You are an elite NSE/BSE quantitative trader with decades of experience.
@@ -209,10 +213,27 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
 
 
 def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -> None:
-    verdict = "✅ ENTER" if d.enter else "🚫 SKIP"
+    verdict = "ENTER" if d.enter else "SKIP"
     warn = f" ⚠ {d.warnings[0]}" if d.warnings else ""
     logger.info(
-        "[gate] {} {} {} | conf={} size={} {}{}  {}",
-        verdict, action, symbol, d.confidence, d.size_factor, d.reason, warn,
-        f"({d.latency_ms}ms)",
+        "[gate] {} {} {} {} | conf={} size={} {}{}  ({}ms)",
+        "✅" if d.enter else "🚫", verdict, action, symbol,
+        d.confidence, d.size_factor, d.reason, warn, d.latency_ms,
     )
+    _gate_log.appendleft({
+        "time":        datetime.now().strftime("%H:%M:%S"),
+        "symbol":      symbol,
+        "strategy":    strategy,
+        "signal":      action,
+        "confidence":  d.confidence,
+        "decision":    verdict,
+        "size_factor": d.size_factor,
+        "reason":      d.reason,
+        "warnings":    d.warnings,
+        "latency_ms":  d.latency_ms,
+    })
+
+
+def get_gate_log(n: int = 50) -> list[dict]:
+    """Return last n gate decisions (newest first)."""
+    return list(_gate_log)[:n]

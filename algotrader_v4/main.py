@@ -9,6 +9,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
@@ -244,12 +245,31 @@ class KillSwitchResetRequest(BaseModel):
     secret: str
 
 
-# ── Login page ───────────────────────────────────────────────────────────────
+# ── UI pages ─────────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
 def login_page():
     """Serve the browser login UI (app + Kite OAuth)."""
     with open("static/login.html", "r") as f:
         return HTMLResponse(f.read())
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard_page():
+    """Serve the main trading dashboard."""
+    p = Path("static/dashboard.html")
+    if not p.exists():
+        return HTMLResponse("<h2>Dashboard not found — run deploy to build static assets.</h2>", status_code=404)
+    return HTMLResponse(p.read_text())
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/dashboard")
+
+@app.get("/gate/log", tags=["Intelligence"])
+def gate_log(n: int = 50):
+    """Last N Claude trade gate decisions (newest first)."""
+    from claude_trade_gate import get_gate_log
+    return {"decisions": get_gate_log(n), "total": n}
 
 
 # ── App auth (JWT) ────────────────────────────────────────────────────────────
