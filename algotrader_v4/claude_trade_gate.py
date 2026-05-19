@@ -100,6 +100,53 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
     now_ist = datetime.now().strftime("%H:%M")
     minutes_open = _minutes_since_open()
 
+    # ── Intelligence modules (sync cache reads — never block) ─────────────────
+    try:
+        from levels_engine import level_context as _level_ctx
+        level_ctx = _level_ctx(snap.symbol, snap.tick.ltp)
+    except Exception:
+        level_ctx = ""
+
+    try:
+        from event_calendar import get_event_risk
+        _evt = get_event_risk(snap.symbol)
+        event_risk = {
+            "risk_level":  _evt.get("risk_level", "NONE"),
+            "event_type":  _evt.get("event_type", ""),
+            "hours_until": _evt.get("hours_until"),
+            "size_factor": _evt.get("size_factor", 1.0),
+            "description": _evt.get("description", ""),
+        }
+    except Exception:
+        event_risk = {"risk_level": "NONE", "size_factor": 1.0, "description": ""}
+
+    try:
+        from options_intelligence import get_cached as _opts_cached
+        _opts = _opts_cached(snap.symbol)
+        options_iv = {
+            "atm_iv":        _opts.get("atm_iv"),
+            "pcr":           _opts.get("pcr"),
+            "max_pain":      _opts.get("max_pain"),
+            "iv_rank":       _opts.get("iv_rank"),
+            "iv_percentile": _opts.get("iv_percentile"),
+            "oi_buildup":    _opts.get("oi_buildup", [])[:2],
+        } if _opts else {}
+    except Exception:
+        options_iv = {}
+
+    try:
+        from institutional_flow import get_cached_score as _inst_cached
+        _inst = _inst_cached(snap.symbol)
+        institutional = {
+            "score":                round(_inst.get("institutional_score", 50.0), 1),
+            "delivery_pct":         _inst.get("delivery_pct"),
+            "has_block_deal":       _inst.get("has_block_deal", False),
+            "block_deal_direction": _inst.get("block_deal_direction"),
+            "is_default":           _inst.get("is_default", True),
+        }
+    except Exception:
+        institutional = {}
+
     return {
         "symbol":   snap.symbol,
         "strategy": strategy,
@@ -144,10 +191,14 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
             "kelly_fraction": kelly_frac,
         },
         "time_context": {
-            "time_ist":           now_ist,
-            "minutes_since_open": minutes_open,
+            "time_ist":             now_ist,
+            "minutes_since_open":   minutes_open,
             "minutes_to_squareoff": max(0, _minutes_to_squareoff()),
         },
+        "key_levels":    level_ctx,
+        "event_risk":    event_risk,
+        "options_iv":    options_iv,
+        "institutional": institutional,
     }
 
 

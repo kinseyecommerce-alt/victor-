@@ -353,6 +353,11 @@ async def refresh_daily(symbols: Optional[list[str]] = None) -> None:
     )
 
 
+def get_cached_score(symbol: str) -> dict:
+    """Synchronous accessor — returns cached entry or neutral default. Never raises."""
+    return _cache.get(symbol.upper(), _default_entry(symbol))
+
+
 async def get_institutional_score(symbol: str) -> dict:
     """
     Return the institutional score dict for `symbol`.

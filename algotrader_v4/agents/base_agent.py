@@ -163,6 +163,14 @@ class BaseAgent(ABC):
                                          self.name, snap.symbol, mtf.score)
                             continue
 
+                    # ── Event calendar hard block (CRITICAL = <1h to results/RBI) ──
+                    from event_calendar import get_event_risk
+                    _evt = get_event_risk(snap.symbol)
+                    if _evt["size_factor"] == 0.0:
+                        logger.debug("[{}] {} event BLOCK: {}",
+                                     self.name, snap.symbol, _evt["description"])
+                        continue
+
                     # ── Claude per-trade intelligence gate ────────────────
                     if settings.use_claude_trade_gate:
                         from claude_trade_gate import assess as gate_assess
@@ -178,6 +186,25 @@ class BaseAgent(ABC):
                             signal["target_pct"]     = gate.adjusted_target_pct
                         signal["_gate_size_factor"]  = gate.size_factor
                         signal["_gate_confidence"]   = gate.confidence
+
+                    # ── Compound size factors: event elevation + correlation ──
+                    _sf = signal.get("_gate_size_factor", 1.0)
+                    if _evt["size_factor"] < 1.0:
+                        _sf = round(_sf * _evt["size_factor"], 3)
+
+                    from correlation_guard import check as _corr_check
+                    _open_syms = [
+                        p["tradingsymbol"] for p in kite_client.positions().get("net", [])
+                        if p.get("quantity", 0) != 0
+                    ]
+                    _corr = _corr_check(snap.symbol, _open_syms)
+                    if not _corr["allowed"]:
+                        logger.debug("[{}] {} corr BLOCK: {}",
+                                     self.name, snap.symbol, _corr["reason"])
+                        continue
+                    if _corr["size_factor"] < 1.0:
+                        _sf = round(_sf * _corr["size_factor"], 3)
+                    signal["_gate_size_factor"] = _sf
 
                     await self._try_enter(snap, action, signal)
             except Exception as exc:
@@ -287,6 +314,19 @@ class BaseAgent(ABC):
                 f"{'🔴' if pnl<0 else '🟢'} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
                 f"Reason: {reason} | P&L: ₹{pnl:.0f}"
             )
+            try:
+                from trade_memory import record_trade as _record_trade
+                from market_regime import regime_detector
+                asyncio.create_task(_record_trade(
+                    {"symbol": sym, "strategy": self.name, "side": side,
+                     "pnl": pnl, "exit_reason": reason},
+                    market_context={
+                        "regime": regime_detector.current_regime.value
+                        if regime_detector.current_regime else "unknown",
+                    },
+                ))
+            except Exception:
+                pass
             break
 
     # ── Utils ─────────────────────────────────────────────────────────
