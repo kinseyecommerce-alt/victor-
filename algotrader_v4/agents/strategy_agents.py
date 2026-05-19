@@ -244,32 +244,358 @@ class SwingAgent(BaseAgent):
 
 class ScalpingAgent(BaseAgent):
     """
-    High-frequency intraday scalper.
+    Maximum-opportunity scalper — 5 entry patterns, 3-tier confidence sizing.
 
-    Entry: EMA9 micro-cross confirmed by 8-factor score (≥5 required).
-    SL/Target: ATR-based (0.6×ATR / 1.2×ATR) for dynamic risk sizing.
-    Filters: time-of-day, level proximity, volatility regime, loss-streak cooldown.
+    Patterns detected every tick:
+      1. EMA9_CROSS    — LTP micro-cross over/under EMA9
+      2. EMA921_CROSS  — EMA9 crosses EMA21 (stronger, less frequent)
+      3. VWAP_BOUNCE   — price touches VWAP then reverses with volume
+      4. SURGE         — explosive candle ≥0.3% body + 2× volume
+      5. ORB           — opening-range breakout (09:30-09:45 execution window)
+
+    Score 8 confirmation factors → adaptive size:
+      3-4/8 = 0.5×  |  5-6/8 = 0.75×  |  7-8/8 = 1.0×
+    Claude gate further refines; can still veto entirely.
+
+    Hard guards (cannot be overridden):
+      spread, dead-market, level wall, loss-streak cooldown, 90s deduplication.
     """
     name    = "scalping"
     product = "MIS"
-    min_candles_1min = 15
+    min_candles_1min = 10
 
-    # ATR multipliers — 1:2 R:R
-    SL_ATR   = 0.6
-    TGT_ATR  = 1.2
+    SL_ATR  = 0.6
+    TGT_ATR = 1.2
+    SL_PCT  = 0.25
+    TGT_PCT = 0.50
 
-    # Fixed fallbacks when ATR is unavailable
-    SL_PCT   = 0.25
-    TGT_PCT  = 0.50
+    MIN_SCORE = 3     # minimum to fire; Claude gate handles further filtering
 
-    # Minimum score (out of 8 factors) required to enter
-    MIN_SCORE = 5
+    # Per-symbol rolling state
+    _prev_ema9:       dict[str, float]    = {}
+    _prev_ema21:      dict[str, float]    = {}
+    _prev_ltp:        dict[str, float]    = {}
+    _prev_near_vwap:  dict[str, bool]     = {}
+    _orb_high:        dict[str, float]    = {}
+    _orb_low:         dict[str, float]    = {}
+    _last_candle_ts:  dict[str, object]   = {}   # last candle that triggered SURGE
+    _last_signal_ts:  dict[str, datetime] = {}   # deduplication timestamp
+    _last_signal_dir: dict[str, str]      = {}   # deduplication direction
+    _loss_streak:     dict[str, int]      = {}
+    _cooldown_until:  dict[str, datetime] = {}
 
-    # Per-symbol rolling state (class-level — shared across instances)
-    _prev_ema9:      dict[str, float]    = {}
-    _prev_ltp:       dict[str, float]    = {}
-    _loss_streak:    dict[str, int]      = {}
-    _cooldown_until: dict[str, datetime] = {}
+    # ── Entry ─────────────────────────────────────────────────────────────────
+
+    def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
+        sym = snap.symbol
+        ind = snap.indicators
+        ltp = snap.tick.ltp
+        now = datetime.now()
+        t   = now.time()
+
+        if not ind.ema9:
+            return "HOLD", None
+
+        # ── Hard guard 1: loss-streak cooldown ──────────────────────────────
+        cd = self._cooldown_until.get(sym)
+        if cd and now < cd:
+            return "HOLD", None
+
+        # ── Hard guard 2: spread (0.05% — slightly wider than before) ───────
+        spread = snap.tick.ask - snap.tick.bid
+        if spread > ltp * 0.0005:
+            return "HOLD", None
+
+        # ── Hard guard 3: dead market (ATR/price < 0.02%) ───────────────────
+        atr = ind.atr_14 or 0.0
+        if ltp > 0 and atr / ltp < 0.0002:
+            return "HOLD", None
+
+        # ── Hard guard 4: no trading last 10 min before squareoff ───────────
+        if t >= time(14, 50):
+            return "HOLD", None
+
+        # ── Update rolling state ─────────────────────────────────────────────
+        prev_ema9  = self._prev_ema9.get(sym, ind.ema9)
+        prev_ema21 = self._prev_ema21.get(sym, ind.ema21 or ind.ema9)
+        prev_ltp   = self._prev_ltp.get(sym, ltp)
+        self._prev_ema9[sym]  = ind.ema9
+        self._prev_ema21[sym] = ind.ema21 or ind.ema9
+        self._prev_ltp[sym]   = ltp
+
+        # ── Build / update opening-range high/low ────────────────────────────
+        self._update_orb(sym, snap, t)
+
+        # ── Pattern detection (first match wins — ordered by priority) ───────
+        action, pattern = self._detect_pattern(
+            sym, snap, ind, ltp, t, now,
+            prev_ema9, prev_ema21, prev_ltp,
+        )
+        if action == "HOLD":
+            return "HOLD", None
+
+        # ── Signal deduplication: same symbol+direction within 90s → skip ───
+        last_ts  = self._last_signal_ts.get(sym)
+        last_dir = self._last_signal_dir.get(sym)
+        if last_ts and last_dir == action and (now - last_ts).total_seconds() < 90:
+            return "HOLD", None
+
+        # ── Scoring for confidence/size ──────────────────────────────────────
+        score, reasons = self._score_setup(snap, ind, ltp, action)
+        if score < self.MIN_SCORE:
+            return "HOLD", None
+
+        # ── Level proximity guard ─────────────────────────────────────────────
+        if not self._level_ok(sym, ltp, action):
+            return "HOLD", None
+
+        # ── Adaptive size from score ──────────────────────────────────────────
+        sf = 0.5 if score <= 4 else (0.75 if score <= 6 else 1.0)
+
+        # ── ATR-based SL & target ────────────────────────────────────────────
+        sl_dist  = max(atr * self.SL_ATR,  ltp * self.SL_PCT  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * self.TGT_PCT / 100)
+
+        # ── Record signal timestamp for dedup ────────────────────────────────
+        self._last_signal_ts[sym]  = now
+        self._last_signal_dir[sym] = action
+
+        if action == "BUY":
+            sl  = round(ltp - sl_dist, 2)
+            tgt = round(ltp + tgt_dist, 2)
+        else:
+            sl  = round(ltp + sl_dist, 2)
+            tgt = round(ltp - tgt_dist, 2)
+
+        return action, {
+            "symbol":            sym,
+            "exchange":          "NSE",
+            "side":              action,
+            "price":             ltp,
+            "stop_loss":         sl,
+            "target":            tgt,
+            "stop_loss_pct":     round(sl_dist  / ltp * 100, 3),
+            "target_pct":        round(tgt_dist / ltp * 100, 3),
+            "product":           self.product,
+            "_gate_size_factor": sf,
+            "trigger": f"{pattern} score={score}/8 sf={sf} {' '.join(reasons[:4])}",
+        }
+
+    # ── Pattern detection ─────────────────────────────────────────────────────
+
+    def _detect_pattern(
+        self,
+        sym: str, snap: MarketSnapshot, ind: LiveIndicators,
+        ltp: float, t: time, now: datetime,
+        prev_ema9: float, prev_ema21: float, prev_ltp: float,
+    ) -> tuple[str, str]:
+        """Return (action, pattern_name) or ('HOLD', '')."""
+
+        # Pattern 1: EMA9 micro-cross (fastest, tick-resolution)
+        if prev_ltp < prev_ema9 and ltp > ind.ema9:
+            return "BUY",  "EMA9X"
+        if prev_ltp > prev_ema9 and ltp < ind.ema9:
+            return "SELL", "EMA9X"
+
+        # Pattern 2: EMA9/EMA21 cross (higher conviction)
+        if ind.ema21 and ind.ema21 > 0:
+            prev_diff = prev_ema9 - prev_ema21
+            curr_diff = ind.ema9  - ind.ema21
+            if prev_diff <= 0 < curr_diff:
+                return "BUY",  "EMA921X"
+            if prev_diff >= 0 > curr_diff:
+                return "SELL", "EMA921X"
+
+        # Pattern 3: VWAP bounce (price touches VWAP band then reverses)
+        if ind.vwap and ind.vwap > 0:
+            was_near = self._prev_near_vwap.get(sym, False)
+            near_now = abs(ltp - ind.vwap) / ind.vwap < 0.0008
+            self._prev_near_vwap[sym] = near_now
+            if was_near and not near_now and ind.volume_ratio >= 1.3:
+                if ltp > ind.vwap:
+                    return "BUY",  "VWAP_BOUNCE"
+                return "SELL", "VWAP_BOUNCE"
+
+        # Pattern 4: Momentum surge (explosive candle ≥0.3% body + 2× volume)
+        if len(snap.candles_1min) >= 2:
+            last_c = snap.candles_1min[-1]
+            c_ts   = getattr(last_c, "ts", None)
+            if c_ts and c_ts != self._last_candle_ts.get(sym):
+                body_pct = (
+                    abs(last_c.close - last_c.open) / last_c.open
+                    if last_c.open > 0 else 0.0
+                )
+                if body_pct > 0.003 and ind.volume_ratio > 2.0:
+                    self._last_candle_ts[sym] = c_ts
+                    if last_c.close > last_c.open:
+                        return "BUY",  "SURGE"
+                    return "SELL", "SURGE"
+
+        # Pattern 5: Opening range breakout (execute 09:30-09:45)
+        if time(9, 30) <= t <= time(9, 45):
+            orb_h = self._orb_high.get(sym)
+            orb_l = self._orb_low.get(sym)
+            if orb_h and orb_l and orb_h > orb_l:
+                breakout_up   = ltp > orb_h * 1.001 and prev_ltp <= orb_h * 1.001
+                breakout_down = ltp < orb_l * 0.999 and prev_ltp >= orb_l * 0.999
+                if breakout_up:
+                    return "BUY",  "ORB"
+                if breakout_down:
+                    return "SELL", "ORB"
+
+        return "HOLD", ""
+
+    # ── ORB builder ───────────────────────────────────────────────────────────
+
+    def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
+        """Track the 09:15-09:30 opening range high and low from 1-min candles."""
+        if not (time(9, 15) <= t <= time(9, 30)):
+            return
+        orb_candles = [
+            c for c in snap.candles_1min
+            if hasattr(c, "ts") and time(9, 15) <= c.ts.time() <= time(9, 30)
+        ]
+        if orb_candles:
+            self._orb_high[sym] = max(c.high for c in orb_candles)
+            self._orb_low[sym]  = min(c.low  for c in orb_candles)
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
+
+    def _score_setup(
+        self, snap: MarketSnapshot, ind: LiveIndicators, ltp: float, action: str
+    ) -> tuple[int, list[str]]:
+        score = 0
+        reasons: list[str] = []
+        is_buy = action == "BUY"
+
+        # 1. VWAP alignment
+        if ind.vwap and ind.vwap > 0:
+            if (is_buy and ltp > ind.vwap) or (not is_buy and ltp < ind.vwap):
+                score += 1; reasons.append("VWAP✓")
+
+        # 2. RSI-7 in tradeable zone (widened: 44-76 / 24-56)
+        rsi = ind.rsi_7
+        if is_buy and 44 < rsi < 76:
+            score += 1; reasons.append(f"RSI{rsi:.0f}")
+        elif not is_buy and 24 < rsi < 56:
+            score += 1; reasons.append(f"RSI{rsi:.0f}")
+
+        # 3. Volume confirmation (≥1.2× for partial, ≥1.5× for full)
+        if ind.volume_ratio >= 1.5:
+            score += 1; reasons.append(f"VOL{ind.volume_ratio:.1f}x")
+        elif ind.volume_ratio >= 1.2:
+            score += 1
+
+        # 4. ADX ≥20 (some trend present)
+        if ind.adx_14 >= 20:
+            score += 1; reasons.append(f"ADX{ind.adx_14:.0f}")
+
+        # 5. MACD histogram direction
+        if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
+            score += 1; reasons.append("MACD✓")
+
+        # 6. Candle microstructure (≥2 of last 3 confirm direction)
+        if len(snap.candles_1min) >= 3:
+            last3 = snap.candles_1min[-3:]
+            if is_buy:
+                g = sum(1 for c in last3 if c.close >= c.open)
+                if g >= 2: score += 1; reasons.append(f"{g}G")
+            else:
+                r = sum(1 for c in last3 if c.close <= c.open)
+                if r >= 2: score += 1; reasons.append(f"{r}R")
+
+        # 7. Price velocity (last 5 closes trending)
+        if len(snap.candles_1min) >= 5:
+            closes = [c.close for c in snap.candles_1min[-5:]]
+            if (is_buy and closes[-1] > closes[0]) or (not is_buy and closes[-1] < closes[0]):
+                score += 1; reasons.append("VEL✓")
+
+        # 8. EMA21 macro-trend alignment
+        if ind.ema21 and ind.ema21 > 0:
+            if (is_buy and ltp > ind.ema21) or (not is_buy and ltp < ind.ema21):
+                score += 1; reasons.append("EMA21✓")
+
+        return score, reasons
+
+    # ── Level proximity guard ─────────────────────────────────────────────────
+
+    def _level_ok(self, sym: str, ltp: float, side: str) -> bool:
+        try:
+            from levels_engine import get_levels
+            lvls = get_levels(sym)
+            if not lvls:
+                return True
+            threshold = ltp * 0.0015
+            keys_r = ("r1", "r2", "pdh", "weekly_high", "vwap_upper_1")
+            keys_s = ("s1", "s2", "pdl", "weekly_low",  "vwap_lower_1")
+            if side == "BUY":
+                for k in keys_r:
+                    v = lvls.get(k)
+                    if v and 0 < v - ltp < threshold:
+                        return False
+            else:
+                for k in keys_s:
+                    v = lvls.get(k)
+                    if v and 0 < ltp - v < threshold:
+                        return False
+        except Exception:
+            pass
+        return True
+
+    # ── Loss-streak tracking ──────────────────────────────────────────────────
+
+    def _record_outcome(self, sym: str, won: bool) -> None:
+        if won:
+            self._loss_streak[sym] = 0
+        else:
+            streak = self._loss_streak.get(sym, 0) + 1
+            self._loss_streak[sym] = streak
+            if streak >= 3:
+                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=20)
+                from loguru import logger
+                logger.warning("[scalping] {} 3-loss streak — 20-min cooldown", sym)
+            elif streak >= 2:
+                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=5)
+
+    # ── Exit ──────────────────────────────────────────────────────────────────
+
+    def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
+        entry = pos.get("average_price", ind.ltp)
+        ltp   = ind.ltp
+        sym   = pos.get("tradingsymbol", "")
+        side  = "BUY" if pos.get("quantity", 0) > 0 else "SELL"
+        if not entry or not ltp:
+            return False, ""
+
+        atr      = ind.atr_14 or 0.0
+        sl_dist  = max(atr * self.SL_ATR,  entry * self.SL_PCT  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, entry * self.TGT_PCT / 100)
+
+        if side == "BUY":
+            sl, tgt = entry - sl_dist, entry + tgt_dist
+            if ltp <= sl:
+                self._record_outcome(sym, False); return True, f"Scalp SL ₹{ltp:.2f}"
+            if ltp >= tgt:
+                self._record_outcome(sym, True);  return True, f"Scalp target ₹{ltp:.2f}"
+            if ind.momentum == "STRONG_DOWN" and ind.macd_hist < 0:
+                self._record_outcome(sym, ltp > entry); return True, "Strong reversal"
+            if ind.vwap and ltp < ind.vwap * 0.9985:
+                self._record_outcome(sym, ltp > entry); return True, "VWAP breakdown"
+        else:
+            sl, tgt = entry + sl_dist, entry - tgt_dist
+            if ltp >= sl:
+                self._record_outcome(sym, False); return True, f"Scalp SL ₹{ltp:.2f}"
+            if ltp <= tgt:
+                self._record_outcome(sym, True);  return True, f"Scalp target ₹{ltp:.2f}"
+            if ind.momentum == "STRONG_UP" and ind.macd_hist > 0:
+                self._record_outcome(sym, ltp < entry); return True, "Strong reversal"
+            if ind.vwap and ltp > ind.vwap * 1.0015:
+                self._record_outcome(sym, ltp < entry); return True, "VWAP breakout"
+
+        if datetime.now().time() >= time(14, 55):
+            return True, "Auto square-off 2:55 PM"
+
+        return False, ""
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
