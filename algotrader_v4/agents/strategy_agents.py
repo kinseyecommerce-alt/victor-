@@ -101,72 +101,348 @@ class IntradayAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class FnOAgent(BaseAgent):
+    """
+    World-class NSE/NFO options agent.
+
+    Intelligence stack (10-factor entry score):
+      1. IV rank       — cheap vol = buy, expensive = avoid
+      2. Trend strength — EMA9/21/50 alignment
+      3. RSI zone       — directionally correct momentum
+      4. VWAP side      — institutional reference point
+      5. IV skew        — put/call skew confirms direction
+      6. Options flow   — smart money call/put ratio
+      7. GEX regime     — avoid short-gamma / pin-risk zones
+      8. Momentum label — STRONG_UP / STRONG_DOWN from tick engine
+      9. Volume surge   — confirms participation
+     10. MACD histogram — momentum direction confirmation
+
+    Strike selection: delta ~0.40 proxy via BS approximation.
+    SL/TGT adapted to IV rank (cheap vol → wider range, expensive → tight).
+    Signal dedup: 5-minute cooldown per symbol+direction.
+    """
     name    = "fno"
     product = "NRML"
-    min_candles_1min = 26
-    IV_THRESHOLD = 40
+    min_candles_1min = 15
+
+    LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
+                       "FINNIFTY": 40, "SENSEX": 10}
+    MIN_SCORE      = 5       # out of 10
+    MAX_IV_BUY     = 72      # above this IV rank, avoid buying premium
+    SIGNAL_COOL_S  = 300     # 5-min dedup per symbol+direction
+
+    _last_ts:  dict = {}
+    _last_dir: dict = {}
+
+    # ── Entry evaluation ──────────────────────────────────────────────────────
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
+        sym = snap.symbol
         ltp = snap.tick.ltp
+        now = datetime.now()
 
-        # IV proxy: ATR relative to recent average (computed in indicators)
-        # We use BB width as IV proxy here (available in LiveIndicators)
-        bb_width = 0.0
-        if ind.bb_upper and ind.bb_lower and ind.bb_mid:
-            bb_width = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
-
-        low_iv   = bb_width < 2.0             # IV relatively low → buy premium
-        rsi_ext  = ind.rsi_14 < 38 or ind.rsi_14 > 62
-
-        if not (low_iv and rsi_ext):
+        # Exit-only window: last 20 min before squareoff
+        if time(14, 50) <= now.time():
             return "HOLD", None
 
-        # Buy Call (bullish)
-        if ind.rsi_14 > 62 and ind.trend == "UP" and ltp > ind.bb_upper:
-            tgt = round(ltp * 1.5, 2)   # 50% gain on premium
-            sl  = round(ltp * 0.65, 2)  # 35% loss limit
-            return "BUY", {
-                "symbol":      snap.symbol,
-                "exchange":    "NFO",
-                "side":        "BUY",
-                "option_type": "CE",
-                "price":       ltp,
-                "stop_loss":   sl,
-                "target":      tgt,
-                "product":     self.product,
-                "trigger":     f"BB-BREAKOUT-CALL rsi={ind.rsi_14:.0f}",
-            }
+        # Pull cached options intelligence (sync — zero latency)
+        from options_intelligence import get_cached
+        import iv_surface, gamma_scalp, options_flow
 
-        # Buy Put (bearish)
-        if ind.rsi_14 < 38 and ind.trend == "DOWN" and ltp < ind.bb_lower:
-            tgt = round(ltp * 1.5, 2)
-            sl  = round(ltp * 0.65, 2)
-            return "BUY", {
-                "symbol":      snap.symbol,
-                "exchange":    "NFO",
-                "side":        "BUY",
-                "option_type": "PE",
-                "price":       ltp,
-                "stop_loss":   sl,
-                "target":      tgt,
-                "product":     self.product,
-                "trigger":     f"BB-BREAKDOWN-PUT rsi={ind.rsi_14:.0f}",
-            }
+        opts   = get_cached(sym)
+        surf   = iv_surface.get_surface(sym)
+        gex    = gamma_scalp.get_cached_gex(sym)
+        flow   = options_flow.get_cached_flow(sym)
 
-        return "HOLD", None
+        iv_rank = float(opts.get("iv_rank",    50.0)) if opts else 50.0
+        atm_iv  = float(opts.get("atm_iv",     25.0)) if opts else 25.0
+
+        # Hard gate: never buy expensive premium
+        if iv_rank > self.MAX_IV_BUY:
+            return "HOLD", None
+
+        ce_sc = self._score("CE", ind, ltp, iv_rank, surf, gex, flow)
+        pe_sc = self._score("PE", ind, ltp, iv_rank, surf, gex, flow)
+
+        if ce_sc < self.MIN_SCORE and pe_sc < self.MIN_SCORE:
+            return "HOLD", None
+
+        opt_type = "CE" if ce_sc >= pe_sc else "PE"
+        score    = max(ce_sc, pe_sc)
+
+        # Signal dedup
+        last_ts  = self._last_ts.get(sym)
+        last_dir = self._last_dir.get(sym)
+        if last_ts and last_dir == opt_type:
+            if (now - last_ts).total_seconds() < self.SIGNAL_COOL_S:
+                return "HOLD", None
+
+        self._last_ts[sym]  = now
+        self._last_dir[sym] = opt_type
+
+        # SL / TGT adapted to IV regime
+        sl_pct, tgt_pct = self._iv_sl_tgt(iv_rank)
+
+        # Size factor: confidence-tiered
+        sf = 1.0 if score >= 8 else (0.75 if score >= 6 else 0.5)
+
+        # Strike: delta-0.40 proxy (slightly OTM)
+        strike   = self._pick_strike(ltp, opt_type, atm_iv)
+        opt_sym  = self._nfo_symbol(sym, strike, opt_type)
+        lot_size = self.LOT_SIZES.get(sym, 1)
+
+        return "BUY", {
+            "exchange":         "NFO",
+            "option_symbol":    opt_sym,
+            "option_type":      opt_type,
+            "strike":           strike,
+            "lot_size":         lot_size,
+            "stop_loss_pct":    sl_pct,
+            "target_pct":       tgt_pct,
+            "iv_rank":          round(iv_rank, 1),
+            "atm_iv":           round(atm_iv, 2),
+            "score":            score,
+            "_gate_size_factor": sf,
+            "trigger": (
+                f"FNO-{opt_type} score={score}/10 IVrank={iv_rank:.0f}% "
+                f"strike={strike} sf={sf} "
+                f"rsi={ind.rsi_14:.0f} trend={ind.trend}"
+            ),
+        }
+
+    # ── 10-factor scoring ─────────────────────────────────────────────────────
+
+    def _score(self, opt_type: str, ind: LiveIndicators, ltp: float,
+               iv_rank: float, surf, gex, flow) -> int:
+        s = 0
+        is_call = (opt_type == "CE")
+
+        # 1. IV rank (0-2)
+        if   iv_rank <= 28: s += 2
+        elif iv_rank <= 55: s += 1
+        elif iv_rank >  70: s -= 1
+
+        # 2. Trend strength (0-2)
+        ema_bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
+        ema_bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
+        if is_call:
+            if ema_bull:              s += 2
+            elif ind.trend == "UP":   s += 1
+        else:
+            if ema_bear:              s += 2
+            elif ind.trend == "DOWN": s += 1
+
+        # 3. RSI in ideal zone (0-1)
+        if is_call and 53 <= ind.rsi_14 <= 72:   s += 1
+        if not is_call and 28 <= ind.rsi_14 <= 47: s += 1
+
+        # 4. VWAP alignment (0-1)
+        if ind.vwap and ind.vwap > 0:
+            if is_call and ltp > ind.vwap:      s += 1
+            if not is_call and ltp < ind.vwap:  s += 1
+
+        # 5. IV skew confirmation (0-1)
+        if surf:
+            if is_call and surf.risk_reversal > -0.005:  s += 1   # calls not crushed
+            if not is_call and surf.put_skew > 0.005:     s += 1   # market buying puts
+
+        # 6. Options flow (0-1)
+        if flow:
+            if is_call  and flow.call_put_ratio > 1.1:   s += 1
+            if not is_call and flow.call_put_ratio < 0.9: s += 1
+
+        # 7. GEX regime (0-1)  — avoid pin risk and pure short-gamma
+        if gex:
+            safe = not gex.pin_risk and gex.regime != "SHORT_GAMMA"
+            if safe: s += 1
+        else:
+            s += 1   # no data = neutral, allow
+
+        # 8. Momentum label (0-1)
+        if is_call  and ind.momentum in ("STRONG_UP",   "WEAK_UP"):   s += 1
+        if not is_call and ind.momentum in ("STRONG_DOWN", "WEAK_DOWN"): s += 1
+
+        # 9. Volume surge (0-1)
+        if ind.volume_ratio > 1.3:  s += 1
+
+        # 10. MACD histogram (0-1)
+        if is_call  and ind.macd_hist > 0:   s += 1
+        if not is_call and ind.macd_hist < 0: s += 1
+
+        return s
+
+    # ── IV-adaptive SL / TGT ─────────────────────────────────────────────────
+
+    def _iv_sl_tgt(self, iv_rank: float) -> tuple[float, float]:
+        if   iv_rank < 25: return 35.0, 100.0   # cheap vol: wide range, vol expansion
+        elif iv_rank < 50: return 30.0,  65.0   # normal
+        elif iv_rank < 65: return 25.0,  48.0   # elevated: tighter
+        else:              return 20.0,  35.0   # expensive: very tight
+
+    # ── Strike selection (delta ~0.40 proxy) ─────────────────────────────────
+
+    def _pick_strike(self, spot: float, opt_type: str, atm_iv: float) -> int:
+        import math
+        step = 100 if spot > 30000 else 50
+        # ATM offset using BS approximation for 0.40-delta strike
+        iv    = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.12)
+        T     = 7.0 / 365.0   # proxy 1 week to expiry
+        # 0.4-delta call is roughly +0.25σ from ATM; put is -0.25σ
+        sigma_spot = spot * iv * math.sqrt(T)
+        offset = 0.25 * sigma_spot
+        raw = (spot + offset) if opt_type == "CE" else (spot - offset)
+        return max(int(round(raw / step) * step), step)
+
+    # ── NFO symbol builder ────────────────────────────────────────────────────
+
+    def _nfo_symbol(self, underlying: str, strike: int, opt_type: str) -> str:
+        """Build Zerodha NFO tradingsymbol for the nearest weekly/monthly expiry."""
+        from datetime import date, timedelta
+        today = date.today()
+        # BANKNIFTY expires Wednesday, others Thursday
+        target_wd = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+        expiry = today + timedelta(days=1)
+        while expiry.weekday() != target_wd:
+            expiry += timedelta(days=1)
+        # Monthly (last week of month)?
+        if (expiry + timedelta(days=7)).month != expiry.month:
+            return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
+        return f"{underlying}{expiry.strftime('%y%m%d')}{strike}{opt_type}"
+
+    # ── Option-aware _try_enter override ─────────────────────────────────────
+
+    async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
+        """Place the order on the resolved NFO option symbol, not the underlying."""
+        import math
+        from agents.base_agent import send_telegram
+        from kite_client import kite_client
+        from risk_manager import risk_manager
+        from order_guard import order_guard
+        from trailing_sl_engine import trailing_sl_engine
+        from sebi_compliance import sebi_compliance
+        from market_regime import regime_detector
+        from config import settings
+
+        underlying = snap.symbol
+        opt_sym    = signal.get("option_symbol", underlying)
+        exch       = signal.get("exchange", "NFO")
+        lot_size   = signal.get("lot_size", 1)
+        iv_rank    = signal.get("iv_rank", 50.0)
+        atm_iv     = signal.get("atm_iv", 25.0)
+        sf         = signal.pop("_gate_size_factor", 1.0)
+
+        # Estimate option premium via ATM BS approximation
+        S   = snap.tick.ltp
+        iv  = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
+        T   = 7.0 / 365.0
+        # ATM call/put premium ≈ S × σ × √T / √(2π)
+        opt_price = max(round(S * iv * math.sqrt(T) / math.sqrt(2 * math.pi), 2), 5.0)
+
+        # Lot quantity (1 lot base; Kelly sizing reduces if sf < 1)
+        qty = lot_size
+        if settings.use_kelly_sizing and sf < 1.0:
+            qty = max(lot_size, int(lot_size * sf))
+
+        allowed, _ = order_guard.can_place(underlying, self.name, action)
+        if not allowed:
+            return
+        if order_guard.is_symbol_active_anywhere(underlying):
+            return
+        allowed, _ = risk_manager.check_before_order(opt_sym, qty, opt_price, action)
+        if not allowed:
+            return
+
+        sebi_ok, _algo_id, sebi_reason = sebi_compliance.pre_order_check(
+            strategy=self.name, symbol=opt_sym, exchange=exch,
+            transaction_type=action, quantity=qty,
+            order_type="MARKET", price_at_signal=opt_price,
+            signal_source=f"agent_{self.name}",
+            regime=regime_detector.current_regime.value
+                   if regime_detector.current_regime else "UNKNOWN",
+        )
+        if not sebi_ok:
+            from loguru import logger
+            logger.warning("[fno] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
+            return
+
+        order_id = kite_client.place_order(
+            tradingsymbol=opt_sym, exchange=exch,
+            transaction_type=action, quantity=qty,
+            order_type="MARKET", product=self.product,
+            tag="Agent-fno",
+        )
+        sebi_compliance.record_order_id(self.name, opt_sym, order_id)
+        order_guard.register_order(underlying, self.name, action, order_id)
+        risk_manager.position_opened()
+        self.state.trades_today  += 1
+        self.state.signals_fired += 1
+        self.state.last_signal    = signal
+
+        trailing_sl_engine.register(
+            symbol=underlying, strategy=self.name, side=action,
+            entry_price=opt_price, quantity=qty, order_id=order_id,
+            atr=snap.indicators.atr_14,
+        )
+
+        ind = snap.indicators
+        sl_pct  = signal.get("stop_loss_pct", 30)
+        tgt_pct = signal.get("target_pct", 65)
+        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
+        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
+
+        kite_client.place_order(
+            tradingsymbol=opt_sym, exchange=exch,
+            transaction_type="SELL", quantity=qty,
+            order_type="SL-M", product=self.product,
+            trigger_price=sl_px, tag="Agent-fno-SL",
+        )
+
+        await send_telegram(
+            f"<b>[FNO]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
+            f"Lots: {qty//lot_size} | {signal.get('option_type')} {signal.get('strike')}\n"
+            f"IVrank: {iv_rank:.0f}% | Score: {signal.get('score')}/10 | sf={sf}\n"
+            f"SL: ₹{sl_px:.1f} | TGT: ₹{tgt_px:.1f} | Ord: {order_id}"
+        )
+
+    # ── Exit conditions ───────────────────────────────────────────────────────
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
-        entry = pos.get("average_price", ind.ltp)
+        entry = pos.get("average_price", 0.0)
         ltp   = ind.ltp
-        if not entry:
+        if not entry or entry <= 0:
             return False, ""
-        change = (ltp - entry) / entry * 100
-        if change <= -35:  return True, f"Option loss 35% ₹{ltp:.2f}"
-        if change >= 80:   return True, f"Option profit 80% ₹{ltp:.2f}"
-        # Exit if mean-reversion: RSI returns to neutral
-        if 45 < ind.rsi_14 < 55:
-            return True, "RSI neutral — exit option"
+
+        chg = (ltp - entry) / entry * 100
+        qty = pos.get("quantity", 0)
+
+        # Near-zero protection: option losing 90%+ → stop the bleed
+        if ltp < entry * 0.10:
+            return True, f"Option near-zero ₹{ltp:.1f} ({chg:.0f}%)"
+
+        # Hard stop 30%
+        if chg <= -30:
+            return True, f"Option SL -30% ₹{ltp:.1f}"
+
+        # Progressive profit exits
+        if chg >= 100:
+            return True, f"Option +100% ₹{ltp:.1f}"
+        if chg >= 60 and ind.rsi_14 > 72:
+            return True, f"Option +60% overbought RSI={ind.rsi_14:.0f}"
+        if chg >= 50 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
+            return True, f"Option +50% momentum fading"
+
+        # Direction lost — theta will erode remaining value
+        if 44 < ind.rsi_14 < 56:
+            return True, "RSI neutral — exit before theta decay"
+
+        # Trend reversal while not yet deeply profitable
+        if qty > 0:    # long call
+            if ind.trend == "DOWN" and ind.ema9 < ind.ema21 and chg < 30:
+                return True, "Trend reversed DOWN — exit call"
+        else:          # long put
+            if ind.trend == "UP"   and ind.ema9 > ind.ema21 and chg < 30:
+                return True, "Trend reversed UP — exit put"
+
         return False, ""
 
 

@@ -147,6 +147,56 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
     except Exception:
         institutional = {}
 
+    # ── Options-specific intelligence (only populated for fno strategy) ───────
+    options_advanced: dict = {}
+    if strategy == "fno":
+        try:
+            import iv_surface as _ivs
+            _surf = _ivs.get_surface(snap.symbol)
+            if _surf:
+                options_advanced["iv_skew"] = {
+                    "atm_iv":         round(_surf.atm_iv * 100, 2),
+                    "put_skew":       round(_surf.put_skew * 100, 2),
+                    "call_skew":      round(_surf.call_skew * 100, 2),
+                    "risk_reversal":  round(_surf.risk_reversal, 4),
+                    "butterfly":      round(_surf.butterfly, 4),
+                    "skew_direction": _surf.skew_direction,
+                    "pcr_oi":         _surf.pcr_oi,
+                }
+        except Exception:
+            pass
+        try:
+            import gamma_scalp as _gex
+            _gp = _gex.get_cached_gex(snap.symbol)
+            if _gp:
+                options_advanced["gex"] = {
+                    "regime":        _gp.regime,
+                    "net_gex":       round(_gp.net_gex, 0),
+                    "pin_risk":      _gp.pin_risk,
+                    "pin_strike":    _gp.pin_strike,
+                    "call_wall":     _gp.top_call_wall.strike if _gp.top_call_wall else None,
+                    "put_wall":      _gp.top_put_wall.strike  if _gp.top_put_wall  else None,
+                    "flip_pct":      _gp.flip_pct,
+                }
+        except Exception:
+            pass
+        try:
+            import options_flow as _of
+            _fl = _of.get_cached_flow(snap.symbol)
+            if _fl:
+                options_advanced["options_flow"] = {
+                    "direction":     _fl.direction,
+                    "score":         _fl.score,
+                    "call_put_ratio": _fl.call_put_ratio,
+                    "smart_bias":    _fl.smart_bias,
+                    "sweep":         _fl.sweep_detected,
+                    "sweep_dir":     _fl.sweep_direction,
+                    "blocks":        len(_fl.block_trades),
+                    "iv_spikes":     len(_fl.iv_spikes),
+                }
+        except Exception:
+            pass
+
     return {
         "symbol":   snap.symbol,
         "strategy": strategy,
@@ -156,16 +206,19 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
         "proposed_target_pct": signal.get("target_pct",     settings.target_pct),
         "indicators": {
             "rsi_14":       round(ind.rsi_14, 2),
-            "ema_20":       round(ind.ema_20, 2),
-            "ema_50":       round(ind.ema_50, 2),
+            "ema9":         round(ind.ema9,  2),
+            "ema21":        round(ind.ema21, 2),
+            "ema50":        round(ind.ema50, 2),
             "macd_hist":    round(ind.macd_hist, 4),
             "vwap":         round(ind.vwap, 2) if ind.vwap else None,
-            "adx_14":       round(ind.adx_14, 2),
             "atr_14":       round(ind.atr_14, 4),
+            "bb_upper":     round(ind.bb_upper, 2),
+            "bb_lower":     round(ind.bb_lower, 2),
             "volume_ratio": round(ind.volume_ratio, 2),
-            "bb_position":  round(ind.bb_position, 3) if hasattr(ind, "bb_position") else None,
+            "momentum":     ind.momentum,
+            "trend":        ind.trend,
             "price_vs_vwap": "above" if ind.vwap and snap.tick.ltp > ind.vwap else "below",
-            "ema_trend":    "bullish" if ind.ema_20 > ind.ema_50 else "bearish",
+            "ema_trend":    "bullish" if ind.ema9 > ind.ema21 > 0 else "bearish",
         },
         "multi_timeframe": snap.mtf_alignment if hasattr(snap, "mtf_alignment") else {},
         "regime": {
@@ -195,10 +248,11 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
             "minutes_since_open":   minutes_open,
             "minutes_to_squareoff": max(0, _minutes_to_squareoff()),
         },
-        "key_levels":    level_ctx,
-        "event_risk":    event_risk,
-        "options_iv":    options_iv,
-        "institutional": institutional,
+        "key_levels":        level_ctx,
+        "event_risk":        event_risk,
+        "options_iv":        options_iv,
+        "institutional":     institutional,
+        "options_advanced":  options_advanced,
     }
 
 

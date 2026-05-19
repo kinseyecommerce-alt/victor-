@@ -1635,6 +1635,292 @@ run("mtf_check() graceful with few candles",                   t_mtf_few_candles
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# Section 17 — Options Intelligence Engines
+# ══════════════════════════════════════════════════════════════════════════
+print("\n── Section 17: Options Intelligence Engines ──")
+from greeks_engine import (
+    bs_price, implied_volatility, calculate_greeks,
+    atm_strike, select_strike_by_delta,
+)
+from iv_surface import build_surface, get_surface, skew_context
+from gamma_scalp import build_gex_profile, get_cached_gex, gex_context
+from options_flow import analyze_flow, get_cached_flow, flow_context
+
+# ── greeks_engine ─────────────────────────────────────────────────────────
+import math
+from datetime import date, timedelta
+
+def t_bs_call_positive():
+    p = bs_price(22000, 22000, 7/365, 0.065, 0.20, "CE")
+    assert p > 0, f"call price={p}"
+
+def t_bs_put_positive():
+    p = bs_price(22000, 22000, 7/365, 0.065, 0.20, "PE")
+    assert p > 0, f"put price={p}"
+
+def t_bs_call_put_parity():
+    S, K, T, r, s = 22000, 22000, 7/365, 0.065, 0.20
+    c = bs_price(S, K, T, r, s, "CE")
+    p = bs_price(S, K, T, r, s, "PE")
+    lhs = c - p
+    rhs = S - K * math.exp(-r * T)
+    assert abs(lhs - rhs) < 0.5, f"put-call parity violated: {lhs:.2f} vs {rhs:.2f}"
+
+def t_iv_roundtrip():
+    S, K, T, r, true_iv = 22000, 22000, 7/365, 0.065, 0.23
+    market_p = bs_price(S, K, T, r, true_iv, "CE")
+    solved   = implied_volatility(market_p, S, K, T, r, "CE")
+    assert abs(solved - true_iv) < 0.001, f"IV roundtrip error: {solved:.4f} vs {true_iv}"
+
+def t_greeks_fields():
+    expiry = date.today() + timedelta(days=7)
+    g = calculate_greeks(22000, 22000, expiry, "CE", 200.0)
+    for field in ("delta", "gamma", "theta", "vega", "iv", "intrinsic", "time_value", "moneyness"):
+        assert hasattr(g, field), f"Missing field: {field}"
+
+def t_greeks_delta_range():
+    expiry = date.today() + timedelta(days=7)
+    g = calculate_greeks(22000, 22000, expiry, "CE", 200.0)
+    assert 0 < g.delta < 1, f"CE delta out of range: {g.delta}"
+
+def t_greeks_put_delta_negative():
+    expiry = date.today() + timedelta(days=7)
+    g = calculate_greeks(22000, 22000, expiry, "PE", 190.0)
+    assert -1 < g.delta < 0, f"PE delta should be negative: {g.delta}"
+
+def t_atm_strike_rounding():
+    assert atm_strike(22134, 50) == 22150
+    assert atm_strike(22075, 50) == 22100
+    assert atm_strike(44100, 100) == 44100
+
+def t_select_strike_ce_above_spot():
+    strikes = list(range(21000, 23500, 50))
+    k = select_strike_by_delta(22000, strikes, "CE", target_delta=0.40)
+    assert k > 21800, f"CE 0.40-delta strike {k} suspiciously low"
+
+def t_select_strike_pe_below_spot():
+    strikes = list(range(21000, 23500, 50))
+    k = select_strike_by_delta(22000, strikes, "PE", target_delta=0.40)
+    assert k < 22200, f"PE 0.40-delta strike {k} suspiciously high"
+
+run("bs_price call > 0",                         t_bs_call_positive)
+run("bs_price put > 0",                          t_bs_put_positive)
+run("put-call parity holds within ₹0.50",        t_bs_call_put_parity)
+run("IV roundtrip within 0.1%",                  t_iv_roundtrip)
+run("calculate_greeks returns all fields",        t_greeks_fields)
+run("CE delta in (0,1)",                         t_greeks_delta_range)
+run("PE delta in (-1,0)",                        t_greeks_put_delta_negative)
+run("atm_strike rounds to nearest step",         t_atm_strike_rounding)
+run("select_strike CE 0.40Δ is above spot",      t_select_strike_ce_above_spot)
+run("select_strike PE 0.40Δ is below spot",      t_select_strike_pe_below_spot)
+
+# ── iv_surface ────────────────────────────────────────────────────────────
+_sample_chain = [
+    {"strike": 21800, "CE": {"iv": 23.5, "oi": 50000, "ltp": 250.0},
+                       "PE": {"iv": 26.0, "oi": 80000, "ltp": 60.0}},
+    {"strike": 22000, "CE": {"iv": 22.0, "oi": 120000, "ltp": 150.0},
+                       "PE": {"iv": 22.5, "oi": 140000, "ltp": 130.0}},
+    {"strike": 22200, "CE": {"iv": 21.5, "oi": 90000, "ltp": 70.0},
+                       "PE": {"iv": 24.0, "oi": 60000, "ltp": 220.0}},
+    {"strike": 22400, "CE": {"iv": 21.0, "oi": 40000, "ltp": 20.0},
+                       "PE": {"iv": 25.5, "oi": 30000, "ltp": 360.0}},
+]
+
+def t_build_surface_returns_data():
+    sd = build_surface("NIFTY", _sample_chain, 22000.0)
+    assert sd is not None
+    assert sd.atm_iv > 0
+
+def t_surface_smile_has_strikes():
+    sd = build_surface("NIFTY", _sample_chain, 22000.0)
+    assert len(sd.smile) >= 3
+
+def t_surface_cached():
+    build_surface("NIFTY", _sample_chain, 22000.0)
+    sd = get_surface("NIFTY")
+    assert sd is not None
+
+def t_skew_direction_valid():
+    sd = build_surface("NIFTY", _sample_chain, 22000.0)
+    assert sd.skew_direction in ("BULLISH", "BEARISH", "NEUTRAL")
+
+def t_pcr_positive():
+    sd = build_surface("NIFTY", _sample_chain, 22000.0)
+    assert sd.pcr_oi > 0
+
+def t_skew_context_nonempty():
+    build_surface("NIFTY", _sample_chain, 22000.0)
+    ctx = skew_context("NIFTY")
+    assert len(ctx) > 10
+
+run("build_surface returns SkewData with atm_iv>0",  t_build_surface_returns_data)
+run("smile dict has >=3 strikes",                    t_surface_smile_has_strikes)
+run("build_surface result is cached",                t_surface_cached)
+run("skew_direction is BULLISH/BEARISH/NEUTRAL",     t_skew_direction_valid)
+run("pcr_oi > 0",                                    t_pcr_positive)
+run("skew_context() returns non-empty string",       t_skew_context_nonempty)
+
+# ── gamma_scalp ───────────────────────────────────────────────────────────
+def t_gex_profile_returned():
+    gp = build_gex_profile("NIFTY", _sample_chain, 22000.0)
+    assert gp is not None
+
+def t_gex_regime_valid():
+    gp = build_gex_profile("NIFTY", _sample_chain, 22000.0)
+    assert gp.regime in ("LONG_GAMMA", "SHORT_GAMMA", "NEUTRAL")
+
+def t_gex_cached():
+    build_gex_profile("NIFTY", _sample_chain, 22000.0)
+    gp = get_cached_gex("NIFTY")
+    assert gp is not None
+
+def t_gex_walls_have_distance():
+    gp = build_gex_profile("NIFTY", _sample_chain, 22000.0)
+    for w in [gp.top_call_wall, gp.top_put_wall]:
+        if w:
+            assert isinstance(w.distance_pct, float)
+
+def t_gex_context_nonempty():
+    build_gex_profile("NIFTY", _sample_chain, 22000.0)
+    ctx = gex_context("NIFTY")
+    assert "GEX_regime" in ctx
+
+run("build_gex_profile returns GEXProfile",                t_gex_profile_returned)
+run("GEX regime is LONG/SHORT/NEUTRAL gamma",              t_gex_regime_valid)
+run("GEX profile is cached",                              t_gex_cached)
+run("GammaWall.distance_pct is float",                    t_gex_walls_have_distance)
+run("gex_context() contains 'GEX_regime'",                t_gex_context_nonempty)
+
+# ── options_flow ──────────────────────────────────────────────────────────
+_flow_chain = [
+    {"strike": 22000, "CE": {"oi": 10000, "volume": 80000, "iv": 22.0, "ltp": 150.0},
+                       "PE": {"oi": 12000, "volume": 5000,  "iv": 23.0, "ltp": 130.0}},
+    {"strike": 22200, "CE": {"oi": 8000,  "volume": 50000, "iv": 21.0, "ltp": 70.0},
+                       "PE": {"oi": 9000,  "volume": 3000,  "iv": 24.0, "ltp": 200.0}},
+    {"strike": 22400, "CE": {"oi": 5000,  "volume": 40000, "iv": 21.0, "ltp": 20.0},
+                       "PE": {"oi": 6000,  "volume": 2000,  "iv": 25.0, "ltp": 350.0}},
+]
+
+def t_flow_signal_returned():
+    f = analyze_flow("NIFTY", _flow_chain, 22000.0)
+    assert f is not None
+
+def t_flow_direction_valid():
+    f = analyze_flow("NIFTY", _flow_chain, 22000.0)
+    assert f.direction in ("BULLISH", "BEARISH", "NEUTRAL")
+
+def t_flow_call_vol_counted():
+    f = analyze_flow("NIFTY", _flow_chain, 22000.0)
+    assert f.total_call_vol == 170000
+
+def t_flow_unusual_calls_detected():
+    f = analyze_flow("NIFTY", _flow_chain, 22000.0)
+    # vol/OI ratios: 8, 6.25, 8 — all > 5x → should detect unusual
+    assert len(f.unusual_calls) > 0
+
+def t_flow_cached():
+    analyze_flow("NIFTY", _flow_chain, 22000.0)
+    f = get_cached_flow("NIFTY")
+    assert f is not None
+
+def t_flow_context_nonempty():
+    analyze_flow("NIFTY", _flow_chain, 22000.0)
+    ctx = flow_context("NIFTY")
+    assert len(ctx) > 5
+
+def t_flow_bullish_dominated():
+    f = analyze_flow("NIFTY", _flow_chain, 22000.0)
+    # call vol 170k >> put vol 10k → should be BULLISH
+    assert f.direction == "BULLISH", f"Expected BULLISH, got {f.direction}"
+
+run("analyze_flow returns OptionsFlow",                      t_flow_signal_returned)
+run("flow direction is BULLISH/BEARISH/NEUTRAL",             t_flow_direction_valid)
+run("total call volume counted correctly",                   t_flow_call_vol_counted)
+run("unusual call strikes detected (vol/OI > 5×)",          t_flow_unusual_calls_detected)
+run("flow result is cached",                                 t_flow_cached)
+run("flow_context() returns non-empty string",              t_flow_context_nonempty)
+run("call-dominated chain → BULLISH direction",             t_flow_bullish_dominated)
+
+# ── FnOAgent scoring integration ──────────────────────────────────────────
+from agents.strategy_agents import FnOAgent
+
+def t_fno_agent_instantiates():
+    a = FnOAgent()
+    assert a.name == "fno"
+    assert a.product == "NRML"
+
+def t_fno_score_ce_strong_bull():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    ind = MagicMock()
+    ind.rsi_14 = 60.0; ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0
+    ind.vwap = 21950.0; ind.macd_hist = 0.5; ind.volume_ratio = 1.5
+    ind.momentum = "STRONG_UP"; ind.trend = "UP"; ind.macd = 0.1; ind.macd_signal = 0.05
+    score = a._score("CE", ind, 22150.0, 20.0, None, None, None)
+    assert score >= 5, f"Strong bull CE score {score} < 5"
+
+def t_fno_score_pe_bear():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    ind = MagicMock()
+    ind.rsi_14 = 38.0; ind.ema9 = 21800.0; ind.ema21 = 22000.0; ind.ema50 = 22200.0
+    ind.vwap = 22100.0; ind.macd_hist = -0.5; ind.volume_ratio = 1.6
+    ind.momentum = "STRONG_DOWN"; ind.trend = "DOWN"; ind.macd = -0.1; ind.macd_signal = 0.0
+    score = a._score("PE", ind, 21850.0, 20.0, None, None, None)
+    assert score >= 5, f"Bear PE score {score} < 5"
+
+def t_fno_sl_tgt_cheap_iv():
+    a = FnOAgent()
+    sl, tgt = a._iv_sl_tgt(20.0)
+    assert sl == 35.0 and tgt == 100.0
+
+def t_fno_sl_tgt_expensive_iv():
+    a = FnOAgent()
+    sl, tgt = a._iv_sl_tgt(75.0)
+    assert sl == 20.0 and tgt == 35.0
+
+def t_fno_pick_strike_ce_above():
+    a = FnOAgent()
+    k = a._pick_strike(22000.0, "CE", 22.0)
+    assert k > 22000, f"CE strike {k} not above spot"
+
+def t_fno_pick_strike_pe_below():
+    a = FnOAgent()
+    k = a._pick_strike(22000.0, "PE", 22.0)
+    assert k < 22000, f"PE strike {k} not below spot"
+
+def t_fno_nfo_symbol_format():
+    a = FnOAgent()
+    sym = a._nfo_symbol("NIFTY", 22000, "CE")
+    assert "NIFTY" in sym and "22000" in sym and "CE" in sym
+
+def t_fno_high_iv_blocks_entry():
+    from unittest.mock import MagicMock, patch
+    a = FnOAgent()
+    a._approved.add("NIFTY")
+    snap = _make_snap(symbol="NIFTY", n_candles=20)
+    snap.indicators.rsi_14 = 65; snap.indicators.trend = "UP"
+    snap.indicators.ema9 = 22100; snap.indicators.ema21 = 22000; snap.indicators.ema50 = 21900
+    snap.indicators.vwap = 21950; snap.indicators.macd_hist = 1.0
+    snap.indicators.volume_ratio = 2.0; snap.indicators.momentum = "STRONG_UP"
+
+    opts_data = {"iv_rank": 80.0, "atm_iv": 35.0, "iv_percentile": 85.0}
+    with patch("options_intelligence.get_cached", return_value=opts_data):
+        action, signal = a.evaluate_tick(snap)
+    assert action == "HOLD", f"High IV rank should block entry, got {action}"
+
+run("FnOAgent instantiates with name=fno",                   t_fno_agent_instantiates)
+run("CE scoring ≥5 on strong bull setup",                    t_fno_score_ce_strong_bull)
+run("PE scoring ≥5 on strong bear setup",                    t_fno_score_pe_bear)
+run("IV<25% → SL=35% TGT=100%",                             t_fno_sl_tgt_cheap_iv)
+run("IV>70% → SL=20% TGT=35%",                             t_fno_sl_tgt_expensive_iv)
+run("_pick_strike CE is above spot",                         t_fno_pick_strike_ce_above)
+run("_pick_strike PE is below spot",                         t_fno_pick_strike_pe_below)
+run("NFO symbol contains underlying/strike/type",           t_fno_nfo_symbol_format)
+run("IV rank >72% blocks entry (no premium buying)",        t_fno_high_iv_blocks_entry)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

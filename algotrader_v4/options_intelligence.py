@@ -254,6 +254,29 @@ def _compute_max_pain(
     return best_strike
 
 
+def _normalise_chain(raw_chain: list[dict], expiry: str) -> list[dict]:
+    """Convert NSE raw chain records into the normalised format expected by the engine modules."""
+    out: dict[int, dict] = {}
+    for row in raw_chain:
+        for side in ("CE", "PE"):
+            item = row.get(side)
+            if not item or item.get("expiryDate") != expiry:
+                continue
+            k = int(float(item.get("strikePrice", 0)))
+            if k <= 0:
+                continue
+            if k not in out:
+                out[k] = {"strike": k, "CE": {}, "PE": {}}
+            out[k][side] = {
+                "oi":        int(item.get("openInterest", 0)),
+                "oi_change": int(item.get("changeinOpenInterest", 0)),
+                "iv":        float(item.get("impliedVolatility", 0) or 0),
+                "ltp":       float(item.get("lastPrice", 0) or 0),
+                "volume":    int(item.get("totalTradedVolume", 0) or 0),
+            }
+    return list(out.values())
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def get_iv_context(symbol: str) -> dict:
@@ -304,6 +327,28 @@ async def get_iv_context(symbol: str) -> dict:
 
         # Store in in-memory cache
         _cache[symbol] = {**result, "_updated_ts": time.time()}
+
+        # ── Populate derivative intelligence caches from the raw chain ────────
+        raw_chain = data.get("records", {}).get("data", [])
+        spot      = parsed["spot_price"]
+        if raw_chain and spot > 0:
+            # Normalise chain into {strike, CE:{iv,oi,oi_change,ltp,volume}, PE:...}
+            _chain = _normalise_chain(raw_chain, parsed["expiry"])
+            try:
+                import iv_surface
+                iv_surface.build_surface(symbol, _chain, spot)
+            except Exception as _e:
+                logger.debug("[options_intel] iv_surface failed for {}: {}", symbol, _e)
+            try:
+                import gamma_scalp
+                gamma_scalp.build_gex_profile(symbol, _chain, spot)
+            except Exception as _e:
+                logger.debug("[options_intel] gamma_scalp failed for {}: {}", symbol, _e)
+            try:
+                import options_flow
+                options_flow.analyze_flow(symbol, _chain, spot)
+            except Exception as _e:
+                logger.debug("[options_intel] options_flow failed for {}: {}", symbol, _e)
 
         logger.info(
             "[options_intel] {} — spot={} ATM_IV={} PCR={} MaxPain={} IVRank={} IVPct={}",
