@@ -51,6 +51,9 @@ class RiskManager:
         return True, "OK"
 
     def _check_market_hours(self) -> tuple[bool, str]:
+        from config import settings
+        if settings.trading_mode == "PAPER":
+            return True, "OK"
         now_t = datetime.now().time()
         open_t  = time(9, 15)
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]

@@ -616,7 +616,8 @@ def t_sebi_resume_from_killed_fails():
 def t_sebi_reset_reenables():
     sc = SEBICompliance()
     sc.trigger_kill_switch("test")
-    sc.reset_kill_switch()
+    # Pass the configured secret (or empty string when not set) so the reset succeeds
+    sc.reset_kill_switch(secret=settings.kill_switch_reset_secret)
     ok_, _ = sc.resume_trading()
     assert ok_ is True
 
@@ -1357,6 +1358,167 @@ async def run_async():
     await arun("bracket active_only filter works",         t_bracket_active_filter())
 
 asyncio.run(run_async())
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 16. INTELLIGENCE MODULES
+# ══════════════════════════════════════════════════════════════════════════
+section("16. INTELLIGENCE MODULES")
+
+# ── event_calendar ────────────────────────────────────────────────────────
+from event_calendar import get_event_risk, has_results_today, RBI_DATES
+
+def t_evt_safe_result():
+    r = get_event_risk("RELIANCE")
+    for k in ("risk_level", "size_factor", "description"):
+        assert k in r, f"Missing key: {k}"
+
+def t_evt_size_factor_range():
+    r = get_event_risk("TCS")
+    assert 0.0 <= r["size_factor"] <= 1.0
+
+def t_evt_risk_levels():
+    r = get_event_risk("INFY")
+    assert r["risk_level"] in ("NONE","LOW","MEDIUM","HIGH","CRITICAL")
+
+def t_evt_no_event_returns_none():
+    r = get_event_risk("UNKNOWNXYZ")
+    assert r["risk_level"] == "NONE" and r["size_factor"] == 1.0
+
+def t_evt_results_today_bool():
+    assert isinstance(has_results_today("RELIANCE"), bool)
+
+def t_evt_rbi_dates_format():
+    import datetime as dt
+    for d in RBI_DATES:
+        parsed = dt.datetime.strptime(d, "%Y-%m-%d")
+        assert parsed.year >= 2025
+
+run("get_event_risk() has risk_level/size_factor/description", t_evt_safe_result)
+run("size_factor in [0, 1]",                                   t_evt_size_factor_range)
+run("risk_level in valid set",                                  t_evt_risk_levels)
+run("unknown symbol → NONE risk / size_factor=1.0",            t_evt_no_event_returns_none)
+run("has_results_today() returns bool",                         t_evt_results_today_bool)
+run("RBI_DATES are valid YYYY-MM-DD from 2025+",               t_evt_rbi_dates_format)
+
+# ── levels_engine ─────────────────────────────────────────────────────────
+from levels_engine import get_levels, level_context
+
+def t_lvl_empty_before_refresh():
+    result = get_levels("NEWXYZ")
+    assert isinstance(result, dict)
+
+def t_lvl_context_str():
+    r = level_context("RELIANCE", 2800.0)
+    assert isinstance(r, str)
+
+def t_lvl_context_no_levels():
+    r = level_context("UNKNOWNABC", 100.0)
+    assert r == ""
+
+run("get_levels() returns dict (empty before refresh)",         t_lvl_empty_before_refresh)
+run("level_context() returns string",                           t_lvl_context_str)
+run("level_context() empty for unknown symbol",                 t_lvl_context_no_levels)
+
+# ── options_intelligence ──────────────────────────────────────────────────
+from options_intelligence import get_cached
+
+def t_opts_cached_empty():
+    result = get_cached("NEWUNKNOWNSYM")
+    assert isinstance(result, dict)
+
+def t_opts_cached_returns_dict():
+    r = get_cached("RELIANCE")
+    assert isinstance(r, dict)
+
+run("get_cached() returns dict (empty before refresh)",         t_opts_cached_empty)
+run("get_cached() for any symbol returns dict",                 t_opts_cached_returns_dict)
+
+# ── institutional_flow ────────────────────────────────────────────────────
+from institutional_flow import get_cached_score
+
+def t_inst_score_keys():
+    r = get_cached_score("RELIANCE")
+    for k in ("institutional_score", "delivery_pct", "is_default"):
+        assert k in r, f"Missing key: {k}"
+
+def t_inst_score_range():
+    r = get_cached_score("TCS")
+    assert 0.0 <= r["institutional_score"] <= 100.0
+
+def t_inst_default_flag():
+    r = get_cached_score("UNKNOWNABC")
+    assert r["is_default"] is True
+
+run("get_cached_score() has score/delivery_pct/is_default",     t_inst_score_keys)
+run("institutional_score in [0, 100]",                          t_inst_score_range)
+run("unknown symbol returns is_default=True",                   t_inst_default_flag)
+
+# ── correlation_guard ─────────────────────────────────────────────────────
+from correlation_guard import check as corr_check, portfolio_heat
+
+def t_corr_no_positions():
+    r = corr_check("RELIANCE", [])
+    assert r["allowed"] is True and r["size_factor"] == 1.0
+
+def t_corr_same_symbol():
+    r = corr_check("RELIANCE", ["RELIANCE"])
+    assert r["allowed"] is True
+
+def t_corr_unknown_unknown():
+    r = corr_check("UNKNOWNABC", ["UNKNOWNXYZ"])
+    assert "allowed" in r and "size_factor" in r
+
+def t_corr_result_keys():
+    r = corr_check("TCS", ["INFOSYS"])
+    for k in ("allowed", "reason", "size_factor"):
+        assert k in r, f"Missing key: {k}"
+
+def t_heat_no_positions():
+    h = portfolio_heat([])
+    assert h == 0.0
+
+def t_heat_one_position():
+    h = portfolio_heat(["RELIANCE"])
+    assert h == 0.0  # need >= 2 positions for meaningful heat
+
+run("no open positions → allowed=True, size=1.0",              t_corr_no_positions)
+run("same symbol as open position handled gracefully",          t_corr_same_symbol)
+run("unknown/unknown correlation returns safe dict",            t_corr_unknown_unknown)
+run("check() has allowed/reason/size_factor keys",              t_corr_result_keys)
+run("portfolio_heat([]) == 0.0",                               t_heat_no_positions)
+run("portfolio_heat with 1 position == 0.0",                   t_heat_one_position)
+
+# ── multi_timeframe ───────────────────────────────────────────────────────
+from multi_timeframe import check as mtf_check, MTFResult
+
+def _make_mtf_snap():
+    snap = _make_snap(n_candles=60)
+    return snap
+
+def t_mtf_returns_result():
+    r = mtf_check(_make_mtf_snap(), "BUY")
+    assert isinstance(r, MTFResult)
+
+def t_mtf_result_fields():
+    r = mtf_check(_make_mtf_snap(), "BUY")
+    assert hasattr(r, "aligned") and hasattr(r, "score")
+    assert isinstance(r.aligned, bool)
+    assert 0 <= r.score <= 3
+
+def t_mtf_sell_result():
+    r = mtf_check(_make_mtf_snap(), "SELL")
+    assert isinstance(r, MTFResult) and isinstance(r.aligned, bool)
+
+def t_mtf_few_candles():
+    snap = _make_snap(n_candles=5)
+    r = mtf_check(snap, "BUY")
+    assert isinstance(r, MTFResult)
+
+run("mtf_check() returns MTFResult",                           t_mtf_returns_result)
+run("MTFResult has aligned(bool) and score(0-3)",              t_mtf_result_fields)
+run("mtf_check() works for SELL signal",                       t_mtf_sell_result)
+run("mtf_check() graceful with few candles",                   t_mtf_few_candles)
 
 
 # ══════════════════════════════════════════════════════════════════════════
