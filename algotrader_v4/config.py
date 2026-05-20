@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
 
+    # Real-time tick feed
+    use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode
+
+    # Daily capital allocation by trading type
+    total_capital:          float = 500000.0   # total account capital (₹)
+    intraday_capital_pct:   float = 40.0       # % for equity intraday MIS (intraday + scalping)
+    swing_capital_pct:      float = 25.0       # % for equity delivery CNC (swing)
+    options_capital_pct:    float = 25.0       # % for options premium NRML (fno)
+    futures_capital_pct:    float = 10.0       # % for futures margin NRML (reserved)
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000

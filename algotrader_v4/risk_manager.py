@@ -12,6 +12,22 @@ from loguru import logger
 from config import settings
 
 
+# Capital bucket mapping: agent name → trading-type bucket
+_AGENT_TO_BUCKET: dict[str, str] = {
+    "intraday": "intraday",
+    "scalping": "intraday",   # scalping shares the equity intraday pool
+    "swing":    "swing",
+    "fno":      "options",
+}
+
+_BUCKET_PCT_ATTR: dict[str, str] = {
+    "intraday": "intraday_capital_pct",
+    "swing":    "swing_capital_pct",
+    "options":  "options_capital_pct",
+    "futures":  "futures_capital_pct",
+}
+
+
 class RiskManager:
 
     def __init__(self) -> None:
@@ -83,8 +99,26 @@ class RiskManager:
             )
         return True, "OK"
 
-    def calculate_quantity(self, price: float, capital: float | None = None, risk_pct: float | None = None) -> int:
-        cap = capital or settings.max_position_size
+    def max_capital_for_agent(self, agent_name: str) -> float:
+        """Return max capital (₹) for an agent based on its trading-type bucket."""
+        bucket   = _AGENT_TO_BUCKET.get(agent_name, "intraday")
+        pct_attr = _BUCKET_PCT_ATTR.get(bucket, "intraday_capital_pct")
+        pct      = getattr(settings, pct_attr, 25.0)
+        return settings.total_capital * pct / 100
+
+    def calculate_quantity(
+        self,
+        price: float,
+        agent: str = "",
+        capital: float | None = None,
+        risk_pct: float | None = None,
+    ) -> int:
+        if capital is not None:
+            cap = capital
+        elif agent:
+            cap = self.max_capital_for_agent(agent)
+        else:
+            cap = settings.max_position_size
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
             cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)
