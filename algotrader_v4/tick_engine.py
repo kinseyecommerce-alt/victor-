@@ -3,19 +3,21 @@ tick_engine.py  (v4)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Real-time market data engine.
 
-Data sources (NO Kite):
-  Live mode  → NSE India public API (polled every 1 second, free)
+Data sources (NO Kite for polling):
+  Live mode  → KiteConnect WebSocket (true real-time) with NSE India API fallback
   Paper mode → GBM simulator seeded from yfinance last price
 
-Kite is completely absent from this file.
-Kite is used ONLY in kite_client.py for order placement.
+Kite is completely absent from order-placement concerns in this file.
+Kite WebSocket is used ONLY for tick streaming; orders go via kite_client.py.
 
 Architecture:
-  asyncio loop (1 sec) → NSEClient.quote_equity(symbol)
-                       → TickBuffer (1s / 1min / 5min candles)
-                       → IndicatorCalc (EMA, RSI, MACD, BB, VWAP, ATR…)
-                       → MarketSnapshot → asyncio.Queue per agent
-                       → FastAPI WebSocket → dashboard
+  LIVE: KiteConnect WebSocket (threaded) → _ingest_kite_tick()
+        NSE India API fallback for symbols not yet received via WebSocket
+  PAPER: GBM simulator seeded from yfinance last price
+  Both → TickBuffer (1s / 1min / 5min candles)
+       → IndicatorCalc (EMA, RSI, MACD, BB, VWAP, ATR…)
+       → MarketSnapshot → asyncio.Queue per agent
+       → FastAPI WebSocket → dashboard
 """
 from __future__ import annotations
 
@@ -254,9 +256,9 @@ class IndicatorCalc:
 
 class TickEngine:
     """
-    Polls NSE India API every 1 second for each subscribed symbol.
-    Builds candles, computes live indicators, publishes to agent queues.
-    Kite is NOT used here — only for orders in kite_client.py.
+    In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
+    NSE India API fallback for symbols not yet received via WebSocket.
+    In PAPER mode: GBM simulator seeded from yfinance last price.
     """
 
     def __init__(self) -> None:
@@ -275,6 +277,11 @@ class TickEngine:
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._task: Optional[asyncio.Task]              = None
+
+        # KiteConnect WebSocket state
+        self._kite_ticker = None
+        self._use_ws: bool = False
+        self._ws_received: set[str] = set()
 
     # ── Setup ─────────────────────────────────────────────────────────
 
@@ -296,15 +303,39 @@ class TickEngine:
                     "NSE India API" if settings.trading_mode == "LIVE" else "Paper simulator")
 
     def start_loop(self) -> None:
-        """Called once FastAPI is running — starts the async polling loop."""
+        """Called once FastAPI is running — starts the async polling loop and WebSocket."""
         self._running = True
+        self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._poll_loop())
-        logger.info("TickEngine poll loop started")
+
+        # Start KiteConnect WebSocket in LIVE mode if configured
+        if (settings.trading_mode == "LIVE"
+                and settings.use_kite_websocket
+                and settings.kite_access_token):
+            try:
+                from kite_ticker import KiteTicker
+                self._kite_ticker = KiteTicker()
+                self._kite_ticker.start(
+                    self._symbols,
+                    self._ingest_kite_tick,
+                    self._loop,
+                )
+                self._use_ws = True
+                logger.info("TickEngine: KiteConnect WebSocket started for {} symbols",
+                            len(self._symbols))
+            except Exception as exc:
+                logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
+                             "falling back to NSE polling", exc)
+                self._use_ws = False
+
+        logger.info("TickEngine poll loop started (ws={})", self._use_ws)
 
     def stop(self) -> None:
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
+        if self._kite_ticker:
+            self._kite_ticker.stop()
         logger.info("TickEngine stopped")
 
     # ── Subscriber management ─────────────────────────────────────────
@@ -317,12 +348,67 @@ class TickEngine:
     def remove_subscriber(self, name: str) -> None:
         self._subscribers.pop(name, None)
 
+    # ── KiteConnect WebSocket ingest ──────────────────────────────────
+
+    async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
+        """Process a tick received directly from KiteConnect WebSocket."""
+        if symbol not in self._bufs_1min:
+            return
+        self._ws_received.add(symbol)
+
+        self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
+        self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
+
+        df  = self._bufs_1min[symbol].as_dataframe()
+        ind = IndicatorCalc.compute(symbol, tick, df)
+
+        self._latest_tick[symbol] = tick
+        self._latest_ind[symbol]  = ind
+
+        snap = MarketSnapshot(
+            symbol=symbol, tick=tick, indicators=ind,
+            candles_1min=self._bufs_1min[symbol].candles()[-60:],
+            candles_5min=self._bufs_5min[symbol].candles()[-30:],
+        )
+
+        for q in self._subscribers.values():
+            try:    q.put_nowait(snap)
+            except asyncio.QueueFull: pass
+
+        if self.ws_broadcast:
+            try:
+                await self.ws_broadcast({
+                    "event":      "tick",
+                    "symbol":     symbol,
+                    "ltp":        tick.ltp,
+                    "bid":        tick.bid,
+                    "ask":        tick.ask,
+                    "change_pct": round(tick.change_pct, 2),
+                    "volume":     tick.volume,
+                    "day_high":   tick.high,
+                    "day_low":    tick.low,
+                    "trend":      ind.trend,
+                    "momentum":   ind.momentum,
+                    "volatility": ind.volatility,
+                    "rsi":        round(ind.rsi_14, 1),
+                    "vwap":       round(ind.vwap, 2),
+                    "ema9":       round(ind.ema9,  2),
+                    "ema21":      round(ind.ema21, 2),
+                    "macd_hist":  round(ind.macd_hist, 4),
+                    "vol_ratio":  round(ind.volume_ratio, 2),
+                    "source":     "KITE_WS",
+                    "ts":         tick.timestamp.isoformat(),
+                })
+            except Exception:
+                pass
+
     # ── Main poll loop ────────────────────────────────────────────────
 
     async def _poll_loop(self) -> None:
         """
         Polls all subscribed symbols every 1 second.
         During off-market hours, slows to every 30 seconds (to check status).
+        Symbols already receiving WebSocket ticks are skipped to avoid duplicate processing.
         """
         while self._running:
             t_start = time.monotonic()
@@ -331,7 +417,7 @@ class TickEngine:
                 await asyncio.sleep(30)
                 continue
 
-            # Fetch all symbols concurrently
+            # Fetch all symbols concurrently (skip those already fed by WebSocket)
             tasks = [self._fetch_and_process(sym) for sym in self._symbols]
             await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -340,6 +426,10 @@ class TickEngine:
             await asyncio.sleep(max(0, 1.0 - elapsed))
 
     async def _fetch_and_process(self, symbol: str) -> None:
+        # Skip NSE polling if KiteConnect WebSocket is already feeding this symbol
+        if self._use_ws and symbol in self._ws_received:
+            return
+
         exch = self._exchange.get(symbol, "NSE")
 
         if settings.trading_mode == "PAPER":

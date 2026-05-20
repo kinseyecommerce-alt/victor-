@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends, Body
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +38,7 @@ from market_regime import regime_detector, REGIME_PLANS
 from adaptive_engine import adaptive_engine
 from sebi_compliance import sebi_compliance, KillSwitchState, APPROVED_ALGO_IDS
 from atomic_bracket import atomic_bracket_engine
+import bot_state
 
 from fastapi.security import OAuth2PasswordRequestForm
 import swagger_ui_bundle
@@ -251,6 +252,19 @@ class TradingLimitsRequest(BaseModel):
     max_trades_scalping:  int | None = Field(default=None, ge=1, le=200)
     cooldown_after_loss_sec: int | None = Field(default=None, ge=0, le=3600)
 
+class AgentEnablesRequest(BaseModel):
+    intraday: bool | None = None
+    fno:      bool | None = None
+    swing:    bool | None = None
+    scalping: bool | None = None
+
+class CapitalAllocationRequest(BaseModel):
+    total_capital:        float | None = Field(None, ge=10000, le=100_000_000)
+    intraday_capital_pct: float | None = Field(None, ge=0, le=100)
+    swing_capital_pct:    float | None = Field(None, ge=0, le=100)
+    options_capital_pct:  float | None = Field(None, ge=0, le=100)
+    futures_capital_pct:  float | None = Field(None, ge=0, le=100)
+
 
 # ── UI pages ─────────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
@@ -373,15 +387,18 @@ def set_token(req: TokenRequest):
 async def start_bot(req: BotStartRequest):
     if master_agent.running:
         raise HTTPException(400, "Already running")
+    strategies = [s for s in req.strategies if bot_state.is_agent_enabled(s)]
+    if not strategies:
+        raise HTTPException(400, "All requested strategies are disabled")
     watchlist = req.watchlist
     if not watchlist:
-        selected = await symbol_scanner.run(strategies=req.strategies, force=req.force_scan)
+        selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
         watchlist = symbol_scanner.all_selected_flat()
         if not watchlist:
             from symbol_scanner import NIFTY_50
             watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
             logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
-    report = master_agent.start(req.strategies, watchlist)
+    report = master_agent.start(strategies, watchlist)
     return {"status": "started", "architecture": "tick-driven 1s",
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
             "watchlist": [w["symbol"] for w in watchlist], "report": report}
@@ -448,6 +465,8 @@ def pause_agent(name: str):
 def resume_agent(name: str):
     a = ALL_AGENTS.get(name)
     if not a: raise HTTPException(404, "Not found")
+    if not bot_state.is_agent_enabled(name):
+        raise HTTPException(400, f"Agent '{name}' is disabled")
     wl = master_agent._agent_watchlists.get(name, [])
     if wl:
         q = tick_engine.add_subscriber(f"agent_{name}")
@@ -626,6 +645,59 @@ def patch_trading_limits(req: TradingLimitsRequest):
     if req.max_trades_scalping     is not None: settings.max_trades_scalping     = req.max_trades_scalping
     if req.cooldown_after_loss_sec is not None: settings.cooldown_after_loss_sec = req.cooldown_after_loss_sec
     return get_trading_limits()
+
+
+# ── Agent Enable/Disable ──────────────────────────────────────────────────────
+@app.get("/settings/agent-enables", tags=["Settings"])
+def get_agent_enables():
+    return dict(bot_state._agent_enabled)
+
+@app.post("/settings/agent-enables", tags=["Settings"])
+def set_agent_enables(req: AgentEnablesRequest):
+    updates = req.model_dump(exclude_none=True)
+    for name, val in updates.items():
+        bot_state.set_agent_enabled(name, val)
+        if not val:
+            a = ALL_AGENTS.get(name)
+            if a and a.state.running:
+                a.stop()
+    return dict(bot_state._agent_enabled)
+
+
+# ── Capital Allocation ────────────────────────────────────────────────────────
+@app.get("/settings/capital-allocation", tags=["Settings"])
+def get_capital_allocation():
+    return {
+        "total_capital":        settings.total_capital,
+        "intraday_capital_pct": settings.intraday_capital_pct,
+        "swing_capital_pct":    settings.swing_capital_pct,
+        "options_capital_pct":  settings.options_capital_pct,
+        "futures_capital_pct":  settings.futures_capital_pct,
+        "per_type_rupees": {
+            "intraday": round(settings.total_capital * settings.intraday_capital_pct / 100),
+            "swing":    round(settings.total_capital * settings.swing_capital_pct    / 100),
+            "options":  round(settings.total_capital * settings.options_capital_pct  / 100),
+            "futures":  round(settings.total_capital * settings.futures_capital_pct  / 100),
+        },
+        "agent_buckets": {
+            "intraday": "intraday", "scalping": "intraday",
+            "swing": "swing",       "fno": "options",
+        }
+    }
+
+@app.patch("/settings/capital-allocation", tags=["Settings"])
+def patch_capital_allocation(req: CapitalAllocationRequest):
+    pcts = [req.intraday_capital_pct, req.swing_capital_pct,
+            req.options_capital_pct,  req.futures_capital_pct]
+    provided = [p for p in pcts if p is not None]
+    if len(provided) == 4 and round(sum(provided), 2) > 100:
+        raise HTTPException(400, "Capital percentages exceed 100%")
+    if req.total_capital        is not None: settings.total_capital        = req.total_capital
+    if req.intraday_capital_pct is not None: settings.intraday_capital_pct = req.intraday_capital_pct
+    if req.swing_capital_pct    is not None: settings.swing_capital_pct    = req.swing_capital_pct
+    if req.options_capital_pct  is not None: settings.options_capital_pct  = req.options_capital_pct
+    if req.futures_capital_pct  is not None: settings.futures_capital_pct  = req.futures_capital_pct
+    return get_capital_allocation()
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -831,6 +903,7 @@ def health():
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
+            "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),
             "time": datetime.now().strftime("%H:%M:%S IST")}
 

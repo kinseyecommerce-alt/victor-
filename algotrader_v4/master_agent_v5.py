@@ -28,6 +28,7 @@ from market_regime import regime_detector, Regime, REGIME_PLANS
 from adaptive_engine import adaptive_engine
 from agents.base_agent import send_telegram
 from agents.strategy_agents import ALL_AGENTS
+from bot_state import is_agent_enabled
 
 
 MASTER_PROMPT = """You are the MASTER TRADING INTELLIGENCE for an NSE/BSE algorithmic trading system.
@@ -149,6 +150,8 @@ class MasterAgent:
             agent = ALL_AGENTS.get(strat)
             if not agent:
                 continue
+            if not is_agent_enabled(strat):
+                continue
             approved = agent.filter_watchlist(watchlist)
             self._agent_watchlists[strat] = approved
             report[strat] = {
@@ -162,6 +165,8 @@ class MasterAgent:
         for strat in strategies:
             agent = ALL_AGENTS.get(strat)
             if not agent:
+                continue
+            if not is_agent_enabled(strat):
                 continue
             if self._agent_watchlists.get(strat):
                 q = tick_engine.add_subscriber(f"agent_{strat}")
@@ -353,6 +358,8 @@ class MasterAgent:
         for strat in plan.active:
             agent = ALL_AGENTS.get(strat)
             if agent and not agent.state.running:
+                if not is_agent_enabled(strat):
+                    continue
                 if self._agent_watchlists.get(strat):
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)
@@ -367,6 +374,8 @@ class MasterAgent:
             if action == "pause" and agent.state.running:
                 agent.stop()
             elif action in ("run", "reduce_size") and not agent.state.running:
+                if not is_agent_enabled(strat):
+                    continue
                 if self._agent_watchlists.get(strat):
                     q = tick_engine.add_subscriber(f"agent_{strat}")
                     agent.start(q)
