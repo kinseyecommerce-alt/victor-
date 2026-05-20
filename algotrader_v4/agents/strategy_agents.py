@@ -14,85 +14,287 @@ from risk_manager import risk_manager
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1.  INTRADAY  —  MIS, VWAP + EMA + RSI + volume confirmation
+# 1.  INTRADAY  —  MIS, 5-pattern never-miss architecture
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class IntradayAgent(BaseAgent):
+    """
+    Never-miss NSE intraday agent — 5 entry patterns, all market sessions covered.
+
+    Patterns (fire independently, best score wins each tick):
+      1. VWAP_TREND   — price+EMA above VWAP with RSI/MACD/volume (trend continuation)
+      2. EMA_PULLBACK — pullback into RSI 45-62 zone in a strong 3-EMA trend
+      3. ORB_BREAK    — opening range breakout (9:30-10:30 execution window)
+      4. BREAKOUT     — 15-bar high/low break with heavy volume (≥1.5×)
+      5. VWAP_RECLAIM — fresh VWAP cross with volume (regime change entry)
+
+    Context bonuses (added to every pattern base score):
+      EMA full align (0-2), VWAP side (0-1), RSI zone (0-1),
+      volume (0-1), MACD direction (0-1), institutional flow (0-1)
+
+    Sizing tiers:  score 4 → 0.5×  |  5-6 → 0.75×  |  7+ → 1.0×
+    Cooldown:      180s per direction (BUY/SELL tracked independently)
+    SL/TGT:        ATR-based — SL=1.5×ATR14, TGT=2.5×ATR14
+    """
     name    = "intraday"
     product = "MIS"
     min_candles_1min = 21
 
+    SL_ATR      = 1.5
+    TGT_ATR     = 2.5
+    SL_MIN_PCT  = 0.5
+    TGT_MIN_PCT = 0.8
+    MIN_SCORE   = 4
+    COOL_S      = 180   # 3-min per direction
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Per-symbol rolling state — instance-level so each agent is independent
+        self._prev_above_vwap: dict = {}
+        self._prev_ltp:        dict = {}
+        self._prev_rsi:        dict = {}
+        self._orb_high:        dict = {}
+        self._orb_low:         dict = {}
+        self._orb_fired:       dict = {}
+        self._cool_ts:         dict = {}   # sym → {"BUY": datetime, "SELL": datetime}
+
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
+        sym = snap.symbol
         ltp = snap.tick.ltp
+        now = datetime.now()
+        t   = now.time()
 
-        # ── Entry conditions (ALL must hold) ────────────────────────────
-        vwap_above  = ltp > ind.vwap > 0          # price above VWAP
-        ema_bullish = ind.ema9 > ind.ema21 > 0    # short EMA above long EMA
-        rsi_ok      = 45 < ind.rsi_14 < 67        # momentum not exhausted
-        macd_bull   = ind.macd_hist > 0            # MACD histogram positive
-        vol_spike   = ind.volume_ratio >= 1.3      # above-average volume
+        if time(14, 50) <= t:
+            return "HOLD", None
 
-        # ── Trend filter ────────────────────────────────────────────
-        trend_up    = ind.trend == "UP"
+        self._update_orb(sym, snap, t)
 
-        if vwap_above and ema_bullish and rsi_ok and macd_bull and vol_spike and trend_up:
-            sl  = round(max(ind.vwap, risk_manager.sl_price(ltp, "BUY")), 2)
-            tgt = risk_manager.target_price(ltp, "BUY")
-            return "BUY", {
-                "symbol":     snap.symbol,
-                "exchange":   "NSE",
-                "side":       "BUY",
-                "price":      ltp,
-                "stop_loss":  sl,
-                "target":     tgt,
-                "product":    self.product,
-                "trigger":    "VWAP+EMA+MACD+VOL",
-            }
+        best_score, best_action, best_pattern = -1, "", ""
+        for pat_fn in (self._pat_vwap_trend, self._pat_ema_pullback,
+                       self._pat_orb_break, self._pat_breakout, self._pat_vwap_reclaim):
+            try:
+                action, base, pname = pat_fn(sym, snap, ind, ltp, t)
+            except Exception:
+                continue
+            if not action:
+                continue
+            total = base + self._ctx_bonus(action, sym, ind, ltp)
+            if total > best_score:
+                best_score, best_action, best_pattern = total, action, pname
 
-        # ── Short side: price breaks below VWAP with momentum ─────────
-        vwap_below  = ltp < ind.vwap > 0
-        ema_bear    = ind.ema9 < ind.ema21
-        rsi_bear    = 33 < ind.rsi_14 < 55
-        macd_bear   = ind.macd_hist < 0
+        self._update_state(sym, ind, ltp)
 
-        if vwap_below and ema_bear and rsi_bear and macd_bear and vol_spike:
-            sl  = round(min(ind.vwap, risk_manager.sl_price(ltp, "SELL")), 2)
-            tgt = risk_manager.target_price(ltp, "SELL")
-            return "SELL", {
-                "symbol":    snap.symbol,
-                "exchange":  "NSE",
-                "side":      "SELL",
-                "price":     ltp,
-                "stop_loss": sl,
-                "target":    tgt,
-                "product":   self.product,
-                "trigger":   "VWAP-BREAK+EMA+MACD",
-            }
+        if best_score < self.MIN_SCORE or not best_action:
+            return "HOLD", None
 
-        return "HOLD", None
+        cools = self._cool_ts.setdefault(sym, {})
+        last  = cools.get(best_action)
+        if last and (now - last).total_seconds() < self.COOL_S:
+            return "HOLD", None
+        cools[best_action] = now
+
+        atr      = ind.atr_14 or ltp * 0.005
+        sl_dist  = max(atr * self.SL_ATR,  ltp * self.SL_MIN_PCT  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, ltp * self.TGT_MIN_PCT / 100)
+        sf       = 1.0 if best_score >= 7 else (0.75 if best_score >= 5 else 0.5)
+
+        if best_action == "BUY":
+            sl  = round(ltp - sl_dist, 2)
+            tgt = round(ltp + tgt_dist, 2)
+        else:
+            sl  = round(ltp + sl_dist, 2)
+            tgt = round(ltp - tgt_dist, 2)
+
+        return best_action, {
+            "symbol":            sym,
+            "exchange":          "NSE",
+            "side":              best_action,
+            "price":             ltp,
+            "stop_loss":         sl,
+            "target":            tgt,
+            "stop_loss_pct":     round(sl_dist  / ltp * 100, 3),
+            "target_pct":        round(tgt_dist / ltp * 100, 3),
+            "product":           self.product,
+            "_gate_size_factor": sf,
+            "trigger": (
+                f"INTRA-{best_action} [{best_pattern}] score={best_score} "
+                f"sf={sf} rsi={ind.rsi_14:.0f} trend={ind.trend}"
+            ),
+        }
+
+    # ── Pattern 1: VWAP_TREND ─────────────────────────────────────────────────
+
+    def _pat_vwap_trend(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        if (ltp > ind.vwap and ind.ema9 > ind.ema21 > 0
+                and 45 <= ind.rsi_14 <= 72
+                and ind.macd_hist > 0 and ind.volume_ratio >= 1.3):
+            return "BUY", 3, "VWAP_TREND"
+        if (ltp < ind.vwap and ind.ema9 < ind.ema21 > 0
+                and 28 <= ind.rsi_14 <= 55
+                and ind.macd_hist < 0 and ind.volume_ratio >= 1.3):
+            return "SELL", 3, "VWAP_TREND"
+        return "", 0, ""
+
+    # ── Pattern 2: EMA_PULLBACK ────────────────────────────────────────────────
+
+    def _pat_ema_pullback(self, sym, snap, ind, ltp, t):
+        prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
+        ema_bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
+        ema_bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
+        # Uptrend pullback: RSI cooled from extended (>63) into 45-62 zone
+        if ema_bull and prev_rsi > 63 and 45 <= ind.rsi_14 <= 62:
+            return "BUY", 4, "EMA_PULLBACK"
+        # Downtrend pullback: RSI recovered from oversold (<37) into 38-55 zone
+        if ema_bear and prev_rsi < 37 and 38 <= ind.rsi_14 <= 55:
+            return "SELL", 4, "EMA_PULLBACK"
+        return "", 0, ""
+
+    # ── Pattern 3: ORB_BREAK ──────────────────────────────────────────────────
+
+    def _pat_orb_break(self, sym, snap, ind, ltp, t):
+        if not (time(9, 30) <= t <= time(10, 30)):
+            return "", 0, ""
+        orb_h = self._orb_high.get(sym)
+        orb_l = self._orb_low.get(sym)
+        if not (orb_h and orb_l and orb_h > orb_l):
+            return "", 0, ""
+        if self._orb_fired.get(sym):
+            return "", 0, ""
+        prev = self._prev_ltp.get(sym, ltp)
+        if prev <= orb_h and ltp > orb_h * 1.001 and ind.volume_ratio >= 1.2:
+            self._orb_fired[sym] = True
+            return "BUY", 5, "ORB_BREAK"
+        if prev >= orb_l and ltp < orb_l * 0.999 and ind.volume_ratio >= 1.2:
+            self._orb_fired[sym] = True
+            return "SELL", 5, "ORB_BREAK"
+        return "", 0, ""
+
+    # ── Pattern 4: BREAKOUT ────────────────────────────────────────────────────
+
+    def _pat_breakout(self, sym, snap, ind, ltp, t):
+        n = 15
+        if len(snap.candles_1min) < n or ind.volume_ratio < 1.5:
+            return "", 0, ""
+        last_n = snap.candles_1min[-n:]
+        n_high = max(c.high for c in last_n)
+        n_low  = min(c.low  for c in last_n)
+        prev   = self._prev_ltp.get(sym, ltp)
+        if prev < n_high and ltp > n_high:
+            return "BUY",  3, "BREAKOUT"
+        if prev > n_low  and ltp < n_low:
+            return "SELL", 3, "BREAKOUT"
+        return "", 0, ""
+
+    # ── Pattern 5: VWAP_RECLAIM ────────────────────────────────────────────────
+
+    def _pat_vwap_reclaim(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        was_above = self._prev_above_vwap.get(sym, ltp >= ind.vwap)
+        now_above = ltp > ind.vwap
+        if was_above == now_above or ind.volume_ratio < 1.2:
+            return "", 0, ""
+        return ("BUY", 3, "VWAP_RECLAIM") if now_above else ("SELL", 3, "VWAP_RECLAIM")
+
+    # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
+
+    def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
+        b = 0
+        is_buy = action == "BUY"
+
+        # EMA alignment (0-2): full 3-EMA stack = +2, 2-EMA only = +1
+        if is_buy:
+            if ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0:
+                b += 2
+            elif ind.ema9 > ind.ema21 > 0:
+                b += 1
+        else:
+            if ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0:
+                b += 2
+            elif ind.ema9 < ind.ema21 > 0:
+                b += 1
+
+        # VWAP side (0-1)
+        if ind.vwap and ind.vwap > 0:
+            if (is_buy and ltp > ind.vwap) or (not is_buy and ltp < ind.vwap):
+                b += 1
+
+        # RSI zone (0-1)
+        if (is_buy and 44 <= ind.rsi_14 <= 72) or (not is_buy and 28 <= ind.rsi_14 <= 56):
+            b += 1
+
+        # Volume (0-1)
+        if ind.volume_ratio >= 1.3:
+            b += 1
+
+        # MACD direction (0-1)
+        if (is_buy and ind.macd_hist > 0) or (not is_buy and ind.macd_hist < 0):
+            b += 1
+
+        # Institutional flow (0-1) — sync cache, fails silently
+        try:
+            from institutional_flow import get_cached_score
+            inst = get_cached_score(sym)
+            if inst:
+                score_val = inst.get("institutional_score", 50.0)
+                if (is_buy and score_val > 55) or (not is_buy and score_val < 45):
+                    b += 1
+        except Exception:
+            pass
+
+        return b
+
+    # ── ORB builder (called every tick 9:15-9:30) ─────────────────────────────
+
+    def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
+        if not (time(9, 15) <= t <= time(9, 30)):
+            return
+        if sym not in self._orb_high:
+            self._orb_high[sym]  = snap.tick.ltp
+            self._orb_low[sym]   = snap.tick.ltp
+            self._orb_fired[sym] = False
+        for c in snap.candles_1min:
+            c_t = getattr(c, "ts", None)
+            if c_t and time(9, 15) <= c_t.time() <= time(9, 30):
+                self._orb_high[sym] = max(self._orb_high[sym], c.high)
+                self._orb_low[sym]  = min(self._orb_low[sym],  c.low)
+
+    # ── State updater (called at end of every tick) ───────────────────────────
+
+    def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
+        if ind.vwap and ind.vwap > 0:
+            self._prev_above_vwap[sym] = ltp > ind.vwap
+        self._prev_ltp[sym] = ltp
+        self._prev_rsi[sym] = ind.rsi_14
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)
         ltp   = ind.ltp
         side  = "BUY" if pos.get("quantity", 0) > 0 else "SELL"
+        if not entry or entry <= 0:
+            return False, ""
 
-        sl  = risk_manager.sl_price(entry, side)
-        tgt = risk_manager.target_price(entry, side)
+        atr      = ind.atr_14 or entry * 0.005
+        sl_dist  = max(atr * self.SL_ATR,  entry * self.SL_MIN_PCT  / 100)
+        tgt_dist = max(atr * self.TGT_ATR, entry * self.TGT_MIN_PCT / 100)
 
         if side == "BUY":
-            if ltp <= sl:              return True, f"SL hit ₹{ltp:.2f}"
-            if ltp >= tgt:             return True, f"Target hit ₹{ltp:.2f}"
+            if ltp <= entry - sl_dist:  return True, f"SL hit ₹{ltp:.2f}"
+            if ltp >= entry + tgt_dist: return True, f"Target ₹{ltp:.2f}"
             if ind.trend == "DOWN" and ind.macd_hist < 0:
-                                       return True, "Trend reversal exit"
+                return True, "Trend reversal exit"
         else:
-            if ltp >= sl:              return True, f"SL hit ₹{ltp:.2f}"
-            if ltp <= tgt:             return True, f"Target hit ₹{ltp:.2f}"
+            if ltp >= entry + sl_dist:  return True, f"SL hit ₹{ltp:.2f}"
+            if ltp <= entry - tgt_dist: return True, f"Target ₹{ltp:.2f}"
             if ind.trend == "UP" and ind.macd_hist > 0:
-                                       return True, "Trend reversal exit"
+                return True, "Trend reversal exit"
 
         now = datetime.now().time()
-        if now.hour >= 15:             return True, "Auto square-off 3:00 PM"
+        if now.hour >= 15:
+            return True, "Auto square-off 3:00 PM"
         return False, ""
 
 
