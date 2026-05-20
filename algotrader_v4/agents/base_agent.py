@@ -24,6 +24,79 @@ from trailing_sl_engine import trailing_sl_engine, TrailingSLEngine
 from atomic_bracket import atomic_bracket_engine
 
 
+# ── TSL callback registry ────────────────────────────────────────────────────
+# Maps main order_id → {sl_order_id, product, exchange}
+_tsl_sl_orders: dict[str, dict] = {}
+_tsl_callbacks_installed: bool = False
+
+
+def _setup_tsl_callbacks() -> None:
+    """Wire global TSL callbacks once (idempotent). Must be called before first register()."""
+    global _tsl_callbacks_installed
+    if _tsl_callbacks_installed:
+        return
+    _tsl_callbacks_installed = True
+
+    async def _on_sl_moved(pos, old_sl: float, move_type: str) -> None:
+        entry = _tsl_sl_orders.get(pos.order_id)
+        if not entry:
+            return
+        sl_oid = entry["sl_order_id"]
+        try:
+            kite_client.modify_order(order_id=sl_oid, trigger_price=pos.current_sl)
+        except Exception:
+            try:
+                kite_client.cancel_order(sl_oid)
+            except Exception:
+                pass
+            new_sl_oid = kite_client.place_order(
+                tradingsymbol=pos.symbol,
+                exchange=entry.get("exchange", "NSE"),
+                transaction_type="SELL" if pos.side == "BUY" else "BUY",
+                quantity=pos.quantity, order_type="SL-M",
+                product=entry.get("product", "MIS"),
+                trigger_price=pos.current_sl,
+                tag=f"TSL-{pos.strategy}",
+            )
+            entry["sl_order_id"] = new_sl_oid
+
+    async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
+        entry = _tsl_sl_orders.pop(pos.order_id, None)
+        if entry and entry.get("sl_order_id"):
+            try:
+                kite_client.cancel_order(entry["sl_order_id"])
+            except Exception:
+                pass
+        kite_client.place_order(
+            tradingsymbol=pos.symbol,
+            exchange=entry.get("exchange", "NSE") if entry else "NSE",
+            transaction_type="SELL" if pos.side == "BUY" else "BUY",
+            quantity=pos.quantity, order_type="MARKET",
+            product=entry.get("product", "MIS") if entry else "MIS",
+            tag=f"TSL-HIT-{pos.strategy}",
+        )
+        order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl)
+        risk_manager.record_trade(pnl)
+        risk_manager.position_closed()
+        trailing_sl_engine.deregister(pos.order_id)
+
+    async def _on_target_hit(pos, ltp: float, level: int) -> None:
+        if level == 2:
+            entry = _tsl_sl_orders.pop(pos.order_id, None)
+            kite_client.place_order(
+                tradingsymbol=pos.symbol,
+                exchange=entry.get("exchange", "NSE") if entry else "NSE",
+                transaction_type="SELL" if pos.side == "BUY" else "BUY",
+                quantity=pos.quantity, order_type="MARKET",
+                product=entry.get("product", "MIS") if entry else "MIS",
+                tag=f"TSL-T{level}-{pos.strategy}",
+            )
+
+    trailing_sl_engine.on_sl_moved   = _on_sl_moved
+    trailing_sl_engine.on_sl_hit     = _on_sl_hit
+    trailing_sl_engine.on_target_hit = _on_target_hit
+
+
 @dataclass
 class AgentState:
     name:             str
@@ -73,7 +146,7 @@ class BaseAgent(ABC):
     def should_exit_position(self, position: dict, ind: LiveIndicators) -> tuple[bool, str]:
         ...
 
-    # ── Backtest filter ───────────────────────────────────────────────
+    # ── Backtest filter ───────────────────────────────────────────────────
 
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
         # Fast path: pre-learned system — skip per-symbol backtests
@@ -113,7 +186,7 @@ class BaseAgent(ABC):
         self.state.approved_symbols = [a["symbol"] for a in approved]
         return approved
 
-    # ── Lifecycle ─────────────────────────────────────────────────────
+    # ── Lifecycle ──────────────────────────────────────────────────────
 
     def start(self, queue: asyncio.Queue) -> None:
         self._queue = queue
@@ -127,7 +200,7 @@ class BaseAgent(ABC):
             self._task.cancel()
         logger.info("[{}] stopped", self.name)
 
-    # ── Main tick loop ────────────────────────────────────────────────
+    # ── Main tick loop ──────────────────────────────────────────────────
 
     async def _run_loop(self) -> None:
         while self.state.running:
@@ -154,7 +227,7 @@ class BaseAgent(ABC):
                 await self._check_exits_on_tick(snap)
                 action, signal = self.evaluate_tick(snap)
                 if action in ("BUY", "SELL") and signal:
-                    # ── Multi-timeframe alignment ──────────────────────────
+                    # ── Multi-timeframe alignment ──────────────────────
                     if settings.use_multi_timeframe:
                         from multi_timeframe import check as mtf_check
                         mtf = mtf_check(snap, action)
@@ -171,7 +244,7 @@ class BaseAgent(ABC):
                                      self.name, snap.symbol, _evt["description"])
                         continue
 
-                    # ── Claude per-trade intelligence gate ────────────────
+                    # ── Claude per-trade intelligence gate ────────────────────
                     if settings.use_claude_trade_gate:
                         from claude_trade_gate import assess as gate_assess
                         from master_agent_v5 import record_gate_decision
@@ -211,13 +284,13 @@ class BaseAgent(ABC):
                 err = f"{snap.symbol}: {str(exc)[:100]}"
                 self.state.errors.append(err)
 
-    # ── Entry ─────────────────────────────────────────────────────────
+    # ── Entry ───────────────────────────────────────────────────────────
 
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         sym  = snap.symbol
         ltp  = snap.tick.ltp
         exch = signal.get("exchange", "NSE")
-        qty  = risk_manager.calculate_quantity(ltp)
+        qty  = risk_manager.calculate_quantity(ltp, agent=self.name)
 
         # Apply Kelly-adjusted size (gate may have set a size_factor)
         size_factor = signal.pop("_gate_size_factor", 1.0)
@@ -260,6 +333,9 @@ class BaseAgent(ABC):
         self.state.signals_fired += 1
         self.state.last_signal    = signal
 
+        # Wire TSL callbacks (idempotent — only installs once globally)
+        _setup_tsl_callbacks()
+
         # Register with trailing SL engine (monitors every tick)
         trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
@@ -268,13 +344,21 @@ class BaseAgent(ABC):
         )
 
         sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
-        kite_client.place_order(
+        product = signal.get("product", self.product)
+        sl_order_id = kite_client.place_order(
             tradingsymbol=sym, exchange=exch,
             transaction_type="SELL" if action == "BUY" else "BUY",
             quantity=qty, order_type="SL-M",
-            product=signal.get("product", self.product),
+            product=product,
             trigger_price=sl, tag=f"Agent-{self.name}-SL",
         )
+
+        # Register SL-M order so TSL callbacks can modify/cancel it
+        _tsl_sl_orders[order_id] = {
+            "sl_order_id": sl_order_id,
+            "product":     product,
+            "exchange":    exch,
+        }
 
         ind = snap.indicators
         await send_telegram(
@@ -311,7 +395,7 @@ class BaseAgent(ABC):
             self.state.pnl_today += pnl
             trailing_sl_engine.deregister(oid)
             await send_telegram(
-                f"{'🔴' if pnl<0 else '🟢'} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
+                f"{'\U0001f534' if pnl<0 else '\U0001f7e2'} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
                 f"Reason: {reason} | P&L: ₹{pnl:.0f}"
             )
             try:
@@ -329,7 +413,7 @@ class BaseAgent(ABC):
                 pass
             break
 
-    # ── Utils ─────────────────────────────────────────────────────────
+    # ── Utils ───────────────────────────────────────────────────────────
 
     def reset_daily(self) -> None:
         self.state.trades_today = self.state.pnl_today = 0
