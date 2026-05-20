@@ -102,209 +102,340 @@ class IntradayAgent(BaseAgent):
 
 class FnOAgent(BaseAgent):
     """
-    World-class NSE/NFO options agent.
+    Never-miss NSE/NFO options agent — 7 entry patterns, all market conditions covered.
 
-    Intelligence stack (10-factor entry score):
-      1. IV rank       — cheap vol = buy, expensive = avoid
-      2. Trend strength — EMA9/21/50 alignment
-      3. RSI zone       — directionally correct momentum
-      4. VWAP side      — institutional reference point
-      5. IV skew        — put/call skew confirms direction
-      6. Options flow   — smart money call/put ratio
-      7. GEX regime     — avoid short-gamma / pin-risk zones
-      8. Momentum label — STRONG_UP / STRONG_DOWN from tick engine
-      9. Volume surge   — confirms participation
-     10. MACD histogram — momentum direction confirmation
+    Patterns (fire independently, best score wins each tick):
+      1. EMA_CROSS    — 9/21/50 EMA full alignment (highest conviction trend)
+      2. TREND_PULL   — Pullback into 48-58 RSI zone in a strong EMA trend
+      3. ORB          — Opening range breakout (9:15-9:30 range, execute 9:30-10:00)
+      4. VWAP_RECLAIM — Price crosses above/below VWAP with volume
+      5. BB_SQUEEZE   — Bollinger Band squeeze expanding → volatility breakout
+      6. RSI_EXTREME  — RSI > 72 / < 28 with MACD confirmation (momentum)
+      7. SURGE        — Large candle body (>0.4%) + heavy volume (>1.8×)
 
-    Strike selection: delta ~0.40 proxy via BS approximation.
-    SL/TGT adapted to IV rank (cheap vol → wider range, expensive → tight).
-    Signal dedup: 5-minute cooldown per symbol+direction.
+    Context bonuses (added to every pattern score):
+      IV rank, options flow, GEX regime, volume, MACD, skew
+
+    Sizing tiers:   score 4 → 0.25×  |  5 → 0.5×  |  6-7 → 0.75×  |  8+ → 1.0×
+    Cooldown:       120s per symbol per direction (CE and PE tracked independently)
+    IV gate:        hard block if IV rank > 72% (never buy expensive premium)
     """
     name    = "fno"
     product = "NRML"
-    min_candles_1min = 15
+    min_candles_1min = 10
 
     LOT_SIZES: dict = {"NIFTY": 75, "BANKNIFTY": 15, "MIDCPNIFTY": 75,
                        "FINNIFTY": 40, "SENSEX": 10}
-    MIN_SCORE      = 5       # out of 10
-    MAX_IV_BUY     = 72      # above this IV rank, avoid buying premium
-    SIGNAL_COOL_S  = 300     # 5-min dedup per symbol+direction
+    MIN_SCORE    = 4        # minimum score to fire at 0.25× size
+    MAX_IV_BUY   = 72       # hard block above this IV rank
+    COOL_S       = 120      # 2-min per symbol per direction
 
-    _last_ts:  dict = {}
-    _last_dir: dict = {}
+    # ── Per-symbol state ──────────────────────────────────────────────────────
+    _orb_high:        dict = {}   # sym → float (ORB high built 9:15-9:30)
+    _orb_low:         dict = {}   # sym → float
+    _orb_fired:       dict = {}   # sym → bool  (prevent ORB retrigger)
+    _last_candle_ts:  dict = {}   # sym → candle ts (SURGE dedup)
+    _prev_above_vwap: dict = {}   # sym → bool (VWAP cross state)
+    _prev_bb_width:   dict = {}   # sym → float (squeeze detection)
+    _prev_ltp:        dict = {}   # sym → float (generic prev price)
+    _prev_rsi:        dict = {}   # sym → float (pullback detection)
+    _cool_ts:         dict = {}   # sym → {"CE": datetime, "PE": datetime}
 
-    # ── Entry evaluation ──────────────────────────────────────────────────────
+    # ── Main entry loop ───────────────────────────────────────────────────────
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         ind = snap.indicators
         sym = snap.symbol
         ltp = snap.tick.ltp
         now = datetime.now()
+        t   = now.time()
 
-        # Exit-only window: last 20 min before squareoff
-        if time(14, 50) <= now.time():
+        # Exit-only window
+        if time(14, 50) <= t:
             return "HOLD", None
 
-        # Pull cached options intelligence (sync — zero latency)
+        # Cached intelligence (sync — zero latency)
         from options_intelligence import get_cached
         import iv_surface, gamma_scalp, options_flow
 
-        opts   = get_cached(sym)
-        surf   = iv_surface.get_surface(sym)
-        gex    = gamma_scalp.get_cached_gex(sym)
-        flow   = options_flow.get_cached_flow(sym)
+        opts = get_cached(sym)
+        surf = iv_surface.get_surface(sym)
+        gex  = gamma_scalp.get_cached_gex(sym)
+        flow = options_flow.get_cached_flow(sym)
 
-        iv_rank = float(opts.get("iv_rank",    50.0)) if opts else 50.0
-        atm_iv  = float(opts.get("atm_iv",     25.0)) if opts else 25.0
+        iv_rank = float(opts.get("iv_rank", 50.0)) if opts else 50.0
+        atm_iv  = float(opts.get("atm_iv",  25.0)) if opts else 25.0
 
-        # Hard gate: never buy expensive premium
+        # Hard IV gate — never buy expensive premium
         if iv_rank > self.MAX_IV_BUY:
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
 
-        ce_sc = self._score("CE", ind, ltp, iv_rank, surf, gex, flow)
-        pe_sc = self._score("PE", ind, ltp, iv_rank, surf, gex, flow)
+        # Update ORB range (9:15-9:30 window)
+        self._update_orb(sym, snap, t)
 
-        if ce_sc < self.MIN_SCORE and pe_sc < self.MIN_SCORE:
+        # Run all 7 patterns — collect the best signal
+        best_score, best_opt, best_pattern = -1, "", ""
+        patterns = [
+            self._pat_ema_cross,
+            self._pat_trend_pull,
+            self._pat_orb,
+            self._pat_vwap_reclaim,
+            self._pat_bb_squeeze,
+            self._pat_rsi_extreme,
+            self._pat_surge,
+        ]
+        for pat_fn in patterns:
+            try:
+                opt_type, base, pname = pat_fn(sym, snap, ind, ltp, t)
+            except Exception:
+                continue
+            if not opt_type:
+                continue
+            # Add context bonuses
+            total = base + self._ctx_bonus(opt_type, ind, ltp, iv_rank, surf, gex, flow)
+            if total > best_score:
+                best_score, best_opt, best_pattern = total, opt_type, pname
+
+        if best_score < self.MIN_SCORE:
+            self._update_state(sym, ind, ltp)
             return "HOLD", None
 
-        opt_type = "CE" if ce_sc >= pe_sc else "PE"
-        score    = max(ce_sc, pe_sc)
+        # Per-direction cooldown
+        cools = self._cool_ts.setdefault(sym, {})
+        last  = cools.get(best_opt)
+        if last and (now - last).total_seconds() < self.COOL_S:
+            self._update_state(sym, ind, ltp)
+            return "HOLD", None
+        cools[best_opt] = now
 
-        # Signal dedup
-        last_ts  = self._last_ts.get(sym)
-        last_dir = self._last_dir.get(sym)
-        if last_ts and last_dir == opt_type:
-            if (now - last_ts).total_seconds() < self.SIGNAL_COOL_S:
-                return "HOLD", None
-
-        self._last_ts[sym]  = now
-        self._last_dir[sym] = opt_type
-
-        # SL / TGT adapted to IV regime
+        # SL / TGT from IV regime
         sl_pct, tgt_pct = self._iv_sl_tgt(iv_rank)
 
-        # Size factor: confidence-tiered
-        sf = 1.0 if score >= 8 else (0.75 if score >= 6 else 0.5)
+        # Size factor: 4 tiers
+        sf = (1.0  if best_score >= 8 else
+              0.75 if best_score >= 6 else
+              0.5  if best_score >= 5 else 0.25)
 
-        # Strike: delta-0.40 proxy (slightly OTM)
-        strike   = self._pick_strike(ltp, opt_type, atm_iv)
-        opt_sym  = self._nfo_symbol(sym, strike, opt_type)
-        lot_size = self.LOT_SIZES.get(sym, 1)
+        # Strike and NFO symbol
+        strike  = self._pick_strike(ltp, best_opt, atm_iv)
+        opt_sym = self._nfo_symbol(sym, strike, best_opt)
+        lot_sz  = self.LOT_SIZES.get(sym, 1)
 
+        self._update_state(sym, ind, ltp)
         return "BUY", {
-            "exchange":         "NFO",
-            "option_symbol":    opt_sym,
-            "option_type":      opt_type,
-            "strike":           strike,
-            "lot_size":         lot_size,
-            "stop_loss_pct":    sl_pct,
-            "target_pct":       tgt_pct,
-            "iv_rank":          round(iv_rank, 1),
-            "atm_iv":           round(atm_iv, 2),
-            "score":            score,
+            "exchange":          "NFO",
+            "option_symbol":     opt_sym,
+            "option_type":       best_opt,
+            "strike":            strike,
+            "lot_size":          lot_sz,
+            "stop_loss_pct":     sl_pct,
+            "target_pct":        tgt_pct,
+            "iv_rank":           round(iv_rank, 1),
+            "atm_iv":            round(atm_iv, 2),
+            "score":             best_score,
+            "pattern":           best_pattern,
             "_gate_size_factor": sf,
             "trigger": (
-                f"FNO-{opt_type} score={score}/10 IVrank={iv_rank:.0f}% "
-                f"strike={strike} sf={sf} "
-                f"rsi={ind.rsi_14:.0f} trend={ind.trend}"
+                f"FNO-{best_opt} [{best_pattern}] score={best_score}/14 "
+                f"IVr={iv_rank:.0f}% sf={sf} rsi={ind.rsi_14:.0f} "
+                f"trend={ind.trend}"
             ),
         }
 
-    # ── 10-factor scoring ─────────────────────────────────────────────────────
+    # ── Pattern 1: EMA_CROSS — full 9/21/50 alignment ────────────────────────
 
-    def _score(self, opt_type: str, ind: LiveIndicators, ltp: float,
-               iv_rank: float, surf, gex, flow) -> int:
-        s = 0
-        is_call = (opt_type == "CE")
-
-        # 1. IV rank (0-2)
-        if   iv_rank <= 28: s += 2
-        elif iv_rank <= 55: s += 1
-        elif iv_rank >  70: s -= 1
-
-        # 2. Trend strength (0-2)
+    def _pat_ema_cross(self, sym, snap, ind, ltp, t):
         ema_bull = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
         ema_bear = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
-        if is_call:
-            if ema_bull:              s += 2
-            elif ind.trend == "UP":   s += 1
-        else:
-            if ema_bear:              s += 2
-            elif ind.trend == "DOWN": s += 1
+        if ema_bull and ind.rsi_14 > 50:
+            return "CE", 5, "EMA_CROSS"
+        if ema_bear and ind.rsi_14 < 50:
+            return "PE", 5, "EMA_CROSS"
+        return "", 0, ""
 
-        # 3. RSI in ideal zone (0-1)
-        if is_call and 53 <= ind.rsi_14 <= 72:   s += 1
-        if not is_call and 28 <= ind.rsi_14 <= 47: s += 1
+    # ── Pattern 2: TREND_PULL — pullback entry in strong trend ───────────────
 
-        # 4. VWAP alignment (0-1)
-        if ind.vwap and ind.vwap > 0:
-            if is_call and ltp > ind.vwap:      s += 1
-            if not is_call and ltp < ind.vwap:  s += 1
+    def _pat_trend_pull(self, sym, snap, ind, ltp, t):
+        prev_rsi = self._prev_rsi.get(sym, ind.rsi_14)
+        ema_bull  = ind.ema9 > ind.ema21 > 0 and ind.ema21 > ind.ema50 > 0
+        ema_bear  = ind.ema9 < ind.ema21 > 0 and ind.ema21 < ind.ema50 > 0
+        # Pullback: was extended (>62), now cooled to 48-60 → re-entry
+        if ema_bull and prev_rsi > 60 and 48 <= ind.rsi_14 <= 60:
+            return "CE", 5, "TREND_PULL"
+        # Pullback: was oversold (<38), now recovered to 40-52 → re-short
+        if ema_bear and prev_rsi < 40 and 40 <= ind.rsi_14 <= 52:
+            return "PE", 5, "TREND_PULL"
+        return "", 0, ""
 
-        # 5. IV skew confirmation (0-1)
-        if surf:
-            if is_call and surf.risk_reversal > -0.005:  s += 1   # calls not crushed
-            if not is_call and surf.put_skew > 0.005:     s += 1   # market buying puts
+    # ── Pattern 3: ORB — opening range breakout ───────────────────────────────
 
-        # 6. Options flow (0-1)
+    def _pat_orb(self, sym, snap, ind, ltp, t):
+        if not (time(9, 30) <= t <= time(10, 0)):
+            return "", 0, ""
+        orb_h = self._orb_high.get(sym)
+        orb_l = self._orb_low.get(sym)
+        if not (orb_h and orb_l and orb_h > orb_l):
+            return "", 0, ""
+        if self._orb_fired.get(sym):
+            return "", 0, ""
+        prev = self._prev_ltp.get(sym, ltp)
+        # Break above ORB high
+        if prev <= orb_h and ltp > orb_h * 1.001:
+            self._orb_fired[sym] = True
+            return "CE", 5, "ORB"
+        # Break below ORB low
+        if prev >= orb_l and ltp < orb_l * 0.999:
+            self._orb_fired[sym] = True
+            return "PE", 5, "ORB"
+        return "", 0, ""
+
+    # ── Pattern 4: VWAP_RECLAIM — cross above/below VWAP with volume ─────────
+
+    def _pat_vwap_reclaim(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0:
+            return "", 0, ""
+        was_above = self._prev_above_vwap.get(sym, ltp >= ind.vwap)
+        now_above = ltp > ind.vwap
+        if was_above == now_above:
+            return "", 0, ""
+        if ind.volume_ratio < 1.2:
+            return "", 0, ""
+        if now_above:   # crossed above → CE
+            return "CE", 3, "VWAP_RECLAIM"
+        return "PE", 3, "VWAP_RECLAIM"    # crossed below → PE
+
+    # ── Pattern 5: BB_SQUEEZE — Bollinger squeeze breakout ───────────────────
+
+    def _pat_bb_squeeze(self, sym, snap, ind, ltp, t):
+        if not (ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0):
+            return "", 0, ""
+        bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
+        prev_bw = self._prev_bb_width.get(sym, bw)
+        # Squeeze was tight and is now expanding
+        if prev_bw < 1.8 and bw > prev_bw * 1.15:
+            direction = "CE" if ltp > ind.bb_mid else "PE"
+            return direction, 3, "BB_SQUEEZE"
+        return "", 0, ""
+
+    # ── Pattern 6: RSI_EXTREME — extreme RSI momentum continuation ────────────
+
+    def _pat_rsi_extreme(self, sym, snap, ind, ltp, t):
+        # Overbought with positive MACD → strong upward momentum, buy CE
+        if ind.rsi_14 > 72 and ind.macd_hist > 0 and ind.volume_ratio > 1.3:
+            return "CE", 3, "RSI_EXTREME"
+        # Oversold with negative MACD → strong downward momentum, buy PE
+        if ind.rsi_14 < 28 and ind.macd_hist < 0 and ind.volume_ratio > 1.3:
+            return "PE", 3, "RSI_EXTREME"
+        return "", 0, ""
+
+    # ── Pattern 7: SURGE — large candle body + volume ─────────────────────────
+
+    def _pat_surge(self, sym, snap, ind, ltp, t):
+        if len(snap.candles_1min) < 2:
+            return "", 0, ""
+        last_c = snap.candles_1min[-1]
+        c_ts   = getattr(last_c, "ts", None)
+        if not c_ts or c_ts == self._last_candle_ts.get(sym):
+            return "", 0, ""
+        if last_c.open <= 0:
+            return "", 0, ""
+        body_pct = abs(last_c.close - last_c.open) / last_c.open
+        if body_pct > 0.004 and ind.volume_ratio > 1.8:
+            self._last_candle_ts[sym] = c_ts
+            direction = "CE" if last_c.close > last_c.open else "PE"
+            return direction, 3, "SURGE"
+        return "", 0, ""
+
+    # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
+
+    def _ctx_bonus(self, opt_type, ind, ltp, iv_rank, surf, gex, flow) -> int:
+        b = 0
+        is_call = (opt_type == "CE")
+
+        # IV rank (0-2)
+        if   iv_rank <= 28: b += 2
+        elif iv_rank <= 55: b += 1
+        elif iv_rank >  65: b -= 1
+
+        # Flow (0-1)
         if flow:
-            if is_call  and flow.call_put_ratio > 1.1:   s += 1
-            if not is_call and flow.call_put_ratio < 0.9: s += 1
+            if is_call  and flow.call_put_ratio > 1.1:   b += 1
+            if not is_call and flow.call_put_ratio < 0.9: b += 1
 
-        # 7. GEX regime (0-1)  — avoid pin risk and pure short-gamma
+        # GEX (0-1)
         if gex:
-            safe = not gex.pin_risk and gex.regime != "SHORT_GAMMA"
-            if safe: s += 1
+            if not gex.pin_risk and gex.regime != "SHORT_GAMMA": b += 1
         else:
-            s += 1   # no data = neutral, allow
+            b += 1
 
-        # 8. Momentum label (0-1)
-        if is_call  and ind.momentum in ("STRONG_UP",   "WEAK_UP"):   s += 1
-        if not is_call and ind.momentum in ("STRONG_DOWN", "WEAK_DOWN"): s += 1
+        # Volume (0-1)
+        if ind.volume_ratio > 1.3: b += 1
 
-        # 9. Volume surge (0-1)
-        if ind.volume_ratio > 1.3:  s += 1
+        # MACD (0-1)
+        if is_call  and ind.macd_hist > 0:   b += 1
+        if not is_call and ind.macd_hist < 0: b += 1
 
-        # 10. MACD histogram (0-1)
-        if is_call  and ind.macd_hist > 0:   s += 1
-        if not is_call and ind.macd_hist < 0: s += 1
+        # IV skew (0-1)
+        if surf:
+            if is_call  and surf.risk_reversal > -0.005: b += 1
+            if not is_call and surf.put_skew > 0.005:     b += 1
 
-        return s
+        return b
+
+    # ── ORB builder (called every tick 9:15-9:30) ─────────────────────────────
+
+    def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
+        if not (time(9, 15) <= t <= time(9, 30)):
+            return
+        if sym not in self._orb_high:
+            self._orb_high[sym] = snap.tick.ltp
+            self._orb_low[sym]  = snap.tick.ltp
+            self._orb_fired[sym] = False
+        for c in snap.candles_1min:
+            c_t = getattr(c, "ts", None)
+            if c_t and time(9, 15) <= c_t.time() <= time(9, 30):
+                self._orb_high[sym] = max(self._orb_high[sym], c.high)
+                self._orb_low[sym]  = min(self._orb_low[sym],  c.low)
+
+    # ── State updater (called at end of every tick) ───────────────────────────
+
+    def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
+        if ind.vwap and ind.vwap > 0:
+            self._prev_above_vwap[sym] = ltp > ind.vwap
+        if ind.bb_upper and ind.bb_lower and ind.bb_mid and ind.bb_mid > 0:
+            self._prev_bb_width[sym] = (ind.bb_upper - ind.bb_lower) / ind.bb_mid * 100
+        self._prev_ltp[sym] = ltp
+        self._prev_rsi[sym] = ind.rsi_14
 
     # ── IV-adaptive SL / TGT ─────────────────────────────────────────────────
 
     def _iv_sl_tgt(self, iv_rank: float) -> tuple[float, float]:
-        if   iv_rank < 25: return 35.0, 100.0   # cheap vol: wide range, vol expansion
-        elif iv_rank < 50: return 30.0,  65.0   # normal
-        elif iv_rank < 65: return 25.0,  48.0   # elevated: tighter
-        else:              return 20.0,  35.0   # expensive: very tight
+        if   iv_rank < 25: return 35.0, 100.0   # cheap vol → vol expansion expected
+        elif iv_rank < 50: return 30.0,  65.0
+        elif iv_rank < 65: return 25.0,  48.0
+        else:              return 20.0,  35.0
 
     # ── Strike selection (delta ~0.40 proxy) ─────────────────────────────────
 
     def _pick_strike(self, spot: float, opt_type: str, atm_iv: float) -> int:
         import math
         step = 100 if spot > 30000 else 50
-        # ATM offset using BS approximation for 0.40-delta strike
-        iv    = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.12)
-        T     = 7.0 / 365.0   # proxy 1 week to expiry
-        # 0.4-delta call is roughly +0.25σ from ATM; put is -0.25σ
-        sigma_spot = spot * iv * math.sqrt(T)
-        offset = 0.25 * sigma_spot
-        raw = (spot + offset) if opt_type == "CE" else (spot - offset)
+        iv   = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.12)
+        T    = 7.0 / 365.0
+        offset = 0.25 * spot * iv * math.sqrt(T)
+        raw    = (spot + offset) if opt_type == "CE" else (spot - offset)
         return max(int(round(raw / step) * step), step)
 
     # ── NFO symbol builder ────────────────────────────────────────────────────
 
     def _nfo_symbol(self, underlying: str, strike: int, opt_type: str) -> str:
-        """Build Zerodha NFO tradingsymbol for the nearest weekly/monthly expiry."""
         from datetime import date, timedelta
-        today = date.today()
-        # BANKNIFTY expires Wednesday, others Thursday
-        target_wd = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
-        expiry = today + timedelta(days=1)
-        while expiry.weekday() != target_wd:
+        today    = date.today()
+        target   = 2 if underlying in ("BANKNIFTY", "MIDCPNIFTY") else 3
+        expiry   = today + timedelta(days=1)
+        while expiry.weekday() != target:
             expiry += timedelta(days=1)
-        # Monthly (last week of month)?
         if (expiry + timedelta(days=7)).month != expiry.month:
             return f"{underlying}{expiry.strftime('%y')}{expiry.strftime('%b').upper()}{strike}{opt_type}"
         return f"{underlying}{expiry.strftime('%y%m%d')}{strike}{opt_type}"
@@ -312,7 +443,6 @@ class FnOAgent(BaseAgent):
     # ── Option-aware _try_enter override ─────────────────────────────────────
 
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
-        """Place the order on the resolved NFO option symbol, not the underlying."""
         import math
         from agents.base_agent import send_telegram
         from kite_client import kite_client
@@ -331,14 +461,11 @@ class FnOAgent(BaseAgent):
         atm_iv     = signal.get("atm_iv", 25.0)
         sf         = signal.pop("_gate_size_factor", 1.0)
 
-        # Estimate option premium via ATM BS approximation
-        S   = snap.tick.ltp
-        iv  = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
-        T   = 7.0 / 365.0
-        # ATM call/put premium ≈ S × σ × √T / √(2π)
-        opt_price = max(round(S * iv * math.sqrt(T) / math.sqrt(2 * math.pi), 2), 5.0)
+        # BS-approximate ATM premium for sizing
+        S         = snap.tick.ltp
+        iv        = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
+        opt_price = max(round(S * iv * math.sqrt(7.0 / 365.0) / math.sqrt(2 * math.pi), 2), 5.0)
 
-        # Lot quantity (1 lot base; Kelly sizing reduces if sf < 1)
         qty = lot_size
         if settings.use_kelly_sizing and sf < 1.0:
             qty = max(lot_size, int(lot_size * sf))
@@ -352,7 +479,7 @@ class FnOAgent(BaseAgent):
         if not allowed:
             return
 
-        sebi_ok, _algo_id, sebi_reason = sebi_compliance.pre_order_check(
+        sebi_ok, _aid, sebi_reason = sebi_compliance.pre_order_check(
             strategy=self.name, symbol=opt_sym, exchange=exch,
             transaction_type=action, quantity=qty,
             order_type="MARKET", price_at_signal=opt_price,
@@ -384,7 +511,6 @@ class FnOAgent(BaseAgent):
             atr=snap.indicators.atr_14,
         )
 
-        ind = snap.indicators
         sl_pct  = signal.get("stop_loss_pct", 30)
         tgt_pct = signal.get("target_pct", 65)
         sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
@@ -399,8 +525,8 @@ class FnOAgent(BaseAgent):
 
         await send_telegram(
             f"<b>[FNO]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
-            f"Lots: {qty//lot_size} | {signal.get('option_type')} {signal.get('strike')}\n"
-            f"IVrank: {iv_rank:.0f}% | Score: {signal.get('score')}/10 | sf={sf}\n"
+            f"Pattern: {signal.get('pattern')} | Score: {signal.get('score')}/14\n"
+            f"{signal.get('option_type')} {signal.get('strike')} | IVr={iv_rank:.0f}% sf={sf}\n"
             f"SL: ₹{sl_px:.1f} | TGT: ₹{tgt_px:.1f} | Ord: {order_id}"
         )
 
@@ -415,7 +541,7 @@ class FnOAgent(BaseAgent):
         chg = (ltp - entry) / entry * 100
         qty = pos.get("quantity", 0)
 
-        # Near-zero protection: option losing 90%+ → stop the bleed
+        # Near-zero protection
         if ltp < entry * 0.10:
             return True, f"Option near-zero ₹{ltp:.1f} ({chg:.0f}%)"
 
@@ -426,22 +552,20 @@ class FnOAgent(BaseAgent):
         # Progressive profit exits
         if chg >= 100:
             return True, f"Option +100% ₹{ltp:.1f}"
-        if chg >= 60 and ind.rsi_14 > 72:
-            return True, f"Option +60% overbought RSI={ind.rsi_14:.0f}"
+        if chg >= 60 and ind.rsi_14 > 73:
+            return True, f"Option +60% + overbought RSI={ind.rsi_14:.0f}"
         if chg >= 50 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
             return True, f"Option +50% momentum fading"
 
-        # Direction lost — theta will erode remaining value
-        if 44 < ind.rsi_14 < 56:
-            return True, "RSI neutral — exit before theta decay"
+        # Theta decay protection: direction lost, RSI neutral
+        if 44 < ind.rsi_14 < 56 and ind.momentum == "NEUTRAL":
+            return True, "RSI+momentum neutral — exit before theta decay"
 
-        # Trend reversal while not yet deeply profitable
-        if qty > 0:    # long call
-            if ind.trend == "DOWN" and ind.ema9 < ind.ema21 and chg < 30:
-                return True, "Trend reversed DOWN — exit call"
-        else:          # long put
-            if ind.trend == "UP"   and ind.ema9 > ind.ema21 and chg < 30:
-                return True, "Trend reversed UP — exit put"
+        # Trend reversal while not deeply profitable
+        if qty > 0 and ind.trend == "DOWN" and ind.ema9 < ind.ema21 and chg < 30:
+            return True, "Trend reversed DOWN — exit call"
+        if qty < 0 and ind.trend == "UP" and ind.ema9 > ind.ema21 and chg < 30:
+            return True, "Trend reversed UP — exit put"
 
         return False, ""
 

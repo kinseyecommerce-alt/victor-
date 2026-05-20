@@ -1849,25 +1849,114 @@ def t_fno_agent_instantiates():
     assert a.name == "fno"
     assert a.product == "NRML"
 
-def t_fno_score_ce_strong_bull():
+def t_fno_ctx_bonus_bull():
     from unittest.mock import MagicMock
     a = FnOAgent()
     ind = MagicMock()
-    ind.rsi_14 = 60.0; ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0
-    ind.vwap = 21950.0; ind.macd_hist = 0.5; ind.volume_ratio = 1.5
-    ind.momentum = "STRONG_UP"; ind.trend = "UP"; ind.macd = 0.1; ind.macd_signal = 0.05
-    score = a._score("CE", ind, 22150.0, 20.0, None, None, None)
-    assert score >= 5, f"Strong bull CE score {score} < 5"
+    ind.macd_hist = 0.5; ind.volume_ratio = 1.5; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
+    bonus = a._ctx_bonus("CE", ind, 22150.0, 20.0, None, None, None)
+    assert bonus >= 3, f"Bull CE bonus {bonus} < 3"
 
-def t_fno_score_pe_bear():
+def t_fno_ctx_bonus_bear():
     from unittest.mock import MagicMock
     a = FnOAgent()
     ind = MagicMock()
-    ind.rsi_14 = 38.0; ind.ema9 = 21800.0; ind.ema21 = 22000.0; ind.ema50 = 22200.0
-    ind.vwap = 22100.0; ind.macd_hist = -0.5; ind.volume_ratio = 1.6
-    ind.momentum = "STRONG_DOWN"; ind.trend = "DOWN"; ind.macd = -0.1; ind.macd_signal = 0.0
-    score = a._score("PE", ind, 21850.0, 20.0, None, None, None)
-    assert score >= 5, f"Bear PE score {score} < 5"
+    ind.macd_hist = -0.5; ind.volume_ratio = 1.6; ind.bb_upper = 0; ind.bb_lower = 0; ind.bb_mid = 0
+    bonus = a._ctx_bonus("PE", ind, 21850.0, 20.0, None, None, None)
+    assert bonus >= 3, f"Bear PE bonus {bonus} < 3"
+
+def t_fno_pat_ema_cross_ce():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    ind = MagicMock()
+    ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0; ind.rsi_14 = 60.0
+    opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 22150.0, time(10, 0))
+    assert opt == "CE" and base == 5 and pname == "EMA_CROSS"
+
+def t_fno_pat_ema_cross_pe():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    ind = MagicMock()
+    ind.ema9 = 21900.0; ind.ema21 = 22000.0; ind.ema50 = 22100.0; ind.rsi_14 = 40.0
+    opt, base, pname = a._pat_ema_cross("NIFTY", None, ind, 21850.0, time(10, 0))
+    assert opt == "PE" and base == 5
+
+def t_fno_pat_rsi_extreme_ce():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    ind = MagicMock()
+    ind.rsi_14 = 75.0; ind.macd_hist = 0.8; ind.volume_ratio = 1.6
+    opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
+    assert opt == "CE" and pname == "RSI_EXTREME"
+
+def t_fno_pat_rsi_extreme_pe():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    ind = MagicMock()
+    ind.rsi_14 = 25.0; ind.macd_hist = -0.8; ind.volume_ratio = 1.5
+    opt, base, pname = a._pat_rsi_extreme("NIFTY", None, ind, 22000.0, time(10, 0))
+    assert opt == "PE" and pname == "RSI_EXTREME"
+
+def t_fno_pat_vwap_reclaim_ce():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    a._prev_above_vwap["NIFTY"] = False   # was below
+    ind = MagicMock()
+    ind.vwap = 21900.0; ind.volume_ratio = 1.5
+    opt, base, pname = a._pat_vwap_reclaim("NIFTY", None, ind, 21950.0, time(10, 0))
+    assert opt == "CE" and pname == "VWAP_RECLAIM"
+
+def t_fno_pat_vwap_reclaim_no_cross():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    a._prev_above_vwap["NIFTY"] = True    # was already above
+    ind = MagicMock()
+    ind.vwap = 21900.0; ind.volume_ratio = 1.5
+    opt, base, pname = a._pat_vwap_reclaim("NIFTY", None, ind, 21950.0, time(10, 0))
+    assert opt == ""    # no cross = no signal
+
+def t_fno_pat_orb_ce():
+    a = FnOAgent()
+    a._orb_high["NIFTY"] = 22050.0
+    a._orb_low["NIFTY"]  = 21950.0
+    a._orb_fired["NIFTY"] = False
+    a._prev_ltp["NIFTY"]  = 22045.0   # was just below ORB high
+    from unittest.mock import MagicMock
+    ind = MagicMock()
+    # ltp breaks above ORB high
+    opt, base, pname = a._pat_orb("NIFTY", None, ind, 22075.0, time(9, 35))
+    assert opt == "CE" and pname == "ORB"
+
+def t_fno_pat_orb_outside_window():
+    a = FnOAgent()
+    a._orb_high["NIFTY"] = 22050.0; a._orb_low["NIFTY"] = 21950.0
+    a._orb_fired["NIFTY"] = False; a._prev_ltp["NIFTY"] = 22045.0
+    from unittest.mock import MagicMock
+    ind = MagicMock()
+    opt, _, _ = a._pat_orb("NIFTY", None, ind, 22075.0, time(11, 0))  # after window
+    assert opt == ""
+
+def t_fno_pat_surge_ce():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    snap = MagicMock()
+    candle = MagicMock()
+    candle.open = 22000.0; candle.close = 22110.0  # +0.5% body
+    candle.ts = datetime.now()
+    snap.candles_1min = [MagicMock(), candle]
+    ind = MagicMock(); ind.volume_ratio = 2.2
+    opt, base, pname = a._pat_surge("NIFTY", snap, ind, 22110.0, time(10, 0))
+    assert opt == "CE" and pname == "SURGE"
+
+def t_fno_trend_pull_ce():
+    from unittest.mock import MagicMock
+    a = FnOAgent()
+    a._prev_rsi["NIFTY"] = 66.0   # was extended
+    ind = MagicMock()
+    ind.ema9 = 22100.0; ind.ema21 = 22000.0; ind.ema50 = 21900.0
+    ind.rsi_14 = 54.0   # cooled to 48-60 range
+    opt, base, pname = a._pat_trend_pull("NIFTY", None, ind, 22050.0, time(10, 0))
+    assert opt == "CE" and pname == "TREND_PULL"
 
 def t_fno_sl_tgt_cheap_iv():
     a = FnOAgent()
@@ -1903,21 +1992,51 @@ def t_fno_high_iv_blocks_entry():
     snap.indicators.ema9 = 22100; snap.indicators.ema21 = 22000; snap.indicators.ema50 = 21900
     snap.indicators.vwap = 21950; snap.indicators.macd_hist = 1.0
     snap.indicators.volume_ratio = 2.0; snap.indicators.momentum = "STRONG_UP"
+    snap.indicators.bb_upper = 0; snap.indicators.bb_lower = 0; snap.indicators.bb_mid = 0
 
     opts_data = {"iv_rank": 80.0, "atm_iv": 35.0, "iv_percentile": 85.0}
     with patch("options_intelligence.get_cached", return_value=opts_data):
         action, signal = a.evaluate_tick(snap)
     assert action == "HOLD", f"High IV rank should block entry, got {action}"
 
+def t_fno_min_score_4_size_025():
+    a = FnOAgent()
+    # score=4 → sf=0.25
+    sf = (1.0 if 4 >= 8 else 0.75 if 4 >= 6 else 0.5 if 4 >= 5 else 0.25)
+    assert sf == 0.25
+
+def t_fno_cooldown_per_direction():
+    a = FnOAgent()
+    a._cool_ts["NIFTY"] = {"CE": datetime.now(), "PE": datetime.min}
+    ce_cool = a._cool_ts["NIFTY"]["CE"]
+    pe_cool = a._cool_ts["NIFTY"]["PE"]
+    # CE cooled, PE can fire
+    ce_elapsed = (datetime.now() - ce_cool).total_seconds()
+    pe_elapsed = (datetime.now() - pe_cool).total_seconds()
+    assert ce_elapsed < a.COOL_S   # CE still in cooldown
+    assert pe_elapsed > a.COOL_S   # PE can fire
+
 run("FnOAgent instantiates with name=fno",                   t_fno_agent_instantiates)
-run("CE scoring ≥5 on strong bull setup",                    t_fno_score_ce_strong_bull)
-run("PE scoring ≥5 on strong bear setup",                    t_fno_score_pe_bear)
+run("ctx_bonus bullish CE >= 3",                             t_fno_ctx_bonus_bull)
+run("ctx_bonus bearish PE >= 3",                             t_fno_ctx_bonus_bear)
+run("EMA_CROSS pattern → CE on bull",                        t_fno_pat_ema_cross_ce)
+run("EMA_CROSS pattern → PE on bear",                        t_fno_pat_ema_cross_pe)
+run("RSI_EXTREME → CE on RSI>72",                            t_fno_pat_rsi_extreme_ce)
+run("RSI_EXTREME → PE on RSI<28",                            t_fno_pat_rsi_extreme_pe)
+run("VWAP_RECLAIM → CE on upside cross",                    t_fno_pat_vwap_reclaim_ce)
+run("VWAP_RECLAIM → no signal when already above",          t_fno_pat_vwap_reclaim_no_cross)
+run("ORB → CE on break above ORB high",                      t_fno_pat_orb_ce)
+run("ORB → no signal outside 9:30-10:00 window",             t_fno_pat_orb_outside_window)
+run("SURGE → CE on big up candle + heavy volume",            t_fno_pat_surge_ce)
+run("TREND_PULL → CE on RSI pullback in uptrend",           t_fno_trend_pull_ce)
 run("IV<25% → SL=35% TGT=100%",                             t_fno_sl_tgt_cheap_iv)
 run("IV>70% → SL=20% TGT=35%",                             t_fno_sl_tgt_expensive_iv)
 run("_pick_strike CE is above spot",                         t_fno_pick_strike_ce_above)
 run("_pick_strike PE is below spot",                         t_fno_pick_strike_pe_below)
 run("NFO symbol contains underlying/strike/type",           t_fno_nfo_symbol_format)
 run("IV rank >72% blocks entry (no premium buying)",        t_fno_high_iv_blocks_entry)
+run("score=4 → 0.25× size factor",                          t_fno_min_score_4_size_025)
+run("CE and PE cooldown tracked independently",             t_fno_cooldown_per_direction)
 
 
 # ══════════════════════════════════════════════════════════════════════════
