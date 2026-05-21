@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     options_capital_pct:    float = 25.0       # % for options premium NRML (fno)
     futures_capital_pct:    float = 10.0       # % for futures margin NRML (reserved)
 
+    # Max concurrent positions per agent (capital divided per-symbol to avoid overrun)
+    max_intraday_positions: int = 5
+    max_scalping_positions: int = 5
+    max_swing_positions:    int = 3
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
