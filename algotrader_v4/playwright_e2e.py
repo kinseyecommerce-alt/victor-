@@ -7,10 +7,21 @@ from __future__ import annotations
 import os, time, json, base64
 from playwright.sync_api import sync_playwright, Page, expect
 
-BASE        = "http://127.0.0.1:8001"
+BASE        = os.getenv("E2E_BASE", "http://127.0.0.1:8000")
 CHROMIUM    = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 SCREENSHOT  = "/tmp/pw_screenshots"
 os.makedirs(SCREENSHOT, exist_ok=True)
+
+# Load credentials from .env
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+API_KEY = ""
+KILL_SWITCH_RESET_SECRET = ""
+if os.path.exists(_env_path):
+    for _line in open(_env_path):
+        if _line.startswith("API_KEY="):
+            API_KEY = _line.split("=", 1)[1].strip()
+        elif _line.startswith("KILL_SWITCH_RESET_SECRET="):
+            KILL_SWITCH_RESET_SECRET = _line.split("=", 1)[1].strip()
 
 PASS = 0; FAIL = 0
 ISSUES: list[str] = []
@@ -40,8 +51,28 @@ def api(page: Page, method: str, path: str, body: dict | None = None) -> tuple[i
     async () => {{
         const r = await fetch('{BASE}{path}', {{
             method: '{method}',
-            headers: {{'Content-Type': 'application/json'}},
+            headers: {{'Content-Type': 'application/json', 'X-API-Key': '{API_KEY}'}},
             body: {json.dumps(json.dumps(body)) if body else 'undefined'}
+        }});
+        const text = await r.text();
+        let data;
+        try {{ data = JSON.parse(text); }} catch(e) {{ data = {{_raw: text}}; }}
+        return {{status: r.status, data}};
+    }}
+    """
+    result = page.evaluate(js)
+    return result["status"], result["data"]
+
+
+def api_form(page: Page, method: str, path: str, fields: dict) -> tuple[int, dict]:
+    """POST application/x-www-form-urlencoded (used for OAuth2 /auth/login)."""
+    encoded = "&".join(f"{k}={v}" for k, v in fields.items())
+    js = f"""
+    async () => {{
+        const r = await fetch('{BASE}{path}', {{
+            method: '{method}',
+            headers: {{'Content-Type': 'application/x-www-form-urlencoded', 'X-API-Key': '{API_KEY}'}},
+            body: '{encoded}'
         }});
         const text = await r.text();
         let data;
@@ -119,19 +150,31 @@ def test_health(page: Page) -> None:
 def test_auth_flow(page: Page) -> None:
     print("\n── 3. AUTH FLOW (via browser fetch) ──────────────")
 
-    # Empty body → 422
-    status, body = api(page, "POST", "/auth/token", {})
+    # Empty form → 422
+    status, body = api_form(page, "POST", "/auth/login", {})
     if status == 422:
-        ok("POST /auth/token empty body → 422 Unprocessable")
+        ok("POST /auth/login empty body → 422 Unprocessable")
     else:
         fail("Auth empty body", f"got {status}")
 
-    # Valid access_token → 200
-    status, body = api(page, "POST", "/auth/token", {"access_token": "pw_test_token"})
-    if status == 200 and "access_token" in body:
-        ok("POST /auth/token with access_token → 200")
+    # Wrong password → 401
+    status, body = api_form(page, "POST", "/auth/login", {"username": "admin", "password": "wrongpassword"})
+    if status == 401:
+        ok("POST /auth/login wrong password → 401")
     else:
-        fail("Auth valid token", f"got {status} — {body}")
+        fail("Auth wrong password", f"got {status} — {body}")
+
+    # /auth/me via X-API-Key
+    status, body = api(page, "GET", "/auth/me")
+    if status == 200 and body.get("auth_method") == "api_key":
+        ok("GET /auth/me with X-API-Key → auth_method=api_key")
+    else:
+        fail("Auth /me with API key", f"got {status} — {body}")
+
+    # Kite status (no real token — just checks endpoint exists)
+    status, body = api(page, "GET", "/auth/kite/status")
+    if status == 200:
+        ok(f"GET /auth/kite/status → connected={body.get('connected')}")
 
 
 def test_bot_lifecycle(page: Page) -> None:
@@ -215,7 +258,7 @@ def test_backtest(page: Page) -> None:
     snap(page, "05_equity_chart")
     # Check content-type via JS
     js = f"""async () => {{
-        const r = await fetch('{BASE}/backtest/equity/RELIANCE/intraday');
+        const r = await fetch('{BASE}/backtest/equity/RELIANCE/intraday', {{headers: {{'X-API-Key': '{API_KEY}'}}}});
         return r.headers.get('content-type');
     }}"""
     ct = page.evaluate(js)
@@ -226,7 +269,7 @@ def test_backtest(page: Page) -> None:
 
     # CSV download headers
     js = f"""async () => {{
-        const r = await fetch('{BASE}/backtest/trades/RELIANCE/intraday');
+        const r = await fetch('{BASE}/backtest/trades/RELIANCE/intraday', {{headers: {{'X-API-Key': '{API_KEY}'}}}});
         return {{ct: r.headers.get('content-type'), cd: r.headers.get('content-disposition'), status: r.status}};
     }}"""
     res = page.evaluate(js)
@@ -270,6 +313,8 @@ def test_orders_and_risk(page: Page) -> None:
         ok(f"POST /orders/place BUY HDFCBANK → order_id={body['order_id']}")
     elif status == 400 and "trading hours" in str(body):
         ok("POST /orders/place outside market hours → 400 (correct risk block)")
+    elif status == 400 and "duplicate" in str(body).lower():
+        ok(f"POST /orders/place → 400 Duplicate guard (position already active)")
     else:
         fail("Place order", f"HTTP {status}: {body}")
 
@@ -327,12 +372,12 @@ def test_sebi(page: Page) -> None:
     else:
         fail("Kill-switch order block", f"got {status}: {body}")
 
-    # Reset
-    status, _ = api(page, "POST", "/sebi/reset-kill-switch")
+    # Reset (requires kill_switch_reset_secret)
+    status, body = api(page, "POST", "/sebi/reset-kill-switch", {"secret": KILL_SWITCH_RESET_SECRET})
     if status == 200:
         ok("POST /sebi/reset-kill-switch → 200")
     else:
-        fail("SEBI reset", f"HTTP {status}")
+        fail("SEBI reset", f"HTTP {status}: {body}")
 
     # Audit log
     from datetime import date
@@ -495,7 +540,10 @@ def main() -> None:
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        ctx  = browser.new_context(viewport={"width": 1440, "height": 900})
+        ctx  = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            extra_http_headers={"X-API-Key": API_KEY},
+        )
         page = ctx.new_page()
         page.set_default_timeout(15000)
 
