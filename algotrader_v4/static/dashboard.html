@@ -398,7 +398,8 @@
     .badge-enter  { background: rgba(16,185,129,0.15); color: var(--green); }
     .badge-skip   { background: rgba(239,68,68,0.15);  color: var(--red); }
     .badge-active { background: rgba(16,185,129,0.12); color: var(--green); }
-    .badge-paused { background: rgba(245,158,11,0.12); color: var(--yellow); }
+    .badge-disabled { background:rgba(139,148,158,.15); color:#8b949e; }
+  .badge-paused { background: rgba(245,158,11,0.12); color: var(--yellow); }
     .badge-stopped{ background: rgba(156,163,175,0.12);color: var(--muted); }
 
     /* ── P&L flash animation ────────────────────────────────────── */
@@ -1038,6 +1039,29 @@
           </div>
         </div>
 
+
+        <!-- Live Positions & TSL Panel -->
+        <div class="card" id="tsl-panel" style="margin-top:20px">
+          <div class="card-header">
+            <h3 class="card-title"><i data-lucide="shield-check"></i> Live Positions &amp; Trailing SL</h3>
+            <span id="tsl-count-badge" class="badge badge-stopped">0 active</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Symbol</th><th>Strategy</th><th>Side</th>
+                  <th>Entry</th><th>Current SL</th><th>Best Price</th>
+                  <th>Trail</th><th>Locked ₹</th><th>SL Moves</th>
+                </tr>
+              </thead>
+              <tbody id="tsl-tbody">
+                <tr><td colspan="9" class="no-data"><i data-lucide="inbox"></i>No trailing positions</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
       </div><!-- /tab-overview -->
 
 
@@ -1442,6 +1466,64 @@
           </button>
         </div>
 
+        <!-- Agent Enable / Disable -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="toggle-right"></i> Agent Enable / Disable</div>
+          <div style="color:var(--muted);font-size:12px;margin-bottom:12px">
+            Disabled agents cannot be started by Bot Control or Master Agent.
+          </div>
+          <div id="agent-enables-list" style="display:flex;flex-direction:column;gap:12px">
+            <!-- populated by renderAgentEnables() -->
+          </div>
+        </div>
+
+        <!-- Capital Allocation -->
+        <div class="settings-section">
+          <div class="settings-title"><i data-lucide="pie-chart"></i> Daily Capital Allocation</div>
+          <div style="color:var(--muted);font-size:12px;margin-bottom:12px">
+            Scalping + Intraday share the MIS equity pool. FnO options draws from the options pool.
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Total Account Capital (₹)</label>
+              <input type="number" id="ca-total" class="risk-input" style="width:100%" placeholder="500000" oninput="updateCapitalDisplay()">
+            </div>
+            <div></div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Equity Intraday MIS (%)</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="number" id="ca-intraday" min="0" max="100" class="risk-input" style="width:80px" placeholder="40" oninput="updateCapitalDisplay()">
+                <span id="ca-intraday-rs" style="color:var(--muted);font-size:12px"></span>
+              </div>
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Swing / Delivery CNC (%)</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="number" id="ca-swing" min="0" max="100" class="risk-input" style="width:80px" placeholder="25" oninput="updateCapitalDisplay()">
+                <span id="ca-swing-rs" style="color:var(--muted);font-size:12px"></span>
+              </div>
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Options Premium NRML (%)</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="number" id="ca-options" min="0" max="100" class="risk-input" style="width:80px" placeholder="25" oninput="updateCapitalDisplay()">
+                <span id="ca-options-rs" style="color:var(--muted);font-size:12px"></span>
+              </div>
+            </div>
+            <div>
+              <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:5px">Futures Margin NRML (%)</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <input type="number" id="ca-futures" min="0" max="100" class="risk-input" style="width:80px" placeholder="10" oninput="updateCapitalDisplay()">
+                <span id="ca-futures-rs" style="color:var(--muted);font-size:12px"></span>
+              </div>
+            </div>
+          </div>
+          <div id="ca-sum-display" style="font-size:12px;margin-bottom:10px"></div>
+          <button class="btn btn-blue btn-sm" onclick="saveCapitalAllocation()">
+            <i data-lucide="save"></i> Save Allocation
+          </button>
+        </div>
+
         <!-- Admin -->
         <div class="settings-section">
           <div class="settings-title"><i data-lucide="terminal"></i> Admin</div>
@@ -1493,6 +1575,9 @@ const state = {
   mode:        'PAPER',
   lastPnl:     null,
   startedAt:   null,
+  agentEnables:       {},
+  tslStatus:          {},
+  capitalAllocation:  {},
 };
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1897,24 +1982,30 @@ function renderStrategyCards() {
 }
 
 function strategyCardHtml(name, agent) {
-  const running  = agent?.running    || false;
-  const trades   = agent?.trades_today || 0;
-  const pnl      = agent?.pnl_today  || 0;
-  const wins     = agent?.wins_today || 0;
-  const wr       = trades > 0 ? (wins / trades * 100).toFixed(1) + '%' : '—';
-  const statusKey = running ? 'active' : 'stopped';
+  const running   = agent?.running      || false;
+  const trades    = agent?.trades_today || 0;
+  const pnl       = agent?.pnl_today    || 0;
+  const wins      = agent?.wins_today   || 0;
+  const wr        = trades > 0 ? (wins / trades * 100).toFixed(1) + '%' : '—';
   const icon      = STRATEGY_ICONS[name] || 'cpu';
   const isPaused  = agent?.paused || false;
+  const enabled   = state.agentEnables[name] !== false;
+  const statusKey = !enabled ? 'disabled' : running ? 'active' : 'stopped';
+  const statusLbl = !enabled ? 'Disabled' : isPaused ? 'Paused' : running ? 'Active' : 'Stopped';
 
-  return `<div class="strategy-card">
+  return `<div class="strategy-card" style="${!enabled ? 'opacity:0.65' : ''}">
     <div class="strategy-card-header">
       <div class="strategy-name">
         <i data-lucide="${icon}"></i>
         ${name.charAt(0).toUpperCase() + name.slice(1)}
       </div>
-      <span class="badge badge-${isPaused ? 'paused' : statusKey}">
-        ${isPaused ? 'Paused' : running ? 'Active' : 'Stopped'}
-      </span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="badge badge-${statusKey}">${statusLbl}</span>
+        <label class="toggle" title="${enabled ? 'Disable' : 'Enable'} agent" style="margin:0">
+          <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleAgent('${name}', this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
     </div>
     <div class="strategy-stats">
       <div class="strategy-stat-item">Trades: <span>${trades}</span></div>
@@ -1923,9 +2014,11 @@ function strategyCardHtml(name, agent) {
       <div class="strategy-stat-item">Wins: <span>${wins}</span></div>
     </div>
     <div style="margin-top:12px">
-      ${running && !isPaused
-        ? `<button class="btn btn-ghost btn-sm" onclick="pauseAgent('${name}')"><i data-lucide="pause"></i> Pause</button>`
-        : `<button class="btn btn-ghost btn-sm" onclick="resumeAgent('${name}')"><i data-lucide="play"></i> Resume</button>`
+      ${enabled
+        ? (running && !isPaused
+            ? `<button class="btn btn-ghost btn-sm" onclick="pauseAgent('${name}')"><i data-lucide="pause"></i> Pause</button>`
+            : `<button class="btn btn-ghost btn-sm" onclick="resumeAgent('${name}')"><i data-lucide="play"></i> Resume</button>`)
+        : `<span style="font-size:12px;color:var(--muted)">Enable to start</span>`
       }
     </div>
   </div>`;
@@ -2430,6 +2523,9 @@ async function pollAll() {
     fetchKite(),
     fetchAdaptive(),
     fetchTradingLimits(),
+    fetchAgentEnables(),
+    fetchTSLStatus(),
+    fetchCapitalAllocation(),
   ]);
 
   renderStats();
@@ -2442,6 +2538,8 @@ async function pollAll() {
   renderSEBI();
   renderAnalytics();
   loadRiskInputs();
+  renderTSLPanel();
+  renderAgentEnables();
 }
 
 async function pollOnce() {
@@ -2640,6 +2738,163 @@ async function init() {
 }
 
 init();
+
+/* ═══════════════════════════════════════════════════════════════
+   AGENT ENABLES: fetch, render, toggle
+═══════════════════════════════════════════════════════════════ */
+async function fetchAgentEnables() {
+  try {
+    const d = await api('GET', '/settings/agent-enables');
+    if (d) state.agentEnables = d;
+  } catch {}
+}
+
+function renderAgentEnables() {
+  const container = document.getElementById('agent-enables-list');
+  if (!container) return;
+  const names = ['intraday', 'scalping', 'fno', 'swing'];
+  container.innerHTML = names.map(name => {
+    const enabled = state.agentEnables[name] !== false;
+    return `<label class="toggle-wrap" style="margin:0">
+      <div class="toggle">
+        <input type="checkbox" ${enabled ? 'checked' : ''} onchange="toggleAgent('${name}', this.checked)">
+        <span class="toggle-slider"></span>
+      </div>
+      <span class="toggle-label" style="text-transform:capitalize">${name} Agent
+        <span style="font-size:11px;color:var(--muted);margin-left:6px">${enabled ? 'Enabled' : 'Disabled'}</span>
+      </span>
+    </label>`;
+  }).join('');
+  lucide.createIcons({ nodes: [container] });
+}
+
+async function toggleAgent(name, val) {
+  try {
+    const body = {};
+    body[name] = val;
+    const d = await api('POST', '/settings/agent-enables', body);
+    if (d) state.agentEnables = d;
+    toast(`${name} ${val ? 'enabled' : 'disabled'}`, val ? 'ok' : 'warn');
+    renderStrategyCards();
+    renderAgentEnables();
+  } catch (e) {
+    toast(`Toggle error: ${e.message}`, 'error');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TSL PANEL: fetch + render
+═══════════════════════════════════════════════════════════════ */
+async function fetchTSLStatus() {
+  try {
+    const d = await api('GET', '/trailing-sl/status');
+    if (d) state.tslStatus = d;
+  } catch {}
+}
+
+function renderTSLPanel() {
+  const tbody = document.getElementById('tsl-tbody');
+  const badge = document.getElementById('tsl-count-badge');
+  if (!tbody) return;
+
+  const positions = state.tslStatus?.positions || [];
+  if (badge) {
+    badge.textContent = positions.length + ' active';
+    badge.className = 'badge badge-' + (positions.length > 0 ? 'active' : 'stopped');
+  }
+
+  if (positions.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-data"><i data-lucide="inbox"></i>No trailing positions</td></tr>';
+    lucide.createIcons({ nodes: [tbody] });
+    return;
+  }
+
+  tbody.innerHTML = positions.map(p => {
+    const rowColor = p.trail_active ? 'var(--green)' : p.breakeven_hit ? 'var(--yellow)' : 'var(--muted)';
+    const locked = p.locked_profit_pct >= 0
+      ? `<span style="color:var(--green)">+${p.locked_profit_pct.toFixed(2)}%</span>`
+      : `<span style="color:var(--red)">${p.locked_profit_pct.toFixed(2)}%</span>`;
+    return `<tr>
+      <td style="font-weight:600">${p.symbol}</td>
+      <td style="color:var(--muted)">${p.strategy}</td>
+      <td><span class="badge badge-${p.side === 'BUY' ? 'active' : 'stopped'}">${p.side}</span></td>
+      <td>₹${p.entry_price.toFixed(2)}</td>
+      <td style="color:${rowColor}">₹${p.current_sl.toFixed(2)}</td>
+      <td>₹${p.best_price.toFixed(2)}</td>
+      <td>${p.trail_active ? '<span style="color:var(--green)">Active</span>' : p.breakeven_hit ? '<span style="color:var(--yellow)">BE</span>' : '—'}</td>
+      <td>${locked}</td>
+      <td>${p.sl_moves}</td>
+    </tr>`;
+  }).join('');
+  lucide.createIcons({ nodes: [tbody] });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   CAPITAL ALLOCATION: fetch, display, save
+═══════════════════════════════════════════════════════════════ */
+async function fetchCapitalAllocation() {
+  try {
+    const d = await api('GET', '/settings/capital-allocation');
+    if (!d) return;
+    state.capitalAllocation = d;
+    const el = id => document.getElementById(id);
+    if (el('ca-total'))    el('ca-total').value   = d.total_capital;
+    if (el('ca-intraday')) el('ca-intraday').value = d.intraday_capital_pct;
+    if (el('ca-swing'))    el('ca-swing').value    = d.swing_capital_pct;
+    if (el('ca-options'))  el('ca-options').value  = d.options_capital_pct;
+    if (el('ca-futures'))  el('ca-futures').value  = d.futures_capital_pct;
+    updateCapitalDisplay();
+  } catch {}
+}
+
+function updateCapitalDisplay() {
+  const total    = parseFloat(document.getElementById('ca-total')?.value)   || 0;
+  const intraday = parseFloat(document.getElementById('ca-intraday')?.value) || 0;
+  const swing    = parseFloat(document.getElementById('ca-swing')?.value)    || 0;
+  const options  = parseFloat(document.getElementById('ca-options')?.value)  || 0;
+  const futures  = parseFloat(document.getElementById('ca-futures')?.value)  || 0;
+
+  const fmt = v => '₹' + Math.round(v).toLocaleString('en-IN');
+  const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = fmt(v); };
+  setTxt('ca-intraday-rs', total * intraday / 100);
+  setTxt('ca-swing-rs',    total * swing    / 100);
+  setTxt('ca-options-rs',  total * options  / 100);
+  setTxt('ca-futures-rs',  total * futures  / 100);
+
+  const sum = intraday + swing + options + futures;
+  const sumEl = document.getElementById('ca-sum-display');
+  if (sumEl) {
+    const color = sum > 100 ? 'var(--red)' : sum === 100 ? 'var(--green)' : 'var(--yellow)';
+    sumEl.innerHTML = `<span style="color:${color}">Sum: ${sum.toFixed(1)}%</span>` +
+      (sum < 100 ? ` <span style="color:var(--muted)">(${(100-sum).toFixed(1)}% unallocated reserve)</span>` : '');
+  }
+}
+
+async function saveCapitalAllocation() {
+  const _f = id => { const v = parseFloat(document.getElementById(id)?.value); return isNaN(v) ? undefined : v; };
+  const body = {
+    total_capital:        _f('ca-total'),
+    intraday_capital_pct: _f('ca-intraday'),
+    swing_capital_pct:    _f('ca-swing'),
+    options_capital_pct:  _f('ca-options'),
+    futures_capital_pct:  _f('ca-futures'),
+  };
+  const pcts = [body.intraday_capital_pct, body.swing_capital_pct, body.options_capital_pct, body.futures_capital_pct]
+    .filter(v => v !== undefined);
+  if (pcts.length === 4 && pcts.reduce((a,b) => a+b, 0) > 100) {
+    toast('Capital % sum exceeds 100%', 'error');
+    return;
+  }
+  Object.keys(body).forEach(k => body[k] === undefined && delete body[k]);
+  try {
+    const d = await api('PATCH', '/settings/capital-allocation', body);
+    if (d) state.capitalAllocation = d;
+    toast('Capital allocation saved', 'ok');
+  } catch (e) {
+    toast(`Save error: ${e.message}`, 'error');
+  }
+}
+
 </script>
 </body>
 </html>
