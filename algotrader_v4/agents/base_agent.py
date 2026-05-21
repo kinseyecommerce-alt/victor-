@@ -394,8 +394,9 @@ class BaseAgent(ABC):
             risk_manager.position_closed()
             self.state.pnl_today += pnl
             trailing_sl_engine.deregister(oid)
+            _dot = "\U0001f534" if pnl < 0 else "\U0001f7e2"
             await send_telegram(
-                f"{'\U0001f534' if pnl<0 else '\U0001f7e2'} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
+                f"{_dot} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
                 f"Reason: {reason} | P&L: ₹{pnl:.0f}"
             )
             try:
