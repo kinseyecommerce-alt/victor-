@@ -27,6 +27,14 @@ _BUCKET_PCT_ATTR: dict[str, str] = {
     "futures":  "futures_capital_pct",
 }
 
+# Max-positions config attr per agent; None = lot-based (fno), no per-symbol split
+_AGENT_MAX_POS: dict[str, str | None] = {
+    "intraday": "max_intraday_positions",
+    "scalping": "max_scalping_positions",
+    "swing":    "max_swing_positions",
+    "fno":      None,
+}
+
 
 class RiskManager:
 
@@ -100,11 +108,17 @@ class RiskManager:
         return True, "OK"
 
     def max_capital_for_agent(self, agent_name: str) -> float:
-        """Return max capital (₹) for an agent based on its trading-type bucket."""
-        bucket   = _AGENT_TO_BUCKET.get(agent_name, "intraday")
-        pct_attr = _BUCKET_PCT_ATTR.get(bucket, "intraday_capital_pct")
-        pct      = getattr(settings, pct_attr, 25.0)
-        return settings.total_capital * pct / 100
+        """Return per-symbol capital (₹) for an agent: bucket total ÷ max concurrent positions."""
+        bucket      = _AGENT_TO_BUCKET.get(agent_name, "intraday")
+        pct_attr    = _BUCKET_PCT_ATTR.get(bucket, "intraday_capital_pct")
+        bucket_total = settings.total_capital * getattr(settings, pct_attr, 25.0) / 100
+
+        max_pos_attr = _AGENT_MAX_POS.get(agent_name)
+        if max_pos_attr:
+            max_pos = getattr(settings, max_pos_attr, settings.max_open_positions)
+        else:
+            max_pos = 1   # lot-based agents (fno): return full bucket
+        return bucket_total / max(max_pos, 1)
 
     def calculate_quantity(
         self,
