@@ -1,3 +1,8 @@
+"""
+main.py — AlgoTrader Pro v4 (tick-driven)
+Real-time tick streaming via /ws WebSocket.
+Kite used ONLY for order placement. Market data from NSE India API + yfinance.
+"""
 from __future__ import annotations
 import asyncio
 import re
@@ -55,7 +60,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "X-API-Key", "Authorization"],
 )
 
-# Swagger UI 4.x only supports OpenAPI <=3.0.x; override to 3.0.3
+# Swagger UI 4.x only supports OpenAPI ≤3.0.x; override to 3.0.3
 from fastapi.openapi.utils import get_openapi
 def _custom_openapi():
     if app.openapi_schema:
@@ -69,7 +74,7 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 
 
-# -- CRIT-1: API key gate (all mutating routes + sensitive GETs) ---------------
+# ── CRIT-1: API key gate (all mutating routes + sensitive GETs) ───────────────
 _EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
@@ -100,7 +105,7 @@ async def _api_key_gate(request: Request, call_next):
     return await call_next(request)
 
 
-# -- HIGH-5: IP whitelist enforcement for orders and SEBI admin ----------------
+# ── HIGH-5: IP whitelist enforcement for orders and SEBI admin ────────────────
 _IP_GUARDED_PREFIXES = ("/orders/", "/sebi/kill-switch", "/sebi/resume",
                          "/sebi/reset-kill-switch", "/sebi/pause")
 
@@ -113,7 +118,7 @@ async def _ip_whitelist_gate(request: Request, call_next):
     return await call_next(request)
 
 
-# -- MED-2: In-memory rate limiter for orders and AI signals -------------------
+# ── MED-2: In-memory rate limiter for orders and AI signals ───────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW = 60.0
 _RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10}
@@ -133,7 +138,7 @@ async def _rate_limiter(request: Request, call_next):
     return await call_next(request)
 
 
-# -- HIGH-2: Input validation helpers (prompt injection / path traversal) ------
+# ── HIGH-2: Input validation helpers (prompt injection / path traversal) ──────
 _SYMBOL_RE = re.compile(r"^[A-Z0-9\-&]{1,20}$")
 _VALID_STRATEGIES = frozenset({"intraday", "fno", "swing", "scalping"})
 
@@ -150,12 +155,12 @@ def _clean_strategy(strategy: str) -> str:
     return s
 
 
-# -- WebSocket connection pool -------------------------------------------------
+# ── WebSocket connection pool ─────────────────────────────────────────────────
 _MAX_WS_CONNECTIONS = 50
 ws_clients: list[WebSocket] = []
 
 
-# -- LOW-4: fixed broadcast -- no bare except, explicit dead-client removal ----
+# ── LOW-4: fixed broadcast — no bare except, explicit dead-client removal ─────
 async def broadcast(data: dict) -> None:
     dead: list[WebSocket] = []
     for ws in ws_clients[:]:
@@ -170,7 +175,7 @@ async def broadcast(data: dict) -> None:
 tick_engine.ws_broadcast = broadcast
 
 
-# -- Pydantic models -----------------------------------------------------------
+# ── Pydantic models ───────────────────────────────────────────────────────────
 
 class TokenRequest(BaseModel):
     request_token: str | None = None
@@ -264,7 +269,7 @@ class CapitalAllocationRequest(BaseModel):
     max_swing_positions:     int | None   = Field(None, ge=1, le=10)
 
 
-# -- UI pages ------------------------------------------------------------------
+# ── UI pages ─────────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
 def login_page():
     """Serve the browser login UI (app + Kite OAuth)."""
@@ -291,7 +296,7 @@ def gate_log(n: int = 50):
     return {"decisions": get_gate_log(n), "total": n}
 
 
-# -- App auth (JWT) ------------------------------------------------------------
+# ── App auth (JWT) ────────────────────────────────────────────────────────────
 @app.post("/auth/login", tags=["Auth"])
 def app_login(form: OAuth2PasswordRequestForm = Depends()):
     """Exchange username + password for a JWT access token."""
@@ -339,9 +344,9 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
         <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
                      display:flex;align-items:center;justify-content:center;height:100vh">
           <div style="text-align:center">
-            <div style="font-size:3rem">&#10003;</div>
+            <div style="font-size:3rem">✅</div>
             <h2 style="color:#3fb950">Kite Connected!</h2>
-            <p style="color:#8b949e">Token: {token[:8]}...</p>
+            <p style="color:#8b949e">Token: {token[:8]}…</p>
             <p style="margin-top:16px"><a href="/login" style="color:#58a6ff">Back to dashboard</a></p>
           </div>
         </body></html>
@@ -355,7 +360,7 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
         )
 
 
-# -- Docs (LOW-3: protected by _api_key_gate middleware above) -----------------
+# ── Docs (LOW-3: protected by _api_key_gate middleware above) ─────────────────
 @app.get("/docs", include_in_schema=False)
 def swagger_ui() -> HTMLResponse:
     return get_swagger_ui_html(
@@ -370,17 +375,17 @@ def redoc_ui() -> HTMLResponse:
     return get_redoc_html(openapi_url="/openapi.json", title="AlgoTrader Pro v4 - ReDoc")
 
 
-# -- Auth ----------------------------------------------------------------------
+# ── Auth ──────────────────────────────────────────────────────────────────────
 @app.get("/auth/login-url", tags=["Auth"])
 def login_url(): return {"login_url": kite_client.login_url()}
 
 @app.post("/auth/token", tags=["Auth"])
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
-    return {"status": "ok", "access_token": t[:6] + "..."}
+    return {"status": "ok", "access_token": t[:6] + "…"}
 
 
-# -- Bot control ---------------------------------------------------------------
+# ── Bot control ───────────────────────────────────────────────────────────────
 @app.post("/bot/start", tags=["Bot"])
 async def start_bot(req: BotStartRequest):
     if master_agent.running:
@@ -395,7 +400,7 @@ async def start_bot(req: BotStartRequest):
         if not watchlist:
             from symbol_scanner import NIFTY_50
             watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
-            logger.warning("[bot/start] Symbol scanner returned no results -- using Nifty 50 fallback ({} symbols)", len(watchlist))
+            logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
     report = master_agent.start(strategies, watchlist)
     return {"status": "started", "architecture": "tick-driven 1s",
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
@@ -413,7 +418,7 @@ def bot_status(): return master_agent.get_status()
 def directives(): return master_agent.last_directives
 
 
-# -- Market data ---------------------------------------------------------------
+# ── Market data ───────────────────────────────────────────────────────────────
 @app.get("/market/live", tags=["Market"])
 def live_market(): return tick_engine.all_latest()
 
@@ -449,7 +454,7 @@ async def option_chain(symbol: str):
     return data
 
 
-# -- Agents --------------------------------------------------------------------
+# ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])
 def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
 
@@ -472,7 +477,7 @@ def resume_agent(name: str):
     return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
 
 
-# -- Backtest ------------------------------------------------------------------
+# ── Backtest ──────────────────────────────────────────────────────────────────
 @app.post("/backtest/run", tags=["Backtest"])
 def run_bt(req: BacktestRequest):
     sym = _clean_symbol(req.symbol)
@@ -539,7 +544,7 @@ async def trigger_weekly_backtest():
     return {"status": "weekly backtest started", "note": "runs in background, check logs"}
 
 
-# -- Orders --------------------------------------------------------------------
+# ── Orders ────────────────────────────────────────────────────────────────────
 @app.post("/orders/place", tags=["Orders"])
 async def place_order(req: OrderRequest):
     ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
@@ -587,7 +592,7 @@ def orders():
         raise HTTPException(500, "Unable to fetch orders")
 
 
-# -- Claude Gate Log (dashboard) ----------------------------------------------
+# ── Claude Gate Log (dashboard) ──────────────────────────────────────────────
 @app.get("/gate/log", tags=["AI Signal"])
 def gate_log(n: int = 50):
     """Return last n Claude trade-gate decisions (newest first). Used by dashboard."""
@@ -600,7 +605,7 @@ def gate_log(n: int = 50):
     return {"decisions": decisions, "count": len(decisions)}
 
 
-# -- Signals / Risk ------------------------------------------------------------
+# ── Signals / Risk ────────────────────────────────────────────────────────────
 @app.post("/signals/generate", tags=["AI Signal"])
 async def gen_signal(req: SignalRequest):
     # HIGH-2: sanitise inputs before they reach Claude prompt
@@ -645,7 +650,7 @@ def patch_trading_limits(req: TradingLimitsRequest):
     return get_trading_limits()
 
 
-# -- Agent Enable/Disable ------------------------------------------------------
+# ── Agent Enable/Disable ──────────────────────────────────────────────────────
 @app.get("/settings/agent-enables", tags=["Settings"])
 def get_agent_enables():
     return dict(bot_state._agent_enabled)
@@ -662,7 +667,7 @@ def set_agent_enables(req: AgentEnablesRequest):
     return dict(bot_state._agent_enabled)
 
 
-# -- Capital Allocation --------------------------------------------------------
+# ── Capital Allocation ────────────────────────────────────────────────────────
 @app.get("/settings/capital-allocation", tags=["Settings"])
 def get_capital_allocation():
     intraday_bucket = round(settings.total_capital * settings.intraday_capital_pct / 100)
@@ -716,7 +721,7 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
     return get_capital_allocation()
 
 
-# -- WebSocket -----------------------------------------------------------------
+# ── WebSocket ─────────────────────────────────────────────────────────────────
 # HIGH-1: token auth via ?token= query param + max connection cap
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -739,7 +744,7 @@ async def ws_endpoint(ws: WebSocket):
             ws_clients.remove(ws)
 
 
-# -- Regime --------------------------------------------------------------------
+# ── Regime ────────────────────────────────────────────────────────────────────
 @app.get("/regime/status", tags=["Market Regime"])
 def regime_status(): return regime_detector.status()
 
@@ -761,7 +766,7 @@ def regime_plans():
             for r, p in REGIME_PLANS.items()}
 
 
-# -- Adaptive engine -----------------------------------------------------------
+# ── Adaptive engine ───────────────────────────────────────────────────────────
 @app.get("/adaptive/status", tags=["Adaptive Engine"])
 def adaptive_status():
     return adaptive_engine.summary()
@@ -776,7 +781,7 @@ async def adaptive_review(
     return report
 
 
-# -- Symbol scanner ------------------------------------------------------------
+# ── Symbol scanner ────────────────────────────────────────────────────────────
 @app.post("/symbols/scan", tags=["Symbol Scanner"])
 async def run_scan(strategies: list[str] | None = None):
     result = await symbol_scanner.run(strategies=strategies, force=True)
@@ -800,8 +805,8 @@ def get_criteria():
     return {name: {"description": c.description, "universe_size": len(c.universe),
                    "top_n": c.top_n, "score_weights": c.score_weights,
                    "filters": {"min_avg_volume": c.min_avg_volume,
-                               "atr_range": f"{c.min_atr_pct}--{c.max_atr_pct}%",
-                               "rsi_range": f"{c.rsi_min}--{c.rsi_max}",
+                               "atr_range": f"{c.min_atr_pct}–{c.max_atr_pct}%",
+                               "rsi_range": f"{c.rsi_min}–{c.rsi_max}",
                                "min_adx": c.min_adx, "fo_only": c.fo_eligible_only,
                                "require_trend": c.require_trend}}
             for name, c in CRITERIA.items()}
@@ -813,7 +818,7 @@ def get_universe():
             "nifty_bank": NIFTY_BANK, "total": len(FULL_UNIVERSE)}
 
 
-# -- Trailing SL ---------------------------------------------------------------
+# ── Trailing SL ───────────────────────────────────────────────────────────────
 @app.get("/trailing-sl/status", tags=["Trailing SL"])
 def tsl_status(): return trailing_sl_engine.status_summary()
 
@@ -836,7 +841,7 @@ def update_tsl_config(req: TSLUpdateRequest):
     return {"status": "updated", "strategy": req.strategy}
 
 
-# -- Brackets ------------------------------------------------------------------
+# ── Brackets ──────────────────────────────────────────────────────────────────
 @app.get("/brackets", tags=["Brackets"])
 def get_all_brackets(active_only: bool = False):
     return {"brackets": atomic_bracket_engine.all_brackets(active_only),
@@ -860,7 +865,7 @@ async def manual_bracket(req: ManualBracketRequest):
     return bracket.to_dict()
 
 
-# -- SEBI ----------------------------------------------------------------------
+# ── SEBI ──────────────────────────────────────────────────────────────────────
 @app.get("/sebi/status", tags=["SEBI Compliance"])
 def sebi_status(): return sebi_compliance.status()
 
@@ -909,7 +914,7 @@ def whitelist_ip(req: WhitelistIPRequest):
     return {"status": "added", "ip": str(req.ip)}
 
 
-# -- Health --------------------------------------------------------------------
+# ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["System"])
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
@@ -924,7 +929,7 @@ def health():
             "time": datetime.now().strftime("%H:%M:%S IST")}
 
 
-# -- Startup -------------------------------------------------------------------
+# ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
     tick_engine.start_loop()
@@ -935,7 +940,7 @@ async def on_startup():
     platform_scheduler.start()
 
 
-# HIGH-7: reload=False in production -- auto-reload bypasses security middleware
+# HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)
