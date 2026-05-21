@@ -900,27 +900,37 @@ def t_intraday_returns_action():
     assert sig is None or isinstance(sig, dict)
 
 def t_intraday_buy_signal():
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)  # 10:30 AM market hours
     agent = IntradayAgent()
-    # Bullish: price>vwap, ema9>ema21, RSI 45-67, macd+, vol>1.3
     snap = _make_snap(rsi=55.0, trend="UP", vwap=2790.0,
                       macd_hist=1.5, volume_ratio=1.8,
                       ema9=2810.0, ema21=2795.0)
-    action, _ = agent.evaluate_tick(snap)
+    with patch("agents.strategy_agents.datetime") as mock_dt:
+        mock_dt.now.return_value = _mkt_dt
+        action, _ = agent.evaluate_tick(snap)
     assert action == "BUY", f"Expected BUY, got {action}"
 
 def t_intraday_hold_overbought():
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = IntradayAgent()
     snap = _make_snap(rsi=82.0, macd_hist=0.5, volume_ratio=1.5)
-    action, _ = agent.evaluate_tick(snap)
+    with patch("agents.strategy_agents.datetime") as mock_dt:
+        mock_dt.now.return_value = _mkt_dt
+        action, _ = agent.evaluate_tick(snap)
     assert action in ("HOLD","SELL"), f"Expected HOLD/SELL for RSI=82, got {action}"
 
 def t_intraday_sell_signal():
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = IntradayAgent()
-    # RSI not too oversold (avoid bounce), price below VWAP, MACD negative, ema9<ema21
     snap = _make_snap(rsi=35.0, trend="DOWN", vwap=2815.0,
                       macd_hist=-1.0, volume_ratio=1.5,
                       ema9=2790.0, ema21=2800.0)
-    action, _ = agent.evaluate_tick(snap)
+    with patch("agents.strategy_agents.datetime") as mock_dt:
+        mock_dt.now.return_value = _mkt_dt
+        action, _ = agent.evaluate_tick(snap)
     assert action == "SELL", f"Expected SELL, got {action}"
 
 def t_fno_valid_action():

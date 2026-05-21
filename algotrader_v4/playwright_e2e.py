@@ -180,6 +180,9 @@ def test_auth_flow(page: Page) -> None:
 def test_bot_lifecycle(page: Page) -> None:
     print("\n── 4. BOT LIFECYCLE ──────────────────────────────")
 
+    # Ensure clean state — stop if already running
+    api(page, "POST", "/bot/stop")
+
     # Start bot
     status, body = api(page, "POST", "/bot/start", {"strategies": ["intraday", "scalping"]})
     if status == 200 and body.get("status") == "started":
