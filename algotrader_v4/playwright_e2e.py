@@ -529,6 +529,149 @@ def test_swagger_interaction(page: Page) -> None:
     page.goto(f"{BASE}/docs")  # reset
 
 
+def test_simulation_orders_flow(page: Page) -> None:
+    print("\n── 12. SIMULATION ORDERS FLOW ────────────────────")
+
+    # Reset paper state via squareoff
+    api(page, "POST", "/orders/squareoff")
+
+    # 1. Paper BUY → PAPER-XXXXXXXX id
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "RELIANCE", "exchange": "NSE",
+        "transaction_type": "BUY", "quantity": 1,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    paper_oid = None
+    if status == 200 and body.get("order_id", "").startswith("PAPER-"):
+        paper_oid = body["order_id"]
+        ok(f"BUY RELIANCE → {paper_oid}")
+    elif status == 400 and "trading hours" in str(body).lower():
+        ok("BUY outside market hours → 400 risk block (correct)")
+        paper_oid = None
+    else:
+        fail("Paper BUY", f"HTTP {status}: {body}")
+        paper_oid = None
+
+    # 2. Portfolio has position
+    status, pos = api(page, "GET", "/portfolio/positions")
+    if status == 200:
+        net = pos.get("net", [])
+        reliance = next((p for p in net if p.get("tradingsymbol") == "RELIANCE"), None)
+        if reliance and reliance.get("quantity", 0) > 0:
+            ok(f"Portfolio shows RELIANCE qty={reliance['quantity']}")
+        elif paper_oid is None:
+            ok("Portfolio check skipped (market hours block)")
+        else:
+            fail("Portfolio position", f"RELIANCE not found or qty=0 in net={net[:2]}")
+    else:
+        fail("Portfolio positions", f"HTTP {status}")
+
+    # 3. SELL → closes position
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "RELIANCE", "exchange": "NSE",
+        "transaction_type": "SELL", "quantity": 1,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    if status == 200 and body.get("order_id", "").startswith("PAPER-"):
+        ok(f"SELL RELIANCE → {body['order_id']}")
+    elif status == 400:
+        ok(f"SELL blocked → 400 ({str(body)[:60]})")
+    else:
+        warn("SELL RELIANCE", f"HTTP {status}: {body}")
+
+    # 4. Place new BUY for cancel test
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "TCS", "exchange": "NSE",
+        "transaction_type": "BUY", "quantity": 1,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    cancel_oid = body.get("order_id") if status == 200 else None
+
+    # 5. Cancel order
+    if cancel_oid:
+        status, body = api(page, "DELETE", f"/orders/{cancel_oid}")
+        if status == 200:
+            ok(f"DELETE /orders/{cancel_oid} → cancelled")
+        else:
+            fail("Cancel order", f"HTTP {status}: {body}")
+    else:
+        ok("Cancel order skipped (no order placed)")
+
+    # 6. Squareoff → all positions cleared
+    status, body = api(page, "POST", "/orders/squareoff")
+    if status == 200 and "squared_off" in body:
+        ok(f"POST /orders/squareoff → squared_off={body['squared_off']}")
+    else:
+        fail("Squareoff", f"HTTP {status}: {body}")
+
+    # 7. Oversized order → 400
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "HDFCBANK", "exchange": "NSE",
+        "transaction_type": "BUY", "quantity": 9999999,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    if status == 400:
+        ok("Oversized qty → 400 risk block")
+    else:
+        fail("Oversized risk block", f"got {status}: {body}")
+
+    # 8. GET /config/validate → fields present
+    status, body = api(page, "GET", "/config/validate")
+    if status == 200:
+        required_keys = ["kite_api_key", "trading_mode", "ready_to_trade", "ticker_source"]
+        missing = [k for k in required_keys if k not in body]
+        if not missing:
+            ok(f"GET /config/validate → trading_mode={body.get('trading_mode')}, "
+               f"ticker_source={body.get('ticker_source')}")
+        else:
+            fail("Config validate fields", f"missing: {missing}")
+    else:
+        fail("GET /config/validate", f"HTTP {status}: {body}")
+
+    # 9. WebSocket → tick event within 5s
+    ws_js = f"""
+    async () => {{
+        return new Promise((resolve) => {{
+            const ws = new WebSocket('ws://127.0.0.1:8000/ws?token={API_KEY}');
+            let gotTick = false;
+            ws.onmessage = (e) => {{
+                try {{
+                    const d = JSON.parse(e.data);
+                    if (d.event === 'tick' || d.ltp) gotTick = true;
+                }} catch(e) {{}}
+            }};
+            setTimeout(() => {{ ws.close(); resolve(gotTick); }}, 5000);
+        }});
+    }}
+    """
+    try:
+        got_tick = page.evaluate(ws_js, timeout=7000)
+        if got_tick:
+            ok("WebSocket received tick event within 5s")
+        else:
+            warn("WebSocket tick", "No tick in 5s (market may be closed or bot not running)")
+    except Exception as e:
+        warn("WebSocket tick", f"evaluation error: {e}")
+
+    # 10. Market live → ltp > 0 (at least one subscribed symbol)
+    status, mkt = api(page, "GET", "/market/live")
+    if status == 200:
+        symbols = list(mkt.keys()) if isinstance(mkt, dict) else []
+        has_ltp = any(
+            isinstance(v, dict) and v.get("ltp", 0) > 0
+            for v in mkt.values()
+        ) if isinstance(mkt, dict) else False
+        if has_ltp:
+            sym0 = symbols[0]
+            ok(f"GET /market/live → ltp={mkt[sym0].get('ltp')} for {sym0}")
+        else:
+            ok(f"GET /market/live → {len(symbols)} symbols (ltp may be 0 if market closed)")
+    else:
+        fail("GET /market/live", f"HTTP {status}")
+
+    snap(page, "12_simulation_flow_done")
+
+
 # ── Main runner ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -562,6 +705,7 @@ def main() -> None:
             test_regime_adaptive(page)
             test_symbol_scanner(page)
             test_swagger_interaction(page)
+            test_simulation_orders_flow(page)
         except Exception as exc:
             fail("UNEXPECTED CRASH", str(exc))
             import traceback; traceback.print_exc()

@@ -131,6 +131,7 @@ class KiteClient:
         self._kite: Optional[KiteConnect] = None
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
+        self._instruments_cache: dict[str, list[dict]] = {}
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -161,6 +162,91 @@ class KiteClient:
                 "KiteClient not initialised — call set_access_token() first."
             )
         return self._kite
+
+    # ── Instrument lookup ──────────────────────────────────────────────────
+
+    def get_instruments(self, exchange: str = "NSE") -> list[dict]:
+        """Fetch and cache all instruments for the given exchange."""
+        if exchange in self._instruments_cache:
+            return self._instruments_cache[exchange]
+        if settings.trading_mode == "PAPER":
+            return []
+        try:
+            instruments = _with_retry(lambda: self.kite.instruments(exchange),
+                                      label="instruments")
+            self._instruments_cache[exchange] = instruments
+            logger.info("[kite] Loaded {} instruments for {}", len(instruments), exchange)
+            return instruments
+        except Exception as exc:
+            logger.warning("[kite] instruments fetch failed: {}", exc)
+            return []
+
+    def get_instrument_tokens(self, symbols: list[str], exchange: str = "NSE") -> dict[str, int]:
+        """Return {symbol: instrument_token} for the given symbols."""
+        instruments = self.get_instruments(exchange)
+        token_map: dict[str, int] = {}
+        for inst in instruments:
+            sym = inst.get("tradingsymbol", "")
+            if sym in symbols:
+                token_map[sym] = int(inst["instrument_token"])
+        missing = set(symbols) - set(token_map)
+        if missing:
+            logger.warning("[kite] No instrument tokens found for: {}", missing)
+        return token_map
+
+    def setup_ticker(
+        self,
+        token_to_symbol: dict[int, str],
+        on_tick_cb,
+        on_connect_cb=None,
+        on_error_cb=None,
+        on_close_cb=None,
+    ):
+        """Create and return a KiteTicker wired to the given callbacks.
+        Caller is responsible for starting it in a daemon thread."""
+        from kiteconnect import KiteTicker
+        tokens = list(token_to_symbol.keys())
+        access_token = (
+            settings.kite_access_token
+            or (getattr(self._kite, "access_token", "") if self._kite else "")
+        )
+        ticker = KiteTicker(api_key=settings.kite_api_key, access_token=access_token)
+
+        def _on_connect(ws, response):
+            logger.info("[KiteTicker] Connected — subscribing {} tokens", len(tokens))
+            ws.subscribe(tokens)
+            ws.set_mode(ws.MODE_FULL, tokens)
+            if on_connect_cb:
+                on_connect_cb(ws, response)
+
+        def _on_error(ws, code, reason):
+            logger.warning("[KiteTicker] Error {}: {}", code, reason)
+            if on_error_cb:
+                on_error_cb(ws, code, reason)
+
+        def _on_close(ws, code, reason):
+            logger.info("[KiteTicker] Closed {}: {}", code, reason)
+            if on_close_cb:
+                on_close_cb(ws, code, reason)
+
+        ticker.on_ticks = on_tick_cb
+        ticker.on_connect = _on_connect
+        ticker.on_error = _on_error
+        ticker.on_close = _on_close
+        return ticker
+
+    def validate_credentials(self) -> dict:
+        """Return status of all required credentials and Kite initialisation."""
+        return {
+            "kite_api_key":       bool(settings.kite_api_key),
+            "kite_api_secret":    bool(settings.kite_api_secret),
+            "kite_access_token":  bool(settings.kite_access_token),
+            "kite_initialised":   self._kite is not None,
+            "anthropic_api_key":  bool(settings.anthropic_api_key),
+            "telegram_bot_token": bool(settings.telegram_bot_token),
+            "api_key_set":        bool(settings.api_key),
+            "trading_mode":       settings.trading_mode,
+        }
 
     # ── Portfolio (read-only) ──────────────────────────────────────────────
 
