@@ -75,8 +75,8 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 
 
-# ── CRIT-1: API key gate (all mutating routes + sensitive GETs) ───────────────
-_EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url"})
+# ── CRIT-1: API key gate (all mutating routes + sensitive GETs) ───────────────────
+_EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/config/validate"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
@@ -106,7 +106,7 @@ async def _api_key_gate(request: Request, call_next):
     return await call_next(request)
 
 
-# ── HIGH-5: IP whitelist enforcement for orders and SEBI admin ────────────────
+# ── HIGH-5: IP whitelist enforcement for orders and SEBI admin ──────────────────
 _IP_GUARDED_PREFIXES = ("/orders/", "/sebi/kill-switch", "/sebi/resume",
                          "/sebi/reset-kill-switch", "/sebi/pause")
 
@@ -119,7 +119,7 @@ async def _ip_whitelist_gate(request: Request, call_next):
     return await call_next(request)
 
 
-# ── MED-2: In-memory rate limiter for orders and AI signals ───────────────────
+# ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW = 60.0
 _RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10}
@@ -139,7 +139,7 @@ async def _rate_limiter(request: Request, call_next):
     return await call_next(request)
 
 
-# ── HIGH-2: Input validation helpers (prompt injection / path traversal) ──────
+# ── HIGH-2: Input validation helpers (prompt injection / path traversal) ────────
 _SYMBOL_RE = re.compile(r"^[A-Z0-9\-&]{1,20}$")
 _VALID_STRATEGIES = frozenset({"intraday", "fno", "swing", "scalping"})
 
@@ -156,12 +156,12 @@ def _clean_strategy(strategy: str) -> str:
     return s
 
 
-# ── WebSocket connection pool ─────────────────────────────────────────────────
+# ── WebSocket connection pool ────────────────────────────────────────────────
 _MAX_WS_CONNECTIONS = 50
 ws_clients: list[WebSocket] = []
 
 
-# ── LOW-4: fixed broadcast — no bare except, explicit dead-client removal ─────
+# ── LOW-4: fixed broadcast — no bare except, explicit dead-client removal ────────
 async def broadcast(data: dict) -> None:
     dead: list[WebSocket] = []
     for ws in ws_clients[:]:
@@ -176,7 +176,7 @@ async def broadcast(data: dict) -> None:
 tick_engine.ws_broadcast = broadcast
 
 
-# ── Pydantic models ───────────────────────────────────────────────────────────
+# ── Pydantic models ────────────────────────────────────────────────────────────
 
 class TokenRequest(BaseModel):
     request_token: str | None = None
@@ -270,7 +270,7 @@ class CapitalAllocationRequest(BaseModel):
     max_swing_positions:     int | None   = Field(None, ge=1, le=10)
 
 
-# ── UI pages ─────────────────────────────────────────────────────────────────
+# ── UI pages ───────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
 def login_page():
     """Serve the browser login UI (app + Kite OAuth)."""
@@ -297,7 +297,7 @@ def gate_log(n: int = 50):
     return {"decisions": get_gate_log(n), "total": n}
 
 
-# ── App auth (JWT) ────────────────────────────────────────────────────────────
+# ── App auth (JWT) ──────────────────────────────────────────────────────────
 @app.post("/auth/login", tags=["Auth"])
 def app_login(form: OAuth2PasswordRequestForm = Depends()):
     """Exchange username + password for a JWT access token."""
@@ -376,7 +376,7 @@ def redoc_ui() -> HTMLResponse:
     return get_redoc_html(openapi_url="/openapi.json", title="AlgoTrader Pro v4 - ReDoc")
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ── Auth ────────────────────────────────────────────────────────────────────
 @app.get("/auth/login-url", tags=["Auth"])
 def login_url(): return {"login_url": kite_client.login_url()}
 
@@ -386,7 +386,7 @@ def set_token(req: TokenRequest):
     return {"status": "ok", "access_token": t[:6] + "…"}
 
 
-# ── Bot control ───────────────────────────────────────────────────────────────
+# ── Bot control ──────────────────────────────────────────────────────────────
 @app.post("/bot/start", tags=["Bot"])
 async def start_bot(req: BotStartRequest):
     if master_agent.running:
@@ -419,7 +419,7 @@ def bot_status(): return master_agent.get_status()
 def directives(): return master_agent.last_directives
 
 
-# ── Market data ───────────────────────────────────────────────────────────────
+# ── Market data ──────────────────────────────────────────────────────────────
 @app.get("/market/live", tags=["Market"])
 def live_market(): return tick_engine.all_latest()
 
@@ -478,7 +478,7 @@ def resume_agent(name: str):
     return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
 
 
-# ── Backtest ──────────────────────────────────────────────────────────────────
+# ── Backtest ────────────────────────────────────────────────────────────────────
 @app.post("/backtest/run", tags=["Backtest"])
 def run_bt(req: BacktestRequest):
     sym = _clean_symbol(req.symbol)
@@ -606,7 +606,7 @@ def gate_log(n: int = 50):
     return {"decisions": decisions, "count": len(decisions)}
 
 
-# ── Signals / Risk ────────────────────────────────────────────────────────────
+# ── Signals / Risk ──────────────────────────────────────────────────────────
 @app.post("/signals/generate", tags=["AI Signal"])
 async def gen_signal(req: SignalRequest):
     # HIGH-2: sanitise inputs before they reach Claude prompt
@@ -651,7 +651,7 @@ def patch_trading_limits(req: TradingLimitsRequest):
     return get_trading_limits()
 
 
-# ── Agent Enable/Disable ──────────────────────────────────────────────────────
+# ── Agent Enable/Disable ───────────────────────────────────────────────────
 @app.get("/settings/agent-enables", tags=["Settings"])
 def get_agent_enables():
     return dict(bot_state._agent_enabled)
@@ -668,7 +668,7 @@ def set_agent_enables(req: AgentEnablesRequest):
     return dict(bot_state._agent_enabled)
 
 
-# ── Capital Allocation ────────────────────────────────────────────────────────
+# ── Capital Allocation ──────────────────────────────────────────────────────────
 @app.get("/settings/capital-allocation", tags=["Settings"])
 def get_capital_allocation():
     intraday_bucket = round(settings.total_capital * settings.intraday_capital_pct / 100)
@@ -722,7 +722,7 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
     return get_capital_allocation()
 
 
-# ── WebSocket ─────────────────────────────────────────────────────────────────
+# ── WebSocket ────────────────────────────────────────────────────────────────────
 # HIGH-1: token auth via ?token= query param + max connection cap
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -767,7 +767,7 @@ def regime_plans():
             for r, p in REGIME_PLANS.items()}
 
 
-# ── Adaptive engine ───────────────────────────────────────────────────────────
+# ── Adaptive engine ────────────────────────────────────────────────────────────
 @app.get("/adaptive/status", tags=["Adaptive Engine"])
 def adaptive_status():
     return adaptive_engine.summary()
@@ -819,7 +819,7 @@ def get_universe():
             "nifty_bank": NIFTY_BANK, "total": len(FULL_UNIVERSE)}
 
 
-# ── Trailing SL ───────────────────────────────────────────────────────────────
+# ── Trailing SL ────────────────────────────────────────────────────────────────
 @app.get("/trailing-sl/status", tags=["Trailing SL"])
 def tsl_status(): return trailing_sl_engine.status_summary()
 
@@ -842,7 +842,7 @@ def update_tsl_config(req: TSLUpdateRequest):
     return {"status": "updated", "strategy": req.strategy}
 
 
-# ── Brackets ──────────────────────────────────────────────────────────────────
+# ── Brackets ────────────────────────────────────────────────────────────────────
 @app.get("/brackets", tags=["Brackets"])
 def get_all_brackets(active_only: bool = False):
     return {"brackets": atomic_bracket_engine.all_brackets(active_only),
@@ -866,7 +866,8 @@ async def manual_bracket(req: ManualBracketRequest):
     return bracket.to_dict()
 
 
-# ── Paper simulation helper ───────────────────────────────────────────────────
+# ── Paper simulation helper ─────────────────────────────────────────────────────
+
 class SimTickRequest(BaseModel):
     symbol: str
     ltp: float = Field(gt=0)
@@ -953,6 +954,25 @@ def health():
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),
             "time": now_ist().strftime("%H:%M:%S IST")}
+
+
+# ── Config validate ────────────────────────────────────────────────────────────
+@app.get("/config/validate", tags=["System"])
+def config_validate():
+    """Validate all required credentials and show current tick data source."""
+    creds = kite_client.validate_credentials()
+    use_ws = getattr(tick_engine, "_use_ws", False)
+    if settings.trading_mode == "LIVE":
+        ticker_source = "KITE_WS" if use_ws else "KITE_REST"
+    else:
+        ticker_source = "PAPER"
+    creds["ticker_source"] = ticker_source
+    creds["ready_to_trade"] = bool(
+        creds.get("kite_api_key")
+        and creds.get("kite_access_token")
+        and creds.get("kite_initialised")
+    )
+    return creds
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
