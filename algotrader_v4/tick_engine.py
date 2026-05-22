@@ -3,16 +3,13 @@ tick_engine.py  (v4)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Real-time market data engine.
 
-Data sources (NO Kite for polling):
-  Live mode  → KiteConnect WebSocket (true real-time) with NSE India API fallback
+Data sources:
+  Live mode  → KiteConnect WebSocket (true real-time) + kite.quote() REST batch fallback
   Paper mode → GBM simulator seeded from yfinance last price
-
-Kite is completely absent from order-placement concerns in this file.
-Kite WebSocket is used ONLY for tick streaming; orders go via kite_client.py.
 
 Architecture:
   LIVE: KiteConnect WebSocket (threaded) → _ingest_kite_tick()
-        NSE India API fallback for symbols not yet received via WebSocket
+        kite.quote() batch REST fallback for symbols not yet received via WebSocket
   PAPER: GBM simulator seeded from yfinance last price
   Both → TickBuffer (1s / 1min / 5min candles)
        → IndicatorCalc (EMA, RSI, MACD, BB, VWAP, ATR…)
@@ -35,6 +32,7 @@ import ta
 from loguru import logger
 
 from config import settings
+from kite_client import kite_client
 from market_data import (
     Quote, NSEClient, YFinanceClient, PaperTickSimulator,
     nse_client, yf_client, paper_sim, is_market_open,
@@ -377,6 +375,29 @@ class IndicatorCalc:
         return ind
 
 
+# ── Kite quote converter ──────────────────────────────────────────────────────
+
+def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
+    ohlc  = data.get("ohlc", {})
+    depth = data.get("depth", {})
+    buys  = depth.get("buy",  [{}])
+    sells = depth.get("sell", [{}])
+    ltp   = data.get("last_price", 0.0)
+    return Quote(
+        symbol    = symbol,
+        ltp       = ltp,
+        open_     = ohlc.get("open",  ltp),
+        high      = ohlc.get("high",  ltp),
+        low       = ohlc.get("low",   ltp),
+        prev_close= ohlc.get("close", ltp),
+        change    = data.get("change", 0.0),
+        change_pct= data.get("change", 0.0),
+        volume    = data.get("volume_traded", 0),
+        bid       = buys[0].get("price",  ltp) if buys  else ltp,
+        ask       = sells[0].get("price", ltp) if sells else ltp,
+    )
+
+
 # ── Tick Engine ───────────────────────────────────────────────────────────────
 
 class TickEngine:
@@ -425,7 +446,7 @@ class TickEngine:
 
         logger.info("TickEngine: subscribed {} symbols via {}",
                     len(self._symbols),
-                    "NSE India API" if settings.trading_mode == "LIVE" else "Paper simulator")
+                    "KiteConnect REST+WS" if settings.trading_mode == "LIVE" else "Paper simulator")
 
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
@@ -473,13 +494,12 @@ class TickEngine:
     def remove_subscriber(self, name: str) -> None:
         self._subscribers.pop(name, None)
 
-    # ── KiteConnect WebSocket ingest ──────────────────────────────────
+    # ── Shared tick processing ────────────────────────────────────────
 
-    async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
-        """Process a tick received directly from KiteConnect WebSocket."""
+    async def _process_tick(self, symbol: str, tick: Tick, source: str = "KITE") -> None:
+        """Candle buffer push → indicator calc → snapshot broadcast. Used by both WS and REST paths."""
         if symbol not in self._bufs_1min:
             return
-        self._ws_received.add(symbol)
 
         self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
         self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
@@ -524,11 +544,18 @@ class TickEngine:
                     "supertrend":  ind.supertrend_dir,
                     "squeeze_on":  ind.squeeze_on,
                     "stoch_rsi_k": ind.stoch_rsi_k,
-                    "source":     "KITE_WS",
+                    "source":     source,
                     "ts":         tick.timestamp.isoformat(),
                 })
             except Exception:
                 pass
+
+    # ── KiteConnect WebSocket ingest ──────────────────────────────────
+
+    async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
+        """Process a tick received directly from KiteConnect WebSocket."""
+        self._ws_received.add(symbol)
+        await self._process_tick(symbol, tick, source="KITE_WS")
 
     # ── Main poll loop ────────────────────────────────────────────────
 
@@ -545,93 +572,45 @@ class TickEngine:
                 await asyncio.sleep(30)
                 continue
 
-            # Fetch all symbols concurrently (skip those already fed by WebSocket)
-            tasks = [self._fetch_and_process(sym) for sym in self._symbols]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            if settings.trading_mode == "PAPER":
+                tasks = [self._fetch_and_process(sym) for sym in self._symbols]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                await self._fetch_kite_batch()
 
             # Sleep the remainder of 1 second
             elapsed = time.monotonic() - t_start
             await asyncio.sleep(max(0, 1.0 - elapsed))
 
     async def _fetch_and_process(self, symbol: str) -> None:
-        # Skip NSE polling if KiteConnect WebSocket is already feeding this symbol
-        if self._use_ws and symbol in self._ws_received:
+        """PAPER mode only — generate next GBM tick and process it."""
+        quote = paper_sim.next_tick(symbol)
+        tick  = Tick.from_quote(quote)
+        await self._process_tick(symbol, tick, source="PAPER")
+
+    async def _fetch_kite_batch(self) -> None:
+        """Single Kite quote() call for all non-WebSocket symbols in LIVE mode."""
+        pending = [s for s in self._symbols
+                   if not (self._use_ws and s in self._ws_received)]
+        if not pending:
             return
-
-        exch = self._exchange.get(symbol, "NSE")
-
-        if settings.trading_mode == "PAPER":
-            quote = paper_sim.next_tick(symbol)
-        else:
-            # Live: fetch from NSE India API (free, no Kite)
-            quote = await nse_client.quote_equity(symbol)
-            if not quote:
-                # Fallback: yfinance current price
-                price = yf_client.current_price(symbol, exch)
-                if price > 0:
-                    quote = Quote(
-                        symbol=symbol, ltp=price, open_=price,
-                        high=price, low=price, prev_close=price,
-                        change=0, change_pct=0, volume=0,
-                        bid=price, ask=price,
-                    )
-                else:
-                    return
-
-        tick = Tick.from_quote(quote)
-
-        # Push to candle buffers
-        self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
-        self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
-
-        # Compute live indicators from 1-min candles
-        df  = self._bufs_1min[symbol].as_dataframe()
-        ind = IndicatorCalc.compute(symbol, tick, df)
-
-        self._latest_tick[symbol] = tick
-        self._latest_ind[symbol]  = ind
-
-        snap = MarketSnapshot(
-            symbol=symbol, tick=tick, indicators=ind,
-            candles_1min=self._bufs_1min[symbol].candles()[-60:],
-            candles_5min=self._bufs_5min[symbol].candles()[-30:],
-        )
-
-        # Push to all subscriber queues
-        for q in self._subscribers.values():
-            try:    q.put_nowait(snap)
-            except asyncio.QueueFull: pass
-
-        # Broadcast to WebSocket dashboard
-        if self.ws_broadcast:
-            try:
-                await self.ws_broadcast({
-                    "event":      "tick",
-                    "symbol":     symbol,
-                    "ltp":        tick.ltp,
-                    "bid":        tick.bid,
-                    "ask":        tick.ask,
-                    "change_pct": round(tick.change_pct, 2),
-                    "volume":     tick.volume,
-                    "day_high":   tick.high,
-                    "day_low":    tick.low,
-                    "trend":      ind.trend,
-                    "momentum":   ind.momentum,
-                    "volatility": ind.volatility,
-                    "rsi":        round(ind.rsi_14, 1),
-                    "vwap":       round(ind.vwap, 2),
-                    "ema9":       round(ind.ema9,  2),
-                    "ema21":      round(ind.ema21, 2),
-                    "macd_hist":  round(ind.macd_hist, 4),
-                    "vol_ratio":   round(ind.volume_ratio, 2),
-                    "supertrend":  ind.supertrend_dir,
-                    "squeeze_on":  ind.squeeze_on,
-                    "stoch_rsi_k": ind.stoch_rsi_k,
-                    "source":     "NSE" if settings.trading_mode == "LIVE" else "PAPER",
-                    "ts":         tick.timestamp.isoformat(),
-                })
-            except Exception:
-                pass
+        instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
+        try:
+            raw = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: kite_client.quote_kite(instruments)
+            )
+        except Exception as exc:
+            logger.warning("[tick] Kite batch quote failed: {}", exc)
+            return
+        for sym in pending:
+            exch = self._exchange.get(sym, "NSE")
+            key  = f"{exch}:{sym}"
+            data = raw.get(key)
+            if not data:
+                continue
+            quote = _kite_quote_to_quote(sym, data)
+            tick  = Tick.from_quote(quote)
+            await self._process_tick(sym, tick, source="KITE_REST")
 
     # ── Query helpers ─────────────────────────────────────────────────
 

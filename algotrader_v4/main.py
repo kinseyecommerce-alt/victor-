@@ -1,7 +1,7 @@
 """
 main.py — AlgoTrader Pro v4 (tick-driven)
 Real-time tick streaming via /ws WebSocket.
-Kite used ONLY for order placement. Market data from NSE India API + yfinance.
+Kite used for order placement AND live market data (WebSocket streaming + REST quote fallback).
 """
 from __future__ import annotations
 import asyncio
@@ -46,7 +46,7 @@ import swagger_ui_bundle
 
 app = FastAPI(
     title="AlgoTrader Pro v4", version="4.0.0",
-    description="Tick-driven · NSE India API · yfinance · Kite for orders only",
+    description="Tick-driven · KiteConnect WebSocket + REST quote · orders + market data",
     docs_url=None, redoc_url=None,
 )
 app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
@@ -945,7 +945,7 @@ def whitelist_ip(req: WhitelistIPRequest):
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
             "architecture": "tick-driven 1s",
-            "market_data_source": "NSE India API + yfinance (Kite = orders only)",
+            "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
             "market_open": is_market_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",

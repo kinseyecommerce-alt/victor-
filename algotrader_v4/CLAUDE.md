@@ -33,7 +33,7 @@ Copy `.env.example` to `.env` and fill in credentials before running.
 ### Tick Pipeline (core data flow)
 
 ```
-NSE India API (1s poll) or KiteConnect WebSocket (LIVE mode)
+KiteConnect WebSocket (LIVE mode) or kite.quote() REST batch fallback (LIVE) or GBM simulator (PAPER)
   → tick_engine.py  (computes 15+ indicators: EMA, VWAP, RSI, MACD, BB, ATR)
   → asyncio Queue per agent subscriber
   → agent._tick_loop()  (IntradayAgent / ScalpingAgent / SwingAgent / FnOAgent)

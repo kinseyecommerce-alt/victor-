@@ -192,6 +192,13 @@ class KiteClient:
             return {"equity": {"available": {"live_balance": settings.max_position_size * 5}}}
         return _with_retry(self.kite.margins, label="margins")
 
+    def quote_kite(self, instruments: list[str]) -> dict[str, dict]:
+        """Batch live quotes from Kite. instruments = ['NSE:RELIANCE', 'NFO:NIFTY...'].
+        Returns Kite's quote dict keyed by 'EXCHANGE:SYMBOL'. Empty dict in PAPER mode."""
+        if settings.trading_mode == "PAPER" or not instruments:
+            return {}
+        return _with_retry(lambda: self.kite.quote(instruments), label="quote")
+
     # ── Order placement ────────────────────────────────────────────────────
 
     def place_order(
