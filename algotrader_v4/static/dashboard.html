@@ -2746,9 +2746,26 @@ function connectWS() {
     const stClass = stDir === 'UP' ? 'radar-up' : stDir === 'DOWN' ? 'radar-dn' : 'radar-neu';
     const hmClass = hmaDir === 'UP' ? 'radar-up' : hmaDir === 'DOWN' ? 'radar-dn' : 'radar-neu';
     const sqClass = sqOn  ? 'radar-sq' : sqMom > 0 ? 'radar-up' : sqMom < 0 ? 'radar-dn' : 'radar-neu';
+    // Stoch RSI row
+    const srK = typeof d.stoch_rsi_k === 'number' ? d.stoch_rsi_k : null;
+    const srLabel = srK === null ? '—' : srK > 80 ? 'OB' : srK < 20 ? 'OS' : 'MID';
+    const srClass = srK === null ? 'radar-neu' : srK > 80 ? 'radar-dn' : srK < 20 ? 'radar-up' : 'radar-neu';
+    const srNum   = srK !== null ? srK.toFixed(1) : '';
+    // VWAP band proximity
+    const ltp = d.ltp || 0;
+    const u3  = d.vwap_u3 || 0, l3 = d.vwap_l3 || 0;
+    const u2  = d.vwap_u2 || 0, l2 = d.vwap_l2 || 0;
+    let bandLabel = '', bandClass = 'radar-neu';
+    if (u3 > 0) {
+      if      (ltp >= u3)         { bandLabel = '▲ Above 3σ'; bandClass = 'radar-dn'; }
+      else if (ltp >= u2)         { bandLabel = '▲ 2–3σ';     bandClass = 'radar-dn'; }
+      else if (ltp <= l3)         { bandLabel = '▼ Below 3σ'; bandClass = 'radar-up'; }
+      else if (ltp <= l2)         { bandLabel = '▼ 2–3σ';     bandClass = 'radar-up'; }
+      else                        { bandLabel = '≈ VWAP mid';  bandClass = 'radar-neu'; }
+    }
     return `<div class="radar-tile" id="radar-${sym}">
       <div class="radar-sym">${sym}</div>
-      <div class="radar-ltp">${d.ltp ? '₹' + d.ltp.toFixed(2) : '—'}</div>
+      <div class="radar-ltp">${ltp ? '₹' + ltp.toFixed(2) : '—'}</div>
       <div class="radar-row ${stClass}">
         <span class="radar-lbl">ST</span>
         <span class="radar-val">${stDir}</span>
@@ -2763,6 +2780,15 @@ function connectWS() {
         <span class="radar-lbl">SQ</span>
         <span class="radar-val" style="flex:1">${sqLabel}</span>
       </div>
+      <div class="radar-row ${srClass}">
+        <span class="radar-lbl">StRSI</span>
+        <span class="radar-val">${srLabel}</span>
+        <span class="radar-num">${srNum}</span>
+      </div>
+      ${bandLabel ? `<div class="radar-row ${bandClass}">
+        <span class="radar-lbl">Band</span>
+        <span class="radar-val" style="flex:1;font-size:11px">${bandLabel}</span>
+      </div>` : ''}
     </div>`;
   }
 

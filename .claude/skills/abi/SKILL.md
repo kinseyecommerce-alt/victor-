@@ -405,6 +405,34 @@ This run improved:
 
 *(Updated each run by Abi — most recent at top)*
 
+### Run: 2026-05-22 (run 2)
+**Indicators added:**
+- VWAP Bands (2σ/3σ): `_vwap_bands()` in `tick_engine.py`; fields `vwap_upper2`, `vwap_lower2`, `vwap_upper3`, `vwap_lower3`; needs ≥10 bars
+- Stochastic RSI (14,3,3): `_stoch_rsi()` using `ta.momentum.stochrsi_k/d`; fields `stoch_rsi_k`, `stoch_rsi_d`; needs ≥20 bars; returns 0–100 scale
+
+**Strategy patterns added:**
+- `IntradayAgent._pat_vwap_band_revert`: mean-reversion from 3σ band extremes (base=4); wired 7th in pat_fn loop; uses `_prev_ltp[sym]` already tracked
+
+**API optimisations:**
+- Prompt caching on `claude_trade_gate.py` `_SYSTEM_PROMPT`: `system=[{"type":"text","text":_SYSTEM_PROMPT,"cache_control":{"type":"ephemeral"}}]`
+- Prompt cache TTL changed from 60→5 min in 2026 — still 90% cost reduction for rapid trade sequences
+
+**Library upgrades:**
+- APScheduler: 3.11.0 → 3.11.2 (safe patch, no API changes)
+- yfinance 1.3.0 released (MAJOR) — skip for now; 0.2.51 still stable
+
+**NSE insights (2026 update):**
+- Unofficial libraries throttle at 3 req/s; NSE hard cap is 10 OPS — our 8 req/s (125ms) remains safe
+- As of April 1 2026, SEBI requires unique Algo-ID on every order (sebi_compliance.py already handles this)
+
+**WebSocket broadcasting:**
+- Added `supertrend`, `squeeze_on`, `stoch_rsi_k` to both ws_broadcast blocks (KITE_WS path + NSE/PAPER path)
+
+**UI patterns:**
+- Radar card extended with StRSI row (OB/OS/MID badges) + Band row (VWAP 2σ/3σ proximity)
+- Template literals with conditional rows: use `${condition ? \`<html>\` : ''}` — no if/else in template
+- `d.vwap_u3` comes from `all_latest()` key `vwap_u3` — make sure JS key name matches Python dict key exactly
+
 ### Run: 2026-05-22
 **Indicators added:**
 - Supertrend (period=10, mult=3.0): `_supertrend()` helper in `tick_engine.py`; fields `supertrend`, `supertrend_dir`

@@ -286,7 +286,7 @@ async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision
             _get_client().messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=256,
-                system=_SYSTEM_PROMPT,
+                system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": json.dumps(ctx)}],
             ),
             timeout=4.0,

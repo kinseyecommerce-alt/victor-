@@ -74,7 +74,7 @@ class IntradayAgent(BaseAgent):
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_vwap_trend, self._pat_ema_pullback,
                        self._pat_orb_break, self._pat_breakout, self._pat_vwap_reclaim,
-                       self._pat_ttm_squeeze):
+                       self._pat_ttm_squeeze, self._pat_vwap_band_revert):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -216,6 +216,21 @@ class IntradayAgent(BaseAgent):
             return "BUY", 4, "TTM_SQUEEZE"
         if mom < 0 and 30 <= ind.rsi_14 <= 60 and ind.volume_ratio >= 1.2:
             return "SELL", 4, "TTM_SQUEEZE"
+        return "", 0, ""
+
+    def _pat_vwap_band_revert(self, sym, snap, ind, ltp, t):
+        """Mean-reversion from VWAP 3σ band extremes — top NSE 2026 pattern."""
+        u3, l3 = ind.vwap_upper3, ind.vwap_lower3
+        u2, l2 = ind.vwap_upper2, ind.vwap_lower2
+        if not (u3 > 0 and l3 > 0):
+            return "", 0, ""
+        prev_ltp = self._prev_ltp.get(sym, ltp)
+        # Price touched 3σ upper band last tick and now pulling back below 2σ
+        if prev_ltp >= u3 and ltp < u2 and ind.rsi_14 > 65 and ind.volume_ratio >= 1.0:
+            return "SELL", 4, "VWAP_BAND_REVERT"
+        # Price touched 3σ lower band last tick and now bouncing above 2σ
+        if prev_ltp <= l3 and ltp > l2 and ind.rsi_14 < 35 and ind.volume_ratio >= 1.0:
+            return "BUY", 4, "VWAP_BAND_REVERT"
         return "", 0, ""
 
     # ── Context bonus (+0 to +6 points added to every pattern) ───────────────

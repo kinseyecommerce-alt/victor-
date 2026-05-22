@@ -118,6 +118,14 @@ class LiveIndicators:
     # TTM Squeeze
     squeeze_on:       bool  = False
     squeeze_momentum: float = 0.0
+    # VWAP Bands (2σ / 3σ standard deviation)
+    vwap_upper2: float = 0.0
+    vwap_lower2: float = 0.0
+    vwap_upper3: float = 0.0
+    vwap_lower3: float = 0.0
+    # Stochastic RSI (14, smooth_k=3, smooth_d=3)
+    stoch_rsi_k: float = 50.0
+    stoch_rsi_d: float = 50.0
     computed_at: float = 0.0
 
 
@@ -243,6 +251,31 @@ def _ttm_squeeze(close, high, low, period: int = 20, kc_mult: float = 1.5):
     return squeeze, round(mom, 4)
 
 
+def _vwap_bands(close: pd.Series, high: pd.Series, low: pd.Series,
+                volume: pd.Series) -> tuple[float, float, float, float]:
+    tp = (high + low + close) / 3.0
+    vol_arr = volume.values.astype(float)
+    cum_vol = float(vol_arr.sum())
+    if cum_vol <= 0:
+        mid = float(close.iloc[-1])
+        return mid, mid, mid, mid
+    vwap = float((tp.values * vol_arr).sum()) / cum_vol
+    dev  = float(np.sqrt((vol_arr * (tp.values - vwap) ** 2).sum() / cum_vol))
+    return vwap + 2 * dev, vwap - 2 * dev, vwap + 3 * dev, vwap - 3 * dev
+
+
+def _stoch_rsi(close: pd.Series, period: int = 14,
+               smooth_k: int = 3, smooth_d: int = 3) -> tuple[float, float]:
+    try:
+        k = ta.momentum.stochrsi_k(close, window=period, smooth1=smooth_k, smooth2=smooth_d)
+        d = ta.momentum.stochrsi_d(close, window=period, smooth1=smooth_k, smooth2=smooth_d)
+        kv = float(k.iloc[-1]) * 100 if not k.empty and not pd.isna(k.iloc[-1]) else 50.0
+        dv = float(d.iloc[-1]) * 100 if not d.empty and not pd.isna(d.iloc[-1]) else 50.0
+        return round(kv, 2), round(dv, 2)
+    except Exception:
+        return 50.0, 50.0
+
+
 # ── Indicator calculator ──────────────────────────────────────────────────────
 
 class IndicatorCalc:
@@ -314,6 +347,13 @@ class IndicatorCalc:
 
             if n >= 20:
                 ind.squeeze_on, ind.squeeze_momentum = _ttm_squeeze(close, high, low)
+
+            if n >= 10:
+                ind.vwap_upper2, ind.vwap_lower2, ind.vwap_upper3, ind.vwap_lower3 = \
+                    _vwap_bands(close, high, low, volume)
+
+            if n >= 20:
+                ind.stoch_rsi_k, ind.stoch_rsi_d = _stoch_rsi(close)
 
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
@@ -480,7 +520,10 @@ class TickEngine:
                     "ema9":       round(ind.ema9,  2),
                     "ema21":      round(ind.ema21, 2),
                     "macd_hist":  round(ind.macd_hist, 4),
-                    "vol_ratio":  round(ind.volume_ratio, 2),
+                    "vol_ratio":   round(ind.volume_ratio, 2),
+                    "supertrend":  ind.supertrend_dir,
+                    "squeeze_on":  ind.squeeze_on,
+                    "stoch_rsi_k": ind.stoch_rsi_k,
                     "source":     "KITE_WS",
                     "ts":         tick.timestamp.isoformat(),
                 })
@@ -580,7 +623,10 @@ class TickEngine:
                     "ema9":       round(ind.ema9,  2),
                     "ema21":      round(ind.ema21, 2),
                     "macd_hist":  round(ind.macd_hist, 4),
-                    "vol_ratio":  round(ind.volume_ratio, 2),
+                    "vol_ratio":   round(ind.volume_ratio, 2),
+                    "supertrend":  ind.supertrend_dir,
+                    "squeeze_on":  ind.squeeze_on,
+                    "stoch_rsi_k": ind.stoch_rsi_k,
                     "source":     "NSE" if settings.trading_mode == "LIVE" else "PAPER",
                     "ts":         tick.timestamp.isoformat(),
                 })
@@ -620,6 +666,12 @@ class TickEngine:
                     "hma":            round(ind.hma, 2),
                     "squeeze_on":     ind.squeeze_on,
                     "squeeze_mom":    ind.squeeze_momentum,
+                    "vwap_u2":        round(ind.vwap_upper2, 2),
+                    "vwap_l2":        round(ind.vwap_lower2, 2),
+                    "vwap_u3":        round(ind.vwap_upper3, 2),
+                    "vwap_l3":        round(ind.vwap_lower3, 2),
+                    "stoch_rsi_k":    ind.stoch_rsi_k,
+                    "stoch_rsi_d":    ind.stoch_rsi_d,
                     "ts":             tick.timestamp.isoformat(),
                 }
         return result
