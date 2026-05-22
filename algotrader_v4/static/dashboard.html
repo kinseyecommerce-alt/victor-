@@ -402,6 +402,41 @@
   .badge-paused { background: rgba(245,158,11,0.12); color: var(--yellow); }
     .badge-stopped{ background: rgba(156,163,175,0.12);color: var(--muted); }
 
+    /* ── Abi Indicator Radar ────────────────────────────────────── */
+    .radar-tile {
+      background: var(--bg-card);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 10px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.3s;
+    }
+    .radar-tile:hover { border-color: var(--accent); }
+    .radar-sym  { font-size: 13px; font-weight: 700; color: var(--text-primary); letter-spacing: 0.5px; }
+    .radar-ltp  { font-size: 12px; color: var(--text-muted); margin-bottom: 2px; }
+    .radar-row  {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      padding: 3px 6px;
+      border-radius: 5px;
+      background: rgba(255,255,255,0.03);
+    }
+    .radar-lbl  { font-weight: 600; color: var(--text-muted); min-width: 30px; }
+    .radar-val  { font-weight: 700; min-width: 50px; }
+    .radar-num  { margin-left: auto; font-size: 11px; color: var(--text-muted); font-family: monospace; }
+    .radar-up   { border-left: 3px solid #10b981; }
+    .radar-up .radar-val { color: #10b981; }
+    .radar-dn   { border-left: 3px solid #ef4444; }
+    .radar-dn .radar-val { color: #ef4444; }
+    .radar-neu  { border-left: 3px solid rgba(255,255,255,0.1); }
+    .radar-neu .radar-val { color: var(--text-muted); }
+    .radar-sq   { border-left: 3px solid #f59e0b; }
+    .radar-sq .radar-val { color: #f59e0b; }
+
     /* ── P&L flash animation ────────────────────────────────────── */
     @keyframes flash-green { 0%,100%{background:transparent} 50%{background:rgba(16,185,129,0.25)} }
     @keyframes flash-red   { 0%,100%{background:transparent} 50%{background:rgba(239,68,68,0.25)} }
@@ -1059,6 +1094,20 @@
                 <tr><td colspan="9" class="no-data"><i data-lucide="inbox"></i>No trailing positions</td></tr>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <!-- ── Abi Indicator Radar ───────────────────────────── -->
+        <div class="card abi-radar-card" style="margin-top:20px">
+          <div class="card-header" style="display:flex;align-items:center;gap:10px">
+            <h3 class="card-title" style="margin:0"><i data-lucide="radar"></i> Abi Indicator Radar</h3>
+            <span class="badge badge-stopped" id="radar-live-badge" style="font-size:11px">LIVE</span>
+            <span style="margin-left:auto;font-size:11px;color:var(--text-muted)">Updates every tick · Supertrend · HMA · TTM Squeeze</span>
+          </div>
+          <div id="abi-radar-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:12px;max-height:380px;overflow-y:auto">
+            <div style="color:var(--text-muted);font-size:13px;grid-column:1/-1;padding:16px 0;text-align:center">
+              <i data-lucide="loader"></i>&nbsp;Waiting for first tick…
+            </div>
           </div>
         </div>
 
@@ -2683,6 +2732,56 @@ function connectWS() {
   const proto  = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws     = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
 
+  // ── Abi Indicator Radar state ───────────────────────────────
+  const _radarState = {};
+
+  function _radarCard(sym, d) {
+    const stDir   = d.supertrend_dir || 'NEUTRAL';
+    const stVal   = d.supertrend ? d.supertrend.toFixed(1) : '—';
+    const hmaDir  = d.hma_dir    || 'NEUTRAL';
+    const hmaVal  = d.hma        ? d.hma.toFixed(1)        : '—';
+    const sqOn    = d.squeeze_on;
+    const sqMom   = typeof d.squeeze_mom === 'number' ? d.squeeze_mom : 0;
+    const sqLabel = sqOn ? '⚡ Squeeze ON' : sqMom > 0 ? '↑ Bull release' : sqMom < 0 ? '↓ Bear release' : '○ Neutral';
+    const stClass = stDir === 'UP' ? 'radar-up' : stDir === 'DOWN' ? 'radar-dn' : 'radar-neu';
+    const hmClass = hmaDir === 'UP' ? 'radar-up' : hmaDir === 'DOWN' ? 'radar-dn' : 'radar-neu';
+    const sqClass = sqOn  ? 'radar-sq' : sqMom > 0 ? 'radar-up' : sqMom < 0 ? 'radar-dn' : 'radar-neu';
+    return `<div class="radar-tile" id="radar-${sym}">
+      <div class="radar-sym">${sym}</div>
+      <div class="radar-ltp">${d.ltp ? '₹' + d.ltp.toFixed(2) : '—'}</div>
+      <div class="radar-row ${stClass}">
+        <span class="radar-lbl">ST</span>
+        <span class="radar-val">${stDir}</span>
+        <span class="radar-num">${stVal}</span>
+      </div>
+      <div class="radar-row ${hmClass}">
+        <span class="radar-lbl">HMA</span>
+        <span class="radar-val">${hmaDir}</span>
+        <span class="radar-num">${hmaVal}</span>
+      </div>
+      <div class="radar-row ${sqClass}">
+        <span class="radar-lbl">SQ</span>
+        <span class="radar-val" style="flex:1">${sqLabel}</span>
+      </div>
+    </div>`;
+  }
+
+  function updateRadar(sym, d) {
+    _radarState[sym] = d;
+    const grid = document.getElementById('abi-radar-grid');
+    if (!grid) return;
+    let tile = document.getElementById(`radar-${sym}`);
+    if (!tile) {
+      // First time: rebuild whole grid from state
+      grid.innerHTML = Object.entries(_radarState)
+        .map(([s, v]) => _radarCard(s, v)).join('');
+    } else {
+      tile.outerHTML = _radarCard(sym, d);
+    }
+    const badge = document.getElementById('radar-live-badge');
+    if (badge) { badge.className = 'badge badge-running'; badge.textContent = 'LIVE'; }
+  }
+
   ws.onmessage = e => {
     try {
       const msg = JSON.parse(e.data);
@@ -2699,6 +2798,10 @@ function connectWS() {
           cell.textContent    = fmtINR(curr);
           cell.dataset.prev   = curr;
         });
+        // Update Abi Indicator Radar
+        if (msg.supertrend !== undefined || msg.hma !== undefined || msg.squeeze_on !== undefined) {
+          updateRadar(sym, msg);
+        }
       }
     } catch {}
   };
