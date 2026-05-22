@@ -203,7 +203,7 @@ class OrderRequest(BaseModel):
     symbol: str
     exchange: Literal["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"] = "NSE"
     transaction_type: Literal["BUY", "SELL"]
-    quantity: int
+    quantity: int = Field(gt=0)
     order_type: Literal["MARKET", "LIMIT", "SL", "SL-M"] = "MARKET"
     product: Literal["MIS", "CNC", "NRML"] = "MIS"
     price: float = 0.0
