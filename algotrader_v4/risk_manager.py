@@ -6,10 +6,11 @@ the trade is skipped and a reason is logged / alerted.
 """
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import time
 from loguru import logger
 
 from config import settings
+from ist_clock import ist_time
 
 
 # Capital bucket mapping: agent name → trading-type bucket
@@ -78,7 +79,7 @@ class RiskManager:
         from config import settings
         if settings.trading_mode == "PAPER":
             return True, "OK"
-        now_t = datetime.now().time()
+        now_t = ist_time()
         open_t  = time(9, 15)
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
         close_t = time(sq_h, sq_m)

@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
 from typing import Optional
 
 import anthropic
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
+
+from ist_clock import now_ist, minutes_to_squareoff as _mts
 
 from config import settings
 from kite_client import kite_client
@@ -72,9 +73,7 @@ MANDATORY RULES:
 
 def _minutes_to_squareoff() -> int:
     from config import settings as _s
-    h, m = [int(x) for x in _s.squareoff_time.split(":")]
-    now = datetime.now()
-    return max(0, (h * 60 + m) - (now.hour * 60 + now.minute))
+    return _mts(_s.squareoff_time)
 
 
 def _nifty_snapshot(live: dict) -> dict:
@@ -135,7 +134,7 @@ class MasterAgent:
 
     def __init__(self) -> None:
         self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        self._scheduler = AsyncIOScheduler()
+        self._scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
         self.running = False
         self._agent_watchlists: dict[str, list[dict]] = {}
         self.last_directives: dict = {}
@@ -234,7 +233,7 @@ class MasterAgent:
         ]
 
         report = {
-            "timestamp":       datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+            "timestamp":       now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
             "mode":            settings.trading_mode,
             "minutes_to_close": _minutes_to_squareoff(),
 

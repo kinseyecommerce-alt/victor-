@@ -257,12 +257,7 @@ class YFinanceClient:
 
 
 # ── Market hours helper ──────────────────────────────────────────────────
-def is_market_open() -> bool:
-    now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    t = now.time()
-    return datetime(1, 1, 1, 9, 15).time() <= t <= datetime(1, 1, 1, 15, 30).time()
+from ist_clock import is_market_open  # noqa: E402  (IST-aware; replaces datetime.now())
 
 
 # ── Paper-mode tick simulator ─────────────────────────────────────────────

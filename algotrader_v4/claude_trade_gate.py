@@ -14,13 +14,13 @@ import asyncio
 import json
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Optional
 
 import anthropic
 from loguru import logger
 
 from config import settings
+from ist_clock import now_ist as _now_ist, minutes_since_open, minutes_to_squareoff as _mts
 
 # ── Gate decision log (ring buffer, read by /gate/log endpoint) ───────────────
 _gate_log: deque[dict] = deque(maxlen=100)
@@ -97,8 +97,8 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
 
     risk_st = risk_manager.status()
 
-    now_ist = datetime.now().strftime("%H:%M")
-    minutes_open = _minutes_since_open()
+    now_ist = _now_ist().strftime("%H:%M")
+    minutes_open = minutes_since_open()
 
     # ── Intelligence modules (sync cache reads — never block) ─────────────────
     try:
@@ -256,18 +256,8 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
     }
 
 
-def _minutes_since_open() -> int:
-    now = datetime.now()
-    open_h, open_m = 9, 15
-    return max(0, (now.hour - open_h) * 60 + (now.minute - open_m))
-
-
 def _minutes_to_squareoff() -> int:
-    h, m = [int(x) for x in settings.squareoff_time.split(":")]
-    now = datetime.now()
-    sq_mins = h * 60 + m
-    now_mins = now.hour * 60 + now.minute
-    return sq_mins - now_mins
+    return _mts(settings.squareoff_time)
 
 
 async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision:

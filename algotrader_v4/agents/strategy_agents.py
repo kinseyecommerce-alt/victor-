@@ -5,9 +5,10 @@ Entry logic reads from live LiveIndicators (EMA, RSI, VWAP, MACD, BB, ATR).
 """
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import time, timedelta
 from typing import Optional
 
+from ist_clock import now_ist
 from agents.base_agent import BaseAgent
 from tick_engine import MarketSnapshot, LiveIndicators
 from risk_manager import risk_manager
@@ -63,8 +64,8 @@ class IntradayAgent(BaseAgent):
         ind = snap.indicators
         sym = snap.symbol
         ltp = snap.tick.ltp
-        now = datetime.now()
-        t   = now.time()
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
 
         if time(14, 50) <= t:
             return "HOLD", None
@@ -327,7 +328,7 @@ class IntradayAgent(BaseAgent):
             if ind.trend == "UP" and ind.macd_hist > 0:
                 return True, "Trend reversal exit"
 
-        now = datetime.now().time()
+        now = now_ist().time().replace(tzinfo=None)
         if now.hour >= 15:
             return True, "Auto square-off 3:00 PM"
         return False, ""
@@ -384,8 +385,8 @@ class FnOAgent(BaseAgent):
         ind = snap.indicators
         sym = snap.symbol
         ltp = snap.tick.ltp
-        now = datetime.now()
-        t   = now.time()
+        now = now_ist()
+        t   = now.time().replace(tzinfo=None)
 
         # Exit-only window
         if time(14, 50) <= t:

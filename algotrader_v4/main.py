@@ -9,6 +9,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime
+from ist_clock import now_ist
 from pathlib import Path
 from typing import Literal
 
@@ -926,7 +927,7 @@ def health():
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),
-            "time": datetime.now().strftime("%H:%M:%S IST")}
+            "time": now_ist().strftime("%H:%M:%S IST")}
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
