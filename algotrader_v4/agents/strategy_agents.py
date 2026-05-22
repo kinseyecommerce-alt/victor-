@@ -53,6 +53,7 @@ class IntradayAgent(BaseAgent):
         self._prev_above_vwap: dict = {}
         self._prev_ltp:        dict = {}
         self._prev_rsi:        dict = {}
+        self._prev_squeeze:    dict = {}   # sym → squeeze_on last tick
         self._orb_high:        dict = {}
         self._orb_low:         dict = {}
         self._orb_fired:       dict = {}
@@ -72,7 +73,8 @@ class IntradayAgent(BaseAgent):
 
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_vwap_trend, self._pat_ema_pullback,
-                       self._pat_orb_break, self._pat_breakout, self._pat_vwap_reclaim):
+                       self._pat_orb_break, self._pat_breakout, self._pat_vwap_reclaim,
+                       self._pat_ttm_squeeze):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -199,6 +201,23 @@ class IntradayAgent(BaseAgent):
             return "", 0, ""
         return ("BUY", 3, "VWAP_RECLAIM") if now_above else ("SELL", 3, "VWAP_RECLAIM")
 
+    # ── Pattern 6: TTM_SQUEEZE ────────────────────────────────────────────────
+    # Fire when squeeze releases (bands expand) with momentum aligned to direction.
+    # Squeeze builds energy; the breakout bar is the entry signal.
+
+    def _pat_ttm_squeeze(self, sym, snap, ind, ltp, t):
+        if ind.squeeze_on:
+            return "", 0, ""
+        prev_squeeze = self._prev_squeeze.get(sym, True)
+        if not prev_squeeze:
+            return "", 0, ""
+        mom = ind.squeeze_momentum
+        if mom > 0 and 40 <= ind.rsi_14 <= 70 and ind.volume_ratio >= 1.2:
+            return "BUY", 4, "TTM_SQUEEZE"
+        if mom < 0 and 30 <= ind.rsi_14 <= 60 and ind.volume_ratio >= 1.2:
+            return "SELL", 4, "TTM_SQUEEZE"
+        return "", 0, ""
+
     # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
 
     def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
@@ -267,8 +286,9 @@ class IntradayAgent(BaseAgent):
     def _update_state(self, sym: str, ind: LiveIndicators, ltp: float) -> None:
         if ind.vwap and ind.vwap > 0:
             self._prev_above_vwap[sym] = ltp > ind.vwap
-        self._prev_ltp[sym] = ltp
-        self._prev_rsi[sym] = ind.rsi_14
+        self._prev_ltp[sym]    = ltp
+        self._prev_rsi[sym]    = ind.rsi_14
+        self._prev_squeeze[sym] = ind.squeeze_on
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)
@@ -878,6 +898,7 @@ class ScalpingAgent(BaseAgent):
     _prev_ema21:      dict[str, float]    = {}
     _prev_ltp:        dict[str, float]    = {}
     _prev_near_vwap:  dict[str, bool]     = {}
+    _prev_st_dir:     dict[str, str]      = {}   # Supertrend direction last tick
     _orb_high:        dict[str, float]    = {}
     _orb_low:         dict[str, float]    = {}
     _last_candle_ts:  dict[str, object]   = {}   # last candle that triggered SURGE
@@ -921,9 +942,10 @@ class ScalpingAgent(BaseAgent):
         prev_ema9  = self._prev_ema9.get(sym, ind.ema9)
         prev_ema21 = self._prev_ema21.get(sym, ind.ema21 or ind.ema9)
         prev_ltp   = self._prev_ltp.get(sym, ltp)
-        self._prev_ema9[sym]  = ind.ema9
-        self._prev_ema21[sym] = ind.ema21 or ind.ema9
-        self._prev_ltp[sym]   = ltp
+        self._prev_ema9[sym]   = ind.ema9
+        self._prev_ema21[sym]  = ind.ema21 or ind.ema9
+        self._prev_ltp[sym]    = ltp
+        self._prev_st_dir[sym] = ind.supertrend_dir
 
         # ── Build / update opening-range high/low ────────────────────────────
         self._update_orb(sym, snap, t)
@@ -1044,6 +1066,15 @@ class ScalpingAgent(BaseAgent):
                     return "BUY",  "ORB"
                 if breakout_down:
                     return "SELL", "ORB"
+
+        # Pattern 6: Supertrend flip — direction changed this tick
+        prev_st_dir = self._prev_st_dir.get(sym, ind.supertrend_dir)
+        curr_st_dir = ind.supertrend_dir
+        if curr_st_dir != prev_st_dir and ind.volume_ratio >= 1.2:
+            if curr_st_dir == "UP":
+                return "BUY",  "SUPERTREND_FLIP"
+            if curr_st_dir == "DOWN":
+                return "SELL", "SUPERTREND_FLIP"
 
         return "HOLD", ""
 

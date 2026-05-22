@@ -109,6 +109,15 @@ class LiveIndicators:
     trend:       str = "NEUTRAL"
     momentum:    str = "NEUTRAL"
     volatility:  str = "NORMAL"
+    # Supertrend (period=10, mult=3.0)
+    supertrend:       float = 0.0
+    supertrend_dir:   str   = "NEUTRAL"
+    # Hull Moving Average (period=20)
+    hma:              float = 0.0
+    hma_dir:          str   = "NEUTRAL"
+    # TTM Squeeze
+    squeeze_on:       bool  = False
+    squeeze_momentum: float = 0.0
     computed_at: float = 0.0
 
 
@@ -165,6 +174,73 @@ class TickBuffer:
             "open": c.open, "high": c.high, "low": c.low,
             "close": c.close, "volume": c.volume, "date": c.ts,
         } for c in cs])
+
+
+# ── Indicator helpers (Supertrend, HMA, TTM Squeeze) ─────────────────────────
+
+def _wma(series, period: int):
+    weights = np.arange(1, period + 1, dtype=float)
+    return series.rolling(period).apply(
+        lambda x: float(np.dot(x, weights) / weights.sum()), raw=True)
+
+
+def _supertrend(high, low, close, period: int = 10, mult: float = 3.0):
+    hl2   = (high + low) / 2
+    atr   = ta.volatility.AverageTrueRange(high, low, close, period).average_true_range()
+    upper = (hl2 + mult * atr).fillna(0)
+    lower = (hl2 - mult * atr).fillna(0)
+    n     = len(close)
+    st_val, st_dir = [0.0] * n, ["NEUTRAL"] * n
+    for i in range(1, n):
+        if close.iloc[i] > upper.iloc[i - 1]:
+            st_dir[i] = "UP"
+        elif close.iloc[i] < lower.iloc[i - 1]:
+            st_dir[i] = "DOWN"
+        else:
+            st_dir[i] = st_dir[i - 1]
+        if st_dir[i] == "UP":
+            st_val[i] = max(float(lower.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(lower.iloc[i])
+        else:
+            st_val[i] = min(float(upper.iloc[i]), st_val[i - 1]) if st_val[i - 1] else float(upper.iloc[i])
+    return st_val[-1], st_dir[-1]
+
+
+def _hma(close, period: int = 20):
+    half  = max(int(period / 2), 1)
+    sqrtp = max(int(period ** 0.5), 1)
+    raw   = 2 * _wma(close, half) - _wma(close, period)
+    hma_s = _wma(raw, sqrtp)
+    v     = hma_s.dropna()
+    if len(v) < 2:
+        return 0.0, "NEUTRAL"
+    direction = "UP" if float(v.iloc[-1]) > float(v.iloc[-2]) else "DOWN"
+    return float(v.iloc[-1]), direction
+
+
+def _ttm_squeeze(close, high, low, period: int = 20, kc_mult: float = 1.5):
+    sma     = close.rolling(period).mean()
+    atr     = ta.volatility.AverageTrueRange(high, low, close, period).average_true_range()
+    bb_obj  = ta.volatility.BollingerBands(close, period, 2)
+    bb_u    = bb_obj.bollinger_hband()
+    bb_l    = bb_obj.bollinger_lband()
+    kc_u    = sma + kc_mult * atr
+    kc_l    = sma - kc_mult * atr
+    squeeze = bool((bb_u.iloc[-1] < kc_u.iloc[-1]) and (bb_l.iloc[-1] > kc_l.iloc[-1]))
+    highest = high.rolling(period).max()
+    lowest  = low.rolling(period).min()
+    delta   = close - (((highest + lowest) / 2) + sma) / 2
+    tail    = delta.dropna().iloc[-period:]
+    if len(tail) >= 2:
+        x = np.arange(len(tail), dtype=float)
+        y = tail.values.astype(float)
+        if not np.any(np.isnan(y)):
+            c   = np.polyfit(x, y, 1)
+            mom = float(c[0] * (len(tail) - 1) + c[1])
+        else:
+            mom = float(tail.iloc[-1])
+    else:
+        mom = 0.0
+    return squeeze, round(mom, 4)
 
 
 # ── Indicator calculator ──────────────────────────────────────────────────────
@@ -229,6 +305,15 @@ class IndicatorCalc:
             if n >= 5:
                 ind.obv = float(ta.volume.OnBalanceVolumeIndicator(
                     close, volume).on_balance_volume().iloc[-1])
+
+            if n >= 11:
+                ind.supertrend, ind.supertrend_dir = _supertrend(high, low, close)
+
+            if n >= 25:
+                ind.hma, ind.hma_dir = _hma(close)
+
+            if n >= 20:
+                ind.squeeze_on, ind.squeeze_momentum = _ttm_squeeze(close, high, low)
 
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
@@ -527,10 +612,15 @@ class TickEngine:
                     "vwap":       round(ind.vwap, 2),
                     "ema9":       round(ind.ema9, 2),
                     "ema21":      round(ind.ema21, 2),
-                    "macd_hist":  round(ind.macd_hist, 4),
-                    "vol_ratio":  round(ind.volume_ratio, 2),
-                    "source":     "NSE" if settings.trading_mode == "LIVE" else "PAPER",
-                    "ts":         tick.timestamp.isoformat(),
+                    "macd_hist":      round(ind.macd_hist, 4),
+                    "vol_ratio":      round(ind.volume_ratio, 2),
+                    "source":         "NSE" if settings.trading_mode == "LIVE" else "PAPER",
+                    "supertrend":     round(ind.supertrend, 2),
+                    "supertrend_dir": ind.supertrend_dir,
+                    "hma":            round(ind.hma, 2),
+                    "squeeze_on":     ind.squeeze_on,
+                    "squeeze_mom":    ind.squeeze_momentum,
+                    "ts":             tick.timestamp.isoformat(),
                 }
         return result
 

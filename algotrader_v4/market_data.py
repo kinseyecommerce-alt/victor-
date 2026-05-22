@@ -110,6 +110,9 @@ class NSEClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._session_ok = False
         self._last_session = 0.0
+        # Rate-limit: cap at 8 req/s per NSE Circular 54/2024 (10 OPS limit)
+        self._last_req_ts: float = 0.0
+        self._MIN_INTERVAL: float = 0.125
 
     async def _ensure_session(self) -> None:
         now = time.time()
@@ -130,6 +133,12 @@ class NSEClient:
 
     async def get(self, url: str) -> Optional[dict]:
         await self._ensure_session()
+        # Throttle to 8 req/s
+        import asyncio as _aio
+        wait = self._MIN_INTERVAL - (time.monotonic() - self._last_req_ts)
+        if wait > 0:
+            await _aio.sleep(wait)
+        self._last_req_ts = time.monotonic()
         try:
             resp = await self._client.get(url)
             resp.raise_for_status()
