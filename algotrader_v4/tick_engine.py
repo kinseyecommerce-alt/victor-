@@ -454,25 +454,40 @@ class TickEngine:
         self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._poll_loop())
 
-        # Start KiteConnect WebSocket in LIVE mode if configured
-        if (settings.trading_mode == "LIVE"
-                and settings.use_kite_websocket
-                and settings.kite_access_token):
-            try:
-                from kite_ticker import KiteTicker
-                self._kite_ticker = KiteTicker()
-                self._kite_ticker.start(
-                    self._symbols,
-                    self._ingest_kite_tick,
-                    self._loop,
-                )
-                self._use_ws = True
-                logger.info("TickEngine: KiteConnect WebSocket started for {} symbols",
-                            len(self._symbols))
-            except Exception as exc:
-                logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
-                             "falling back to NSE polling", exc)
-                self._use_ws = False
+        # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback
+        if settings.trading_mode == "LIVE":
+            if settings.use_truedata_websocket and settings.truedata_username:
+                try:
+                    from truedata_client import truedata_ticker
+                    self._kite_ticker = truedata_ticker  # reuse slot; same interface
+                    truedata_ticker.start(
+                        self._symbols,
+                        self._ingest_kite_tick,
+                        self._loop,
+                    )
+                    self._use_ws = True
+                    logger.info("TickEngine: TrueData WebSocket started for {} symbols",
+                                len(self._symbols))
+                except Exception as exc:
+                    logger.error("TickEngine: TrueData WebSocket failed: {} — "
+                                 "falling back to Kite REST", exc)
+                    self._use_ws = False
+            elif settings.use_kite_websocket and settings.kite_access_token:
+                try:
+                    from kite_ticker import KiteTicker
+                    self._kite_ticker = KiteTicker()
+                    self._kite_ticker.start(
+                        self._symbols,
+                        self._ingest_kite_tick,
+                        self._loop,
+                    )
+                    self._use_ws = True
+                    logger.info("TickEngine: KiteConnect WebSocket started for {} symbols",
+                                len(self._symbols))
+                except Exception as exc:
+                    logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
+                                 "falling back to Kite REST", exc)
+                    self._use_ws = False
 
         logger.info("TickEngine poll loop started (ws={})", self._use_ws)
 

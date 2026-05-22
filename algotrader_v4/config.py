@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str = ""
 
+    # TrueData
+    truedata_username: str = ""
+    truedata_password: str = ""
+    use_truedata_websocket:   bool = False  # primary live tick source (replaces Kite WS)
+    use_truedata_historical:  bool = False  # OHLCV history for backtesting / warm-up
+    use_truedata_options:     bool = False  # options chain: IV rank, PCR, max pain
+
     # Telegram
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""

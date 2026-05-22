@@ -1,8 +1,12 @@
-# ── Broker (orders only, no market data) ──────────────────────────
+# ── Broker ──────────────────────────────────────────────────────
 kiteconnect==5.0.1
 
 # ── Market data ───────────────────────────────────────────────────
 yfinance==0.2.51
+# TrueData WebSocket feed (live ticks, OHLCV history, options chain)
+# Install only if you have a TrueData subscription:
+#   pip install truedata-ws
+truedata-ws; extra == "truedata"
 httpx==0.28.1
 
 # ── API server ────────────────────────────────────────────────────

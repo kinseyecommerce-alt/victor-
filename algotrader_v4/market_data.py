@@ -228,6 +228,17 @@ class YFinanceClient:
         return symbol + suffix
 
     def historical(self, symbol, exchange="NSE", interval="1m", period="5d") -> pd.DataFrame:
+        from config import settings as _s
+        if _s.use_truedata_historical:
+            try:
+                from truedata_client import truedata_historical
+                lookback = {"5d": 5, "15d": 15, "30d": 30, "60d": 60, "90d": 90}.get(period, 5)
+                df = truedata_historical.historical(symbol, exchange, interval, lookback)
+                if not df.empty:
+                    return df
+            except Exception as exc:
+                logger.debug("TrueData historical fallback to yfinance for {}: {}", symbol, exc)
+
         ticker = self._ticker(symbol, exchange)
         try:
             df = yf.download(ticker, period=period, interval=interval,
@@ -248,6 +259,16 @@ class YFinanceClient:
             return pd.DataFrame()
 
     def current_price(self, symbol: str, exchange: str = "NSE") -> float:
+        from config import settings as _s
+        if _s.use_truedata_historical:
+            try:
+                from truedata_client import truedata_historical
+                price = truedata_historical.current_price(symbol, exchange)
+                if price > 0:
+                    return price
+            except Exception:
+                pass
+
         ticker = self._ticker(symbol, exchange)
         try:
             info = yf.Ticker(ticker).fast_info

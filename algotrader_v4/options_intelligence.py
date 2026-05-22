@@ -277,6 +277,88 @@ def _normalise_chain(raw_chain: list[dict], expiry: str) -> list[dict]:
     return list(out.values())
 
 
+# ── TrueData chain parser ──────────────────────────────────────────────────────
+
+def _parse_truedata_chain(rows: list[dict]) -> Optional[dict]:
+    """
+    Parse the normalised TrueData option chain (from TrueDataOptionsClient)
+    into the same structure returned by _parse_chain() for NSE data.
+    rows: [{"strike", "expiry", "CE_oi", "CE_iv", "CE_ltp", "CE_oi_change",
+                                "PE_oi", "PE_iv", "PE_ltp", "PE_oi_change"}, ...]
+    """
+    try:
+        if not rows:
+            return None
+
+        # Use expiry of first row (all rows same expiry from get_option_chain)
+        current_expiry = rows[0].get("expiry", "")
+
+        strikes: dict[float, dict] = {}
+        for row in rows:
+            k = float(row.get("strike", 0))
+            if k <= 0:
+                continue
+            strikes[k] = {
+                "CE": {
+                    "oi":        int(row.get("CE_oi", 0)),
+                    "oi_change": int(row.get("CE_oi_change", 0)),
+                    "iv":        float(row.get("CE_iv", 0)),
+                    "ltp":       float(row.get("CE_ltp", 0)),
+                },
+                "PE": {
+                    "oi":        int(row.get("PE_oi", 0)),
+                    "oi_change": int(row.get("PE_oi_change", 0)),
+                    "iv":        float(row.get("PE_iv", 0)),
+                    "ltp":       float(row.get("PE_ltp", 0)),
+                },
+            }
+
+        if not strikes:
+            return None
+
+        sorted_strikes = sorted(strikes.keys())
+
+        # ATM IV — use median strike as a proxy for spot (no underlying value in TD chain)
+        mid_idx    = len(sorted_strikes) // 2
+        atm_strike = sorted_strikes[mid_idx]
+        atm_entry  = strikes[atm_strike]
+        ce_iv = atm_entry["CE"]["iv"] if atm_entry["CE"] else 0.0
+        pe_iv = atm_entry["PE"]["iv"] if atm_entry["PE"] else 0.0
+        valid_ivs  = [v for v in (ce_iv, pe_iv) if v > 0]
+        atm_iv     = round(sum(valid_ivs) / len(valid_ivs), 2) if valid_ivs else 0.0
+
+        # PCR
+        total_pe_oi = sum(strikes[k]["PE"]["oi"] for k in sorted_strikes if strikes[k]["PE"])
+        total_ce_oi = sum(strikes[k]["CE"]["oi"] for k in sorted_strikes if strikes[k]["CE"])
+        pcr = round(total_pe_oi / total_ce_oi, 3) if total_ce_oi > 0 else 0.0
+
+        max_pain_strike = _compute_max_pain(strikes, sorted_strikes)
+
+        oi_changes: list[dict] = []
+        for k in sorted_strikes:
+            for side in ("CE", "PE"):
+                entry = strikes[k].get(side)
+                if entry and entry["oi_change"] != 0:
+                    oi_changes.append({"strike": k, "type": side,
+                                       "oi_change": entry["oi_change"]})
+        oi_buildup = sorted(oi_changes, key=lambda x: abs(x["oi_change"]), reverse=True)[:3]
+
+        return {
+            "spot_price":  round(atm_strike, 2),   # best estimate without underlying feed
+            "atm_strike":  atm_strike,
+            "atm_iv":      atm_iv,
+            "pcr":         pcr,
+            "max_pain":    max_pain_strike,
+            "oi_buildup":  oi_buildup,
+            "expiry":      current_expiry,
+            "total_ce_oi": total_ce_oi,
+            "total_pe_oi": total_pe_oi,
+        }
+    except Exception as exc:
+        logger.debug("[options_intel] TrueData chain parse error: {}", exc)
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def get_iv_context(symbol: str) -> dict:
@@ -289,17 +371,37 @@ async def get_iv_context(symbol: str) -> dict:
 
     Returns {} on any failure.
     """
+    from config import settings as _s
     symbol = symbol.upper()
     try:
-        data = await nse_client.option_chain(symbol)
-        if not data:
-            logger.debug("[options_intel] no chain data for {}", symbol)
-            return {}
+        parsed = None
 
-        parsed = _parse_chain(data)
+        # TrueData path (preferred when enabled)
+        if _s.use_truedata_options:
+            try:
+                from truedata_client import truedata_options
+                td_rows = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: truedata_options.get_option_chain(symbol)
+                )
+                if td_rows:
+                    parsed = _parse_truedata_chain(td_rows)
+            except Exception as _e:
+                logger.debug("[options_intel] TrueData path failed for {}: {}", symbol, _e)
+
+        # NSE fallback
+        if parsed is None:
+            data = await nse_client.option_chain(symbol)
+            if not data:
+                logger.debug("[options_intel] no chain data for {}", symbol)
+                return {}
+            parsed = _parse_chain(data)
+
         if not parsed:
             logger.debug("[options_intel] chain parse returned nothing for {}", symbol)
             return {}
+
+        # Make raw_chain available for derivative caches (NSE path only)
+        data = data if not _s.use_truedata_options else None
 
         atm_iv = parsed["atm_iv"]
 
@@ -329,7 +431,7 @@ async def get_iv_context(symbol: str) -> dict:
         _cache[symbol] = {**result, "_updated_ts": time.time()}
 
         # ── Populate derivative intelligence caches from the raw chain ────────
-        raw_chain = data.get("records", {}).get("data", [])
+        raw_chain = data.get("records", {}).get("data", []) if data else []
         spot      = parsed["spot_price"]
         if raw_chain and spot > 0:
             # Normalise chain into {strike, CE:{iv,oi,oi_change,ltp,volume}, PE:...}
