@@ -866,7 +866,32 @@ async def manual_bracket(req: ManualBracketRequest):
     return bracket.to_dict()
 
 
-# ── SEBI ──────────────────────────────────────────────────────────────────────
+# ── Paper simulation helper ───────────────────────────────────────────────────
+class SimTickRequest(BaseModel):
+    symbol: str
+    ltp: float = Field(gt=0)
+    atr_14: float = 0.0
+
+@app.post("/simulate/price-tick", tags=["Simulate"])
+async def simulate_price_tick(req: SimTickRequest):
+    """PAPER mode only — inject a price tick directly into the TSL engine.
+    Bypasses candle-history guard so profit booking can be tested immediately."""
+    if settings.trading_mode != "PAPER":
+        raise HTTPException(403, "Only available in PAPER mode")
+    sym = _clean_symbol(req.symbol)
+    before = {b["bracket_id"]: b["status"]
+              for b in atomic_bracket_engine.all_brackets(active_only=False)}
+    await trailing_sl_engine.on_tick(sym, req.ltp, req.atr_14)
+    after  = {b["bracket_id"]: b["status"]
+              for b in atomic_bracket_engine.all_brackets(active_only=False)}
+    changes = {bid: {"before": before.get(bid), "after": after[bid]}
+               for bid in after if after[bid] != before.get(bid)}
+    brackets_now = [b for b in atomic_bracket_engine.all_brackets()
+                    if b["symbol"] == sym]
+    return {"symbol": sym, "ltp": req.ltp, "status_changes": changes,
+            "brackets": brackets_now}
+
+
 @app.get("/sebi/status", tags=["SEBI Compliance"])
 def sebi_status(): return sebi_compliance.status()
 
