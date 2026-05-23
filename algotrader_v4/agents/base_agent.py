@@ -367,6 +367,21 @@ class BaseAgent(ABC):
             f"RSI: {ind.rsi_14:.1f} | Trend: {ind.trend} | Vol: {ind.volume_ratio:.1f}x\n"
             f"Order: {order_id}"
         )
+        from n8n_bridge import notify as _n8n
+        asyncio.create_task(_n8n("trade_entry", {
+            "agent":     self.name,
+            "symbol":    sym,
+            "action":    action,
+            "price":     ltp,
+            "quantity":  qty,
+            "stop_loss": sl,
+            "target":    signal.get("target", 0),
+            "order_id":  order_id,
+            "pattern":   signal.get("trigger", ""),
+            "rsi":       ind.rsi_14,
+            "trend":     ind.trend,
+            "vol_ratio": ind.volume_ratio,
+        }))
 
     # ── Exit ──────────────────────────────────────────────────────────
 
@@ -399,6 +414,14 @@ class BaseAgent(ABC):
                 f"{_dot} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
                 f"Reason: {reason} | P&L: ₹{pnl:.0f}"
             )
+            from n8n_bridge import notify as _n8n
+            asyncio.create_task(_n8n("trade_exit", {
+                "agent":  self.name,
+                "symbol": sym,
+                "reason": reason,
+                "pnl":    pnl,
+                "side":   side,
+            }))
             try:
                 from trade_memory import record_trade as _record_trade
                 from market_regime import regime_detector

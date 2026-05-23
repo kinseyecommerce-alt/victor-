@@ -189,6 +189,8 @@ class MasterAgent:
             f"<b>AlgoTrader Pro v5</b> started\nMode: {settings.trading_mode} | Tick: 1s\n"
             + "\n".join(f"  {s}: {r['approved']}/{r['total']} symbols" for s, r in report.items())
         ))
+        from n8n_bridge import notify as _n8n
+        asyncio.create_task(_n8n("system", {"type": "bot_started", "mode": settings.trading_mode}))
         return report
 
     async def stop(self) -> None:
@@ -201,6 +203,8 @@ class MasterAgent:
         except Exception:
             pass
         await send_telegram("<b>AlgoTrader Pro v5 stopped</b>")
+        from n8n_bridge import notify as _n8n
+        asyncio.create_task(_n8n("system", {"type": "bot_stopped"}))
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
 
@@ -298,11 +302,22 @@ class MasterAgent:
                 f"Paused: {', '.join(plan.paused) or 'none'}\n"
                 f"Size:   {int(plan.size_factor * 100)}%\n{summary}"
             ))
+            from n8n_bridge import notify as _n8n
+            asyncio.create_task(_n8n("regime_change", {
+                "regime":      regime.value,
+                "active":      plan.active,
+                "paused":      plan.paused,
+                "size_factor": plan.size_factor,
+                "reasoning":   plan.reasoning[:120],
+                "signals":     sigs.to_dict() if sigs else {},
+            }))
 
     async def _auto_squareoff(self) -> None:
         ids = kite_client.squareoff_all_positions()
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
+            from n8n_bridge import notify as _n8n
+            asyncio.create_task(_n8n("system", {"type": "squareoff", "positions_closed": len(ids)}))
 
     async def _daily_reset(self) -> None:
         risk_manager.reset_daily()
@@ -310,6 +325,8 @@ class MasterAgent:
         for a in ALL_AGENTS.values():
             a.reset_daily()
         await send_telegram("<b>New trading day</b> — counters reset")
+        from n8n_bridge import notify as _n8n
+        asyncio.create_task(_n8n("system", {"type": "daily_reset"}))
 
     async def _nightly_adaptive(self) -> None:
         try:

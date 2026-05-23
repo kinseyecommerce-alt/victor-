@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # n8n webhook integration
+    n8n_webhook_url:    str = ""  # e.g. https://your-n8n.com/webhook/algotrader
+    n8n_webhook_secret: str = ""  # optional HMAC-SHA256 signing secret
+
     # Security — API access
     api_key: str = ""                   # X-API-Key header for mutating routes
     kill_switch_reset_secret: str = ""  # Separate secret required to reset kill switch

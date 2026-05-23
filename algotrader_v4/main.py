@@ -5,6 +5,8 @@ Kite used for order placement AND live market data (WebSocket streaming + REST q
 """
 from __future__ import annotations
 import asyncio
+import hashlib
+import hmac
 import re
 import time
 from collections import defaultdict
@@ -615,6 +617,15 @@ async def gen_signal(req: SignalRequest):
     try:
         sig = signal_engine.generate(sym, req.exchange, strat)
         await broadcast({"event": "signal", "symbol": sym, "signal": sig})
+        from n8n_bridge import notify as _n8n
+        asyncio.create_task(_n8n("signal", {
+            "symbol":     sym,
+            "strategy":   strat,
+            "action":     sig.get("action", ""),
+            "price":      sig.get("price", 0),
+            "confidence": sig.get("confidence", 0),
+            "pattern":    sig.get("trigger", ""),
+        }))
         return sig
     except Exception as e:
         logger.error("Signal generation error for {}: {}", sym, e)
@@ -900,8 +911,10 @@ def sebi_status(): return sebi_compliance.status()
 def sebi_disclosures(): return sebi_compliance.get_disclosure_document()
 
 @app.post("/sebi/kill-switch", tags=["SEBI Compliance"])
-def trigger_kill_switch(reason: str = "Manual kill switch"):
+async def trigger_kill_switch(reason: str = "Manual kill switch"):
     sebi_compliance.trigger_kill_switch(reason)
+    from n8n_bridge import notify as _n8n
+    asyncio.create_task(_n8n("system", {"type": "kill_switch", "reason": reason}))
     return {"status": "KILLED", "reason": reason}
 
 @app.post("/sebi/resume", tags=["SEBI Compliance"])
@@ -973,6 +986,108 @@ def config_validate():
         and creds.get("kite_initialised")
     )
     return creds
+
+
+# ── n8n Inbound Webhook ───────────────────────────────────────────────────────
+
+class N8NWebhookRequest(BaseModel):
+    action:  str        # "place_order" | "start_bot" | "stop_bot" | "squareoff" | "get_status"
+    payload: dict = {}
+
+
+async def _verify_n8n_sig(request: Request, body: bytes) -> bool:
+    """Return True if HMAC signature is valid, or if no secret is configured."""
+    secret = settings.n8n_webhook_secret
+    if not secret:
+        return True
+    sig_header = request.headers.get("X-AlgoTrader-Signature", "")
+    if not sig_header.startswith("sha256="):
+        return False
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig_header[7:], expected)
+
+
+@app.post("/webhooks/n8n", tags=["Integration"])
+async def n8n_inbound(request: Request):
+    """Inbound webhook from n8n — routes to internal AlgoTrader actions.
+
+    Requires X-API-Key header (standard auth).
+    Optional HMAC-SHA256 body signature via X-AlgoTrader-Signature header.
+
+    Supported actions:
+      get_status   — returns bot status (read-only)
+      stop_bot     — stops the trading bot
+      squareoff    — squares off all open positions
+      start_bot    — payload: {strategies:[...], watchlist:[...]}
+      place_order  — payload matches OrderRequest fields
+    """
+    body = await request.body()
+    if not await _verify_n8n_sig(request, body):
+        raise HTTPException(401, "Invalid webhook signature")
+    try:
+        data = N8NWebhookRequest.model_validate_json(body)
+    except Exception:
+        raise HTTPException(422, "Invalid JSON body — expected {action, payload}")
+
+    action = data.action
+    p = data.payload
+
+    if action == "get_status":
+        return master_agent.get_status()
+
+    elif action == "stop_bot":
+        await master_agent.stop()
+        return {"status": "stopped"}
+
+    elif action == "squareoff":
+        ids = kite_client.squareoff_all_positions()
+        return {"status": "ok", "squared_off": len(ids)}
+
+    elif action == "start_bot":
+        if master_agent.running:
+            raise HTTPException(400, "Bot already running")
+        strategies = p.get("strategies", [])
+        if not strategies:
+            raise HTTPException(422, "strategies required in payload")
+        watchlist = p.get("watchlist", [])
+        report = master_agent.start(strategies, watchlist)
+        return {"status": "started", "report": report}
+
+    elif action == "place_order":
+        try:
+            req = OrderRequest(**p)
+        except Exception as exc:
+            raise HTTPException(422, f"Invalid order payload: {exc}")
+        ok, reason = order_guard.can_place(req.symbol, "n8n", req.transaction_type)
+        if not ok:
+            raise HTTPException(400, f"Guard blocked: {reason}")
+        ok, reason = risk_manager.check_before_order(
+            req.symbol, req.quantity, req.price or 1.0, req.transaction_type
+        )
+        if not ok:
+            raise HTTPException(400, f"Risk blocked: {reason}")
+        sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
+            strategy="n8n", symbol=req.symbol, exchange=req.exchange,
+            transaction_type=req.transaction_type, quantity=req.quantity,
+            order_type=req.order_type, price_at_signal=req.price or 0.0,
+            signal_source="n8n_webhook",
+            regime=regime_detector.current_regime.value if regime_detector.current_regime else "unknown",
+        )
+        if not sebi_ok:
+            raise HTTPException(403, f"SEBI blocked: {sebi_reason}")
+        oid = kite_client.place_order(
+            tradingsymbol=req.symbol, exchange=req.exchange,
+            transaction_type=req.transaction_type, quantity=req.quantity,
+            order_type=req.order_type, product=req.product,
+            price=req.price, trigger_price=req.trigger_price, tag=algo_id,
+        )
+        sebi_compliance.record_order_id("n8n", req.symbol, oid)
+        order_guard.register_order(req.symbol, "n8n", req.transaction_type, oid)
+        await broadcast({"event": "order_placed", "order_id": oid, "symbol": req.symbol})
+        return {"status": "ok", "order_id": oid}
+
+    else:
+        raise HTTPException(422, f"Unknown action: {action!r}")
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────
