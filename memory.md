@@ -1,6 +1,6 @@
 # AlgoTrader Pro — Project Memory
 
-> Last updated: 2026-05-23  
+> Last updated: 2026-05-23 (n8n integration added)  
 > Branch: `claude/create-nirma-trade-repo-7rMKX`  
 > Repo: `spbtextile/JAG`
 
@@ -24,11 +24,11 @@ All work lives on `claude/create-nirma-trade-repo-7rMKX`. Key recent commits:
 
 | Commit | What |
 |--------|------|
+| `292dd87` | feat(n8n): bidirectional n8n webhook integration |
+| `c117978` | docs: add memory.md |
 | `2bab959` | chore: frontend .gitignore + package-lock.json |
 | `fea8041` | abi(run-3): Williams %R indicator + sim test fixes |
 | `bf3ded4` | fix(frontend): lightweight-charts v4 API + vite-env.d.ts |
-| `f8e3b5b` | feat(frontend): vercel.json + VITE_API_BASE_URL env var |
-| `9ed307b` | feat: test_sim_orders_flow.py — 13 simulation order tests |
 
 ---
 
@@ -49,13 +49,14 @@ KiteConnect WebSocket (LIVE) or GBM simulator (PAPER)
 
 | File | Role |
 |------|------|
-| `algotrader_v4/main.py` | FastAPI app, all REST endpoints, WebSocket `/ws` |
+| `algotrader_v4/main.py` | FastAPI app, all REST endpoints, WebSocket `/ws`, `/webhooks/n8n` |
 | `algotrader_v4/kite_client.py` | Kite REST + KiteTicker; paper orders in `_paper_orders` |
 | `algotrader_v4/tick_engine.py` | LiveIndicators dataclass, IndicatorCalc, TickBuffer, TickEngine |
 | `algotrader_v4/agents/strategy_agents.py` | IntradayAgent, ScalpingAgent, SwingAgent, FnOAgent |
 | `algotrader_v4/risk_manager.py` | Pre-order checks, position sizing, daily loss limits |
 | `algotrader_v4/sebi_compliance.py` | Kill-switch, audit log, IP whitelist, algo IDs |
 | `algotrader_v4/config.py` | Pydantic Settings from `.env`; all runtime config |
+| `algotrader_v4/n8n_bridge.py` | Async fire-and-forget outbound webhook to n8n |
 | `algotrader_v4/frontend/` | React + Vite SPA (Watchlist, Chart, OrderPanel, 6 tabs) |
 | `algotrader_v4/deploy/` | Dockerfile, docker-compose, nginx, EC2 setup scripts |
 
@@ -179,6 +180,56 @@ Library is **v4.2.3**. Use v4 API:
 
 ---
 
+## n8n Bidirectional Integration
+
+### Outbound (AlgoTrader → n8n)
+
+Set `N8N_WEBHOOK_URL` in `.env`. AlgoTrader POSTs these 5 event types automatically:
+
+| Event | Fired from | Key data fields |
+|-------|-----------|-----------------|
+| `trade_entry` | `base_agent.py` `_try_enter()` | agent, symbol, action, price, qty, sl, target, order_id, rsi, trend |
+| `trade_exit` | `base_agent.py` exit handler | agent, symbol, reason, pnl, side |
+| `signal` | `main.py` `gen_signal()` | symbol, strategy, action, price, confidence, pattern |
+| `regime_change` | `master_agent_v5.py` regime loop | regime, active, paused, size_factor, reasoning |
+| `system` | `master_agent_v5.py` + `main.py` | type: bot_started/bot_stopped/squareoff/daily_reset/kill_switch |
+
+All events include top-level `event`, `timestamp` (IST ISO), `trading_mode`.
+
+**Optional HMAC signing:** Set `N8N_WEBHOOK_SECRET` → every outbound POST gets  
+`X-AlgoTrader-Signature: sha256=<hex>` header. Set same secret in n8n Credential.
+
+**Implementation:** `n8n_bridge.py` — shared `httpx.AsyncClient`, 1 retry on network error, silent no-op if URL not set. Always called via `asyncio.create_task()` — never blocks trades.
+
+### Inbound (n8n → AlgoTrader)
+
+`POST /webhooks/n8n` — body: `{"action": "<action>", "payload": {...}}`
+
+Supported actions:
+
+| Action | Maps to |
+|--------|---------|
+| `get_status` | returns bot running state + daily P&L |
+| `start_bot` | starts all agents (POST `/bot/start` equivalent) |
+| `stop_bot` | stops all agents |
+| `squareoff` | squares off all open positions |
+| `place_order` | full order with guard/risk/SEBI checks |
+
+Auth: requires `X-API-Key` header OR, if `N8N_WEBHOOK_SECRET` is set, validates `X-AlgoTrader-Signature` HMAC instead.
+
+### .env keys
+```
+N8N_WEBHOOK_URL=https://your-n8n.com/webhook/algotrader
+N8N_WEBHOOK_SECRET=     # optional; generate: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### n8n setup steps
+1. Create **Webhook node** in n8n → copy URL → paste as `N8N_WEBHOOK_URL`
+2. To call AlgoTrader from n8n: **HTTP Request node** → POST `/webhooks/n8n` with `X-API-Key` header
+3. Filter events by `{{$json.event}}` in n8n Switch node
+
+---
+
 ## Start the Server
 
 ```bash
@@ -235,6 +286,8 @@ KITE_API_SECRET=<zerodha>
 KITE_ACCESS_TOKEN=<zerodha>  # rotates daily in LIVE mode
 ANTHROPIC_API_KEY=<anthropic>
 FRONTEND_ORIGIN=https://your-app.vercel.app   # for CORS
+N8N_WEBHOOK_URL=                               # optional — n8n outbound events
+N8N_WEBHOOK_SECRET=                            # optional — HMAC signing
 ```
 
 ---
