@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useCallback } from 'react'
-import { createChart, IChartApi, ISeriesApi, CandlestickSeries, LineSeries, HistogramSeries, ColorType } from 'lightweight-charts'
+import { createChart, IChartApi, ISeriesApi, ColorType } from 'lightweight-charts'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
 
@@ -39,7 +39,7 @@ export default function MainChart() {
     const c = createChart(chartRef.current, { ...CHART_OPTS, width: chartRef.current.clientWidth, height: 340 })
     chart.current = c
 
-    candles.current = c.addSeries(CandlestickSeries, {
+    candles.current = c.addCandlestickSeries({
       upColor:   '#16A34A',
       downColor: '#DC2626',
       borderUpColor:   '#16A34A',
@@ -48,8 +48,8 @@ export default function MainChart() {
       wickDownColor: '#DC2626',
     })
 
-    ema9Line.current  = c.addSeries(LineSeries, { color: '#4F46E5', lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
-    ema21Line.current = c.addSeries(LineSeries, { color: '#F59E0B', lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
+    ema9Line.current  = c.addLineSeries({ color: '#4F46E5', lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
+    ema21Line.current = c.addLineSeries({ color: '#F59E0B', lineWidth: 1, priceLineVisible: false, lastValueVisible: false })
 
     const ro = new ResizeObserver(entries => {
       for (const e of entries) c.applyOptions({ width: e.contentRect.width })
