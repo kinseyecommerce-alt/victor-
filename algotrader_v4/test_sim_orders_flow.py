@@ -215,36 +215,34 @@ def t_sim_risk_market_hours():
 
 
 def t_sim_tick_buffer_candle():
-    """TickBuffer builds at least one 1m candle after feeding 5 ticks."""
-    from tick_engine import TickBuffer, Tick
-    buf = TickBuffer()
+    """TickBuffer builds at least one 1m candle after feeding 5 ticks spanning 2 minutes."""
+    from tick_engine import TickBuffer
+    buf = TickBuffer(60)  # 60-second resolution = 1-min candles
     base_ts = datetime(2024, 1, 15, 10, 0, 0)
     for i in range(5):
-        t = Tick(
-            symbol="RELIANCE", ltp=2800.0 + i,
-            bid=2799.0 + i, ask=2801.0 + i,
-            volume=1000 + i * 100,
-            timestamp=base_ts + timedelta(seconds=i * 10),
-        )
-        buf.push(t)
-    candles_1m = buf.get_candles("1m")
-    assert len(candles_1m) >= 1, f"Expected >=1 candle after 5 ticks, got {len(candles_1m)}"
+        # each tick 65 s apart → crosses minute boundary → completes candles
+        buf.push(2800.0 + i, 1000 + i * 100, base_ts + timedelta(seconds=i * 65))
+    candles = buf.candles()
+    assert len(candles) >= 1, f"Expected >=1 candle after 5 ticks, got {len(candles)}"
 
 
 def t_sim_indicators_nonzero():
     """IndicatorCalc returns non-zero EMA9 after sufficient price history."""
+    import pandas as pd
     from tick_engine import IndicatorCalc, Tick
-    calc = IndicatorCalc()
     base_ts = datetime(2024, 1, 15, 10, 0, 0)
+    rows = []
     for i in range(30):
-        t = Tick(
-            symbol="TCS", ltp=3400.0 + (i % 5),
-            bid=3399.0, ask=3401.0, volume=500,
-            timestamp=base_ts + timedelta(seconds=i * 15),
-        )
-        calc.update(t)
-    ind = calc.current()
-    assert ind.ema9 > 0, f"EMA9 should be > 0 after 30 ticks, got {ind.ema9}"
+        p = 3400.0 + (i % 5)
+        rows.append({"open": p, "high": p + 2, "low": p - 2, "close": p, "volume": 500})
+    df = pd.DataFrame(rows)
+    tick = Tick(
+        symbol="TCS", ltp=3402.0, bid=3401.0, ask=3403.0, volume=500,
+        change=2.0, change_pct=0.06, high=3410.0, low=3390.0, open=3400.0,
+        timestamp=base_ts + timedelta(seconds=30 * 15),
+    )
+    ind = IndicatorCalc.compute("TCS", tick, df)
+    assert ind.ema9 > 0, f"EMA9 should be > 0 after 30 bars, got {ind.ema9}"
 
 
 def t_sim_validate_credentials_keys():

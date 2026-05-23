@@ -124,6 +124,8 @@ class LiveIndicators:
     # Stochastic RSI (14, smooth_k=3, smooth_d=3)
     stoch_rsi_k: float = 50.0
     stoch_rsi_d: float = 50.0
+    # Williams %R (14) — range -100 to 0; >-20 overbought, <-80 oversold
+    williams_r:  float = -50.0
     computed_at: float = 0.0
 
 
@@ -274,6 +276,16 @@ def _stoch_rsi(close: pd.Series, period: int = 14,
         return 50.0, 50.0
 
 
+def _williams_r(close: pd.Series, high: pd.Series, low: pd.Series, period: int = 14) -> float:
+    """Williams %R — ranges from -100 to 0. >-20 overbought, <-80 oversold."""
+    try:
+        wr = ta.momentum.WilliamsRIndicator(high, low, close, lbp=period)
+        val = float(wr.williams_r().iloc[-1])
+        return round(val, 2) if not pd.isna(val) else -50.0
+    except Exception:
+        return -50.0
+
+
 # ── Indicator calculator ──────────────────────────────────────────────────────
 
 class IndicatorCalc:
@@ -352,6 +364,9 @@ class IndicatorCalc:
 
             if n >= 20:
                 ind.stoch_rsi_k, ind.stoch_rsi_d = _stoch_rsi(close)
+
+            if n >= 14:
+                ind.williams_r = _williams_r(close, high, low)
 
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
@@ -559,6 +574,7 @@ class TickEngine:
                     "supertrend":  ind.supertrend_dir,
                     "squeeze_on":  ind.squeeze_on,
                     "stoch_rsi_k": ind.stoch_rsi_k,
+                    "williams_r":  ind.williams_r,
                     "source":     source,
                     "ts":         tick.timestamp.isoformat(),
                 })
@@ -666,6 +682,7 @@ class TickEngine:
                     "vwap_l3":        round(ind.vwap_lower3, 2),
                     "stoch_rsi_k":    ind.stoch_rsi_k,
                     "stoch_rsi_d":    ind.stoch_rsi_d,
+                    "williams_r":     ind.williams_r,
                     "ts":             tick.timestamp.isoformat(),
                 }
         return result

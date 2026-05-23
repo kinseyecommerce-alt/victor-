@@ -405,6 +405,33 @@ This run improved:
 
 *(Updated each run by Abi — most recent at top)*
 
+### Run: 2026-05-23 (run 3)
+**Indicators added:**
+- Williams %R (period=14): `_williams_r(close, high, low)` helper in `tick_engine.py`; field `williams_r: float = -50.0`; needs ≥14 bars; range -100 to 0; >-20 overbought, <-80 oversold; added to both WS broadcast paths + `all_latest()`
+
+**Test fixes:**
+- `test_sim_orders_flow.py` tests 11 & 12 used outdated API: `TickBuffer()` now requires `resolution_sec` positional arg → `TickBuffer(60)`; `TickBuffer.push()` takes `(ltp, volume, ts)` not a Tick object; `IndicatorCalc` has no `update()`/`current()` — use static `compute(sym, tick, df)` with a DataFrame
+- Fixed test 11 to use `buf.push(ltp, vol, ts)` with 65-second spacing to cross minute boundaries; test 12 builds a 30-row DataFrame and calls `IndicatorCalc.compute()` directly
+- All 13 sim tests now pass; 59/59 E2E tests still pass
+
+**Library research (2026-05-23):**
+- kiteconnect 5.2.0 is latest (was ~5.0 in requirements) — check requirements.txt
+- NSE endpoints `/api/quote-equity` and `/api/allIndices` still functional at 8 req/s (safe)
+- NSE May 2025 circular: OAuth + 2FA + static IP required for registered algos; our 8 req/s stays under 10 OPS threshold
+
+**Vercel deployment (confirmed working pattern):**
+- Root Dir: `algotrader_v4/frontend`, Build: `npm run build`, Output: `dist`
+- `vercel.json` with SPA rewrite `{"rewrites":[{"source":"/(.*)","destination":"/index.html"}]}` ✅ already committed
+- `VITE_API_BASE_URL` env var + localStorage fallback ✅ already committed  
+- FastAPI WebSocket backend CANNOT go on Vercel — must use Railway/Render/EC2
+- Frontend `apiBase` priority: localStorage override → `VITE_API_BASE_URL` → `http://localhost:8000`
+- Backend must set CORS headers to allow Vercel frontend domain
+
+**Frontend build:**
+- `npm run build` produces clean `dist/` ✅ (806 KB JS, 18 KB CSS)
+- lightweight-charts v4 API: use `chart.addCandlestickSeries()` / `addLineSeries()` — NOT `addSeries(Type, opts)` (that's v5)
+- `vite-env.d.ts` with `/// <reference types="vite/client" />` needed for `import.meta.env` TS support
+
 ### Run: 2026-05-22 (run 2)
 **Indicators added:**
 - VWAP Bands (2σ/3σ): `_vwap_bands()` in `tick_engine.py`; fields `vwap_upper2`, `vwap_lower2`, `vwap_upper3`, `vwap_lower3`; needs ≥10 bars
