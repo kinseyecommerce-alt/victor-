@@ -69,4 +69,13 @@ export const api = {
 
   // Regime
   regimeStatus: () => ax().get('/regime/status'),
+
+  // Credentials
+  updateCredentials: (data: {
+    kite_api_key?: string
+    kite_api_secret?: string
+    anthropic_api_key?: string
+    truedata_username?: string
+    truedata_password?: string
+  }) => ax().post('/settings/credentials', data),
 }

@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Activity, Wifi, WifiOff, Settings, Zap, ZapOff } from 'lucide-react'
+import { Activity, Wifi, WifiOff, Settings, Zap, ZapOff, Eye, EyeOff } from 'lucide-react'
+import { clsx } from 'clsx'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
 import { Badge, Btn, Modal, Input } from '../ui'
@@ -11,6 +12,17 @@ export default function Header() {
   const [tempKey, setTempKey] = useState(apiKey)
   const [tempBase, setTempBase] = useState(apiBase)
   const [botLoading, setBotLoading] = useState(false)
+
+  // Settings modal tab state
+  const [settingsTab, setSettingsTab] = useState<'connection' | 'apikeys'>('connection')
+  const [credForm, setCredForm] = useState({
+    kite_api_key: '', kite_api_secret: '',
+    anthropic_api_key: '',
+    truedata_username: '', truedata_password: '',
+  })
+  const [showFields, setShowFields] = useState<Record<string, boolean>>({})
+  const [credStatus, setCredStatus] = useState<Record<string, boolean>>({})
+  const [credSaving, setCredSaving] = useState(false)
 
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000)
@@ -26,6 +38,21 @@ export default function Header() {
     const t = setInterval(poll, 5000)
     return () => clearInterval(t)
   }, [])
+
+  // Fetch credential status when API Keys tab becomes active
+  useEffect(() => {
+    if (settingsTab === 'apikeys') {
+      api.configValidate().then(r => {
+        setCredStatus({
+          kite_api_key:      r.data.kite_api_key      ?? false,
+          kite_api_secret:   r.data.kite_api_secret   ?? false,
+          anthropic_api_key: r.data.anthropic_api_key ?? false,
+          truedata_username: r.data.truedata_username ?? false,
+          truedata_password: r.data.truedata_password ?? false,
+        })
+      }).catch(() => {})
+    }
+  }, [settingsTab])
 
   const handleBotToggle = useCallback(async () => {
     setBotLoading(true)
@@ -45,6 +72,62 @@ export default function Header() {
       setBotLoading(false)
     }
   }, [botStatus])
+
+  const handleSaveCredentials = async () => {
+    const payload: Record<string, string> = {}
+    if (credForm.kite_api_key.trim())      payload.kite_api_key      = credForm.kite_api_key.trim()
+    if (credForm.kite_api_secret.trim())   payload.kite_api_secret   = credForm.kite_api_secret.trim()
+    if (credForm.anthropic_api_key.trim()) payload.anthropic_api_key = credForm.anthropic_api_key.trim()
+    if (credForm.truedata_username.trim()) payload.truedata_username = credForm.truedata_username.trim()
+    if (credForm.truedata_password.trim()) payload.truedata_password = credForm.truedata_password.trim()
+    if (!Object.keys(payload).length) { addToast('No credentials entered', 'info'); return }
+    setCredSaving(true)
+    try {
+      const r = await api.updateCredentials(payload)
+      const c = r.data.credentials ?? {}
+      setCredStatus({
+        kite_api_key:      c.kite_api_key      ?? false,
+        kite_api_secret:   c.kite_api_secret   ?? false,
+        anthropic_api_key: c.anthropic_api_key ?? false,
+        truedata_username: c.truedata_username ?? false,
+        truedata_password: c.truedata_password ?? false,
+      })
+      setCredForm({ kite_api_key: '', kite_api_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
+      addToast('Credentials updated', 'buy')
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Failed to update credentials', 'error')
+    } finally { setCredSaving(false) }
+  }
+
+  // Renders a credential field row: label + status badge + password input + optional eye toggle
+  const credField = (label: string, key: keyof typeof credForm, isSecret = true) => (
+    <div key={key}>
+      <div className="flex items-center justify-between mb-1">
+        <label className="text-sm font-medium text-slate-700">{label}</label>
+        <Badge variant={credStatus[key] ? 'buy' : 'warning'}>
+          {credStatus[key] ? 'Set ✓' : 'Not set'}
+        </Badge>
+      </div>
+      <div className="relative">
+        <Input
+          type={isSecret && !showFields[key] ? 'password' : 'text'}
+          value={credForm[key]}
+          onChange={e => setCredForm(p => ({ ...p, [key]: e.target.value }))}
+          placeholder="Leave blank to keep current"
+          className={isSecret ? 'pr-9' : ''}
+        />
+        {isSecret && (
+          <button
+            type="button"
+            onClick={() => setShowFields(p => ({ ...p, [key]: !p[key] }))}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+          >
+            {showFields[key] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+          </button>
+        )}
+      </div>
+    </div>
+  )
 
   const mode = health?.mode || 'PAPER'
   const marketOpen = health?.market_open
@@ -111,41 +194,99 @@ export default function Header() {
         )}
       </Btn>
 
-      {/* Config */}
+      {/* Settings button */}
       <button
-        onClick={() => { setConfigOpen(true); setTempKey(apiKey); setTempBase(apiBase) }}
+        onClick={() => {
+          setTempKey(apiKey); setTempBase(apiBase)
+          setSettingsTab('connection')
+          setCredForm({ kite_api_key: '', kite_api_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
+          setShowFields({})
+          setConfigOpen(true)
+        }}
         className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700 transition-colors"
       >
         <Settings className="w-4 h-4" />
       </button>
 
-      {/* Config modal */}
-      <Modal open={configOpen} onClose={() => setConfigOpen(false)} title="Connection Settings">
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">API Base URL</label>
-            <Input
-              value={tempBase}
-              onChange={e => setTempBase(e.target.value)}
-              placeholder="http://localhost:8000"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">X-API-Key</label>
-            <Input
-              type="password"
-              value={tempKey}
-              onChange={e => setTempKey(e.target.value)}
-              placeholder="Leave empty if not set"
-            />
-          </div>
-          <div className="flex gap-2 pt-2">
-            <Btn onClick={() => { setApiKey(tempKey); setApiBase(tempBase); setConfigOpen(false) }}>
-              Save & Reconnect
-            </Btn>
-            <Btn variant="outline" onClick={() => setConfigOpen(false)}>Cancel</Btn>
-          </div>
+      {/* Settings modal */}
+      <Modal open={configOpen} onClose={() => setConfigOpen(false)} title="Settings">
+        {/* Tab bar */}
+        <div className="flex border-b border-slate-200 mb-4 -mt-1">
+          {(['connection', 'apikeys'] as const).map(tab => (
+            <button
+              key={tab}
+              className={clsx(
+                'px-4 py-2 text-sm font-medium border-b-2 transition-colors',
+                settingsTab === tab
+                  ? 'border-indigo-600 text-indigo-600'
+                  : 'border-transparent text-slate-500 hover:text-slate-700'
+              )}
+              onClick={() => setSettingsTab(tab)}
+            >
+              {tab === 'connection' ? 'Connection' : 'API Keys'}
+            </button>
+          ))}
         </div>
+
+        {/* Connection tab — existing behaviour unchanged */}
+        {settingsTab === 'connection' && (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">API Base URL</label>
+              <Input
+                value={tempBase}
+                onChange={e => setTempBase(e.target.value)}
+                placeholder="http://localhost:8000"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">X-API-Key</label>
+              <Input
+                type="password"
+                value={tempKey}
+                onChange={e => setTempKey(e.target.value)}
+                placeholder="Leave empty if not set"
+              />
+            </div>
+            <div className="flex gap-2 pt-2">
+              <Btn onClick={() => { setApiKey(tempKey); setApiBase(tempBase); setConfigOpen(false) }}>
+                Save & Reconnect
+              </Btn>
+              <Btn variant="outline" onClick={() => setConfigOpen(false)}>Cancel</Btn>
+            </div>
+          </div>
+        )}
+
+        {/* API Keys tab — backend credentials */}
+        {settingsTab === 'apikeys' && (
+          <div className="space-y-4">
+            <div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Kite (Zerodha)</p>
+              <div className="space-y-3">
+                {credField('API Key', 'kite_api_key')}
+                {credField('API Secret', 'kite_api_secret')}
+              </div>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Claude AI (Anthropic)</p>
+              {credField('Anthropic API Key', 'anthropic_api_key')}
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">TrueData</p>
+              <div className="space-y-3">
+                {credField('Username', 'truedata_username', false)}
+                {credField('Password', 'truedata_password')}
+              </div>
+            </div>
+            <p className="text-xs text-slate-400">In-memory only — restart reverts to environment variables.</p>
+            <div className="flex gap-2 pt-1">
+              <Btn onClick={handleSaveCredentials} disabled={credSaving}>
+                {credSaving ? 'Saving…' : 'Save Credentials'}
+              </Btn>
+              <Btn variant="outline" onClick={() => setConfigOpen(false)}>Cancel</Btn>
+            </div>
+          </div>
+        )}
       </Modal>
     </header>
   )

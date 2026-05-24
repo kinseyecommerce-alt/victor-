@@ -271,6 +271,13 @@ class CapitalAllocationRequest(BaseModel):
     max_scalping_positions:  int | None   = Field(None, ge=1, le=20)
     max_swing_positions:     int | None   = Field(None, ge=1, le=10)
 
+class CredentialsUpdateRequest(BaseModel):
+    kite_api_key:      str | None = Field(default=None, min_length=1)
+    kite_api_secret:   str | None = Field(default=None, min_length=1)
+    anthropic_api_key: str | None = Field(default=None, min_length=1)
+    truedata_username: str | None = Field(default=None, min_length=1)
+    truedata_password: str | None = Field(default=None, min_length=1)
+
 
 # ── UI pages ───────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
@@ -733,6 +740,20 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
     return get_capital_allocation()
 
 
+@app.post("/settings/credentials", tags=["Settings"])
+def update_credentials(req: CredentialsUpdateRequest):
+    """Update API credentials in-memory. Restart reverts to env values."""
+    if req.kite_api_key      is not None: settings.kite_api_key      = req.kite_api_key
+    if req.kite_api_secret   is not None: settings.kite_api_secret   = req.kite_api_secret
+    if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
+    if req.truedata_username is not None: settings.truedata_username = req.truedata_username
+    if req.truedata_password is not None: settings.truedata_password = req.truedata_password
+    creds = kite_client.validate_credentials()
+    creds["truedata_username"] = bool(settings.truedata_username)
+    creds["truedata_password"] = bool(settings.truedata_password)
+    return {"status": "updated", "credentials": creds}
+
+
 # ── WebSocket ────────────────────────────────────────────────────────────────────
 # HIGH-1: token auth via ?token= query param + max connection cap
 @app.websocket("/ws")
@@ -980,6 +1001,8 @@ def config_validate():
     else:
         ticker_source = "PAPER"
     creds["ticker_source"] = ticker_source
+    creds["truedata_username"] = bool(settings.truedata_username)
+    creds["truedata_password"] = bool(settings.truedata_password)
     creds["ready_to_trade"] = bool(
         creds.get("kite_api_key")
         and creds.get("kite_access_token")
