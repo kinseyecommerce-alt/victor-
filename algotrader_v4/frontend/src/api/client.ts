@@ -78,4 +78,8 @@ export const api = {
     truedata_username?: string
     truedata_password?: string
   }) => ax().post('/settings/credentials', data),
+
+  // App login
+  updateAppPassword: (data: { username?: string; new_password: string }) =>
+    ax().post('/settings/app-password', data),
 }

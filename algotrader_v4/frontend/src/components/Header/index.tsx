@@ -5,6 +5,8 @@ import { useStore } from '../../store'
 import { api } from '../../api/client'
 import { Badge, Btn, Modal, Input } from '../ui'
 
+type SettingsTab = 'connection' | 'apikeys' | 'applogin'
+
 export default function Header() {
   const { health, botStatus, wsConnected, apiKey, apiBase, setApiKey, setApiBase, setHealth, setBotStatus, addToast } = useStore()
   const [time, setTime] = useState(new Date())
@@ -13,8 +15,10 @@ export default function Header() {
   const [tempBase, setTempBase] = useState(apiBase)
   const [botLoading, setBotLoading] = useState(false)
 
-  // Settings modal tab state
-  const [settingsTab, setSettingsTab] = useState<'connection' | 'apikeys'>('connection')
+  // Settings modal
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('connection')
+
+  // API Keys tab
   const [credForm, setCredForm] = useState({
     kite_api_key: '', kite_api_secret: '',
     anthropic_api_key: '',
@@ -23,6 +27,11 @@ export default function Header() {
   const [showFields, setShowFields] = useState<Record<string, boolean>>({})
   const [credStatus, setCredStatus] = useState<Record<string, boolean>>({})
   const [credSaving, setCredSaving] = useState(false)
+
+  // App Login tab
+  const [appLoginForm, setAppLoginForm] = useState({ username: '', new_password: '', confirm_password: '' })
+  const [showAppFields, setShowAppFields] = useState<Record<string, boolean>>({})
+  const [appSaving, setAppSaving] = useState(false)
 
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000)
@@ -39,9 +48,9 @@ export default function Header() {
     return () => clearInterval(t)
   }, [])
 
-  // Fetch credential status when API Keys tab becomes active
+  // Fetch /config/validate when API Keys or App Login tab opens
   useEffect(() => {
-    if (settingsTab === 'apikeys') {
+    if (settingsTab === 'apikeys' || settingsTab === 'applogin') {
       api.configValidate().then(r => {
         setCredStatus({
           kite_api_key:      r.data.kite_api_key      ?? false,
@@ -50,6 +59,7 @@ export default function Header() {
           truedata_username: r.data.truedata_username ?? false,
           truedata_password: r.data.truedata_password ?? false,
         })
+        setAppLoginForm(p => ({ ...p, username: r.data.admin_username ?? '' }))
       }).catch(() => {})
     }
   }, [settingsTab])
@@ -99,7 +109,28 @@ export default function Header() {
     } finally { setCredSaving(false) }
   }
 
-  // Renders a credential field row: label + status badge + password input + optional eye toggle
+  const handleSaveAppPassword = async () => {
+    if (appLoginForm.new_password.length < 8) {
+      addToast('Password must be at least 8 characters', 'error'); return
+    }
+    if (appLoginForm.new_password !== appLoginForm.confirm_password) {
+      addToast('Passwords do not match', 'error'); return
+    }
+    const payload: { username?: string; new_password: string } = {
+      new_password: appLoginForm.new_password,
+    }
+    if (appLoginForm.username.trim()) payload.username = appLoginForm.username.trim()
+    setAppSaving(true)
+    try {
+      const r = await api.updateAppPassword(payload)
+      setAppLoginForm(p => ({ ...p, username: r.data.admin_username, new_password: '', confirm_password: '' }))
+      addToast('Login credentials updated', 'buy')
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Failed to update login credentials', 'error')
+    } finally { setAppSaving(false) }
+  }
+
+  // Credential field: label + status badge + input + optional eye toggle
   const credField = (label: string, key: keyof typeof credForm, isSecret = true) => (
     <div key={key}>
       <div className="flex items-center justify-between mb-1">
@@ -131,6 +162,12 @@ export default function Header() {
 
   const mode = health?.mode || 'PAPER'
   const marketOpen = health?.market_open
+
+  const TAB_LABELS: Record<SettingsTab, string> = {
+    connection: 'Connection',
+    apikeys: 'API Keys',
+    applogin: 'App Login',
+  }
 
   return (
     <header className="h-14 bg-white border-b border-slate-200 flex items-center px-4 gap-4 shrink-0 z-30">
@@ -201,6 +238,8 @@ export default function Header() {
           setSettingsTab('connection')
           setCredForm({ kite_api_key: '', kite_api_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
           setShowFields({})
+          setAppLoginForm({ username: '', new_password: '', confirm_password: '' })
+          setShowAppFields({})
           setConfigOpen(true)
         }}
         className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700 transition-colors"
@@ -212,7 +251,7 @@ export default function Header() {
       <Modal open={configOpen} onClose={() => setConfigOpen(false)} title="Settings">
         {/* Tab bar */}
         <div className="flex border-b border-slate-200 mb-4 -mt-1">
-          {(['connection', 'apikeys'] as const).map(tab => (
+          {(['connection', 'apikeys', 'applogin'] as const).map(tab => (
             <button
               key={tab}
               className={clsx(
@@ -223,12 +262,12 @@ export default function Header() {
               )}
               onClick={() => setSettingsTab(tab)}
             >
-              {tab === 'connection' ? 'Connection' : 'API Keys'}
+              {TAB_LABELS[tab]}
             </button>
           ))}
         </div>
 
-        {/* Connection tab — existing behaviour unchanged */}
+        {/* Connection tab */}
         {settingsTab === 'connection' && (
           <div className="space-y-4">
             <div>
@@ -257,7 +296,7 @@ export default function Header() {
           </div>
         )}
 
-        {/* API Keys tab — backend credentials */}
+        {/* API Keys tab */}
         {settingsTab === 'apikeys' && (
           <div className="space-y-4">
             <div>
@@ -282,6 +321,65 @@ export default function Header() {
             <div className="flex gap-2 pt-1">
               <Btn onClick={handleSaveCredentials} disabled={credSaving}>
                 {credSaving ? 'Saving…' : 'Save Credentials'}
+              </Btn>
+              <Btn variant="outline" onClick={() => setConfigOpen(false)}>Cancel</Btn>
+            </div>
+          </div>
+        )}
+
+        {/* App Login tab */}
+        {settingsTab === 'applogin' && (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Admin Username</label>
+              <Input
+                value={appLoginForm.username}
+                onChange={e => setAppLoginForm(p => ({ ...p, username: e.target.value }))}
+                placeholder="admin"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">New Password</label>
+              <div className="relative">
+                <Input
+                  type={showAppFields.new_password ? 'text' : 'password'}
+                  value={appLoginForm.new_password}
+                  onChange={e => setAppLoginForm(p => ({ ...p, new_password: e.target.value }))}
+                  placeholder="Min 8 characters"
+                  className="pr-9"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAppFields(p => ({ ...p, new_password: !p.new_password }))}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                >
+                  {showAppFields.new_password ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Confirm Password</label>
+              <div className="relative">
+                <Input
+                  type={showAppFields.confirm_password ? 'text' : 'password'}
+                  value={appLoginForm.confirm_password}
+                  onChange={e => setAppLoginForm(p => ({ ...p, confirm_password: e.target.value }))}
+                  placeholder="Re-enter password"
+                  className="pr-9"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAppFields(p => ({ ...p, confirm_password: !p.confirm_password }))}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                >
+                  {showAppFields.confirm_password ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-slate-400">In-memory only — restart reverts to environment variables.</p>
+            <div className="flex gap-2 pt-1">
+              <Btn onClick={handleSaveAppPassword} disabled={appSaving}>
+                {appSaving ? 'Saving…' : 'Update Login'}
               </Btn>
               <Btn variant="outline" onClick={() => setConfigOpen(false)}>Cancel</Btn>
             </div>

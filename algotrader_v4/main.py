@@ -25,7 +25,7 @@ from pydantic.networks import IPvAnyAddress
 from loguru import logger
 
 from config import settings
-from auth import authenticate, create_token, decode_token
+from auth import authenticate, create_token, decode_token, hash_password
 from market_data import nse_client, yf_client, is_market_open
 from kite_client import kite_client
 from risk_manager import risk_manager
@@ -277,6 +277,10 @@ class CredentialsUpdateRequest(BaseModel):
     anthropic_api_key: str | None = Field(default=None, min_length=1)
     truedata_username: str | None = Field(default=None, min_length=1)
     truedata_password: str | None = Field(default=None, min_length=1)
+
+class AppPasswordRequest(BaseModel):
+    username:     str | None = Field(default=None, min_length=1, max_length=50)
+    new_password: str        = Field(min_length=8, max_length=128)
 
 
 # ── UI pages ───────────────────────────────────────────────────────────────
@@ -754,6 +758,15 @@ def update_credentials(req: CredentialsUpdateRequest):
     return {"status": "updated", "credentials": creds}
 
 
+@app.post("/settings/app-password", tags=["Settings"])
+def update_app_password(req: AppPasswordRequest):
+    """Update admin login credentials in-memory. Restart reverts to env values."""
+    if req.username is not None:
+        settings.admin_username = req.username
+    settings.admin_password_hash = hash_password(req.new_password)
+    return {"status": "updated", "admin_username": settings.admin_username}
+
+
 # ── WebSocket ────────────────────────────────────────────────────────────────────
 # HIGH-1: token auth via ?token= query param + max connection cap
 @app.websocket("/ws")
@@ -1003,6 +1016,7 @@ def config_validate():
     creds["ticker_source"] = ticker_source
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
+    creds["admin_username"] = settings.admin_username
     creds["ready_to_trade"] = bool(
         creds.get("kite_api_key")
         and creds.get("kite_access_token")
