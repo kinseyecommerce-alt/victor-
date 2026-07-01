@@ -8,8 +8,16 @@ export function connectWS() {
   const { apiBase, apiKey, setWsConnected, setTick, addToast } = useStore.getState()
   if (ws && ws.readyState === WebSocket.OPEN) return
 
-  const wsBase = apiBase.replace(/^http/, 'ws')
-  const url = `${wsBase}/ws${apiKey ? `?token=${apiKey}` : ''}`
+  // Derive WebSocket URL — supports both absolute (http://host) and relative (/api) apiBase
+  let url: string
+  if (apiBase.startsWith('http')) {
+    const wsBase = apiBase.replace(/^http/, 'ws')
+    url = `${wsBase}/ws${apiKey ? `?token=${apiKey}` : ''}`
+  } else {
+    // Relative path: route through Vite proxy /ws-proxy → ws://localhost:8000
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    url = `${proto}//${window.location.host}/ws-proxy/ws${apiKey ? `?token=${apiKey}` : ''}`
+  }
 
   ws = new WebSocket(url)
 

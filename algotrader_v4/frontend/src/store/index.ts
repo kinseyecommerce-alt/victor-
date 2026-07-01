@@ -54,7 +54,7 @@ interface AppStore {
 export const useStore = create<AppStore>((set, get) => ({
   apiKey: localStorage.getItem('api_key') || '',
   // Priority: localStorage override → build-time env var → localhost fallback
-  apiBase: localStorage.getItem('api_base') || import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
+  apiBase: localStorage.getItem('api_base') || import.meta.env.VITE_API_BASE_URL || '/api',
   wsConnected: false,
   setApiKey: (k) => { localStorage.setItem('api_key', k); set({ apiKey: k }) },
   setApiBase: (b) => { localStorage.setItem('api_base', b); set({ apiBase: b }) },

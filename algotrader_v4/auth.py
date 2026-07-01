@@ -4,12 +4,14 @@ auth.py — JWT app login + Kite OAuth helpers
 from __future__ import annotations
 
 import warnings
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+import jwt as pyjwt
+from jwt.exceptions import InvalidTokenError
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -36,7 +38,6 @@ def authenticate(username: str, password: str) -> bool:
         return False
     if settings.admin_password_hash:
         return verify_password(password, settings.admin_password_hash)
-    # fallback for dev: plain password comparison
     return password == settings.admin_password
 
 
@@ -45,8 +46,8 @@ def authenticate(username: str, password: str) -> bool:
 def create_token(username: str) -> tuple[str, int]:
     """Returns (access_token, expires_in_seconds)."""
     expires = timedelta(hours=settings.jwt_expire_hours)
-    expire_dt = datetime.utcnow() + expires
-    token = jwt.encode(
+    expire_dt = datetime.now(timezone.utc) + expires
+    token = pyjwt.encode(
         {"sub": username, "exp": expire_dt},
         settings.jwt_secret_key,
         algorithm=ALGORITHM,
@@ -56,9 +57,9 @@ def create_token(username: str) -> tuple[str, int]:
 def decode_token(token: str) -> Optional[str]:
     """Returns username if token valid, else None."""
     try:
-        payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[ALGORITHM])
+        payload = pyjwt.decode(token, settings.jwt_secret_key, algorithms=[ALGORITHM])
         return payload.get("sub")
-    except JWTError:
+    except InvalidTokenError:
         return None
 
 
