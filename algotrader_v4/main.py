@@ -497,6 +497,49 @@ def agents_coordinator():
     from agent_coordinator import agent_coordinator
     return agent_coordinator.status()
 
+@app.get("/costs/{symbol}", tags=["Market"])
+def costs(symbol: str, lots: int = 1, price: float = 0.0):
+    """MCX round-trip transaction-cost breakdown + break-even move for a contract."""
+    import cost_model, mcx_universe
+    c = mcx_universe.contract(symbol)
+    if not c:
+        raise HTTPException(404, f"{symbol} is not an MCX contract")
+    px = price or c.base_price
+    return {
+        "symbol": symbol, "lots": lots, "price": px,
+        "breakdown": cost_model.round_trip_breakdown(symbol, lots, px),
+        "break_even_move_per_unit": cost_model.min_profitable_move(symbol, lots, px),
+    }
+
+@app.get("/risk/posture", tags=["Risk"])
+def risk_posture():
+    """Current regime risk posture (size_factor) applied off the order hot path."""
+    from agent_bus import agent_bus, TOPIC_REGIME
+    from agent_coordinator import agent_coordinator
+    msg = agent_bus.latest(TOPIC_REGIME, "regime")
+    return {
+        "regime_posture": msg.payload if msg else {"size_factor": 1.0, "regime": "unknown"},
+        "coordinator_size_factor_applied": agent_coordinator._regime_factor(),
+        "per_trade_claude_gate": settings.use_claude_trade_gate,
+    }
+
+@app.get("/strategies/backtest", tags=["Agents"])
+async def strategies_backtest(agent: str | None = None, symbol: str | None = None,
+                              days: int = 30, interval: str = "5m"):
+    """On-demand walk-forward, cost-adjusted backtest of the strategy registry.
+
+    Uses broker history when connected, else synthetic data (results labelled and
+    not persisted). Persists approved_strategies.json only on real broker data.
+    """
+    import strategy_backtest as bt
+    rep = await asyncio.to_thread(
+        bt.run, [symbol] if symbol else None, [agent] if agent else None, interval, days)
+    approved = bt.approved_strategies(rep)
+    if rep["source"] == "BROKER":
+        bt.save_approved(approved)
+    return {"source": rep["source"], "approved": approved,
+            "ranked": bt.rank(rep["results"])[:60]}
+
 @app.get("/agents/strategies", tags=["Agents"])
 def agents_strategies(name: str | None = None):
     """The 20 strategies each agent runs (and which one last fired)."""
@@ -1180,6 +1223,17 @@ async def on_startup():
         except Exception as exc:
             logger.warning("FastAPI startup: broker connect failed ({}) — "
                            "market data unavailable until /auth/login", exc)
+
+    # Restore the coordinator's reserved book and reconcile against the broker's
+    # actual open positions (drops stale reservations, adopts untracked positions).
+    try:
+        from agent_coordinator import agent_coordinator
+        agent_coordinator.load()
+        positions = kite_client.positions().get("net", []) if kite_client.is_connected() else []
+        rec = agent_coordinator.reconcile(positions)
+        logger.info("FastAPI startup: coordinator reconciled {}", rec)
+    except Exception as exc:
+        logger.warning("FastAPI startup: coordinator reconcile skipped ({})", exc)
 
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast

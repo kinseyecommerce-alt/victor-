@@ -88,8 +88,26 @@ class Settings(BaseSettings):
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
     # Intelligence layer
-    use_claude_trade_gate: bool = True    # per-trade Claude assessment via Sonnet
+    # Per-trade Claude gate is OFF by default — it added network latency + cost to
+    # the order hot path. Risk posture is instead applied off-path via the master
+    # agent's periodic regime review (published to the bus, consumed by the coordinator).
+    use_claude_trade_gate: bool = False   # per-trade Claude assessment via Sonnet (opt-in)
     claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
+
+    # ── Execution & cost controls ─────────────────────────────────────
+    # Entry order type: MARKET | LIMIT | MARKETABLE_LIMIT (cap slippage at N ticks)
+    entry_order_type:        str = "MARKETABLE_LIMIT"
+    entry_limit_cross_ticks: int = 2      # ticks to cross the book on a marketable limit
+    use_cost_gate:           bool = True  # skip trades whose target can't beat round-trip cost
+
+    # Transaction-cost model (MCX; verify against your contract note)
+    brokerage_flat:    float = 20.0        # ₹ per order
+    brokerage_pct:     float = 0.0003      # 0.03% of turnover (min vs flat)
+    exchange_txn_pct:  float = 0.000026    # MCX transaction charge
+    gst_pct:           float = 0.18        # on brokerage + exchange txn
+    sebi_per_crore:    float = 10.0        # ₹ per ₹1 crore turnover
+    stamp_pct_buy:     float = 0.00002     # buy-side stamp duty
+    slippage_ticks:    float = 1.0         # assumed slippage per side (ticks)
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty

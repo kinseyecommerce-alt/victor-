@@ -49,6 +49,27 @@ the data feed.
 - Offline dev fallback: `settings.use_paper_simulator=True` re-enables the GBM
   tick simulator (default False → broker feed).
 
+### Validation, costs, execution, resilience (world-class upgrades)
+
+- `strategy_backtest.py` — walk-forward, cost-adjusted backtest of all 80
+  strategies (reuses `IndicatorCalc` so backtest == live). Ranks by OOS
+  expectancy/Sharpe; `approved_strategies()` → `logs/approved_strategies.json`.
+  Broker history when connected, else labelled synthetic (never approves).
+  `GET /strategies/backtest`.
+- `cost_model.py` — MCX round-trip cost (brokerage/exchange/GST/stamp/SEBI +
+  slippage). `base_agent` applies a **cost gate**: entries whose target can't
+  beat round-trip cost are skipped (`settings.use_cost_gate`). `GET /costs/{symbol}`.
+- `execution.py` — `resolve_entry()` returns the entry order type/price;
+  default `MARKETABLE_LIMIT` crosses the book by `entry_limit_cross_ticks`,
+  capping slippage instead of paying full spread on market orders.
+- `state_store.py` + `agent_coordinator.{load,reconcile,_persist}` — the reserved
+  book is journaled (atomic writes) and, on FastAPI startup, reconciled against
+  the broker's actual positions (drops stale, adopts untracked).
+- Risk posture off the hot path: `use_claude_trade_gate` defaults **False**;
+  `master_agent._master_review` publishes the regime `size_factor` to the bus
+  (`TOPIC_REGIME`), which `agent_coordinator._regime_factor()` applies to every
+  entry. `GET /risk/posture`.
+
 ### Inter-agent communication (agents talk to each other)
 
 - `agent_bus.py` — a shared blackboard. Every agent publishes its SIGNAL / INTENT
@@ -81,6 +102,7 @@ cd algotrader_v4 && python test_sim_orders_flow.py   # paper order lifecycle (13
 cd algotrader_v4 && python test_mcx.py               # MCX universe/bus/coordinator/agents (35 tests)
 cd algotrader_v4 && python test_broker_data.py       # broker-only market data (15 tests)
 cd algotrader_v4 && python test_mcx_strategies.py    # 20 strategies per agent (16 tests)
+cd algotrader_v4 && python test_upgrades.py          # cost/backtest/state/execution/posture (20 tests)
 
 # Run a single test class or method
 cd algotrader_v4 && python test_pipeline.py TestRiskManager

@@ -351,6 +351,17 @@ class BaseAgent(ABC):
             agent_coordinator.release(sym, self.name)
             return
 
+        # ── Cost gate: skip trades whose target can't beat round-trip cost ──
+        if settings.use_cost_gate and mcx_universe.is_mcx_symbol(sym):
+            import cost_model
+            lots_ct = max(1, qty // lot)
+            tgt = signal.get("target", 0.0)
+            if tgt and not cost_model.covers_cost(sym, lots_ct, ltp, tgt):
+                logger.debug("[{}] {} {} cost gate: target ₹{} < round-trip cost",
+                             self.name, action, sym, tgt)
+                agent_coordinator.release(sym, self.name)
+                return
+
         # LOW-2: SEBI pre-order compliance check
         from sebi_compliance import sebi_compliance
         from market_regime import regime_detector
@@ -366,15 +377,22 @@ class BaseAgent(ABC):
             agent_coordinator.release(sym, self.name)
             return
 
+        # ── Resolve a slippage-aware entry (marketable-limit by default) ──
+        from execution import resolve_entry
+        entry_type, entry_price = resolve_entry(
+            sym, action, ltp, bid=snap.tick.bid, ask=snap.tick.ask)
+
         # Broadcast intent just before the order goes in
         if settings.use_agent_bus:
             agent_bus.publish(self.name, TOPIC_INTENT,
-                              {"action": action, "qty": qty, "price": ltp}, key=sym)
+                              {"action": action, "qty": qty, "price": entry_price or ltp,
+                               "order_type": entry_type}, key=sym)
 
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange=exch,
             transaction_type=action, quantity=qty,
-            order_type="MARKET", product=signal.get("product", self.product),
+            order_type=entry_type, price=entry_price,
+            product=signal.get("product", self.product),
             tag=f"Agent-{self.name}",
         )
         sebi_compliance.record_order_id(self.name, sym, order_id)

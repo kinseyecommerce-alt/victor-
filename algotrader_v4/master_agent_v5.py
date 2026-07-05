@@ -220,6 +220,19 @@ class MasterAgent:
 
         self._apply_regime_plan(regime, plan)
 
+        # Publish the regime risk posture to the agent bus (OFF the order hot path).
+        # The coordinator reads this size_factor and scales every agent's entry size,
+        # replacing the old per-trade Claude gate as the intelligence layer.
+        try:
+            from agent_bus import agent_bus, TOPIC_REGIME
+            agent_bus.publish("master", TOPIC_REGIME,
+                              {"regime": regime.value if regime else "unknown",
+                               "size_factor": getattr(plan, "size_factor", 1.0),
+                               "reasoning": getattr(plan, "reasoning", "")[:120]},
+                              key="regime")
+        except Exception:
+            pass
+
         sigs = regime_detector.current_signals
         live = tick_engine.all_latest()
         risk_st = risk_manager.status()

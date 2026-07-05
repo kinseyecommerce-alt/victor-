@@ -21,6 +21,20 @@ commodity futures — bullion, energy and base metals.
   come from Zerodha Kite (broker WebSocket + REST) in **both paper and live modes**;
   no yfinance / NSE-India feed. MCX base names are resolved to live near-month
   futures contracts from the broker's instrument dump (`mcx_instruments.py`).
+- **Walk-forward, cost-adjusted strategy validation** (`strategy_backtest.py`) —
+  replays history through the live indicator stack + each strategy, subtracts real
+  transaction costs & slippage, ranks by out-of-sample expectancy/Sharpe, and
+  writes the *approved* (positive-edge) subset to `approved_strategies.json`
+- **Transaction-cost & slippage model** (`cost_model.py`) — MCX brokerage,
+  exchange, GST, stamp, SEBI + slippage; a live **cost gate** skips trades whose
+  target can't beat round-trip cost
+- **Slippage-aware execution** (`execution.py`) — marketable-limit entries cap
+  slippage at N ticks instead of paying the full spread on market orders
+- **Crash-safe state** — the coordinator book is journaled and, on startup,
+  reconciled against the broker's actual open positions
+- **Risk posture off the hot path** — the per-trade LLM gate is off by default;
+  the master agent's periodic regime review publishes a size-factor to the bus
+  that the coordinator applies to every entry
 - Lot-based, margin-aware position sizing (MCX contracts trade in whole lots)
 - MCX session handling (09:00–23:30 IST normal, 09:00–21:00 agri)
 - Atomic bracket orders (entry + SL placed atomically)
@@ -74,4 +88,8 @@ python test_sim_orders_flow.py   # paper order lifecycle (13 tests)
 python test_mcx.py               # MCX restructure: universe, bus, coordinator, agents (35 tests)
 python test_broker_data.py       # broker-only market data feed (15 tests)
 python test_mcx_strategies.py    # 20 strategies per agent (16 tests)
+python test_upgrades.py          # cost/backtest/state/execution/posture (20 tests)
+
+# Validate which strategies actually have an edge (broker history → approved set)
+python strategy_backtest.py --days 60
 ```

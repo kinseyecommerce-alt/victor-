@@ -184,6 +184,7 @@ class AgentCoordinator:
                 group=mcx_universe.group_of(symbol),
                 margin=self._margin_for(symbol, lots),
             )
+            self._persist()
         # Broadcast the arbitration outcome so the dashboard/peers can see it
         agent_bus.publish("coordinator", "decision",
                           {**decision.as_dict(), "symbol": symbol,
@@ -201,6 +202,70 @@ class AgentCoordinator:
         if agent is not None and held.agent != agent:
             return
         self._book.pop(symbol, None)
+        self._persist()
+
+    # ── Durable state + reconciliation ───────────────────────────────────────────
+    _STATE_FILE = "coordinator_state.json"
+
+    def _persist(self) -> None:
+        try:
+            from state_store import save_json
+            save_json(self._STATE_FILE, {"book": self.book()})
+        except Exception:
+            pass
+
+    def load(self) -> None:
+        """Restore the reserved book from disk (call on startup, before reconcile)."""
+        try:
+            from state_store import load_json
+            data = load_json(self._STATE_FILE, {}) or {}
+        except Exception:
+            data = {}
+        for r in data.get("book", []):
+            sym = r.get("symbol")
+            if not sym:
+                continue
+            self._book[sym] = Reservation(
+                agent=r.get("agent", ""), symbol=sym, side=r.get("side", "BUY"),
+                lots=int(r.get("lots", 1)), group=r.get("group", mcx_universe.group_of(sym)),
+                margin=float(r.get("margin", 0.0)),
+            )
+        if self._book:
+            logger.info("[coordinator] restored {} reservation(s) from disk", len(self._book))
+
+    def reconcile(self, positions: list[dict]) -> dict:
+        """Reconcile the reserved book against the broker's ACTUAL open positions.
+
+        `positions` = broker net positions [{tradingsymbol, quantity, ...}]. Any
+        reservation with no matching live position is dropped (stale after a
+        restart/disconnect); any live position not reserved is adopted so the
+        coordinator won't hand its contract to another agent.
+        """
+        live: dict[str, int] = {}
+        for p in positions or []:
+            q = p.get("quantity", 0)
+            if q:
+                # positions may carry the futures tradingsymbol; match on base prefix
+                sym = p.get("tradingsymbol", "")
+                base = next((s for s in mcx_universe.MCX_SYMBOLS if sym.startswith(s)), sym)
+                live[base] = q
+        dropped, adopted = [], []
+        for sym in list(self._book):
+            if sym not in live:
+                self._book.pop(sym, None)
+                dropped.append(sym)
+        for sym, q in live.items():
+            if sym not in self._book:
+                self._book[sym] = Reservation(
+                    agent="reconciled", symbol=sym, side="BUY" if q > 0 else "SELL",
+                    lots=max(1, abs(q) // mcx_universe.lot_size(sym)),
+                    group=mcx_universe.group_of(sym), margin=self._margin_for(sym, 1))
+                adopted.append(sym)
+        if dropped or adopted:
+            logger.info("[coordinator] reconciled: dropped {} stale, adopted {} live",
+                        dropped, adopted)
+        self._persist()
+        return {"dropped": dropped, "adopted": adopted, "open_positions": len(self._book)}
 
     # ── Introspection ────────────────────────────────────────────────────────────
     def book(self) -> list[dict]:
