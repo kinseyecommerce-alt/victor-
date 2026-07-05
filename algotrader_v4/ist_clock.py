@@ -9,13 +9,29 @@ from zoneinfo import ZoneInfo
 
 _IST = ZoneInfo("Asia/Kolkata")
 
+# NSE equity session (retained for legacy/backtest utilities)
 _MARKET_OPEN  = dtime(9, 15)
 _MARKET_CLOSE = dtime(15, 30)
+
+# MCX commodity session (IST): 09:00–23:30 normal, 09:00–21:00 agri
+_MCX_OPEN        = dtime(9, 0)
+_MCX_CLOSE       = dtime(23, 30)
+_MCX_AGRI_CLOSE  = dtime(21, 0)
 
 
 def now_ist() -> datetime:
     """Current datetime in IST (Asia/Kolkata)."""
     return datetime.now(_IST)
+
+
+def is_mcx_open(agri: bool = False) -> bool:
+    """True if the MCX commodity market is open now (Mon–Fri, 09:00–23:30 IST)."""
+    n = now_ist()
+    if n.weekday() >= 5:
+        return False
+    t = n.time().replace(tzinfo=None)
+    close = _MCX_AGRI_CLOSE if agri else _MCX_CLOSE
+    return _MCX_OPEN <= t <= close
 
 
 def ist_time() -> dtime:

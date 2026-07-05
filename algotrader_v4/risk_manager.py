@@ -69,7 +69,7 @@ class RiskManager:
             if not ok:
                 return False, msg
 
-        ok, msg = self._check_position_size(quantity, price)
+        ok, msg = self._check_position_size(quantity, price, symbol)
         if not ok:
             return False, msg
 
@@ -80,11 +80,11 @@ class RiskManager:
         if settings.trading_mode == "PAPER":
             return True, "OK"
         now_t = ist_time()
-        open_t  = time(9, 15)
-        sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
-        close_t = time(sq_h, sq_m)
+        oh, om = [int(x) for x in settings.mcx_open_time.split(":")]
+        ch, cm = [int(x) for x in settings.mcx_close_time.split(":")]
+        open_t, close_t = time(oh, om), time(ch, cm)
         if not (open_t <= now_t <= close_t):
-            return False, f"Outside trading hours (market {open_t}–{close_t})"
+            return False, f"Outside MCX hours (market {open_t}–{close_t})"
         return True, "OK"
 
     def _check_daily_loss(self) -> tuple[bool, str]:
@@ -100,7 +100,22 @@ class RiskManager:
             return False, f"Max open positions reached ({settings.max_open_positions})"
         return True, "OK"
 
-    def _check_position_size(self, quantity: int, price: float) -> tuple[bool, str]:
+    def _check_position_size(self, quantity: int, price: float, symbol: str = "") -> tuple[bool, str]:
+        # MCX: commodity futures carry large notional but trade on margin — cap on
+        # the margin blocked (lots × margin_per_lot), not the full contract value.
+        if symbol:
+            import mcx_universe
+            c = mcx_universe.contract(symbol)
+            if c is not None:
+                lots   = max(1, quantity // c.lot_size)
+                margin = lots * c.margin_per_lot
+                limit  = getattr(settings, "mcx_max_margin_per_position", 300000.0)
+                if margin > limit:
+                    return False, (
+                        f"Position margin ₹{margin:.0f} exceeds MCX limit ₹{limit:.0f}"
+                    )
+                return True, "OK"
+
         value = quantity * price
         if value > settings.max_position_size:
             return False, (
@@ -125,15 +140,30 @@ class RiskManager:
         self,
         price: float,
         agent: str = "",
+        symbol: str = "",
         capital: float | None = None,
         risk_pct: float | None = None,
     ) -> int:
+        # Resolve the capital available to this agent/order
         if capital is not None:
             cap = capital
         elif agent:
             cap = self.max_capital_for_agent(agent)
         else:
             cap = settings.max_position_size
+
+        # ── MCX lot-based sizing ──────────────────────────────────────────
+        # Commodity futures trade in whole lots; size by how many lots the
+        # allocated capital can margin, then return lots × lot_size.
+        if symbol:
+            import mcx_universe
+            c = mcx_universe.contract(symbol)
+            if c is not None:
+                lots = int(cap // c.margin_per_lot)
+                lots = max(lots, 1)
+                return lots * c.lot_size
+
+        # ── Legacy notional sizing (equity / non-MCX) ─────────────────────
         if risk_pct and price > 0:
             sl_amount = price * (settings.stop_loss_pct / 100)
             cap = min(cap, (cap * risk_pct / 100) / sl_amount * price)

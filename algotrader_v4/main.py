@@ -409,12 +409,24 @@ async def start_bot(req: BotStartRequest):
         raise HTTPException(400, "All requested strategies are disabled")
     watchlist = req.watchlist
     if not watchlist:
-        selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
-        watchlist = symbol_scanner.all_selected_flat()
-        if not watchlist:
-            from symbol_scanner import NIFTY_50
-            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
-            logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
+        if settings.exchange == "MCX":
+            # MCX: build the watchlist from the commodity universe for the
+            # requested strategies (the NSE symbol scanner does not apply).
+            import mcx_universe
+            seen: dict[str, dict] = {}
+            for strat in strategies:
+                for item in mcx_universe.get_strategy_watchlist(strat):
+                    seen[item["symbol"]] = item
+            watchlist = list(seen.values())
+            logger.info("[bot/start] MCX watchlist: {} contracts across {} strategies",
+                        len(watchlist), len(strategies))
+        else:
+            selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
+            watchlist = symbol_scanner.all_selected_flat()
+            if not watchlist:
+                from symbol_scanner import NIFTY_50
+                watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
+                logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
     report = master_agent.start(strategies, watchlist)
     return {"status": "started", "architecture": "tick-driven 1s",
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
@@ -471,6 +483,18 @@ async def option_chain(symbol: str):
 # ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])
 def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
+
+@app.get("/agents/bus", tags=["Agents"])
+def agents_bus(limit: int = 50, topic: str | None = None):
+    """Recent inter-agent bus messages (signals / intents / fills / exits) + stats."""
+    from agent_bus import agent_bus
+    return {"stats": agent_bus.stats(), "recent": agent_bus.recent(limit, topic)}
+
+@app.get("/agents/coordinator", tags=["Agents"])
+def agents_coordinator():
+    """Coordinator state: reserved book, per-group exposure, caps."""
+    from agent_coordinator import agent_coordinator
+    return agent_coordinator.status()
 
 @app.post("/agents/{name}/pause", tags=["Agents"])
 def pause_agent(name: str):
@@ -1133,7 +1157,10 @@ async def on_startup():
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
-    asyncio.create_task(symbol_scanner.run())
+    # The NSE symbol scanner (yfinance-backed) does not apply to MCX commodity
+    # trading — the MCX watchlist is built directly from the contract universe.
+    if settings.exchange != "MCX":
+        asyncio.create_task(symbol_scanner.run())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 

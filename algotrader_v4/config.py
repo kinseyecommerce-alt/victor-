@@ -46,14 +46,28 @@ class Settings(BaseSettings):
 
     # Trading
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
+    # Primary exchange — MCX commodity futures (replaces NSE/BSE equity)
+    exchange: str = "MCX"
 
     # Risk
     max_daily_loss: float = 5000.0
-    max_position_size: float = 50000.0
+    max_position_size: float = 50000.0           # equity notional cap (legacy)
+    mcx_max_margin_per_position: float = 300000.0 # MCX: max margin blocked per position
     max_open_positions: int = 5
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
-    squareoff_time: str = "15:10"
+    squareoff_time: str = "23:15"   # MCX intraday square-off (session closes 23:30)
+
+    # ── MCX session (IST) ─────────────────────────────────────────────
+    mcx_open_time:       str = "09:00"   # MCX opens 09:00 IST
+    mcx_close_time:      str = "23:30"   # normal session close (bullion/energy/metals)
+    mcx_agri_close_time: str = "21:00"   # agri commodities close earlier
+
+    # ── Inter-agent communication ─────────────────────────────────────
+    use_agent_bus:         bool  = True   # agents publish/read signals on the shared bus
+    use_agent_coordinator: bool  = True   # coordinator arbitrates entries between agents
+    coord_max_concurrent_positions: int   = 6        # global cap on coordinated positions
+    coord_group_margin_cap:         float = 250000.0 # ₹ margin cap per correlated group
 
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0
@@ -106,14 +120,15 @@ class Settings(BaseSettings):
     port: int = 8000
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
 
-    @field_validator("squareoff_time")
+    @field_validator("squareoff_time", "mcx_open_time", "mcx_close_time", "mcx_agri_close_time")
     @classmethod
-    def validate_squareoff_time(cls, v: str) -> str:
+    def validate_hhmm(cls, v: str) -> str:
         if not re.match(r"^\d{2}:\d{2}$", v):
-            raise ValueError("squareoff_time must be HH:MM format")
+            raise ValueError("time must be HH:MM format")
         h, m = int(v[:2]), int(v[3:])
-        if not (9 <= h <= 15 and 0 <= m <= 59):
-            raise ValueError("squareoff_time must be between 09:00 and 15:59")
+        # MCX trades 09:00–23:30 IST, so allow the full commodity session window
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            raise ValueError("time must be a valid 24h HH:MM")
         return v
 
     class Config:

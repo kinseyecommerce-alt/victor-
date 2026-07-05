@@ -288,10 +288,20 @@ class PaperTickSimulator:
         self._yf = YFinanceClient()
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
+        # MCX contracts have no yfinance quote — seed them from the contract's
+        # reference price so the simulator produces realistic commodity ticks.
+        try:
+            import mcx_universe
+            mcx_seed = mcx_universe.base_prices()
+        except Exception:
+            mcx_seed = {}
         for sym in symbols:
             exch = exchanges.get(sym, "NSE")
-            price = self._yf.current_price(sym, exch)
-            self._prices[sym] = price if price > 0 else 1000.0
+            if sym in mcx_seed:
+                self._prices[sym] = mcx_seed[sym]
+            else:
+                price = self._yf.current_price(sym, exch)
+                self._prices[sym] = price if price > 0 else 1000.0
             logger.info("Paper seed {} @ ₹{:.2f}", sym, self._prices[sym])
 
     def next_tick(self, symbol: str) -> Quote:

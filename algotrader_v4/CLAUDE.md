@@ -2,6 +2,41 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Market: MCX commodity futures
+
+The platform has been **restructured for MCX (Multi Commodity Exchange of India)**
+commodity-futures trading (bullion, energy, base metals). The NSE/BSE equity
+agents are retired (kept in `agents/strategy_agents.py` only for their unit-test
+coverage of the shared framework). The live registry is `agents/mcx_agents.py`,
+exported as `ALL_AGENTS`, keyed by stable names so risk buckets / scheduler /
+dashboard keep working:
+
+| Registry key | MCX agent | Product |
+|--------------|-----------|---------|
+| `intraday` | MCX Intraday | MIS |
+| `scalping` | MCX Scalping | MIS |
+| `swing`    | MCX Positional | NRML |
+| `fno`      | MCX Options / Spread | NRML |
+
+Contracts, lot sizes, tick sizes, margins and sessions live in `mcx_universe.py`.
+MCX sizing is **lot-based and margin-aware** (`risk_manager.calculate_quantity`
+takes a `symbol=` and returns whole-lot quantities; position-size checks cap on
+margin, not notional).
+
+### Inter-agent communication (agents talk to each other)
+
+- `agent_bus.py` — a shared blackboard. Every agent publishes its SIGNAL / INTENT
+  / FILL / EXIT (keyed by symbol) and can read peers' latest messages.
+- `agent_coordinator.py` — arbitrates every entry before an order is placed:
+  blocks opposite-direction conflicts and duplicate contracts, enforces the
+  correlated-group margin cap, applies a global concurrency cap, and boosts or
+  damps size based on peer conviction read off the bus.
+- Wiring lives in `agents/base_agent.py`: it publishes the SIGNAL, calls
+  `agent_coordinator.evaluate()`/`request()` inside `_try_enter`, and releases the
+  reservation on exit / SL. Both are gated by `settings.use_agent_bus` and
+  `settings.use_agent_coordinator`.
+- Read endpoints: `GET /agents/bus`, `GET /agents/coordinator`.
+
 ## Common Commands
 
 ```bash
@@ -14,8 +49,10 @@ cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Start the server (production, via main)
 cd algotrader_v4 && python main.py
 
-# Run all tests (417 tests)
-cd algotrader_v4 && python test_pipeline.py
+# Run the test suites
+cd algotrader_v4 && python test_pipeline.py          # core framework (263 tests)
+cd algotrader_v4 && python test_sim_orders_flow.py   # paper order lifecycle (13 tests)
+cd algotrader_v4 && python test_mcx.py               # MCX universe/bus/coordinator/agents (35 tests)
 
 # Run a single test class or method
 cd algotrader_v4 && python test_pipeline.py TestRiskManager
