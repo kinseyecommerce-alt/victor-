@@ -13,6 +13,10 @@ commodity futures — bullion, energy and base metals.
 - **Shared agent bus + coordinator** — agents broadcast signals/fills/exposure on a
   blackboard; a coordinator arbitrates every entry (blocks conflicting/duplicate
   contracts, enforces correlated-group margin caps, boosts/damps size on peer conviction)
+- **Market data from the broker only** — quotes, ticks and historical bars all
+  come from Zerodha Kite (broker WebSocket + REST) in **both paper and live modes**;
+  no yfinance / NSE-India feed. MCX base names are resolved to live near-month
+  futures contracts from the broker's instrument dump (`mcx_instruments.py`).
 - Lot-based, margin-aware position sizing (MCX contracts trade in whole lots)
 - MCX session handling (09:00–23:30 IST normal, 09:00–21:00 agri)
 - Atomic bracket orders (entry + SL placed atomically)
@@ -28,14 +32,21 @@ python startup.py
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## Trading Mode
-- **PAPER** (default): Simulates orders, no real money at risk (MCX contracts
-  seeded from reference prices)
-- **LIVE**: Real Zerodha Kite orders on the MCX segment
+## Data vs. execution
+Market **data** always comes from the broker (Kite); **execution** is what
+`TRADING_MODE` switches:
+- **PAPER** (default): real broker market data, simulated order fills — no money at risk
+- **LIVE**: real broker market data, real Zerodha Kite orders on the MCX segment
+
+A valid `KITE_ACCESS_TOKEN` is required for any market data. For fully offline
+development without a broker session, set `USE_PAPER_SIMULATOR=true` to fall back
+to the built-in GBM tick simulator.
 
 ## Architecture
 - `main.py` — FastAPI server + REST/WebSocket endpoints
 - `mcx_universe.py` — MCX contract universe (lot sizes, tick sizes, margins, sessions)
+- `mcx_instruments.py` — resolves base names → live near-month futures from the broker
+- `kite_client.py` / `kite_ticker.py` — broker session, quotes, historical, WebSocket ticks
 - `agent_bus.py` — inter-agent pub/sub blackboard
 - `agent_coordinator.py` — arbitrates entries across agents
 - `agents/mcx_agents.py` — the 4 MCX trading-type agents (live registry)

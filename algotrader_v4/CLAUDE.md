@@ -23,6 +23,25 @@ MCX sizing is **lot-based and margin-aware** (`risk_manager.calculate_quantity`
 takes a `symbol=` and returns whole-lot quantities; position-size checks cap on
 margin, not notional).
 
+### Market data — broker only
+
+Market data (quotes, ticks, historical bars) comes from the **broker (Zerodha
+Kite) in both paper and live modes** — yfinance/NSE-India are no longer used as
+live sources. `trading_mode` (PAPER/LIVE) governs **order execution only**, not
+the data feed.
+
+- `kite_client.is_connected()` gates all data calls (`quote_kite`, `ltp_kite`,
+  `historical_data`, `get_instruments`) — they return empty when no broker
+  session, never based on PAPER/LIVE.
+- `mcx_instruments.py` resolves each base name (CRUDEOIL) to its live near-month
+  futures contract (tradingsymbol + instrument_token) from the broker's MCX
+  instrument dump. Used by the WebSocket ticker, REST quote batch and historical.
+- `tick_engine` starts the Kite WebSocket whenever the broker is connected (both
+  modes) and polls Kite REST as fallback; `get_historical` pulls Kite bars.
+- The FastAPI startup establishes the broker session from `KITE_ACCESS_TOKEN`.
+- Offline dev fallback: `settings.use_paper_simulator=True` re-enables the GBM
+  tick simulator (default False → broker feed).
+
 ### Inter-agent communication (agents talk to each other)
 
 - `agent_bus.py` — a shared blackboard. Every agent publishes its SIGNAL / INTENT

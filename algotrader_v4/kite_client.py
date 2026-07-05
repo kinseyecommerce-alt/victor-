@@ -163,13 +163,21 @@ class KiteClient:
             )
         return self._kite
 
+    def is_connected(self) -> bool:
+        """True once the broker session is established (access token set).
+
+        Market data flows from the broker whenever this is True — independent of
+        PAPER/LIVE, which only governs order execution.
+        """
+        return self._kite is not None
+
     # ── Instrument lookup ──────────────────────────────────────────────────
 
     def get_instruments(self, exchange: str = "NSE") -> list[dict]:
         """Fetch and cache all instruments for the given exchange."""
         if exchange in self._instruments_cache:
             return self._instruments_cache[exchange]
-        if settings.trading_mode == "PAPER":
+        if not self.is_connected():
             return []
         try:
             instruments = _with_retry(lambda: self.kite.instruments(exchange),
@@ -279,11 +287,21 @@ class KiteClient:
         return _with_retry(self.kite.margins, label="margins")
 
     def quote_kite(self, instruments: list[str]) -> dict[str, dict]:
-        """Batch live quotes from Kite. instruments = ['NSE:RELIANCE', 'NFO:NIFTY...'].
-        Returns Kite's quote dict keyed by 'EXCHANGE:SYMBOL'. Empty dict in PAPER mode."""
-        if settings.trading_mode == "PAPER" or not instruments:
+        """Batch live quotes from the broker. instruments = ['MCX:CRUDEOIL25JULFUT', ...].
+        Returns Kite's quote dict keyed by 'EXCHANGE:TRADINGSYMBOL'.
+
+        Market data comes from the broker in BOTH paper and live modes — this is
+        gated on the broker session, not trading_mode. Empty dict if not connected."""
+        if not instruments or not self.is_connected():
             return {}
         return _with_retry(lambda: self.kite.quote(instruments), label="quote")
+
+    def ltp_kite(self, instruments: list[str]) -> dict[str, float]:
+        """Last traded price per instrument from the broker (both modes)."""
+        if not instruments or not self.is_connected():
+            return {}
+        raw = _with_retry(lambda: self.kite.ltp(instruments), label="ltp")
+        return {k: v.get("last_price", 0.0) for k, v in (raw or {}).items()}
 
     # ── Order placement ────────────────────────────────────────────────────
 
@@ -401,8 +419,11 @@ class KiteClient:
           minute data → 60-day chunks
           day data    → 2 000-day chunks
         Chunks are merged and returned as a single list.
+
+        Historical data comes from the broker in BOTH paper and live modes —
+        gated on the broker session, not trading_mode. Empty if not connected.
         """
-        if settings.trading_mode == "PAPER":
+        if not self.is_connected():
             return []
 
         is_minute = "minute" in interval

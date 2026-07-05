@@ -100,8 +100,10 @@ class Settings(BaseSettings):
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
 
-    # Real-time tick feed
-    use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode
+    # Real-time tick feed — market data always comes from the broker (Kite) in
+    # both paper and live modes. PAPER/LIVE only governs order execution.
+    use_kite_websocket: bool = True    # use KiteConnect WebSocket for broker ticks
+    use_paper_simulator: bool = False  # offline dev only: GBM sim instead of broker feed
 
     # Daily capital allocation by trading type
     total_capital:          float = 500000.0   # total account capital (₹)

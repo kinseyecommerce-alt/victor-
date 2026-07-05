@@ -19,10 +19,11 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from typing import Callable, Optional
 
@@ -33,6 +34,7 @@ from loguru import logger
 
 from config import settings
 from kite_client import kite_client
+from ist_clock import is_mcx_open
 from market_data import (
     Quote, NSEClient, YFinanceClient, PaperTickSimulator,
     nse_client, yf_client, paper_sim, is_market_open,
@@ -425,7 +427,9 @@ class TickEngine:
     def __init__(self) -> None:
         self._running        = False
         self._symbols:  list[str]       = []
-        self._exchange: dict[str, str]  = {}   # symbol → NSE/BSE
+        self._exchange: dict[str, str]  = {}   # symbol → NSE/BSE/MCX
+        self._trading_symbol: dict[str, str] = {}  # base → broker tradingsymbol (MCX futures)
+        self._token:          dict[str, int] = {}  # base → instrument_token
 
         self._bufs_1min: dict[str, TickBuffer] = {}
         self._bufs_5min: dict[str, TickBuffer] = {}
@@ -447,21 +451,43 @@ class TickEngine:
     # ── Setup ─────────────────────────────────────────────────────────
 
     def subscribe(self, watchlist: list[dict]) -> None:
+        mcx_bases = []
         for item in watchlist:
             sym  = item["symbol"]
-            exch = item.get("exchange", "NSE")
+            exch = item.get("exchange", settings.exchange)
             self._symbols.append(sym)
             self._exchange[sym]  = exch
+            self._trading_symbol[sym] = sym   # default; MCX overridden below
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
+            if exch == "MCX":
+                mcx_bases.append(sym)
 
-        if settings.trading_mode == "PAPER":
+        # Resolve MCX base names → live near-month futures (broker instrument dump)
+        if mcx_bases:
+            try:
+                from mcx_instruments import resolve
+                for base, rc in resolve(mcx_bases).items():
+                    self._trading_symbol[base] = rc.tradingsymbol
+                    self._token[base]          = rc.instrument_token
+            except Exception as exc:
+                logger.warning("[tick] MCX contract resolution failed: {}", exc)
+
+        # Offline dev only: seed the GBM simulator. By default market data comes
+        # from the broker (use_paper_simulator=False).
+        if getattr(settings, "use_paper_simulator", False):
             exchanges = {s: self._exchange[s] for s in self._symbols}
             paper_sim.seed(self._symbols, exchanges)
+            feed = "GBM simulator (offline)"
+        elif kite_client.is_connected():
+            feed = "broker (Kite WS+REST)"
+        else:
+            feed = "NONE — broker not connected"
+            logger.warning("TickEngine: broker not connected and simulator disabled — "
+                           "no market data will flow until the broker session is set")
 
-        logger.info("TickEngine: subscribed {} symbols via {}",
-                    len(self._symbols),
-                    "KiteConnect REST+WS" if settings.trading_mode == "LIVE" else "Paper simulator")
+        logger.info("TickEngine: subscribed {} symbols | data feed: {}",
+                    len(self._symbols), feed)
 
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
@@ -469,8 +495,11 @@ class TickEngine:
         self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._poll_loop())
 
-        # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback
-        if settings.trading_mode == "LIVE":
+        # Start the broker tick WebSocket whenever the broker is connected — in
+        # BOTH paper and live modes (data is broker-sourced; PAPER only simulates
+        # fills). Skipped only when the offline GBM simulator is explicitly on.
+        primary_exch = self._exchange.get(self._symbols[0], settings.exchange) if self._symbols else settings.exchange
+        if not getattr(settings, "use_paper_simulator", False) and kite_client.is_connected():
             if settings.use_truedata_websocket and settings.truedata_username:
                 try:
                     from truedata_client import truedata_ticker
@@ -487,7 +516,7 @@ class TickEngine:
                     logger.error("TickEngine: TrueData WebSocket failed: {} — "
                                  "falling back to Kite REST", exc)
                     self._use_ws = False
-            elif settings.use_kite_websocket and settings.kite_access_token:
+            elif settings.use_kite_websocket:
                 try:
                     from kite_ticker import KiteTicker
                     self._kite_ticker = KiteTicker()
@@ -495,10 +524,11 @@ class TickEngine:
                         self._symbols,
                         self._ingest_kite_tick,
                         self._loop,
+                        exchange=primary_exch,
                     )
                     self._use_ws = True
-                    logger.info("TickEngine: KiteConnect WebSocket started for {} symbols",
-                                len(self._symbols))
+                    logger.info("TickEngine: KiteConnect WebSocket started for {} {} symbols",
+                                len(self._symbols), primary_exch)
                 except Exception as exc:
                     logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
                                  "falling back to Kite REST", exc)
@@ -596,47 +626,60 @@ class TickEngine:
         During off-market hours, slows to every 30 seconds (to check status).
         Symbols already receiving WebSocket ticks are skipped to avoid duplicate processing.
         """
+        use_sim = getattr(settings, "use_paper_simulator", False)
         while self._running:
             t_start = time.monotonic()
 
-            if not is_market_open() and settings.trading_mode == "LIVE":
+            # Broker feed: slow the loop when the market is closed (no ticks).
+            # The offline simulator keeps running regardless (dev convenience).
+            if not use_sim and not is_mcx_open():
                 await asyncio.sleep(30)
                 continue
 
-            if settings.trading_mode == "PAPER":
+            if use_sim:
                 tasks = [self._fetch_and_process(sym) for sym in self._symbols]
                 await asyncio.gather(*tasks, return_exceptions=True)
-            else:
+            elif kite_client.is_connected():
                 await self._fetch_kite_batch()
+            else:
+                await asyncio.sleep(5)   # nothing to feed until broker connects
+                continue
 
             # Sleep the remainder of 1 second
             elapsed = time.monotonic() - t_start
             await asyncio.sleep(max(0, 1.0 - elapsed))
 
     async def _fetch_and_process(self, symbol: str) -> None:
-        """PAPER mode only — generate next GBM tick and process it."""
+        """Offline simulator only — generate next GBM tick and process it."""
         quote = paper_sim.next_tick(symbol)
         tick  = Tick.from_quote(quote)
-        await self._process_tick(symbol, tick, source="PAPER")
+        await self._process_tick(symbol, tick, source="SIM")
 
     async def _fetch_kite_batch(self) -> None:
-        """Single Kite quote() call for all non-WebSocket symbols in LIVE mode."""
+        """Batch broker quote() for all non-WebSocket symbols (both paper & live modes).
+
+        MCX symbols are quoted by their resolved futures tradingsymbol
+        (e.g. MCX:CRUDEOIL25JULFUT), then mapped back to the base name.
+        """
         pending = [s for s in self._symbols
                    if not (self._use_ws and s in self._ws_received)]
         if not pending:
             return
-        instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
+        # base → 'EXCHANGE:TRADINGSYMBOL' and the reverse, so we can map the reply back
+        key_for_sym = {
+            s: f"{self._exchange.get(s, settings.exchange)}:{self._trading_symbol.get(s, s)}"
+            for s in pending
+        }
+        instruments = list(key_for_sym.values())
         try:
             raw = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: kite_client.quote_kite(instruments)
             )
         except Exception as exc:
-            logger.warning("[tick] Kite batch quote failed: {}", exc)
+            logger.warning("[tick] broker batch quote failed: {}", exc)
             return
         for sym in pending:
-            exch = self._exchange.get(sym, "NSE")
-            key  = f"{exch}:{sym}"
-            data = raw.get(key)
+            data = raw.get(key_for_sym[sym])
             if not data:
                 continue
             quote = _kite_quote_to_quote(sym, data)
@@ -692,20 +735,74 @@ class TickEngine:
 
     # ── Historical data (for backtesting + warm-up) ───────────────────
 
+    # Kite interval names keyed by our shorthand
+    _KITE_INTERVAL = {
+        "1m": "minute", "3m": "3minute", "5m": "5minute", "10m": "10minute",
+        "15m": "15minute", "30m": "30minute", "60m": "60minute",
+        "1h": "60minute", "1d": "day", "1day": "day", "day": "day",
+    }
+
     def get_historical(
-        self, symbol: str, exchange: str = "NSE",
+        self, symbol: str, exchange: str = "MCX",
         interval: str = "1m", period: str = "5d",
     ) -> pd.DataFrame:
-        """Fetch OHLCV from yfinance — used by backtest engine and signal engine."""
-        return yf_client.historical(symbol, exchange, interval, period)
+        """Fetch OHLCV from the broker (Kite) — used by backtest engine & signal engine.
+
+        Data is broker-sourced in both paper and live modes. Returns an empty
+        DataFrame if the broker is not connected or the instrument can't be resolved.
+        """
+        cols = ["timestamp", "open", "high", "low", "close", "volume"]
+        if not kite_client.is_connected():
+            return pd.DataFrame(columns=cols)
+
+        # Resolve the instrument token (MCX base → near-month future)
+        token = self._token.get(symbol)
+        if token is None and exchange == "MCX":
+            try:
+                from mcx_instruments import resolve
+                rc = resolve([symbol]).get(symbol)
+                token = rc.instrument_token if rc else None
+            except Exception:
+                token = None
+        if token is None:
+            try:
+                token = kite_client.get_instrument_tokens([symbol], exchange).get(symbol)
+            except Exception:
+                token = None
+        if not token:
+            logger.warning("[tick] no instrument token for {} ({})", symbol, exchange)
+            return pd.DataFrame(columns=cols)
+
+        kite_interval = self._KITE_INTERVAL.get(interval, "minute")
+        days = int(re.sub(r"\D", "", period) or 5)
+        bars = kite_client.historical_data(
+            instrument_token=int(token),
+            from_date=datetime.now() - timedelta(days=days),
+            to_date=datetime.now(),
+            interval=kite_interval,
+        )
+        if not bars:
+            return pd.DataFrame(columns=cols)
+        df = pd.DataFrame(bars)
+        if "date" in df.columns:
+            df = df.rename(columns={"date": "timestamp"})
+        return df
 
     # ── Market status ─────────────────────────────────────────────────
 
     async def get_market_status(self) -> dict:
-        return await nse_client.market_status()
+        """MCX session status derived from the IST clock (no external NSE dependency)."""
+        return {
+            "exchange": settings.exchange,
+            "open":     is_mcx_open(),
+            "broker_connected": kite_client.is_connected(),
+            "session":  f"{settings.mcx_open_time}-{settings.mcx_close_time} IST",
+        }
 
     async def get_option_chain(self, symbol: str) -> Optional[dict]:
-        return await nse_client.option_chain(symbol)
+        # Commodity options are resolved via the broker instrument dump; the NSE
+        # equity option-chain feed does not apply to MCX.
+        return None
 
 
 tick_engine = TickEngine()

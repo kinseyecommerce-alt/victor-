@@ -27,6 +27,7 @@ from loguru import logger
 from config import settings
 from auth import authenticate, create_token, decode_token, hash_password
 from market_data import nse_client, yf_client, is_market_open
+from ist_clock import is_mcx_open
 from kite_client import kite_client
 from risk_manager import risk_manager
 from order_guard import order_guard
@@ -468,8 +469,8 @@ def live_symbol(symbol: str):
 @app.get("/market/status", tags=["Market"])
 async def market_status():
     status = await tick_engine.get_market_status()
-    status["market_open"] = is_market_open()
-    status["data_source"] = "NSE India API (not Kite)"
+    status["market_open"] = status.get("open", False)
+    status["data_source"] = "Zerodha Kite (broker)"
     return status
 
 @app.get("/market/option-chain/{symbol}", tags=["Market"])
@@ -1017,8 +1018,9 @@ def whitelist_ip(req: WhitelistIPRequest):
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
             "architecture": "tick-driven 1s",
-            "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
-            "market_open": is_market_open(),
+            "market_data_source": "Zerodha Kite (broker WebSocket + REST; MCX)",
+            "broker_connected": kite_client.is_connected(),
+            "market_open": is_mcx_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
@@ -1154,6 +1156,16 @@ async def n8n_inbound(request: Request):
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
+    # Establish the broker session so market data flows from Kite (both paper &
+    # live modes). Market data is broker-only; without this there is no feed.
+    if settings.kite_access_token and not kite_client.is_connected():
+        try:
+            kite_client.set_access_token(access_token=settings.kite_access_token)
+            logger.info("FastAPI startup: broker session established (Kite)")
+        except Exception as exc:
+            logger.warning("FastAPI startup: broker connect failed ({}) — "
+                           "market data unavailable until /auth/login", exc)
+
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")

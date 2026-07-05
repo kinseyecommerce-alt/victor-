@@ -32,29 +32,40 @@ class KiteTicker:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._connected = False
 
-    def load_instruments(self, symbols: list[str]) -> None:
-        """Fetch instrument tokens for symbols from Kite instruments API."""
+    def load_instruments(self, symbols: list[str], exchange: str = "NSE") -> None:
+        """Fetch instrument tokens for symbols from the broker.
+
+        For MCX the universe uses base names (CRUDEOIL); resolve each to its live
+        near-month futures contract and key the reverse map back to the base name
+        so ticks are reported under the symbol the agents subscribed to.
+        """
         try:
-            instruments = kite_client.kite.instruments("NSE")
-            sym_set = set(symbols)
-            for inst in instruments:
-                ts = inst.get("tradingsymbol", "")
-                if ts in sym_set:
-                    tok = inst["instrument_token"]
-                    self._token_map[ts] = tok
-                    self._reverse_map[tok] = ts
-            logger.info("[KiteTicker] Loaded {} instrument tokens ({} requested)",
-                        len(self._token_map), len(symbols))
-            missing = sym_set - set(self._token_map.keys())
+            if exchange == "MCX":
+                from mcx_instruments import token_map
+                for base, tok in token_map(symbols).items():
+                    self._token_map[base]  = tok
+                    self._reverse_map[tok] = base
+            else:
+                instruments = kite_client.kite.instruments(exchange)
+                sym_set = set(symbols)
+                for inst in instruments:
+                    ts = inst.get("tradingsymbol", "")
+                    if ts in sym_set:
+                        tok = inst["instrument_token"]
+                        self._token_map[ts] = tok
+                        self._reverse_map[tok] = ts
+            logger.info("[KiteTicker] Loaded {} {} instrument tokens ({} requested)",
+                        len(self._token_map), exchange, len(symbols))
+            missing = set(symbols) - set(self._token_map.keys())
             if missing:
                 logger.warning("[KiteTicker] Tokens not found: {}", missing)
         except Exception as exc:
             logger.error("[KiteTicker] Failed to load instruments: {}", exc)
 
     def start(self, symbols: list[str], on_tick_callback: Callable,
-              loop: asyncio.AbstractEventLoop) -> None:
+              loop: asyncio.AbstractEventLoop, exchange: str = "NSE") -> None:
         """Connect WebSocket. on_tick_callback(symbol, Tick) is called for each tick."""
-        self.load_instruments(symbols)
+        self.load_instruments(symbols, exchange)
         if not self._token_map:
             logger.error("[KiteTicker] No instrument tokens found — WebSocket not started")
             return
