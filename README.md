@@ -5,11 +5,15 @@ commodity futures — bullion, energy and base metals.
 
 ## Features
 - Tick-driven architecture (1-second cadence)
-- **4 MCX trading-type agents that communicate with each other:**
-  - `intraday` → **MCX Intraday (MIS)** — fast momentum, square off intraday
-  - `scalping` → **MCX Scalping (MIS)** — high-frequency small moves
-  - `swing`    → **MCX Positional (NRML)** — multi-day trend, carries overnight
-  - `fno`      → **MCX Options / Spread (NRML)** — directional options + inter-commodity spreads
+- **4 MCX trading-type agents, each running 20 strategies (80 total), that
+  communicate with each other:**
+  - `intraday` → **MCX Intraday (MIS)** — 20 trend/momentum/breakout strategies
+  - `scalping` → **MCX Scalping (MIS)** — 20 fast micro-momentum / mean-reversion strategies
+  - `swing`    → **MCX Positional (NRML)** — 20 multi-day trend-following strategies
+  - `fno`      → **MCX Options / Spread (NRML)** — 20 volatility/directional strategies + inter-commodity spread overlay
+- Each agent evaluates all 20 strategies per tick and takes the best-scoring
+  signal (`agents/mcx_strategies.py`); score drives the position size factor.
+  Inspect them at `GET /agents/strategies`.
 - **Shared agent bus + coordinator** — agents broadcast signals/fills/exposure on a
   blackboard; a coordinator arbitrates every entry (blocks conflicting/duplicate
   contracts, enforces correlated-group margin caps, boosts/damps size on peer conviction)
@@ -50,6 +54,7 @@ to the built-in GBM tick simulator.
 - `agent_bus.py` — inter-agent pub/sub blackboard
 - `agent_coordinator.py` — arbitrates entries across agents
 - `agents/mcx_agents.py` — the 4 MCX trading-type agents (live registry)
+- `agents/mcx_strategies.py` — 80 signal strategies (20 per agent), best-score selection
 - `agents/base_agent.py` — tick consumer; publishes to the bus, consults the coordinator
 - `tick_engine.py` — real-time / simulated tick pipeline + indicators
 - `risk_manager.py` — lot/margin-based sizing + daily loss limits
@@ -67,4 +72,6 @@ cd algotrader_v4
 python test_pipeline.py          # core framework (263 tests)
 python test_sim_orders_flow.py   # paper order lifecycle (13 tests)
 python test_mcx.py               # MCX restructure: universe, bus, coordinator, agents (35 tests)
+python test_broker_data.py       # broker-only market data feed (15 tests)
+python test_mcx_strategies.py    # 20 strategies per agent (16 tests)
 ```

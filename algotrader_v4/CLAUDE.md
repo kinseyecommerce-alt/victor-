@@ -18,6 +18,13 @@ dashboard keep working:
 | `swing`    | MCX Positional | NRML |
 | `fno`      | MCX Options / Spread | NRML |
 
+Each agent runs a registry of **20 strategies** (`agents/mcx_strategies.py`,
+80 total) on every tick and takes the best-scoring signal; the score drives the
+size factor. Strategies are pure functions over an `SCtx` (indicators + the
+symbol's rolling previous-tick state) returning `(action, score)` or `None`.
+The registry is keyed by agent name in `STRATEGY_REGISTRY`; agents keep
+per-symbol prev state in `self._pstate`. Inspect via `GET /agents/strategies`.
+
 Contracts, lot sizes, tick sizes, margins and sessions live in `mcx_universe.py`.
 MCX sizing is **lot-based and margin-aware** (`risk_manager.calculate_quantity`
 takes a `symbol=` and returns whole-lot quantities; position-size checks cap on
@@ -72,6 +79,8 @@ cd algotrader_v4 && python main.py
 cd algotrader_v4 && python test_pipeline.py          # core framework (263 tests)
 cd algotrader_v4 && python test_sim_orders_flow.py   # paper order lifecycle (13 tests)
 cd algotrader_v4 && python test_mcx.py               # MCX universe/bus/coordinator/agents (35 tests)
+cd algotrader_v4 && python test_broker_data.py       # broker-only market data (15 tests)
+cd algotrader_v4 && python test_mcx_strategies.py    # 20 strategies per agent (16 tests)
 
 # Run a single test class or method
 cd algotrader_v4 && python test_pipeline.py TestRiskManager

@@ -497,6 +497,21 @@ def agents_coordinator():
     from agent_coordinator import agent_coordinator
     return agent_coordinator.status()
 
+@app.get("/agents/strategies", tags=["Agents"])
+def agents_strategies(name: str | None = None):
+    """The 20 strategies each agent runs (and which one last fired)."""
+    items = ALL_AGENTS.items() if name is None else [(name, ALL_AGENTS[name])] if name in ALL_AGENTS else []
+    out = {}
+    for n, a in items:
+        names = a.strategy_names() if hasattr(a, "strategy_names") else []
+        out[n] = {
+            "label":         getattr(a, "label", n),
+            "strategy_count": len(names),
+            "strategies":     names,
+            "last_strategy":  getattr(a, "_last_strategy", ""),
+        }
+    return out
+
 @app.post("/agents/{name}/pause", tags=["Agents"])
 def pause_agent(name: str):
     a = ALL_AGENTS.get(name)
