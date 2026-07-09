@@ -473,6 +473,11 @@ async def market_status():
     status["data_source"] = "Zerodha Kite (broker)"
     return status
 
+@app.get("/market/feed", tags=["Market"])
+def market_feed():
+    """Live tick-feed status: WebSocket vs REST vs simulator, and subscribed count."""
+    return tick_engine.feed_status()
+
 @app.get("/market/option-chain/{symbol}", tags=["Market"])
 async def option_chain(symbol: str):
     symbol = _clean_symbol(symbol)
@@ -1081,6 +1086,7 @@ def health():
             "market_open": is_mcx_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
+            "tick_source": tick_engine.feed_status()["source"],
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),

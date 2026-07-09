@@ -489,52 +489,85 @@ class TickEngine:
         logger.info("TickEngine: subscribed {} symbols | data feed: {}",
                     len(self._symbols), feed)
 
+        # Start/restart the broker WebSocket for the freshly-subscribed watchlist.
+        # No-op until the event loop is running and the broker is connected — the
+        # guard inside start_ws() handles the boot-time case (loop is None).
+        self.start_ws()
+
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
         self._running = True
         self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._poll_loop())
 
-        # Start the broker tick WebSocket whenever the broker is connected — in
-        # BOTH paper and live modes (data is broker-sourced; PAPER only simulates
-        # fills). Skipped only when the offline GBM simulator is explicitly on.
-        primary_exch = self._exchange.get(self._symbols[0], settings.exchange) if self._symbols else settings.exchange
-        if not getattr(settings, "use_paper_simulator", False) and kite_client.is_connected():
-            if settings.use_truedata_websocket and settings.truedata_username:
-                try:
-                    from truedata_client import truedata_ticker
-                    self._kite_ticker = truedata_ticker  # reuse slot; same interface
-                    truedata_ticker.start(
-                        self._symbols,
-                        self._ingest_kite_tick,
-                        self._loop,
-                    )
-                    self._use_ws = True
-                    logger.info("TickEngine: TrueData WebSocket started for {} symbols",
-                                len(self._symbols))
-                except Exception as exc:
-                    logger.error("TickEngine: TrueData WebSocket failed: {} — "
-                                 "falling back to Kite REST", exc)
-                    self._use_ws = False
-            elif settings.use_kite_websocket:
-                try:
-                    from kite_ticker import KiteTicker
-                    self._kite_ticker = KiteTicker()
-                    self._kite_ticker.start(
-                        self._symbols,
-                        self._ingest_kite_tick,
-                        self._loop,
-                        exchange=primary_exch,
-                    )
-                    self._use_ws = True
-                    logger.info("TickEngine: KiteConnect WebSocket started for {} {} symbols",
-                                len(self._symbols), primary_exch)
-                except Exception as exc:
-                    logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
-                                 "falling back to Kite REST", exc)
-                    self._use_ws = False
+        # Start the broker tick WebSocket (no-op if no symbols are subscribed yet;
+        # subscribe() re-invokes start_ws() once the watchlist is known).
+        self.start_ws()
 
         logger.info("TickEngine poll loop started (ws={})", self._use_ws)
+
+    def start_ws(self) -> None:
+        """Start (or restart) the broker tick WebSocket for the current symbol set.
+
+        Idempotent and safe to call multiple times: on the first watchlist it
+        starts the WebSocket; on a later/expanded watchlist it stops the running
+        ticker and restarts it for the full symbol set. Returns early (a no-op)
+        until every precondition is met — broker connected, WebSocket enabled,
+        symbols subscribed, and the event loop running — so it can be called at
+        boot (empty symbols, loop maybe None) and again from subscribe().
+
+        Started whenever the broker is connected — in BOTH paper and live modes
+        (data is broker-sourced; PAPER only simulates fills). Skipped only when
+        the offline GBM simulator is explicitly on.
+        """
+        if (getattr(settings, "use_paper_simulator", False)
+                or not kite_client.is_connected()
+                or not settings.use_kite_websocket
+                or not self._symbols
+                or self._loop is None):
+            return
+
+        # Restart cleanly if a ticker is already running for a smaller symbol set.
+        if self._kite_ticker and self._use_ws:
+            try:
+                self._kite_ticker.stop()
+            except Exception:
+                pass
+
+        primary_exch = self._exchange.get(self._symbols[0], settings.exchange)
+        if settings.use_truedata_websocket and settings.truedata_username:
+            try:
+                from truedata_client import truedata_ticker
+                self._kite_ticker = truedata_ticker  # reuse slot; same interface
+                truedata_ticker.start(
+                    self._symbols,
+                    self._ingest_kite_tick,
+                    self._loop,
+                )
+                self._use_ws = True
+                logger.info("TickEngine: TrueData WebSocket started for {} symbols",
+                            len(self._symbols))
+            except Exception as exc:
+                logger.error("TickEngine: TrueData WebSocket failed: {} — "
+                             "falling back to Kite REST", exc)
+                self._use_ws = False
+        else:
+            try:
+                from kite_ticker import KiteTicker
+                self._kite_ticker = KiteTicker()
+                self._kite_ticker.start(
+                    self._symbols,
+                    self._ingest_kite_tick,
+                    self._loop,
+                    exchange=primary_exch,
+                )
+                self._use_ws = True
+                logger.info("TickEngine: KiteConnect WebSocket started for {} {} symbols",
+                            len(self._symbols), primary_exch)
+            except Exception as exc:
+                logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
+                             "falling back to Kite REST", exc)
+                self._use_ws = False
 
     def stop(self) -> None:
         self._running = False
@@ -732,6 +765,23 @@ class TickEngine:
 
     def symbols(self) -> list[str]:
         return list(self._symbols)
+
+    def feed_status(self) -> dict:
+        """Report the active market-data source for /market/feed and /health."""
+        use_sim = getattr(settings, "use_paper_simulator", False)
+        if self._use_ws:
+            source = "KITE_WS"
+        elif use_sim:
+            source = "SIM"
+        elif kite_client.is_connected():
+            source = "KITE_REST"
+        else:
+            source = "NONE"
+        return {
+            "ws_active":  self._use_ws,
+            "source":     source,
+            "subscribed": len(self._symbols),
+        }
 
     # ── Historical data (for backtesting + warm-up) ───────────────────
 
