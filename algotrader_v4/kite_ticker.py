@@ -63,12 +63,16 @@ class KiteTicker:
             logger.error("[KiteTicker] Failed to load instruments: {}", exc)
 
     def start(self, symbols: list[str], on_tick_callback: Callable,
-              loop: asyncio.AbstractEventLoop, exchange: str = "NSE") -> None:
-        """Connect WebSocket. on_tick_callback(symbol, Tick) is called for each tick."""
+              loop: asyncio.AbstractEventLoop, exchange: str = "NSE") -> bool:
+        """Connect WebSocket. on_tick_callback(symbol, Tick) is called for each tick.
+
+        Returns True if a socket connection was initiated, False if no instrument
+        tokens could be resolved (so the caller can fall back to REST cleanly).
+        """
         self.load_instruments(symbols, exchange)
         if not self._token_map:
             logger.error("[KiteTicker] No instrument tokens found — WebSocket not started")
-            return
+            return False
 
         self._callback = on_tick_callback
         self._loop = loop
@@ -82,6 +86,7 @@ class KiteTicker:
         self._kws.on_close   = self._on_close
         self._kws.connect(threaded=True)
         logger.info("[KiteTicker] WebSocket connecting…")
+        return True
 
     def stop(self) -> None:
         self._connected = False

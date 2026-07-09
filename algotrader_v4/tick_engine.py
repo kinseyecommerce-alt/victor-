@@ -447,6 +447,25 @@ class TickEngine:
         self._kite_ticker = None
         self._use_ws: bool = False
         self._ws_received: set[str] = set()
+        self._ws_last: dict[str, float] = {}   # symbol → monotonic time of last WS tick
+
+    # Seconds without a WS tick after which REST resumes covering a symbol.
+    # Bounds how long a symbol can go silent after a socket drop / ticker restart.
+    WS_STALE_SEC: float = 6.0
+
+    def _ws_healthy(self) -> bool:
+        """True only when the WS is flagged on AND the ticker reports connected."""
+        return bool(self._use_ws and self._kite_ticker
+                    and getattr(self._kite_ticker, "is_connected", False))
+
+    def _ws_covers(self, symbol: str, now: float) -> bool:
+        """A symbol is WS-covered only if a live tick arrived within WS_STALE_SEC.
+
+        This is what makes REST fall back automatically: on a socket drop or a
+        subscribe()-triggered restart, symbols stop receiving WS ticks, go stale,
+        and _fetch_kite_batch resumes fetching them — no symbol starves.
+        """
+        return self._use_ws and (now - self._ws_last.get(symbol, 0.0)) < self.WS_STALE_SEC
 
     # ── Setup ─────────────────────────────────────────────────────────
 
@@ -528,11 +547,15 @@ class TickEngine:
             return
 
         # Restart cleanly if a ticker is already running for a smaller symbol set.
+        # Clear per-symbol WS freshness so REST covers every symbol during the
+        # reconnect window (prevents already-live symbols going silent on restart).
         if self._kite_ticker and self._use_ws:
             try:
                 self._kite_ticker.stop()
             except Exception:
                 pass
+            self._ws_received.clear()
+            self._ws_last.clear()
 
         primary_exch = self._exchange.get(self._symbols[0], settings.exchange)
         if settings.use_truedata_websocket and settings.truedata_username:
@@ -555,15 +578,21 @@ class TickEngine:
             try:
                 from kite_ticker import KiteTicker
                 self._kite_ticker = KiteTicker()
-                self._kite_ticker.start(
+                started = self._kite_ticker.start(
                     self._symbols,
                     self._ingest_kite_tick,
                     self._loop,
                     exchange=primary_exch,
                 )
-                self._use_ws = True
-                logger.info("TickEngine: KiteConnect WebSocket started for {} {} symbols",
-                            len(self._symbols), primary_exch)
+                # start() returns False when no instrument tokens resolved — don't
+                # claim the WS is active (would falsely report KITE_WS and, worse,
+                # block REST for symbols that never actually get a socket tick).
+                self._use_ws = started is not False
+                if self._use_ws:
+                    logger.info("TickEngine: KiteConnect WebSocket started for {} {} symbols",
+                                len(self._symbols), primary_exch)
+                else:
+                    logger.warning("TickEngine: WebSocket has no tokens — using Kite REST")
             except Exception as exc:
                 logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
                              "falling back to Kite REST", exc)
@@ -649,6 +678,7 @@ class TickEngine:
     async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
         """Process a tick received directly from KiteConnect WebSocket."""
         self._ws_received.add(symbol)
+        self._ws_last[symbol] = time.monotonic()
         await self._process_tick(symbol, tick, source="KITE_WS")
 
     # ── Main poll loop ────────────────────────────────────────────────
@@ -694,8 +724,10 @@ class TickEngine:
         MCX symbols are quoted by their resolved futures tradingsymbol
         (e.g. MCX:CRUDEOIL25JULFUT), then mapped back to the base name.
         """
-        pending = [s for s in self._symbols
-                   if not (self._use_ws and s in self._ws_received)]
+        # Only skip symbols currently receiving fresh WS ticks; a symbol that has
+        # gone stale (socket drop / restart) falls back to REST automatically.
+        now = time.monotonic()
+        pending = [s for s in self._symbols if not self._ws_covers(s, now)]
         if not pending:
             return
         # base → 'EXCHANGE:TRADINGSYMBOL' and the reverse, so we can map the reply back
@@ -769,16 +801,17 @@ class TickEngine:
     def feed_status(self) -> dict:
         """Report the active market-data source for /market/feed and /health."""
         use_sim = getattr(settings, "use_paper_simulator", False)
-        if self._use_ws:
-            source = "KITE_WS"
-        elif use_sim:
+        healthy = self._ws_healthy()
+        if use_sim:
             source = "SIM"
+        elif healthy:
+            source = "KITE_WS"
         elif kite_client.is_connected():
-            source = "KITE_REST"
+            source = "KITE_REST"   # connected but WS not (yet) delivering — REST covers
         else:
             source = "NONE"
         return {
-            "ws_active":  self._use_ws,
+            "ws_active":  healthy,
             "source":     source,
             "subscribed": len(self._symbols),
         }

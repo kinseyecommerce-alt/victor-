@@ -51,17 +51,33 @@ class FakeKite:
 
 
 class FakeTicker:
-    """Records .start()/.stop() calls; never touches the network."""
+    """Records .start()/.stop() calls; never touches the network.
+
+    `tokens` mirrors KiteTicker.start()'s real contract: it returns True when
+    instrument tokens resolved (socket initiated) and False when none did.
+    `is_connected` flips True after a successful start and False after stop,
+    matching the real ticker so feed_status()/_ws_healthy() can be exercised.
+    """
     instances: list["FakeTicker"] = []
+    tokens: bool = True
     def __init__(self):
         self.started_with = None
         self.stopped = False
+        self.is_connected = False
         FakeTicker.instances.append(self)
     def start(self, symbols, callback, loop, exchange="NSE"):
         self.started_with = {"symbols": list(symbols), "exchange": exchange,
                              "callback": callback, "loop": loop}
+        self.is_connected = self.__class__.tokens
+        return self.__class__.tokens
     def stop(self):
         self.stopped = True
+        self.is_connected = False
+
+
+class FakeTickerNoTokens(FakeTicker):
+    """A ticker that finds no instrument tokens (start returns False, never connects)."""
+    tokens = False
 
 
 def _mcx_instruments():
@@ -232,11 +248,18 @@ def t_subscribe_restarts_running_ticker():
             eng._loop = asyncio.new_event_loop()
             eng.subscribe([{"symbol": "CRUDEOIL", "exchange": "MCX"}])
             first = FakeTicker.instances[0]
+            # simulate CRUDEOIL having been receiving live WS ticks
+            import time as _t
+            eng._ws_received.add("CRUDEOIL")
+            eng._ws_last["CRUDEOIL"] = _t.monotonic()
             # Second subscribe should stop the first ticker and start a new one
             eng.subscribe([{"symbol": "GOLDM", "exchange": "MCX"}])
             assert first.stopped is True, "existing ticker must be stopped on restart"
             assert len(FakeTicker.instances) == 2, FakeTicker.instances
             assert set(FakeTicker.instances[1].started_with["symbols"]) == {"CRUDEOIL", "GOLDM"}
+            # WS freshness must be cleared so REST covers every symbol during reconnect
+            assert eng._ws_received == set(), "restart must clear _ws_received"
+            assert eng._ws_last == {}, "restart must clear _ws_last"
         finally:
             _disconnect()
 
@@ -270,11 +293,34 @@ section("5. feed_status() REPORTS THE ACTIVE SOURCE")
 def t_feed_status_ws_active():
     with _SettingsGuard():
         settings.use_paper_simulator = False
-        eng = _new_engine()
-        eng._use_ws = True
-        st = eng.feed_status()
-        assert st["ws_active"] is True and st["source"] == "KITE_WS", st
-        assert st["subscribed"] == 1, st
+        _connect(FakeKite())
+        try:
+            eng = _new_engine()
+            eng._use_ws = True
+            class _Connected:  # ticker reporting a live socket
+                is_connected = True
+            eng._kite_ticker = _Connected()
+            st = eng.feed_status()
+            assert st["ws_active"] is True and st["source"] == "KITE_WS", st
+            assert st["subscribed"] == 1, st
+        finally:
+            _disconnect()
+
+def t_feed_status_ws_flag_but_not_connected():
+    # _use_ws True but the socket isn't actually connected → honest KITE_REST, not a lie
+    with _SettingsGuard():
+        settings.use_paper_simulator = False
+        _connect(FakeKite())
+        try:
+            eng = _new_engine()
+            eng._use_ws = True
+            class _NotConnected:
+                is_connected = False
+            eng._kite_ticker = _NotConnected()
+            st = eng.feed_status()
+            assert st["source"] == "KITE_REST" and st["ws_active"] is False, st
+        finally:
+            _disconnect()
 
 def t_feed_status_rest():
     with _SettingsGuard():
@@ -307,6 +353,7 @@ def t_feed_status_none():
         assert st["source"] == "NONE", st
 
 run("feed_status() → KITE_WS when WS active", t_feed_status_ws_active)
+run("feed_status() → KITE_REST when WS flagged but socket down", t_feed_status_ws_flag_but_not_connected)
 run("feed_status() → KITE_REST when connected, WS off", t_feed_status_rest)
 run("feed_status() → SIM when simulator on", t_feed_status_sim)
 run("feed_status() → NONE when disconnected", t_feed_status_none)
@@ -330,6 +377,64 @@ def t_rest_fallback_preserved():
             _disconnect()
 
 run("REST fallback intact when WS disabled", t_rest_fallback_preserved)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+section("7. WS DISCONNECT / STALENESS → REST RESUMES (no silent starvation)")
+
+def t_stale_symbol_not_ws_covered():
+    import time as _t
+    eng = _new_engine(("CRUDEOIL",), "MCX")
+    eng._use_ws = True
+    now = _t.monotonic()
+    # fresh tick → WS-covered (REST skips it)
+    eng._ws_last["CRUDEOIL"] = now
+    assert eng._ws_covers("CRUDEOIL", now) is True, "fresh WS symbol should be WS-covered"
+    # tick older than WS_STALE_SEC (socket dropped) → NOT covered → REST resumes
+    eng._ws_last["CRUDEOIL"] = now - (eng.WS_STALE_SEC + 1)
+    assert eng._ws_covers("CRUDEOIL", now) is False, "stale symbol must fall back to REST"
+
+def t_fetch_batch_includes_stale_symbols():
+    # _fetch_kite_batch must re-fetch symbols that stopped receiving WS ticks
+    async def _drive():
+        eng = _new_engine(("CRUDEOIL",), "MCX")
+        eng._use_ws = True
+        import time as _t
+        eng._ws_last["CRUDEOIL"] = _t.monotonic() - (eng.WS_STALE_SEC + 2)  # gone silent
+        fetched = {}
+        _connect(FakeKite(quotes={"MCX:CRUDEOIL": {"last_price": 6500.0}}))
+        # spy: capture which symbols REST tried to quote
+        orig = kite_client.quote_kite
+        def _spy(insts):
+            fetched["insts"] = insts
+            return {}
+        kite_client.quote_kite = _spy
+        try:
+            await eng._fetch_kite_batch()
+        finally:
+            kite_client.quote_kite = orig
+            _disconnect()
+        assert fetched.get("insts"), "REST must re-fetch a stale (silent) WS symbol"
+    asyncio.run(_drive())
+
+def t_no_token_start_uses_rest():
+    with _SettingsGuard(), _TickerPatch():
+        settings.use_paper_simulator = False
+        settings.use_kite_websocket = True
+        settings.use_truedata_websocket = False
+        kite_ticker_mod.KiteTicker = FakeTickerNoTokens   # start() returns False
+        _connect(FakeKite(instruments=_mcx_instruments()))
+        try:
+            eng = _new_engine()
+            eng.start_ws()
+            assert eng._use_ws is False, "no tokens → must not claim WS active"
+            assert eng.feed_status()["source"] == "KITE_REST", eng.feed_status()
+        finally:
+            _disconnect()
+
+run("stale symbol is not WS-covered",       t_stale_symbol_not_ws_covered)
+run("_fetch_kite_batch re-fetches stale symbol", t_fetch_batch_includes_stale_symbols)
+run("no-token WS start falls back to REST",  t_no_token_start_uses_rest)
 
 
 # ── Summary ──────────────────────────────────────────────────────────────────
