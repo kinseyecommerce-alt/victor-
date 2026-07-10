@@ -70,6 +70,21 @@ the data feed.
   (`TOPIC_REGIME`), which `agent_coordinator._regime_factor()` applies to every
   entry. `GET /risk/posture`.
 
+### Claude brain (central agent intelligence)
+
+- `claude_brain.py` — a single async Anthropic-API "brain" (`AsyncAnthropic`,
+  model `claude-opus-4-8`, adaptive thinking) the master agent consults on its
+  ~1-min regime review — **off the order hot path**, throttled to ~1 call/min.
+- It returns a fleet **risk posture** (`BrainPosture`): regime, a global
+  `size_factor`, per-agent directives (`run`/`reduce_size`/`pause`) and an
+  optional `halt_new_trades`. `master_agent._master_review()` publishes it to the
+  bus (`TOPIC_REGIME`) — consumed by the coordinator — and applies the directives.
+- **Graceful degradation**: with no `ANTHROPIC_API_KEY` (or on timeout/error) it
+  returns a deterministic rule-based posture mirroring the regime plan, so the app
+  runs fully offline. Gated by `settings.use_claude_brain` (default True) +
+  `anthropic_api_key`. Model/timeout/throttle are configurable in `config.py`.
+- Read endpoints: `GET /brain`, `GET /brain/log`. Tests: `test_claude_brain.py`.
+
 ### Inter-agent communication (agents talk to each other)
 
 - `agent_bus.py` — a shared blackboard. Every agent publishes its SIGNAL / INTENT
@@ -103,6 +118,7 @@ cd algotrader_v4 && python test_mcx.py               # MCX universe/bus/coordina
 cd algotrader_v4 && python test_broker_data.py       # broker-only market data (15 tests)
 cd algotrader_v4 && python test_mcx_strategies.py    # 20 strategies per agent (16 tests)
 cd algotrader_v4 && python test_upgrades.py          # cost/backtest/state/execution/posture (20 tests)
+cd algotrader_v4 && python test_claude_brain.py      # Claude brain / central intelligence (20 tests)
 
 # Run a single test class or method
 cd algotrader_v4 && python test_pipeline.py TestRiskManager

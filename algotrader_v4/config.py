@@ -94,6 +94,19 @@ class Settings(BaseSettings):
     use_claude_trade_gate: bool = False   # per-trade Claude assessment via Sonnet (opt-in)
     claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
 
+    # ── Claude Brain — central intelligence powering the MCX agents ───────────
+    # A single async Claude (Anthropic API) "brain" the master agent consults on
+    # its periodic regime review (OFF the order hot path). It returns a risk
+    # posture (regime + size_factor + per-agent directives) that is published to
+    # the bus (TOPIC_REGIME) and applied by the coordinator to every entry.
+    # Degrades gracefully to a rule-based posture when no API key is configured,
+    # so the app runs fully offline.
+    use_claude_brain:    bool  = True            # consult Claude on the regime review
+    claude_brain_model:  str   = "claude-opus-4-8"
+    claude_brain_max_tokens: int = 1024
+    claude_brain_timeout_sec: float = 12.0       # off hot path — generous budget
+    claude_brain_min_interval_sec: int = 55      # throttle: don't call more than ~1/min
+
     # ── Execution & cost controls ─────────────────────────────────────
     # Entry order type: MARKET | LIMIT | MARKETABLE_LIMIT (cap slippage at N ticks)
     entry_order_type:        str = "MARKETABLE_LIMIT"

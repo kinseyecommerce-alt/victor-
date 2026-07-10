@@ -528,6 +528,18 @@ def risk_posture():
         "per_trade_claude_gate": settings.use_claude_trade_gate,
     }
 
+@app.get("/brain", tags=["Agents"])
+def brain_status():
+    """Claude brain health + the last risk posture it produced."""
+    import claude_brain
+    return claude_brain.status()
+
+@app.get("/brain/log", tags=["Agents"])
+def brain_log(n: int = 30):
+    """Recent brain risk postures (newest first)."""
+    import claude_brain
+    return {"postures": claude_brain.get_brain_log(n)}
+
 @app.get("/strategies/backtest", tags=["Agents"])
 async def strategies_backtest(agent: str | None = None, symbol: str | None = None,
                               days: int = 30, interval: str = "5m"):
