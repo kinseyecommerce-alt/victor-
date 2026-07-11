@@ -906,8 +906,7 @@ def t_intraday_buy_signal():
     snap = _make_snap(rsi=55.0, trend="UP", vwap=2790.0,
                       macd_hist=1.5, volume_ratio=1.8,
                       ema9=2810.0, ema21=2795.0)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
-        mock_dt.now.return_value = _mkt_dt
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
         action, _ = agent.evaluate_tick(snap)
     assert action == "BUY", f"Expected BUY, got {action}"
 
@@ -916,8 +915,7 @@ def t_intraday_hold_overbought():
     _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = IntradayAgent()
     snap = _make_snap(rsi=82.0, macd_hist=0.5, volume_ratio=1.5)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
-        mock_dt.now.return_value = _mkt_dt
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
         action, _ = agent.evaluate_tick(snap)
     assert action in ("HOLD","SELL"), f"Expected HOLD/SELL for RSI=82, got {action}"
 
@@ -928,8 +926,7 @@ def t_intraday_sell_signal():
     snap = _make_snap(rsi=35.0, trend="DOWN", vwap=2815.0,
                       macd_hist=-1.0, volume_ratio=1.5,
                       ema9=2790.0, ema21=2800.0)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
-        mock_dt.now.return_value = _mkt_dt
+    with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):
         action, _ = agent.evaluate_tick(snap)
     assert action == "SELL", f"Expected SELL, got {action}"
 

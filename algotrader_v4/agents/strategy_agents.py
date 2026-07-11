@@ -1483,8 +1483,19 @@ class ScalpingAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 # Registry
 # ═══════════════════════════════════════════════════════════════════════════════
+# The platform has been restructured for MCX commodity trading. The NSE/BSE
+# equity agents above (IntradayAgent / FnOAgent / SwingAgent / ScalpingAgent)
+# are RETIRED — retained only for their unit-test coverage of the shared agent
+# framework. The LIVE registry is the MCX agent set, keyed by the same stable
+# names so risk buckets, the scheduler and the dashboard keep working:
+#   intraday → MCX Intraday (MIS)     swing → MCX Positional (NRML)
+#   scalping → MCX Scalping (MIS)     fno   → MCX Options / Spread (NRML)
+from agents.mcx_agents import MCX_AGENTS
 
-ALL_AGENTS: dict[str, BaseAgent] = {
+ALL_AGENTS: dict[str, BaseAgent] = MCX_AGENTS
+
+# Retired equity registry (not wired) — kept for reference / tests
+EQUITY_AGENTS: dict[str, BaseAgent] = {
     "intraday": IntradayAgent(),
     "fno":      FnOAgent(),
     "swing":    SwingAgent(),

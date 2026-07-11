@@ -22,6 +22,9 @@ from backtest_engine import backtest_engine
 from tick_engine import MarketSnapshot, LiveIndicators
 from trailing_sl_engine import trailing_sl_engine, TrailingSLEngine
 from atomic_bracket import atomic_bracket_engine
+from agent_bus import agent_bus, TOPIC_SIGNAL, TOPIC_INTENT, TOPIC_FILL, TOPIC_EXIT
+from agent_coordinator import agent_coordinator
+import mcx_universe
 
 
 # ── TSL callback registry ────────────────────────────────────────────────────
@@ -78,6 +81,11 @@ def _setup_tsl_callbacks() -> None:
         order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl)
         risk_manager.record_trade(pnl)
         risk_manager.position_closed()
+        agent_coordinator.release(pos.symbol, pos.strategy)
+        if settings.use_agent_bus:
+            agent_bus.publish(pos.strategy, TOPIC_EXIT,
+                              {"reason": "SL hit", "pnl": pnl, "side": pos.side},
+                              key=pos.symbol)
         trailing_sl_engine.deregister(pos.order_id)
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
@@ -227,6 +235,18 @@ class BaseAgent(ABC):
                 await self._check_exits_on_tick(snap)
                 action, signal = self.evaluate_tick(snap)
                 if action in ("BUY", "SELL") and signal:
+                    # ── Broadcast this signal so peer agents & the coordinator
+                    #    can factor it into their own decisions ─────────────
+                    if settings.use_agent_bus:
+                        agent_bus.publish(
+                            self.name, TOPIC_SIGNAL,
+                            {"action": action, "price": snap.tick.ltp,
+                             "trigger": signal.get("trigger", ""),
+                             "stop_loss": signal.get("stop_loss"),
+                             "target": signal.get("target")},
+                            key=snap.symbol,
+                        )
+
                     # ── Multi-timeframe alignment ──────────────────────
                     if settings.use_multi_timeframe:
                         from multi_timeframe import check as mtf_check
@@ -289,22 +309,58 @@ class BaseAgent(ABC):
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         sym  = snap.symbol
         ltp  = snap.tick.ltp
-        exch = signal.get("exchange", "NSE")
-        qty  = risk_manager.calculate_quantity(ltp, agent=self.name)
+        exch = signal.get("exchange", settings.exchange)
+        qty  = risk_manager.calculate_quantity(ltp, agent=self.name, symbol=sym)
 
         # Apply Kelly-adjusted size (gate may have set a size_factor)
         size_factor = signal.pop("_gate_size_factor", 1.0)
         if settings.use_kelly_sizing and size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
 
+        # ── Coordinator arbitration (inter-agent) ─────────────────────────
+        # The coordinator vets this entry against every other agent's book and
+        # live signals: it blocks conflicting/duplicate contracts, enforces the
+        # correlated-group margin cap, and boosts/damps size on peer conviction.
+        lot = mcx_universe.lot_size(sym)
+        if settings.use_agent_coordinator:
+            base_lots = max(1, qty // lot)
+            preview = agent_coordinator.evaluate(self.name, sym, action, base_lots)
+            if not preview.allowed:
+                logger.debug("[{}] {} {} coordinator veto: {}",
+                             self.name, action, sym, preview.reason)
+                return
+            # Size to peer conviction, then reserve the (possibly larger) slot
+            want_lots = max(1, round(base_lots * preview.size_factor))
+            decision = agent_coordinator.request(self.name, sym, action, want_lots)
+            if not decision.allowed and want_lots != base_lots:
+                decision = agent_coordinator.request(self.name, sym, action, base_lots)
+                want_lots = base_lots
+            if not decision.allowed:
+                return
+            qty = want_lots * lot
+
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
+            agent_coordinator.release(sym, self.name)
             return
         if order_guard.is_symbol_active_anywhere(sym):
+            agent_coordinator.release(sym, self.name)
             return
         allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
         if not allowed:
+            agent_coordinator.release(sym, self.name)
             return
+
+        # ── Cost gate: skip trades whose target can't beat round-trip cost ──
+        if settings.use_cost_gate and mcx_universe.is_mcx_symbol(sym):
+            import cost_model
+            lots_ct = max(1, qty // lot)
+            tgt = signal.get("target", 0.0)
+            if tgt and not cost_model.covers_cost(sym, lots_ct, ltp, tgt):
+                logger.debug("[{}] {} {} cost gate: target ₹{} < round-trip cost",
+                             self.name, action, sym, tgt)
+                agent_coordinator.release(sym, self.name)
+                return
 
         # LOW-2: SEBI pre-order compliance check
         from sebi_compliance import sebi_compliance
@@ -318,12 +374,25 @@ class BaseAgent(ABC):
         )
         if not sebi_ok:
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
+            agent_coordinator.release(sym, self.name)
             return
+
+        # ── Resolve a slippage-aware entry (marketable-limit by default) ──
+        from execution import resolve_entry
+        entry_type, entry_price = resolve_entry(
+            sym, action, ltp, bid=snap.tick.bid, ask=snap.tick.ask)
+
+        # Broadcast intent just before the order goes in
+        if settings.use_agent_bus:
+            agent_bus.publish(self.name, TOPIC_INTENT,
+                              {"action": action, "qty": qty, "price": entry_price or ltp,
+                               "order_type": entry_type}, key=sym)
 
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange=exch,
             transaction_type=action, quantity=qty,
-            order_type="MARKET", product=signal.get("product", self.product),
+            order_type=entry_type, price=entry_price,
+            product=signal.get("product", self.product),
             tag=f"Agent-{self.name}",
         )
         sebi_compliance.record_order_id(self.name, sym, order_id)
@@ -332,6 +401,12 @@ class BaseAgent(ABC):
         self.state.trades_today  += 1
         self.state.signals_fired += 1
         self.state.last_signal    = signal
+
+        # Broadcast the fill so peers/coordinator see the new position
+        if settings.use_agent_bus:
+            agent_bus.publish(self.name, TOPIC_FILL,
+                              {"action": action, "qty": qty, "price": ltp,
+                               "order_id": order_id, "exchange": exch}, key=sym)
 
         # Wire TSL callbacks (idempotent — only installs once globally)
         _setup_tsl_callbacks()
@@ -407,6 +482,17 @@ class BaseAgent(ABC):
             order_guard.release_order(sym, self.name, "BUY" if side == "SELL" else "SELL", pnl)
             risk_manager.record_trade(pnl)
             risk_manager.position_closed()
+            agent_coordinator.release(sym, self.name)
+            if settings.use_agent_bus:
+                agent_bus.publish(self.name, TOPIC_EXIT,
+                                  {"reason": reason, "pnl": pnl, "side": side}, key=sym)
+            # Feed scalping loss-streak cooldown if the agent tracks it
+            _rec = getattr(self, "_record_outcome", None)
+            if callable(_rec):
+                try:
+                    _rec(sym, pnl >= 0)
+                except Exception:
+                    pass
             self.state.pnl_today += pnl
             trailing_sl_engine.deregister(oid)
             _dot = "\U0001f534" if pnl < 0 else "\U0001f7e2"

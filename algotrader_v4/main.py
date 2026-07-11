@@ -27,6 +27,7 @@ from loguru import logger
 from config import settings
 from auth import authenticate, create_token, decode_token, hash_password
 from market_data import nse_client, yf_client, is_market_open
+from ist_clock import is_mcx_open
 from kite_client import kite_client
 from risk_manager import risk_manager
 from order_guard import order_guard
@@ -409,12 +410,24 @@ async def start_bot(req: BotStartRequest):
         raise HTTPException(400, "All requested strategies are disabled")
     watchlist = req.watchlist
     if not watchlist:
-        selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
-        watchlist = symbol_scanner.all_selected_flat()
-        if not watchlist:
-            from symbol_scanner import NIFTY_50
-            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
-            logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
+        if settings.exchange == "MCX":
+            # MCX: build the watchlist from the commodity universe for the
+            # requested strategies (the NSE symbol scanner does not apply).
+            import mcx_universe
+            seen: dict[str, dict] = {}
+            for strat in strategies:
+                for item in mcx_universe.get_strategy_watchlist(strat):
+                    seen[item["symbol"]] = item
+            watchlist = list(seen.values())
+            logger.info("[bot/start] MCX watchlist: {} contracts across {} strategies",
+                        len(watchlist), len(strategies))
+        else:
+            selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
+            watchlist = symbol_scanner.all_selected_flat()
+            if not watchlist:
+                from symbol_scanner import NIFTY_50
+                watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
+                logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
     report = master_agent.start(strategies, watchlist)
     return {"status": "started", "architecture": "tick-driven 1s",
             "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
@@ -456,9 +469,14 @@ def live_symbol(symbol: str):
 @app.get("/market/status", tags=["Market"])
 async def market_status():
     status = await tick_engine.get_market_status()
-    status["market_open"] = is_market_open()
-    status["data_source"] = "NSE India API (not Kite)"
+    status["market_open"] = status.get("open", False)
+    status["data_source"] = "Zerodha Kite (broker)"
     return status
+
+@app.get("/market/feed", tags=["Market"])
+def market_feed():
+    """Live tick-feed status: WebSocket vs REST vs simulator, and subscribed count."""
+    return tick_engine.feed_status()
 
 @app.get("/market/option-chain/{symbol}", tags=["Market"])
 async def option_chain(symbol: str):
@@ -471,6 +489,88 @@ async def option_chain(symbol: str):
 # ── Agents ────────────────────────────────────────────────────────────────────
 @app.get("/agents", tags=["Agents"])
 def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
+
+@app.get("/agents/bus", tags=["Agents"])
+def agents_bus(limit: int = 50, topic: str | None = None):
+    """Recent inter-agent bus messages (signals / intents / fills / exits) + stats."""
+    from agent_bus import agent_bus
+    return {"stats": agent_bus.stats(), "recent": agent_bus.recent(limit, topic)}
+
+@app.get("/agents/coordinator", tags=["Agents"])
+def agents_coordinator():
+    """Coordinator state: reserved book, per-group exposure, caps."""
+    from agent_coordinator import agent_coordinator
+    return agent_coordinator.status()
+
+@app.get("/costs/{symbol}", tags=["Market"])
+def costs(symbol: str, lots: int = 1, price: float = 0.0):
+    """MCX round-trip transaction-cost breakdown + break-even move for a contract."""
+    import cost_model, mcx_universe
+    c = mcx_universe.contract(symbol)
+    if not c:
+        raise HTTPException(404, f"{symbol} is not an MCX contract")
+    px = price or c.base_price
+    return {
+        "symbol": symbol, "lots": lots, "price": px,
+        "breakdown": cost_model.round_trip_breakdown(symbol, lots, px),
+        "break_even_move_per_unit": cost_model.min_profitable_move(symbol, lots, px),
+    }
+
+@app.get("/risk/posture", tags=["Risk"])
+def risk_posture():
+    """Current regime risk posture (size_factor) applied off the order hot path."""
+    from agent_bus import agent_bus, TOPIC_REGIME
+    from agent_coordinator import agent_coordinator
+    msg = agent_bus.latest(TOPIC_REGIME, "regime")
+    return {
+        "regime_posture": msg.payload if msg else {"size_factor": 1.0, "regime": "unknown"},
+        "coordinator_size_factor_applied": agent_coordinator._regime_factor(),
+        "per_trade_claude_gate": settings.use_claude_trade_gate,
+    }
+
+@app.get("/brain", tags=["Agents"])
+def brain_status():
+    """Claude brain health + the last risk posture it produced."""
+    import claude_brain
+    return claude_brain.status()
+
+@app.get("/brain/log", tags=["Agents"])
+def brain_log(n: int = 30):
+    """Recent brain risk postures (newest first)."""
+    import claude_brain
+    return {"postures": claude_brain.get_brain_log(n)}
+
+@app.get("/strategies/backtest", tags=["Agents"])
+async def strategies_backtest(agent: str | None = None, symbol: str | None = None,
+                              days: int = 30, interval: str = "5m"):
+    """On-demand walk-forward, cost-adjusted backtest of the strategy registry.
+
+    Uses broker history when connected, else synthetic data (results labelled and
+    not persisted). Persists approved_strategies.json only on real broker data.
+    """
+    import strategy_backtest as bt
+    rep = await asyncio.to_thread(
+        bt.run, [symbol] if symbol else None, [agent] if agent else None, interval, days)
+    approved = bt.approved_strategies(rep)
+    if rep["source"] == "BROKER":
+        bt.save_approved(approved)
+    return {"source": rep["source"], "approved": approved,
+            "ranked": bt.rank(rep["results"])[:60]}
+
+@app.get("/agents/strategies", tags=["Agents"])
+def agents_strategies(name: str | None = None):
+    """The 20 strategies each agent runs (and which one last fired)."""
+    items = ALL_AGENTS.items() if name is None else [(name, ALL_AGENTS[name])] if name in ALL_AGENTS else []
+    out = {}
+    for n, a in items:
+        names = a.strategy_names() if hasattr(a, "strategy_names") else []
+        out[n] = {
+            "label":         getattr(a, "label", n),
+            "strategy_count": len(names),
+            "strategies":     names,
+            "last_strategy":  getattr(a, "_last_strategy", ""),
+        }
+    return out
 
 @app.post("/agents/{name}/pause", tags=["Agents"])
 def pause_agent(name: str):
@@ -993,10 +1093,12 @@ def whitelist_ip(req: WhitelistIPRequest):
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
             "architecture": "tick-driven 1s",
-            "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
-            "market_open": is_market_open(),
+            "market_data_source": "Zerodha Kite (broker WebSocket + REST; MCX)",
+            "broker_connected": kite_client.is_connected(),
+            "market_open": is_mcx_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
+            "tick_source": tick_engine.feed_status()["source"],
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "subscribed_symbols": tick_engine.symbols(),
@@ -1130,10 +1232,34 @@ async def n8n_inbound(request: Request):
 # ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
+    # Establish the broker session so market data flows from Kite (both paper &
+    # live modes). Market data is broker-only; without this there is no feed.
+    if settings.kite_access_token and not kite_client.is_connected():
+        try:
+            kite_client.set_access_token(access_token=settings.kite_access_token)
+            logger.info("FastAPI startup: broker session established (Kite)")
+        except Exception as exc:
+            logger.warning("FastAPI startup: broker connect failed ({}) — "
+                           "market data unavailable until /auth/login", exc)
+
+    # Restore the coordinator's reserved book and reconcile against the broker's
+    # actual open positions (drops stale reservations, adopts untracked positions).
+    try:
+        from agent_coordinator import agent_coordinator
+        agent_coordinator.load()
+        positions = kite_client.positions().get("net", []) if kite_client.is_connected() else []
+        rec = agent_coordinator.reconcile(positions)
+        logger.info("FastAPI startup: coordinator reconciled {}", rec)
+    except Exception as exc:
+        logger.warning("FastAPI startup: coordinator reconcile skipped ({})", exc)
+
     tick_engine.start_loop()
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
-    asyncio.create_task(symbol_scanner.run())
+    # The NSE symbol scanner (yfinance-backed) does not apply to MCX commodity
+    # trading — the MCX watchlist is built directly from the contract universe.
+    if settings.exchange != "MCX":
+        asyncio.create_task(symbol_scanner.run())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 

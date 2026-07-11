@@ -2,6 +2,103 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Market: MCX commodity futures
+
+The platform has been **restructured for MCX (Multi Commodity Exchange of India)**
+commodity-futures trading (bullion, energy, base metals). The NSE/BSE equity
+agents are retired (kept in `agents/strategy_agents.py` only for their unit-test
+coverage of the shared framework). The live registry is `agents/mcx_agents.py`,
+exported as `ALL_AGENTS`, keyed by stable names so risk buckets / scheduler /
+dashboard keep working:
+
+| Registry key | MCX agent | Product |
+|--------------|-----------|---------|
+| `intraday` | MCX Intraday | MIS |
+| `scalping` | MCX Scalping | MIS |
+| `swing`    | MCX Positional | NRML |
+| `fno`      | MCX Options / Spread | NRML |
+
+Each agent runs a registry of **20 strategies** (`agents/mcx_strategies.py`,
+80 total) on every tick and takes the best-scoring signal; the score drives the
+size factor. Strategies are pure functions over an `SCtx` (indicators + the
+symbol's rolling previous-tick state) returning `(action, score)` or `None`.
+The registry is keyed by agent name in `STRATEGY_REGISTRY`; agents keep
+per-symbol prev state in `self._pstate`. Inspect via `GET /agents/strategies`.
+
+Contracts, lot sizes, tick sizes, margins and sessions live in `mcx_universe.py`.
+MCX sizing is **lot-based and margin-aware** (`risk_manager.calculate_quantity`
+takes a `symbol=` and returns whole-lot quantities; position-size checks cap on
+margin, not notional).
+
+### Market data — broker only
+
+Market data (quotes, ticks, historical bars) comes from the **broker (Zerodha
+Kite) in both paper and live modes** — yfinance/NSE-India are no longer used as
+live sources. `trading_mode` (PAPER/LIVE) governs **order execution only**, not
+the data feed.
+
+- `kite_client.is_connected()` gates all data calls (`quote_kite`, `ltp_kite`,
+  `historical_data`, `get_instruments`) — they return empty when no broker
+  session, never based on PAPER/LIVE.
+- `mcx_instruments.py` resolves each base name (CRUDEOIL) to its live near-month
+  futures contract (tradingsymbol + instrument_token) from the broker's MCX
+  instrument dump. Used by the WebSocket ticker, REST quote batch and historical.
+- `tick_engine` starts the Kite WebSocket whenever the broker is connected (both
+  modes) and polls Kite REST as fallback; `get_historical` pulls Kite bars.
+- The FastAPI startup establishes the broker session from `KITE_ACCESS_TOKEN`.
+- Offline dev fallback: `settings.use_paper_simulator=True` re-enables the GBM
+  tick simulator (default False → broker feed).
+
+### Validation, costs, execution, resilience (world-class upgrades)
+
+- `strategy_backtest.py` — walk-forward, cost-adjusted backtest of all 80
+  strategies (reuses `IndicatorCalc` so backtest == live). Ranks by OOS
+  expectancy/Sharpe; `approved_strategies()` → `logs/approved_strategies.json`.
+  Broker history when connected, else labelled synthetic (never approves).
+  `GET /strategies/backtest`.
+- `cost_model.py` — MCX round-trip cost (brokerage/exchange/GST/stamp/SEBI +
+  slippage). `base_agent` applies a **cost gate**: entries whose target can't
+  beat round-trip cost are skipped (`settings.use_cost_gate`). `GET /costs/{symbol}`.
+- `execution.py` — `resolve_entry()` returns the entry order type/price;
+  default `MARKETABLE_LIMIT` crosses the book by `entry_limit_cross_ticks`,
+  capping slippage instead of paying full spread on market orders.
+- `state_store.py` + `agent_coordinator.{load,reconcile,_persist}` — the reserved
+  book is journaled (atomic writes) and, on FastAPI startup, reconciled against
+  the broker's actual positions (drops stale, adopts untracked).
+- Risk posture off the hot path: `use_claude_trade_gate` defaults **False**;
+  `master_agent._master_review` publishes the regime `size_factor` to the bus
+  (`TOPIC_REGIME`), which `agent_coordinator._regime_factor()` applies to every
+  entry. `GET /risk/posture`.
+
+### Claude brain (central agent intelligence)
+
+- `claude_brain.py` — a single async Anthropic-API "brain" (`AsyncAnthropic`,
+  model `claude-opus-4-8`, adaptive thinking) the master agent consults on its
+  ~1-min regime review — **off the order hot path**, throttled to ~1 call/min.
+- It returns a fleet **risk posture** (`BrainPosture`): regime, a global
+  `size_factor`, per-agent directives (`run`/`reduce_size`/`pause`) and an
+  optional `halt_new_trades`. `master_agent._master_review()` publishes it to the
+  bus (`TOPIC_REGIME`) — consumed by the coordinator — and applies the directives.
+- **Graceful degradation**: with no `ANTHROPIC_API_KEY` (or on timeout/error) it
+  returns a deterministic rule-based posture mirroring the regime plan, so the app
+  runs fully offline. Gated by `settings.use_claude_brain` (default True) +
+  `anthropic_api_key`. Model/timeout/throttle are configurable in `config.py`.
+- Read endpoints: `GET /brain`, `GET /brain/log`. Tests: `test_claude_brain.py`.
+
+### Inter-agent communication (agents talk to each other)
+
+- `agent_bus.py` — a shared blackboard. Every agent publishes its SIGNAL / INTENT
+  / FILL / EXIT (keyed by symbol) and can read peers' latest messages.
+- `agent_coordinator.py` — arbitrates every entry before an order is placed:
+  blocks opposite-direction conflicts and duplicate contracts, enforces the
+  correlated-group margin cap, applies a global concurrency cap, and boosts or
+  damps size based on peer conviction read off the bus.
+- Wiring lives in `agents/base_agent.py`: it publishes the SIGNAL, calls
+  `agent_coordinator.evaluate()`/`request()` inside `_try_enter`, and releases the
+  reservation on exit / SL. Both are gated by `settings.use_agent_bus` and
+  `settings.use_agent_coordinator`.
+- Read endpoints: `GET /agents/bus`, `GET /agents/coordinator`.
+
 ## Common Commands
 
 ```bash
@@ -14,8 +111,14 @@ cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Start the server (production, via main)
 cd algotrader_v4 && python main.py
 
-# Run all tests (417 tests)
-cd algotrader_v4 && python test_pipeline.py
+# Run the test suites
+cd algotrader_v4 && python test_pipeline.py          # core framework (263 tests)
+cd algotrader_v4 && python test_sim_orders_flow.py   # paper order lifecycle (13 tests)
+cd algotrader_v4 && python test_mcx.py               # MCX universe/bus/coordinator/agents (35 tests)
+cd algotrader_v4 && python test_broker_data.py       # broker-only market data (15 tests)
+cd algotrader_v4 && python test_mcx_strategies.py    # 20 strategies per agent (16 tests)
+cd algotrader_v4 && python test_upgrades.py          # cost/backtest/state/execution/posture (20 tests)
+cd algotrader_v4 && python test_claude_brain.py      # Claude brain / central intelligence (20 tests)
 
 # Run a single test class or method
 cd algotrader_v4 && python test_pipeline.py TestRiskManager

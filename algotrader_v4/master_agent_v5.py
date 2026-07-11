@@ -30,6 +30,7 @@ from adaptive_engine import adaptive_engine
 from agents.base_agent import send_telegram
 from agents.strategy_agents import ALL_AGENTS
 from bot_state import is_agent_enabled
+import claude_brain
 
 
 MASTER_PROMPT = """You are the MASTER TRADING INTELLIGENCE for an NSE/BSE algorithmic trading system.
@@ -138,6 +139,8 @@ class MasterAgent:
         self.running = False
         self._agent_watchlists: dict[str, list[dict]] = {}
         self.last_directives: dict = {}
+        self.last_posture: dict = {}
+        self._last_brain_call: float = 0.0
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -266,49 +269,70 @@ class MasterAgent:
             "guard": order_guard.status(),
         }
 
+        # ── Consult the Claude brain for the fleet risk posture ──────────────
+        # OFF the order hot path. Throttled so we never call more than ~1/min even
+        # if the review interval is shortened. Degrades to a rule-based posture
+        # (mirroring the regime plan) when Claude is unavailable or disabled.
+        now_mono = asyncio.get_event_loop().time()
+        throttled = (claude_brain.is_enabled()
+                     and (now_mono - self._last_brain_call) < settings.claude_brain_min_interval_sec)
+        if throttled:
+            posture = claude_brain._rule_based_posture(report, source="throttled")
+        else:
+            posture = await claude_brain.assess(report)
+            if posture.source == "claude":
+                self._last_brain_call = now_mono
+
+        self.last_posture = posture.to_dict()
+
+        # Publish the brain's risk posture to the agent bus (consumed by the
+        # coordinator, which scales every agent's entry size by size_factor).
         try:
-            msg = self._client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=800,
-                system=MASTER_PROMPT,
-                messages=[{"role": "user", "content": json.dumps(report, indent=2, default=str)}],
-            )
-            raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
-            d   = json.loads(raw)
-            self.last_directives = {
-                **d,
-                "regime": regime.value,
-                "regime_reasoning": plan.reasoning,
-            }
-            self._apply_directives(d)
+            from agent_bus import agent_bus, TOPIC_REGIME
+            agent_bus.publish("master", TOPIC_REGIME,
+                              {"regime": posture.regime,
+                               "size_factor": posture.size_factor,
+                               "confidence": posture.regime_confidence,
+                               "reasoning": posture.reasoning[:120],
+                               "source": posture.source},
+                              key="regime")
+        except Exception:
+            pass
+
+        # Apply the brain's per-agent directives + optional halt.
+        self.last_directives = {
+            "regime":            posture.regime,
+            "regime_reasoning":  posture.reasoning,
+            "regime_confidence": posture.regime_confidence,
+            "size_factor":       posture.size_factor,
+            "agent_directives":  posture.agent_directives,
+            "risk_override":     {"halt_new_trades": posture.halt_new_trades,
+                                  "reason": posture.reasoning[:120]},
+            "opportunity_alert": posture.opportunity_alert,
+            "brain_source":      posture.source,
+            "summary":           posture.reasoning or f"Regime {posture.regime}.",
+        }
+        try:
+            self._apply_directives(self.last_directives)
         except Exception as exc:
-            logger.error("[master] Claude review error: {}", exc)
-            self.last_directives = {
-                "regime":            regime.value,
-                "regime_reasoning":  plan.reasoning,
-                "strategy_plan": {
-                    "active":      plan.active,
-                    "paused":      plan.paused,
-                    "allocation":  plan.allocation,
-                },
-                "summary": f"Regime {regime.value}. {plan.reasoning[:80]}",
-            }
+            logger.error("[master] apply directives failed: {}", exc)
 
         summary = self.last_directives.get("summary", "")
         if summary:
             asyncio.create_task(send_telegram(
-                f"<b>Regime: {regime.value}</b>\n"
+                f"<b>Regime: {posture.regime}</b> (brain: {posture.source})\n"
                 f"Active: {', '.join(plan.active)}\n"
                 f"Paused: {', '.join(plan.paused) or 'none'}\n"
-                f"Size:   {int(plan.size_factor * 100)}%\n{summary}"
+                f"Size:   {int(posture.size_factor * 100)}%\n{summary}"
             ))
             from n8n_bridge import notify as _n8n
             asyncio.create_task(_n8n("regime_change", {
-                "regime":      regime.value,
+                "regime":      posture.regime,
                 "active":      plan.active,
                 "paused":      plan.paused,
-                "size_factor": plan.size_factor,
-                "reasoning":   plan.reasoning[:120],
+                "size_factor": posture.size_factor,
+                "reasoning":   posture.reasoning[:120],
+                "brain_source": posture.source,
                 "signals":     sigs.to_dict() if sigs else {},
             }))
 
@@ -422,6 +446,8 @@ class MasterAgent:
             "adaptive":          adaptive_engine.summary(),
             "live_market":       tick_engine.all_latest(),
             "last_directives":   self.last_directives,
+            "brain_posture":     self.last_posture,
+            "brain":             claude_brain.status(),
             "agents":            {n: a.get_status() for n, a in ALL_AGENTS.items()},
             "risk":              risk_manager.status(),
             "guard":             order_guard.status(),
