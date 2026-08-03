@@ -47,6 +47,17 @@ class PlatformScheduler:
             self._options_cache_refresh, "interval",
             minutes=5, id="options_cache",
         )
+        if settings.positional_enabled:
+            # Positional trend-following: EOD signals after the MCX close,
+            # execution after both MCX (09:00) and NSE (09:15) are open
+            self._sched.add_job(
+                self._positional_eod, "cron",
+                hour=23, minute=45, day_of_week="mon-fri", id="positional_eod",
+            )
+            self._sched.add_job(
+                self._positional_morning, "cron",
+                hour=9, minute=16, day_of_week="mon-fri", id="positional_morning",
+            )
         self._sched.start()
         logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, Start@09:16 IST)")
 
@@ -194,6 +205,24 @@ class PlatformScheduler:
         except Exception as exc:
             logger.error("[platform] auto-start failed: {}", exc)
             await send_telegram(f"⚠️ <b>Auto-start failed</b>\n{exc}")
+
+    async def _positional_eod(self) -> None:
+        try:
+            from positional_runner import positional_runner
+            result = await positional_runner.eod_job()
+            logger.info("[platform] positional EOD: {}", result)
+        except Exception as exc:
+            logger.error("[platform] positional EOD failed: {}", exc)
+            await send_telegram(f"⚠️ <b>Positional EOD failed</b>\n{exc}")
+
+    async def _positional_morning(self) -> None:
+        try:
+            from positional_runner import positional_runner
+            result = await positional_runner.morning_job()
+            logger.info("[platform] positional morning: {}", result)
+        except Exception as exc:
+            logger.error("[platform] positional morning failed: {}", exc)
+            await send_telegram(f"⚠️ <b>Positional morning failed</b>\n{exc}")
 
 
 platform_scheduler = PlatformScheduler()

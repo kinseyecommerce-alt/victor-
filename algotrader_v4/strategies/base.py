@@ -60,3 +60,22 @@ class PositionalStrategy:
 
     def get_position(self, symbol: str) -> Optional[OpenPosition]:
         raise NotImplementedError
+
+    # ── State persistence (restart-safe operation) ─────────────────────────
+
+    def to_state(self) -> dict:
+        """JSON-serializable snapshot of all mutable strategy state."""
+        raise NotImplementedError
+
+    def load_state(self, state: dict) -> None:
+        """Restore a snapshot produced by to_state()."""
+        raise NotImplementedError
+
+
+def _positions_to_dict(positions: dict[str, OpenPosition]) -> dict:
+    from dataclasses import asdict
+    return {sym: asdict(p) for sym, p in positions.items()}
+
+
+def _positions_from_dict(data: dict) -> dict[str, OpenPosition]:
+    return {sym: OpenPosition(**p) for sym, p in (data or {}).items()}

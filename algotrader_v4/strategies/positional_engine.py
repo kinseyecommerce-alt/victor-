@@ -161,3 +161,37 @@ class PositionalEngine:
         pos_store = getattr(strat, "_positions", None)
         if pos_store is not None:
             pos_store.pop(symbol, None)
+
+    def net_quantities(self) -> dict[str, int]:
+        """Expected signed net quantity (units, not lots) per symbol across
+        all strategies — the reconciliation target for broker positions."""
+        net: dict[str, int] = {}
+        for key, lots in self._exit_lots.items():
+            sym  = key.split(":", 1)[1]
+            sign = 1 if self._exit_sides.get(key) == "LONG" else -1
+            c    = get_contract(sym)
+            net[sym] = net.get(sym, 0) + sign * lots * c.lot_size
+        return {s: q for s, q in net.items() if q != 0}
+
+    # ── State persistence (restart-safe operation) ─────────────────────────
+
+    def to_state(self) -> dict:
+        from dataclasses import asdict
+        return {
+            "equity":     self.equity,
+            "book":       [asdict(p) for p in self.book.positions],
+            "exit_lots":  dict(self._exit_lots),
+            "exit_sides": dict(self._exit_sides),
+            "strategies": {s.name: s.to_state() for s in self.strategies},
+        }
+
+    def load_state(self, state: dict) -> None:
+        from strategies.position_sizing import OpenRisk
+        self.book.positions = [OpenRisk(**p) for p in state.get("book") or []]
+        self._exit_lots  = {k: int(v) for k, v in
+                            (state.get("exit_lots") or {}).items()}
+        self._exit_sides = dict(state.get("exit_sides") or {})
+        by_name = state.get("strategies") or {}
+        for s in self.strategies:
+            if s.name in by_name:
+                s.load_state(by_name[s.name])

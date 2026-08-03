@@ -557,5 +557,137 @@ run("Stop breach next day → full exit plan",          t_engine_exit_unwinds)
 run("Unaffordable sizing suppressed cleanly",         t_engine_respects_heat_cap)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+section("STATE PERSISTENCE (restart-safe)")
+# ═══════════════════════════════════════════════════════════════════════════
+
+def t_engine_state_round_trip():
+    eng = PositionalEngine(equity=3_000_000)
+    closes = [5000.0] * 60 + [5200.0]
+    plans = eng.run_eod({"CRUDEOILM": make_bars(closes, spread=75.0)})
+    assert plans, "setup: need an open position"
+    state = eng.to_state()
+
+    eng2 = PositionalEngine(equity=3_000_000)
+    eng2.load_state(state)
+    assert eng2.net_quantities() == eng.net_quantities()
+    assert eng2.book.units_in("CRUDEOILM") == eng.book.units_in("CRUDEOILM")
+    don = eng2.strategies[0]
+    pos = don.get_position("CRUDEOILM")
+    assert pos is not None and pos.side == "LONG" and pos.stop > 0
+
+    # The restored engine must manage the position (stop-hit exit works)
+    plans2 = eng2.run_eod({"CRUDEOILM": make_bars(closes + [4300.0], spread=75.0)})
+    assert any(p.action == "SELL" for p in plans2), "restored engine must exit"
+
+def t_state_store_idempotent_queue():
+    from strategies.state_store import PositionalStateStore
+    store = PositionalStateStore(":memory:")
+    from strategies.positional_engine import OrderPlan
+    plan = OrderPlan(symbol="CRUDEOILM", exchange="MCX", action="BUY",
+                     lots=3, quantity=30, stop=4900.0,
+                     strategy="donchian", tag="maran_donchian-entry")
+    assert store.queue_plans("2026-08-03", [plan]) == 1
+    assert store.queue_plans("2026-08-03", [plan]) == 0, "re-queue must be a no-op"
+    pending = store.pending_plans()
+    assert len(pending) == 1 and pending[0][1].quantity == 30
+
+def t_state_store_lifecycle():
+    from strategies.state_store import PositionalStateStore
+    from strategies.positional_engine import OrderPlan
+    store = PositionalStateStore(":memory:")
+    p = OrderPlan(symbol="GOLDM", exchange="MCX", action="BUY", lots=1,
+                  quantity=10, strategy="tsmom", tag="maran_tsmom-entry")
+    store.queue_plans("2026-08-01", [p])
+    pid = store.pending_plans()[0][0]
+    store.mark_plan(pid, "placed", order_id="OID1", gtt_id="G1")
+    assert store.pending_plans() == [], "placed plan must leave the queue"
+    store.queue_plans("2026-08-02", [p])
+    assert store.cancel_stale_pending("2026-08-03") == 1, "old pending → cancelled"
+
+def t_state_store_engine_snapshot():
+    from strategies.state_store import PositionalStateStore
+    store = PositionalStateStore(":memory:")
+    assert store.load_engine_state() is None
+    store.save_engine_state({"equity": 1.0})
+    store.save_engine_state({"equity": 2.0})
+    assert store.load_engine_state() == {"equity": 2.0}, "snapshot must upsert"
+
+def t_state_store_trade_log():
+    from strategies.state_store import PositionalStateStore
+    store = PositionalStateStore(":memory:")
+    store.record_trade("2026-08-01", "donchian", "CRUDEOILM", -500.0)
+    store.record_trade("2026-08-02", "donchian", "CRUDEOILM", 1500.0)
+    assert store.trade_pnls("donchian") == [-500.0, 1500.0]
+    assert store.trade_pnls("tsmom") == []
+
+run("Engine state round-trips through to_state/load_state", t_engine_state_round_trip)
+run("Plan queue is idempotent (unique client tag)",         t_state_store_idempotent_queue)
+run("Plan lifecycle: placed leaves queue, stale cancelled", t_state_store_lifecycle)
+run("Engine snapshot upserts single row",                   t_state_store_engine_snapshot)
+run("Trade log feeds kill criteria per strategy",           t_state_store_trade_log)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+section("LIVE RUNNER HELPERS (rollover / reconcile / data sanity)")
+# ═══════════════════════════════════════════════════════════════════════════
+
+from positional_runner import pick_near_month, reconcile, sane_bars
+
+def _fut(name, tsym, expiry):
+    return {"name": name, "tradingsymbol": tsym, "expiry": expiry,
+            "instrument_type": "FUT", "instrument_token": hash(tsym) % 10**6}
+
+def t_rollover_picks_near_month():
+    instruments = [
+        _fut("CRUDEOILM", "CRUDEOILM26AUGFUT", date(2026, 8, 18)),
+        _fut("CRUDEOILM", "CRUDEOILM26SEPFUT", date(2026, 9, 18)),
+        _fut("CRUDEOILM", "CRUDEOILM26OCTFUT", date(2026, 10, 19)),
+        _fut("GOLDM",     "GOLDM26AUGFUT",     date(2026, 8, 5)),
+        {"name": "CRUDEOILM", "instrument_type": "CE", "expiry": date(2026, 8, 18)},
+    ]
+    inst = pick_near_month(instruments, "CRUDEOILM", date(2026, 8, 3), 3)
+    assert inst["tradingsymbol"] == "CRUDEOILM26AUGFUT"
+
+def t_rollover_respects_buffer():
+    instruments = [
+        _fut("CRUDEOILM", "CRUDEOILM26AUGFUT", date(2026, 8, 18)),
+        _fut("CRUDEOILM", "CRUDEOILM26SEPFUT", date(2026, 9, 18)),
+    ]
+    # 3 days (or fewer) to expiry → roll to next month
+    inst = pick_near_month(instruments, "CRUDEOILM", date(2026, 8, 15), 3)
+    assert inst["tradingsymbol"] == "CRUDEOILM26SEPFUT", \
+        "within the rollover buffer the next month must be picked"
+    assert pick_near_month(instruments, "CRUDEOILM", date(2026, 12, 1), 3) is None
+
+def t_reconcile_match_and_mismatch():
+    universe = ["CRUDEOILM", "GOLDM", "NIFTY"]
+    broker   = {"CRUDEOILM26AUGFUT": 30, "GOLDM26SEPFUT": -10,
+                "RELIANCE": 100}                      # non-universe → ignored
+    expected = {"CRUDEOILM": 30, "GOLDM": -10}
+    ok, mm = reconcile(broker, expected, universe)
+    assert ok and not mm, mm
+    expected_bad = {"CRUDEOILM": 30, "GOLDM": -10, "NIFTY": 75}
+    ok, mm = reconcile(broker, expected_bad, universe)
+    assert not ok and any("NIFTY" in m for m in mm)
+
+def t_sane_bars_rejects_bad_data():
+    good = [{"date": date(2026, 8, 1), "open": 100, "high": 101,
+             "low": 99, "close": 100, "volume": 10},
+            {"date": date(2026, 8, 2), "open": 100, "high": 102,
+             "low": 99, "close": 101, "volume": 12}]
+    bars = sane_bars(good)
+    assert bars and len(bars) == 2 and bars[1].close == 101
+    zero = [dict(good[0], close=0)]
+    assert sane_bars(zero) is None, "zero close must reject the symbol"
+    outlier = [good[0], dict(good[1], close=160)]     # +60% day → bad feed
+    assert sane_bars(outlier) is None
+
+run("Near-month FUT contract resolution",             t_rollover_picks_near_month)
+run("Rollover buffer skips expiring contract",        t_rollover_respects_buffer)
+run("Reconcile matches roots, flags mismatches",      t_reconcile_match_and_mismatch)
+run("EOD bar sanity: zero/outlier data rejected",     t_sane_bars_rejects_bad_data)
+
+
 failed = summary()
 sys.exit(1 if failed else 0)

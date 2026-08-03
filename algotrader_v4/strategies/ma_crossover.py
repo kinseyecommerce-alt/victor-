@@ -14,7 +14,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from strategies.base import Action, OpenPosition, PositionalStrategy, Signal
+from strategies.base import (
+    Action,
+    OpenPosition,
+    PositionalStrategy,
+    Signal,
+    _positions_from_dict,
+    _positions_to_dict,
+)
 from strategies.indicators import DailyBar, atr, ema_series, sma
 
 
@@ -33,6 +40,16 @@ class MACrossoverStrategy(PositionalStrategy):
 
     def get_position(self, symbol: str) -> Optional[OpenPosition]:
         return self._positions.get(symbol)
+
+    def to_state(self) -> dict:
+        return {
+            "positions": _positions_to_dict(self._positions),
+            "extreme":   dict(self._extreme),
+        }
+
+    def load_state(self, state: dict) -> None:
+        self._positions = _positions_from_dict(state.get("positions"))
+        self._extreme   = dict(state.get("extreme") or {})
 
     def evaluate(self, symbol: str, bars: list[DailyBar]) -> Signal:
         if len(bars) < self.TREND + 1:

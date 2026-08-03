@@ -74,7 +74,8 @@ int(per_symbol_capital // ltp) = quantity
 | `sebi_compliance.py` | Audit log, kill switch (`KillSwitchState`), IP whitelist, approved algo IDs |
 | `symbol_scanner.py` | Scans Nifty 100 universe for liquid, volatile symbols meeting entry criteria |
 | `atomic_bracket.py` | Places entry + SL-M + target orders as a unit; rolls back on partial failure |
-| `strategies/` | Positional daily-bar trend-following package (separate from the tick-driven agents): Donchian/Turtle S1-S2, 20/50 EMA crossover + 200-SMA filter, 12-month TSMOM; ATR/Turtle-unit sizing, portfolio caps (4 units/market, 6/cluster, 6% heat), MCX/NSE cost model, pre-committed kill criteria; `PositionalEngine.run_eod()` turns daily bars into sized `OrderPlan`s for next-day-open NRML execution |
+| `strategies/` | Positional daily-bar trend-following package (separate from the tick-driven agents): Donchian/Turtle S1-S2, 20/50 EMA crossover + 200-SMA filter, 12-month TSMOM; ATR/Turtle-unit sizing, portfolio caps (4 units/market, 6/cluster, 6% heat), MCX/NSE cost model, pre-committed kill criteria; `PositionalEngine.run_eod()` turns daily bars into sized `OrderPlan`s for next-day-open NRML execution; `state_store.py` persists engine state + idempotent order plans in SQLite |
+| `positional_runner.py` | Live wiring for `strategies/`: EOD job (23:45 IST — continuous daily bars, sanity checks, signal generation, plan queueing) and morning job (09:16 IST — start-of-day reconciliation with halt-on-mismatch, NRML market orders, GTT stops, near-month contract resolution with 3-day rollover buffer). Enabled via `POSITIONAL_ENABLED=true`; REST: `/positional/status`, `/positional/run-eod`, `/positional/run-morning` |
 
 ### Agent Enable/Disable
 

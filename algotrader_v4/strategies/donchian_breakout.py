@@ -20,7 +20,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from strategies.base import Action, OpenPosition, PositionalStrategy, Signal
+from strategies.base import (
+    Action,
+    OpenPosition,
+    PositionalStrategy,
+    Signal,
+    _positions_from_dict,
+    _positions_to_dict,
+)
 from strategies.indicators import DailyBar, atr, donchian
 
 
@@ -43,6 +50,18 @@ class DonchianBreakoutStrategy(PositionalStrategy):
 
     def get_position(self, symbol: str) -> Optional[OpenPosition]:
         return self._positions.get(symbol)
+
+    def to_state(self) -> dict:
+        return {
+            "positions":   _positions_to_dict(self._positions),
+            "last_s1_won": dict(self._last_s1_won),
+            "s1_tracker":  dict(self._s1_tracker),
+        }
+
+    def load_state(self, state: dict) -> None:
+        self._positions   = _positions_from_dict(state.get("positions"))
+        self._last_s1_won = dict(state.get("last_s1_won") or {})
+        self._s1_tracker  = dict(state.get("s1_tracker") or {})
 
     # ── Main EOD evaluation ────────────────────────────────────────────────
 

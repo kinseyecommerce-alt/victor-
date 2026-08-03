@@ -365,6 +365,67 @@ class KiteClient:
             label="cancel_order",
         )
 
+    # ── GTT (Good Till Triggered) — positional stops ───────────────────────
+    # Preferred over daily SL-M re-placement for NRML positional trades:
+    # a single-leg GTT survives sessions until triggered or deleted.
+
+    def place_gtt_stop(
+        self,
+        tradingsymbol:    str,
+        exchange:         str,
+        transaction_type: str,     # order fired when triggered (SELL for long stop)
+        quantity:         int,
+        trigger_price:    float,
+        last_price:       float,
+        product:          str = "NRML",
+    ) -> str:
+        if settings.trading_mode == "PAPER":
+            gtt_id = f"PAPER-GTT-{len(self._paper_orders) + 1}"
+            self._paper_orders.append({
+                "order_id": gtt_id, "tradingsymbol": tradingsymbol,
+                "exchange": exchange, "transaction_type": transaction_type,
+                "quantity": quantity, "order_type": "GTT-STOP",
+                "product": product, "price": 0.0,
+                "trigger_price": trigger_price, "status": "TRIGGER PENDING",
+                "tag": "GTT", "timestamp": datetime.now().isoformat(),
+            })
+            return gtt_id
+
+        def _place():
+            result = self.kite.place_gtt(
+                trigger_type=self.kite.GTT_TYPE_SINGLE,
+                tradingsymbol=tradingsymbol,
+                exchange=exchange,
+                trigger_values=[trigger_price],
+                last_price=last_price,
+                orders=[{
+                    "exchange":         exchange,
+                    "tradingsymbol":    tradingsymbol,
+                    "transaction_type": transaction_type,
+                    "quantity":         quantity,
+                    "order_type":       "LIMIT",
+                    "product":          product,
+                    # Limit slightly through the trigger so it fills like a stop
+                    "price": round(trigger_price * (0.995 if transaction_type == "SELL"
+                                                    else 1.005), 2),
+                }],
+            )
+            return str(result.get("trigger_id", ""))
+
+        gtt_id = _with_retry(_place, label="place_gtt")
+        logger.info("LIVE GTT stop | {} {} qty={} trigger={} | id={}",
+                    transaction_type, tradingsymbol, quantity,
+                    trigger_price, gtt_id)
+        return gtt_id
+
+    def delete_gtt(self, gtt_id: str) -> None:
+        if settings.trading_mode == "PAPER":
+            for o in self._paper_orders:
+                if o["order_id"] == gtt_id:
+                    o["status"] = "CANCELLED"
+            return
+        _with_retry(lambda: self.kite.delete_gtt(int(gtt_id)), label="delete_gtt")
+
     def squareoff_all_positions(self) -> list[str]:
         order_ids: list[str] = []
         for pos in self.positions().get("net", []):
