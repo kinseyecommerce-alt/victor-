@@ -21,6 +21,9 @@ cd algotrader_v4 && python test_pipeline.py
 cd algotrader_v4 && python test_pipeline.py TestRiskManager
 cd algotrader_v4 && python test_pipeline.py TestRiskManager.test_calculate_quantity
 
+# Run positional strategy tests (Donchian/MA-crossover/TSMOM package)
+cd algotrader_v4 && python test_strategies.py
+
 # Pre-learn approved symbols before first run (replaces startup backtest)
 cd algotrader_v4 && python historical_learner.py
 cd algotrader_v4 && python historical_learner.py --resume   # continue interrupted run
@@ -71,6 +74,7 @@ int(per_symbol_capital // ltp) = quantity
 | `sebi_compliance.py` | Audit log, kill switch (`KillSwitchState`), IP whitelist, approved algo IDs |
 | `symbol_scanner.py` | Scans Nifty 100 universe for liquid, volatile symbols meeting entry criteria |
 | `atomic_bracket.py` | Places entry + SL-M + target orders as a unit; rolls back on partial failure |
+| `strategies/` | Positional daily-bar trend-following package (separate from the tick-driven agents): Donchian/Turtle S1-S2, 20/50 EMA crossover + 200-SMA filter, 12-month TSMOM; ATR/Turtle-unit sizing, portfolio caps (4 units/market, 6/cluster, 6% heat), MCX/NSE cost model, pre-committed kill criteria; `PositionalEngine.run_eod()` turns daily bars into sized `OrderPlan`s for next-day-open NRML execution |
 
 ### Agent Enable/Disable
 
