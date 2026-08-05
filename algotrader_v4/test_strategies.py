@@ -689,5 +689,94 @@ run("Reconcile matches roots, flags mismatches",      t_reconcile_match_and_mism
 run("EOD bar sanity: zero/outlier data rejected",     t_sane_bars_rejects_bad_data)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+section("PHASE-1 BACKTEST HARNESS (simulator / DSR / Monte Carlo)")
+# ═══════════════════════════════════════════════════════════════════════════
+
+from strategies.phase1_backtest import (
+    WARMUP as P1_WARMUP,
+    bootstrap_drawdowns,
+    deflated_sharpe,
+    holdout_split,
+    metrics as p1_metrics,
+    normal_cdf,
+    normal_ppf,
+    phase1_report,
+    simulate,
+    walk_forward,
+)
+
+def _trend_bars(n=800, start=100.0, drift=0.15, wobble=3.0):
+    import math as _m
+    closes = [start + drift * i + wobble * _m.sin(i / 9.0) for i in range(n)]
+    return make_bars(closes, spread=1.0)
+
+def t_p1_sim_tsmom_profits_on_trend():
+    res = simulate(lambda: TSMOMStrategy(long_only=True), "tsmom", _trend_bars())
+    assert res.eq_curve and res.eq_curve[-1] > 1.0, \
+        f"TSMOM must profit on a steady uptrend (final {res.eq_curve[-1]:.3f})"
+    m = p1_metrics(res)
+    assert m["sharpe"] > 0 and m["max_dd"] < 0.5
+
+def t_p1_sim_respects_leverage_cap():
+    bars = _trend_bars(wobble=0.2)          # tiny ATR → huge raw unit size
+    res = simulate(DonchianBreakoutStrategy, "donchian", bars)
+    # With notional capped at 2× equity, a 1-day 1% move can cost ≤ ~2%
+    rets = [res.eq_curve[i] / res.eq_curve[i-1] - 1
+            for i in range(1, len(res.eq_curve))]
+    assert max(abs(r) for r in rets) < 0.10, "leverage cap must bound daily P&L"
+
+def t_p1_normal_ppf_roundtrip():
+    for p in (0.01, 0.2, 0.5, 0.8, 0.975):
+        assert abs(normal_cdf(normal_ppf(p)) - p) < 1e-6
+
+def t_p1_dsr_penalizes_many_trials():
+    eq = [1.0]
+    import random as _r
+    rng = _r.Random(7)
+    for _ in range(1000):
+        eq.append(eq[-1] * (1 + 0.0004 + rng.gauss(0, 0.01)))
+    few  = deflated_sharpe(eq, n_trials=1)["dsr"]
+    many = deflated_sharpe(eq, n_trials=1000)["dsr"]
+    assert many < few, "more trials must deflate the Sharpe probability"
+
+def t_p1_bootstrap_percentiles_ordered():
+    trades = [0.05, -0.02, 0.08, -0.03, -0.02, 0.10, -0.04, 0.01] * 5
+    mc = bootstrap_drawdowns(trades, n_sims=500)
+    assert 0 <= mc["dd_p50"] <= mc["dd_p95"] <= mc["dd_worst"] <= 1
+    mc2 = bootstrap_drawdowns(trades, n_sims=500)
+    assert mc == mc2, "bootstrap must be deterministic (fixed seed)"
+
+def t_p1_holdout_split():
+    bars = _trend_bars(1000)
+    is_bars, oos_bars = holdout_split(bars, 0.15)
+    assert len(is_bars) == 850 and len(oos_bars) == 1000
+
+def t_p1_walk_forward_blocks():
+    bars = _trend_bars(1600)
+    wf = walk_forward(lambda: TSMOMStrategy(long_only=True), "tsmom",
+                      bars, block_years=2.0)
+    assert len(wf) >= 2 and all("sharpe" in b and "from" in b for b in wf)
+
+def t_p1_report_gates_and_verdict():
+    rep = phase1_report(lambda: TSMOMStrategy(long_only=True), "tsmom",
+                        _trend_bars(900), n_trials=3)
+    assert set(rep["gates"]) == {"dsr_positive", "oos_half_of_is",
+                                 "min_30_trades", "wf_majority_positive"}
+    assert rep["go"] == all(rep["gates"].values())
+    assert abs(rep["kill_dd_threshold"] - round(rep["full"]["max_dd"] * 1.5, 4)) < 1e-9
+    # TSMOM trades ~monthly → a 3.5-year sample can't reach 30 trades: NO-GO
+    assert rep["gates"]["min_30_trades"] is False and rep["go"] is False
+
+run("Simulator: TSMOM profits on steady uptrend",     t_p1_sim_tsmom_profits_on_trend)
+run("Simulator: 2× leverage cap bounds daily P&L",    t_p1_sim_respects_leverage_cap)
+run("Inverse normal CDF round-trips",                 t_p1_normal_ppf_roundtrip)
+run("DSR deflates with more trials",                  t_p1_dsr_penalizes_many_trials)
+run("Bootstrap DD percentiles ordered + deterministic", t_p1_bootstrap_percentiles_ordered)
+run("Hold-out split is 85/15 with warm OOS state",    t_p1_holdout_split)
+run("Walk-forward produces consecutive blocks",       t_p1_walk_forward_blocks)
+run("Phase-1 report: gates wired to verdict",         t_p1_report_gates_and_verdict)
+
+
 failed = summary()
 sys.exit(1 if failed else 0)

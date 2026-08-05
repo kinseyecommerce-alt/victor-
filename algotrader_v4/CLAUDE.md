@@ -24,6 +24,10 @@ cd algotrader_v4 && python test_pipeline.py TestRiskManager.test_calculate_quant
 # Run positional strategy tests (Donchian/MA-crossover/TSMOM package)
 cd algotrader_v4 && python test_strategies.py
 
+# Phase-1 validation of positional strategies (walk-forward, OOS, DSR, Monte Carlo)
+cd algotrader_v4 && python positional_backtest.py --kite                      # live Kite data
+cd algotrader_v4 && python positional_backtest.py --csv data.csv --symbol X   # offline OHLC/FRED csv
+
 # Pre-learn approved symbols before first run (replaces startup backtest)
 cd algotrader_v4 && python historical_learner.py
 cd algotrader_v4 && python historical_learner.py --resume   # continue interrupted run
@@ -75,6 +79,7 @@ int(per_symbol_capital // ltp) = quantity
 | `symbol_scanner.py` | Scans Nifty 100 universe for liquid, volatile symbols meeting entry criteria |
 | `atomic_bracket.py` | Places entry + SL-M + target orders as a unit; rolls back on partial failure |
 | `strategies/` | Positional daily-bar trend-following package (separate from the tick-driven agents): Donchian/Turtle S1-S2, 20/50 EMA crossover + 200-SMA filter, 12-month TSMOM; ATR/Turtle-unit sizing, portfolio caps (4 units/market, 6/cluster, 6% heat), MCX/NSE cost model, pre-committed kill criteria; `PositionalEngine.run_eod()` turns daily bars into sized `OrderPlan`s for next-day-open NRML execution; `state_store.py` persists engine state + idempotent order plans in SQLite |
+| `positional_backtest.py` | Phase-1 go/no-go CLI for the positional strategies: event simulation of the real strategy classes (next-bar fills, costs, spec sizing, 2× leverage cap), 85/15 out-of-sample hold-out, walk-forward blocks, Deflated Sharpe Ratio (Bailey & López de Prado), Monte Carlo trade-sequence bootstrap, and the spec's gates (DSR>0, OOS Sharpe >50% of in-sample, ≥30 trades). Core logic in `strategies/phase1_backtest.py` |
 | `positional_runner.py` | Live wiring for `strategies/`: EOD job (23:45 IST — continuous daily bars, sanity checks, signal generation, plan queueing) and morning job (09:16 IST — start-of-day reconciliation with halt-on-mismatch, NRML market orders, GTT stops, near-month contract resolution with 3-day rollover buffer). Enabled via `POSITIONAL_ENABLED=true`; REST: `/positional/status`, `/positional/run-eod`, `/positional/run-morning` |
 
 ### Agent Enable/Disable
