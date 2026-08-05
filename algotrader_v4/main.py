@@ -653,6 +653,27 @@ def risk_update(req: RiskUpdateRequest):
     if req.target_pct        is not None: settings.target_pct        = req.target_pct
     return risk_manager.status()
 
+@app.get("/positional/status", tags=["Positional"])
+def positional_status():
+    from positional_runner import positional_runner
+    try:
+        return positional_runner.status()
+    except Exception as e:
+        logger.error("Positional status error: {}", e)
+        raise HTTPException(500, "Unable to fetch positional status")
+
+@app.post("/positional/run-eod", tags=["Positional"])
+async def positional_run_eod():
+    """Manually trigger EOD signal generation (normally 23:45 IST cron)."""
+    from positional_runner import positional_runner
+    return await positional_runner.eod_job()
+
+@app.post("/positional/run-morning", tags=["Positional"])
+async def positional_run_morning():
+    """Manually trigger morning reconciliation + order placement (normally 09:16 IST cron)."""
+    from positional_runner import positional_runner
+    return await positional_runner.morning_job()
+
 @app.get("/settings/trading-limits", tags=["Settings"])
 def get_trading_limits():
     return {

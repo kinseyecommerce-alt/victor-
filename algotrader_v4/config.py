@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     max_scalping_positions: int = 5
     max_swing_positions:    int = 3
 
+    # Positional trend-following system (strategies/ package)
+    # Runs on the futures NRML bucket (total_capital × futures_capital_pct)
+    positional_enabled:        bool  = False
+    positional_universe:       str   = "CRUDEOILM,GOLDM,SILVERM,NATURALGAS,NIFTY"
+    positional_risk_fraction:  float = 0.01   # 0.005–0.01 per spec (0.5–1%)
+    positional_rollover_days:  int   = 3      # roll ≤N days before expiry
+
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
