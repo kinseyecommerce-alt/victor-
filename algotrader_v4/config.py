@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
     # PAPER-mode price feed: SIM = GBM simulator, KITE = real Kite quotes (orders stay simulated)
     paper_data_source: Literal["SIM", "KITE"] = "SIM"
+    # Demo: only with TRADING_MODE=PAPER + PAPER_DATA_SOURCE=SIM. The IST clock starts at
+    # 10:00 on a weekday (so the market is "open" any time you test) and the simulator moves
+    # in trending bursts so strategies actually fire. Ignored in every other mode.
+    demo_mode: bool = False
 
     # Risk
     max_daily_loss: float = 5000.0
@@ -165,6 +169,10 @@ class Settings(BaseSettings):
     @property
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",")]
+
+    @property
+    def demo_active(self) -> bool:
+        return self.demo_mode and self.trading_mode == "PAPER" and self.paper_data_source == "SIM"
 
     @property
     def uses_kite_market_data(self) -> bool:

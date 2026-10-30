@@ -19,12 +19,15 @@ export function connectWS() {
     url = `${proto}//${window.location.host}/ws-proxy/ws${apiKey ? `?token=${apiKey}` : ''}`
   }
 
-  ws = new WebSocket(url)
+  // Keep a local handle: if connectWS runs again (React StrictMode), `ws` points at the new,
+  // still-connecting socket by the time this one opens
+  const sock = new WebSocket(url)
+  ws = sock
 
-  ws.onopen = () => {
+  sock.onopen = () => {
     setWsConnected(true)
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-    ws?.send('ping')
+    sock.send('ping')
   }
 
   ws.onclose = () => {

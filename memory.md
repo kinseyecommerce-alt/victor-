@@ -146,6 +146,13 @@ A full review also runs every `AI_AGENT_INTERVAL_MIN` (15; 0 = off). Chat in the
 - API: `GET /agent/status`, `POST /agent/start|stop|cycle|close-all|chat`, `GET /agent/log`.
 - Tests use a fake client (`_FakeClient` in `test_pipeline.py`) — no API spend.
 
+### Overview dashboard + demo
+- `frontend/src/components/Overview/` — animated landing page (framer-motion + recharts) fed by
+  `GET /dashboard/summary` every 1.5 s. Toggle to the original Trading view and back.
+- `DEMO_MODE=true` (PAPER + SIM only): `ist_clock.now_ist()` starts at 10:00 IST on a weekday,
+  the simulator trends, new symbols get 90 min of backfilled candles. `./run_demo.sh` starts it all.
+- Browser test: `python3 dashboard_e2e.py` (needs the demo running). Guide: `TESTING.md`.
+
 ### Claude skills (`.claude/skills/`)
 `/preflight` (read-only GO/NO-GO), `/paper-session` (PAPER only), `/trade-review`, `/backtest`, `/abi`.
 Skills read `ALGO_URL` (default `http://127.0.0.1:8000`) and `ALGO_API_KEY` from the environment.

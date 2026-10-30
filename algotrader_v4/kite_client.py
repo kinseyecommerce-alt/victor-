@@ -40,6 +40,7 @@ from kiteconnect.exceptions import (
 from loguru import logger
 
 from config import settings
+from ist_clock import now_ist
 
 
 # ── Kite-documented limits ─────────────────────────────────────────────────
@@ -521,7 +522,7 @@ class KiteClient:
             "trigger_price":    trigger_price,
             "status":           "TRIGGER PENDING" if resting else "COMPLETE",
             "tag":              tag,
-            "placed_at":        datetime.now().isoformat(),
+            "placed_at":        now_ist().isoformat(),      # IST, like every other timestamp
         }
         self._paper_orders.append(record)
         if not resting:

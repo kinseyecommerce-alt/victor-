@@ -885,10 +885,11 @@ class FnOAgent(BaseAgent):
             "sl_buffer_pct": 5.0,
             "exit_limit_buffer_pct": 3.0,
         }
-        trailing_sl_engine.register(
+        tsl_pos = trailing_sl_engine.register(
             symbol=opt_sym, strategy=self.name, side=action,
             entry_price=opt_price, quantity=qty, order_id=order_id,
         )
+        tsl_pos.current_sl = sl_px     # same stop as the exchange order (see base_agent)
 
         await send_telegram(
             f"<b>[FNO]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
@@ -1086,7 +1087,7 @@ class ScalpingAgent(BaseAgent):
         sym = snap.symbol
         ind = snap.indicators
         ltp = snap.tick.ltp
-        now = datetime.now()
+        now = now_ist().replace(tzinfo=None)
         t   = now.time()
 
         if not ind.ema9:
@@ -1357,11 +1358,11 @@ class ScalpingAgent(BaseAgent):
             streak = self._loss_streak.get(sym, 0) + 1
             self._loss_streak[sym] = streak
             if streak >= 3:
-                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=20)
+                self._cooldown_until[sym] = now_ist().replace(tzinfo=None) + timedelta(minutes=20)
                 from loguru import logger
                 logger.warning("[scalping] {} 3-loss streak — 20-min cooldown", sym)
             elif streak >= 2:
-                self._cooldown_until[sym] = datetime.now() + timedelta(minutes=5)
+                self._cooldown_until[sym] = now_ist().replace(tzinfo=None) + timedelta(minutes=5)
 
     # ── Exit ──────────────────────────────────────────────────────────────────
 
@@ -1398,7 +1399,7 @@ class ScalpingAgent(BaseAgent):
             if ind.vwap and ltp > ind.vwap * 1.0015:
                 self._record_outcome(sym, ltp < entry); return True, "VWAP breakout"
 
-        if datetime.now().time() >= time(14, 55):
+        if now_ist().replace(tzinfo=None).time() >= time(14, 55):
             return True, "Auto square-off 2:55 PM"
 
         return False, ""

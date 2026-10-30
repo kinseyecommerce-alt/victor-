@@ -464,11 +464,14 @@ class BaseAgent(ABC):
         _setup_tsl_callbacks()
 
         # Register with trailing SL engine (monitors every tick)
-        trailing_sl_engine.register(
+        tsl_pos = trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
             entry_price=ltp, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
         )
+        # Start the software stop where the exchange stop actually is. Otherwise the engine
+        # tracks its own default % stop, and its first trail move could LOOSEN the real stop.
+        tsl_pos.current_sl = round(sl, 2)
 
         # Track the position so every exit path can cancel its SL-M and release it
         _tsl_sl_orders[order_id] = {

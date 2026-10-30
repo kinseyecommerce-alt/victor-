@@ -12,6 +12,14 @@ Algorithmic trading system for NSE/BSE Indian equity markets.
 - SEBI compliance module (10 regulations implemented)
 - Backtest gate (every symbol must pass before live trading)
 
+## Try it in 2 minutes
+```bash
+cd algotrader_v4 && pip install -r requirements.txt && ./run_demo.sh
+```
+Open http://localhost:5000 — the animated Overview dashboard runs on simulated prices (demo mode,
+no keys, no real orders). See [algotrader_v4/TESTING.md](algotrader_v4/TESTING.md) for the full
+test path from demo to live.
+
 ## Setup
 ```bash
 cd algotrader_v4

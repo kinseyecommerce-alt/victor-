@@ -22,7 +22,7 @@ import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from typing import Callable, Optional
 
@@ -166,8 +166,12 @@ class TickBuffer:
         self._lock = Lock()
 
     def push(self, ltp: float, volume: int, ts: datetime) -> Optional[Candle]:
-        bar_ts = datetime(ts.year, ts.month, ts.day, ts.hour, ts.minute,
-                          (ts.second // self.resolution) * self.resolution)
+        # Floor to the bar size within the day (the old seconds-only floor made every
+        # bar one minute long, so the "5-minute" buffer held 1-minute candles)
+        day_s = ts.hour * 3600 + ts.minute * 60 + ts.second
+        b = day_s // self.resolution * self.resolution
+        bar_ts = datetime(ts.year, ts.month, ts.day, b // 3600, (b % 3600) // 60, b % 60,
+                          tzinfo=ts.tzinfo)
         completed = None
         with self._lock:
             if self._current is None or bar_ts != self._current_ts:
@@ -547,6 +551,8 @@ class TickEngine:
             to_seed = [s for s in added if s not in seeded]
             if to_seed:
                 paper_sim.seed(to_seed, {s: self._exchange[s] for s in to_seed})
+            if settings.demo_active:
+                self._demo_backfill(added)
 
         logger.info("TickEngine: subscribed {} symbols via {}",
                     len(self._symbols), self.data_source())
@@ -555,6 +561,25 @@ class TickEngine:
         # Only equities ride the WebSocket (it resolves NSE tokens); option legs use REST
         if self._running and any(self._exchange[s] in ("NSE", "BSE") for s in added):
             self._start_ws()
+
+    def _demo_backfill(self, symbols: list[str], minutes: int = 90) -> None:
+        """DEMO_MODE only: give new symbols 90 minutes of simulated history so strategies
+        that need 10-200 candles can trade straight away instead of after 20+ minutes."""
+        import random
+        now = datetime.now()
+        for sym in symbols:
+            px = paper_sim._prices.get(sym)
+            if not px:
+                continue
+            path = [px]
+            for _ in range(minutes * 4):
+                path.append(path[-1] * (1 + random.gauss(0, 0.0012)))
+            scale = px / path[-1]                       # end the history at the current price
+            for i, p in enumerate(path[:-1]):
+                ts = now - timedelta(seconds=15 * (len(path) - 1 - i))
+                vol = random.randint(800, 4000)
+                self._bufs_1min[sym].push(p * scale, vol, ts)
+                self._bufs_5min[sym].push(p * scale, vol, ts)
 
     def data_source(self) -> str:
         """Human-readable label for where ticks come from."""

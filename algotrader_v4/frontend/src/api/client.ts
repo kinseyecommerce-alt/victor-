@@ -60,6 +60,9 @@ export const api = {
   pauseAgent: (name: string) => ax().post(`/agents/${name}/pause`),
   resumeAgent: (name: string) => ax().post(`/agents/${name}/resume`),
 
+  // Overview dashboard (one aggregate call per refresh)
+  dashboardSummary: () => ax().get('/dashboard/summary'),
+
   // AI trader (Claude)
   aiStatus: () => ax().get('/agent/status'),
   aiStart: () => ax().post('/agent/start', {}),

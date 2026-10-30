@@ -25,3 +25,4 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+e2e_screenshots/

@@ -82,6 +82,7 @@ _EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/conf
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log", "/agent/log",
+    "/dashboard/summary",
     "/docs", "/redoc",
 })
 
@@ -1068,6 +1069,93 @@ def agent_log(n: int = 100):
 async def agent_chat(req: AgentChatRequest):
     """Chat with the AI trader. It uses the same tools and limits as its autonomous cycles."""
     return await ai_trader.chat(req.message, req.conversation_id)
+
+
+# ── Dashboard overview (one call per refresh for the animated Overview page) ──
+@app.get("/dashboard/summary", tags=["Dashboard"])
+def dashboard_summary():
+    from trailing_sl_engine import SLStatus
+    from agents.base_agent import _tsl_sl_orders
+    live = tick_engine.all_latest()
+
+    positions, unrealised = [], 0.0
+    for oid, pos in list(trailing_sl_engine._positions.items()):
+        if pos.status != SLStatus.ACTIVE:
+            continue
+        ltp = (live.get(pos.symbol) or {}).get("ltp") or pos.entry_price
+        sign = 1 if pos.side == "BUY" else -1
+        pnl = (ltp - pos.entry_price) * pos.quantity * sign
+        unrealised += pnl
+        cfg = pos.cfg
+        target = ai_trader._targets.get(oid) or round(
+            pos.entry_price * (1 + sign * cfg.target2_pct / 100), 2)
+        trail = ai_trader._trail.get(oid)
+        r_mult = None
+        if trail and trail.get("risk"):
+            r_mult = round((ltp - pos.entry_price) * sign / trail["risk"], 2)
+        entry = _tsl_sl_orders.get(oid, {})
+        positions.append({
+            "id": oid, "symbol": pos.symbol, "strategy": pos.strategy, "side": pos.side,
+            "quantity": pos.quantity, "entry": round(pos.entry_price, 2), "ltp": round(ltp, 2),
+            "stop": round(pos.current_sl, 2), "target": round(target, 2),
+            "pnl": round(pnl, 2), "pnl_pct": round((ltp / pos.entry_price - 1) * 100 * sign, 2),
+            "r_multiple": r_mult, "exchange": entry.get("exchange", "NSE"),
+            "trailing": "AI" if pos.external_trail else ("ON" if pos.trail_active else "WAIT"),
+            "sl_moves": pos.sl_moves,
+        })
+
+    realised = risk_manager.daily_realised_pnl
+    closed = risk_manager.wins_today + risk_manager.losses_today
+    ai = ai_trader.status()
+
+    activity = [{"t": e["t"], "kind": e["kind"], "text": e["text"], "source": "ai"}
+                for e in list(ai_trader.log)[-40:]]
+    for o in kite_client.orders()[-25:] if settings.trading_mode == "PAPER" else []:
+        activity.append({"t": str(o.get("placed_at", ""))[11:19], "kind": "order",
+                         "source": str(o.get("tag", "")),
+                         "text": f'{o.get("transaction_type")} {o.get("quantity")} {o.get("tradingsymbol")} '
+                                 f'{o.get("order_type")} @ ₹{o.get("price") or o.get("trigger_price") or 0} '
+                                 f'· {o.get("status")}'})
+    activity.sort(key=lambda a: a["t"], reverse=True)
+
+    agents = [{"name": n, "running": a.state.running, "enabled": bot_state.is_agent_enabled(n),
+               "trades_today": a.state.trades_today} for n, a in ALL_AGENTS.items()]
+    agents.append({"name": "ai", "running": ai["enabled"], "enabled": True,
+                   "trades_today": ai["trades_today"]})
+
+    watch = [{"symbol": sym, "ltp": d.get("ltp"), "change_pct": d.get("change_pct"),
+              "trend": d.get("trend"), "rsi": d.get("rsi_14")} for sym, d in list(live.items())[:40]]
+
+    return {
+        "time_ist": now_ist().strftime("%H:%M:%S"),
+        "date": now_ist().strftime("%a %d %b %Y"),
+        "demo": settings.demo_active,
+        "mode": ai["mode"],
+        "market_open": is_market_open(),
+        "bot_running": master_agent.running,
+        "regime": regime_detector.current_regime.value if regime_detector.current_regime else "UNKNOWN",
+        "sebi_state": sebi_compliance.status().get("state"),
+        "kpis": {
+            "day_pnl": round(realised + unrealised, 2), "realised": round(realised, 2),
+            "unrealised": round(unrealised, 2), "trades_closed": closed,
+            "wins": risk_manager.wins_today, "losses": risk_manager.losses_today,
+            "win_rate": round(risk_manager.wins_today / closed * 100, 1) if closed else None,
+            "profit_factor": round(risk_manager.gross_profit / risk_manager.gross_loss, 2)
+                             if risk_manager.gross_loss else None,
+            "open_positions": len(positions),
+            "max_daily_loss": settings.max_daily_loss,
+            "loss_used_pct": round(min(100.0, max(0.0, -realised) / settings.max_daily_loss * 100), 1)
+                             if settings.max_daily_loss else 0.0,
+            "is_halted": risk_manager.is_trading_halted,
+            "ai_cost_usd": ai["cost_today_usd"],
+        },
+        "positions": positions,
+        "agents": agents,
+        "ai": {k: ai[k] for k in ("enabled", "alerts_today", "decisions_today", "avg_decision_ms",
+                                  "last_alert", "api_key_set", "trades_today")},
+        "watch": watch,
+        "activity": activity[:50],
+    }
 
 
 # ── n8n Inbound Webhook ───────────────────────────────────────────────────────

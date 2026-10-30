@@ -2671,6 +2671,98 @@ run("AI trail reviews fire at R milestones",                  t_ai_trail_review_
 run("Trail reviews rank below exits, above entries",          t_ai_trail_review_alert_priority)
 run("AI stopped → mechanical trailing takes over",            t_ai_trailing_falls_back_when_ai_stopped)
 
+# ══════════════════════════════════════════════════════════════════════════
+# DASHBOARD + DEMO MODE
+# ══════════════════════════════════════════════════════════════════════════
+section("DASHBOARD + DEMO")
+import ist_clock as _clk
+
+def t_tickbuffer_5min_bars():
+    b = TickBuffer(300)
+    t0 = datetime(2026, 1, 15, 10, 0, 0)
+    for i in range(0, 16 * 60, 30):
+        b.push(100.0 + i / 100, 10, t0 + timedelta(seconds=i))
+    stamps = [c.ts.strftime("%H:%M") for c in b.candles()]
+    assert stamps == ["10:00", "10:05", "10:10", "10:15"], stamps   # last = bar still forming
+
+def t_demo_only_in_paper_sim():
+    prev = (_ai_settings.demo_mode, _ai_settings.trading_mode, _ai_settings.paper_data_source)
+    try:
+        _ai_settings.demo_mode = True
+        _ai_settings.trading_mode, _ai_settings.paper_data_source = "PAPER", "SIM"
+        assert _ai_settings.demo_active
+        _ai_settings.paper_data_source = "KITE"
+        assert not _ai_settings.demo_active, "demo must never run on real prices"
+        _ai_settings.paper_data_source, _ai_settings.trading_mode = "SIM", "LIVE"
+        assert not _ai_settings.demo_active, "demo must never run in LIVE"
+    finally:
+        _ai_settings.demo_mode, _ai_settings.trading_mode, _ai_settings.paper_data_source = prev
+
+def t_demo_clock_starts_in_market_hours():
+    prev = (_ai_settings.demo_mode, _clk._demo_anchor)
+    try:
+        _ai_settings.demo_mode, _clk._demo_anchor = True, None
+        n = _clk.now_ist()
+        assert n.weekday() < 5 and n.hour == 10 and n.minute == 0, n
+        assert _clk.is_market_open()
+        _ai_settings.demo_mode = False
+        assert abs((_clk.now_ist() - datetime.now(_clk._IST)).total_seconds()) < 2, "real clock when off"
+    finally:
+        _ai_settings.demo_mode, _clk._demo_anchor = prev
+
+def t_dashboard_summary_shape():
+    import main as _main
+    def body():
+        ai = _ai_mod.ai_trader
+        _ai_tick("DASH1", 1000.0)
+        with _patch.object(_main, "ai_trader", ai):
+            oid = asyncio.run(ai._place_trade(_trade_args("DASH1")))["order_id"]
+            _ai_tick("DASH1", 1012.0)
+            d = _main.dashboard_summary()
+        try:
+            for key in ("kpis", "positions", "agents", "ai", "watch", "activity", "mode", "time_ist"):
+                assert key in d, key
+            p = next(x for x in d["positions"] if x["id"] == oid)
+            assert p["stop"] == 990.0 and p["target"] == 1020.0 and p["pnl"] == 120.0, p
+            assert p["trailing"] == "AI" and p["r_multiple"] == 1.2
+            assert d["kpis"]["unrealised"] >= 120.0
+            assert {a["name"] for a in d["agents"]} >= {"intraday", "scalping", "swing", "fno", "ai"}
+        finally:
+            asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_risk_win_loss_counters():
+    from risk_manager import RiskManager
+    rm = RiskManager()
+    for pnl in (500, -200, 300, 0):
+        rm.record_trade(pnl)
+    assert (rm.wins_today, rm.losses_today, rm.gross_profit, rm.gross_loss) == (2, 1, 800, 200)
+    rm.reset_daily()
+    assert rm.wins_today == rm.losses_today == 0
+
+def t_scalping_uses_ist_clock():
+    import inspect
+    src = inspect.getsource(ScalpingAgent)
+    assert "datetime.now()" not in src, "Scalping must use now_ist(), not the server's local clock"
+
+run("5-minute buffer builds 5-minute bars",        t_tickbuffer_5min_bars)
+run("Demo mode only in PAPER + SIM",               t_demo_only_in_paper_sim)
+run("Demo clock starts 10:00 on a weekday",        t_demo_clock_starts_in_market_hours)
+run("/dashboard/summary positions + KPIs",         t_dashboard_summary_shape)
+run("Risk manager counts wins/losses",             t_risk_win_loss_counters)
+run("Scalping uses the IST clock",                 t_scalping_uses_ist_clock)
+
+def t_agent_tsl_starts_at_exchange_stop():
+    oid = _paper_entry(IntradayAgent(), "TSLSYNC", 1000.0)       # signal stop = 990.00
+    try:
+        sl_order = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
+        assert _tsl_eng._positions[oid].current_sl == sl_order["trigger_price"] == 990.0, \
+            "software stop must equal the exchange stop, or trailing can loosen it"
+    finally:
+        _ba._close_tracked(oid, "TSLSYNC", "BUY", _paper_pos("TSLSYNC")["quantity"], 0.0, "T", "intraday")
+
+run("Agent TSL starts at the exchange stop",       t_agent_tsl_starts_at_exchange_stop)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 13. SIGNAL ENGINE — indicator computation
