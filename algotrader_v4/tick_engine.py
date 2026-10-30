@@ -126,6 +126,8 @@ class LiveIndicators:
     stoch_rsi_d: float = 50.0
     # Williams %R (14) — range -100 to 0; >-20 overbought, <-80 oversold
     williams_r:  float = -50.0
+    # ADX (14) — trend strength, 0-100; >20 means a trend is present
+    adx_14:      float = 0.0
     computed_at: float = 0.0
 
 
@@ -286,6 +288,15 @@ def _williams_r(close: pd.Series, high: pd.Series, low: pd.Series, period: int =
         return -50.0
 
 
+def _adx(close: pd.Series, high: pd.Series, low: pd.Series, period: int = 14) -> float:
+    """Average Directional Index — trend strength (0-100). 0.0 when not computable."""
+    try:
+        val = float(ta.trend.ADXIndicator(high, low, close, window=period).adx().iloc[-1])
+        return round(val, 2) if not pd.isna(val) else 0.0
+    except Exception:
+        return 0.0
+
+
 # ── Indicator calculator ──────────────────────────────────────────────────────
 
 class IndicatorCalc:
@@ -368,6 +379,9 @@ class IndicatorCalc:
             if n >= 14:
                 ind.williams_r = _williams_r(close, high, low)
 
+            if n >= 28:   # ADX smoothing needs ~2× the window
+                ind.adx_14 = _adx(close, high, low)
+
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
 
@@ -449,11 +463,13 @@ class TickEngine:
     # ── Setup ─────────────────────────────────────────────────────────
 
     def subscribe(self, watchlist: list[dict]) -> None:
+        added = 0
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
             if sym in self._bufs_1min:   # already subscribed (e.g. bot restarted)
                 continue
+            added += 1
             self._symbols.append(sym)
             self._exchange[sym]  = exch
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
@@ -466,12 +482,16 @@ class TickEngine:
         logger.info("TickEngine: subscribed {} symbols via {}",
                     len(self._symbols), self.data_source())
 
+        # The WebSocket needs the symbol list, so (re)start it once symbols exist
+        if added and self._running:
+            self._start_ws()
+
     def data_source(self) -> str:
         """Human-readable label for where ticks come from."""
         if settings.trading_mode == "LIVE":
             return "KiteConnect REST+WS"
         if settings.paper_data_source == "KITE":
-            return "KiteConnect REST (paper orders)"
+            return "KiteConnect REST+WS (paper orders)"
         return "Paper simulator"
 
     def start_loop(self) -> None:
@@ -484,42 +504,51 @@ class TickEngine:
         self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._poll_loop())
 
-        # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback
-        if settings.trading_mode == "LIVE":
-            if settings.use_truedata_websocket and settings.truedata_username:
-                try:
-                    from truedata_client import truedata_ticker
-                    self._kite_ticker = truedata_ticker  # reuse slot; same interface
-                    truedata_ticker.start(
-                        self._symbols,
-                        self._ingest_kite_tick,
-                        self._loop,
-                    )
-                    self._use_ws = True
-                    logger.info("TickEngine: TrueData WebSocket started for {} symbols",
-                                len(self._symbols))
-                except Exception as exc:
-                    logger.error("TickEngine: TrueData WebSocket failed: {} — "
-                                 "falling back to Kite REST", exc)
-                    self._use_ws = False
-            elif settings.use_kite_websocket and settings.kite_access_token:
-                try:
-                    from kite_ticker import KiteTicker
-                    self._kite_ticker = KiteTicker()
-                    self._kite_ticker.start(
-                        self._symbols,
-                        self._ingest_kite_tick,
-                        self._loop,
-                    )
-                    self._use_ws = True
+        self._start_ws()
+        logger.info("TickEngine poll loop started (ws={})", self._use_ws)
+
+    def _start_ws(self) -> None:
+        """(Re)start the tick WebSocket for all subscribed symbols — TrueData preferred, Kite as fallback.
+        Needs symbols, so it runs from subscribe() (or start_loop() on a restart), not at server startup."""
+        if not settings.uses_kite_market_data or not self._symbols or not self._loop:
+            return
+        if self._kite_ticker:
+            self._kite_ticker.stop()
+            self._kite_ticker = None
+        self._use_ws = False
+        self._ws_received.clear()
+
+        if settings.use_truedata_websocket and settings.truedata_username:
+            try:
+                from truedata_client import truedata_ticker
+                self._kite_ticker = truedata_ticker  # reuse slot; same interface
+                truedata_ticker.start(
+                    self._symbols,
+                    self._ingest_kite_tick,
+                    self._loop,
+                )
+                self._use_ws = True
+                logger.info("TickEngine: TrueData WebSocket started for {} symbols",
+                            len(self._symbols))
+            except Exception as exc:
+                logger.error("TickEngine: TrueData WebSocket failed: {} — "
+                             "falling back to Kite REST", exc)
+        elif settings.use_kite_websocket and kite_client.has_session():
+            try:
+                from kite_ticker import KiteTicker
+                self._kite_ticker = KiteTicker()
+                self._use_ws = self._kite_ticker.start(
+                    self._symbols,
+                    self._ingest_kite_tick,
+                    self._loop,
+                )
+                if self._use_ws:
                     logger.info("TickEngine: KiteConnect WebSocket started for {} symbols",
                                 len(self._symbols))
-                except Exception as exc:
-                    logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
-                                 "falling back to Kite REST", exc)
-                    self._use_ws = False
-
-        logger.info("TickEngine poll loop started (ws={})", self._use_ws)
+            except Exception as exc:
+                logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
+                             "falling back to Kite REST", exc)
+                self._use_ws = False
 
     def stop(self) -> None:
         self._running = False
@@ -527,6 +556,8 @@ class TickEngine:
             self._task.cancel()
         if self._kite_ticker:
             self._kite_ticker.stop()
+            self._kite_ticker = None
+        self._use_ws = False
         logger.info("TickEngine stopped")
 
     # ── Subscriber management ─────────────────────────────────────────
@@ -636,8 +667,11 @@ class TickEngine:
 
     async def _fetch_kite_batch(self) -> None:
         """Single Kite quote() call for all non-WebSocket symbols (LIVE, or PAPER with Kite data)."""
+        # Poll over REST for symbols the WebSocket isn't covering — including all of
+        # them while the socket is disconnected (otherwise they'd go stale)
+        ws_live = self._use_ws and getattr(self._kite_ticker, "is_connected", True)
         pending = [s for s in self._symbols
-                   if not (self._use_ws and s in self._ws_received)]
+                   if not (ws_live and s in self._ws_received)]
         if not pending:
             return
         instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]

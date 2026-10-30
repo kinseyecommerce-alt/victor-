@@ -1,6 +1,6 @@
 """
 kite_ticker.py — KiteConnect WebSocket wrapper for AlgoTrader Pro v4
-Only active in LIVE mode with a valid access token.
+Active when ticks come from Kite (LIVE, or PAPER with PAPER_DATA_SOURCE=KITE) and a session exists.
 Maps NSE symbols → instrument tokens, subscribes in FULL mode.
 Feeds ticks directly into tick_engine via asyncio.run_coroutine_threadsafe().
 """
@@ -35,7 +35,7 @@ class KiteTicker:
     def load_instruments(self, symbols: list[str]) -> None:
         """Fetch instrument tokens for symbols from Kite instruments API."""
         try:
-            instruments = kite_client.kite.instruments("NSE")
+            instruments = kite_client.ensure_session().instruments("NSE")
             sym_set = set(symbols)
             for inst in instruments:
                 ts = inst.get("tradingsymbol", "")
@@ -52,18 +52,19 @@ class KiteTicker:
             logger.error("[KiteTicker] Failed to load instruments: {}", exc)
 
     def start(self, symbols: list[str], on_tick_callback: Callable,
-              loop: asyncio.AbstractEventLoop) -> None:
-        """Connect WebSocket. on_tick_callback(symbol, Tick) is called for each tick."""
+              loop: asyncio.AbstractEventLoop) -> bool:
+        """Connect WebSocket. on_tick_callback(symbol, Tick) is called for each tick.
+        Returns False if no instrument tokens could be resolved (WebSocket not started)."""
         self.load_instruments(symbols)
         if not self._token_map:
             logger.error("[KiteTicker] No instrument tokens found — WebSocket not started")
-            return
+            return False
 
         self._callback = on_tick_callback
         self._loop = loop
         self._kws = _KiteTicker(
             api_key=settings.kite_api_key,
-            access_token=settings.kite_access_token,
+            access_token=kite_client.ensure_session().access_token,
         )
         self._kws.on_ticks   = self._on_ticks
         self._kws.on_connect = self._on_connect
@@ -71,14 +72,18 @@ class KiteTicker:
         self._kws.on_close   = self._on_close
         self._kws.connect(threaded=True)
         logger.info("[KiteTicker] WebSocket connecting…")
+        return True
 
     def stop(self) -> None:
         self._connected = False
         if self._kws:
             try:
-                self._kws.stop()
+                # close(), not stop(): stop() halts the Twisted reactor for good,
+                # so the WebSocket could never reconnect after a bot restart
+                self._kws.close()
             except Exception:
                 pass
+            self._kws = None
 
     # ── KiteConnect callbacks (called from C thread) ──────────────────────────
 

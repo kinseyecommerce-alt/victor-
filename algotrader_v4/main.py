@@ -303,13 +303,6 @@ def root_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/dashboard")
 
-@app.get("/gate/log", tags=["Intelligence"])
-def gate_log(n: int = 50):
-    """Last N Claude trade gate decisions (newest first)."""
-    from claude_trade_gate import get_gate_log
-    return {"decisions": get_gate_log(n), "total": n}
-
-
 # ── App auth (JWT) ──────────────────────────────────────────────────────────
 @app.post("/auth/login", tags=["Auth"])
 def app_login(form: OAuth2PasswordRequestForm = Depends()):
@@ -1009,10 +1002,8 @@ def config_validate():
     """Validate all required credentials and show current tick data source."""
     creds = kite_client.validate_credentials()
     use_ws = getattr(tick_engine, "_use_ws", False)
-    if settings.trading_mode == "LIVE":
+    if settings.uses_kite_market_data:
         ticker_source = "KITE_WS" if use_ws else "KITE_REST"
-    elif settings.paper_data_source == "KITE":
-        ticker_source = "KITE_REST"
     else:
         ticker_source = "PAPER"
     creds["paper_data_source"] = settings.paper_data_source

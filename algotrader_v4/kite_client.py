@@ -155,6 +155,18 @@ class KiteClient:
         logger.info("Kite auth OK (orders-only, rate-limited mode)")
         return token
 
+    def has_session(self) -> bool:
+        """True if a Kite session exists or can be opened from KITE_ACCESS_TOKEN."""
+        return self._kite is not None or bool(settings.kite_access_token)
+
+    def ensure_session(self) -> KiteConnect:
+        """Return the Kite session, opening one from KITE_ACCESS_TOKEN if needed."""
+        if self._kite is None:
+            if not settings.kite_access_token:
+                raise RuntimeError("No Kite session — connect Kite or set KITE_ACCESS_TOKEN")
+            self.set_access_token(access_token=settings.kite_access_token)
+        return self._kite
+
     @property
     def kite(self) -> KiteConnect:
         if self._kite is None:
@@ -284,11 +296,8 @@ class KiteClient:
         unless PAPER_DATA_SOURCE=KITE (read-only market data; orders stay simulated)."""
         if not settings.uses_kite_market_data or not instruments:
             return {}
-        if self._kite is None:
-            if not settings.kite_access_token:
-                raise RuntimeError("No Kite session — connect Kite or set KITE_ACCESS_TOKEN")
-            self.set_access_token(access_token=settings.kite_access_token)
-        return _with_retry(lambda: self.kite.quote(instruments), label="quote")
+        kite = self.ensure_session()
+        return _with_retry(lambda: kite.quote(instruments), label="quote")
 
     # ── Order placement ────────────────────────────────────────────────────
 

@@ -1419,7 +1419,7 @@ def t_paper_kite_ticks():
         asyncio.run(te._fetch_kite_batch())
         tick, _ = te.latest("RELIANCE")
         assert tick is not None and tick.ltp == 2500.0, f"tick={tick}"
-        assert te.data_source() == "KiteConnect REST (paper orders)"
+        assert te.data_source() == "KiteConnect REST+WS (paper orders)"
     _with_paper_kite(body)
 
 def t_paper_kite_orders_simulated():
@@ -1511,6 +1511,114 @@ def t_sl_and_exit_fail_still_tracked():
 
 run("SL-M rejected → entry closed at market, nothing registered", t_sl_fail_flattens_position)
 run("SL-M and exit both rejected → position stays tracked",      t_sl_and_exit_fail_still_tracked)
+
+# Tick WebSocket must start once symbols exist (not at empty server startup)
+class _FakeTicker:
+    instances: list = []
+    def __init__(self):
+        self.started_with, self.stopped, self.is_connected = None, False, True
+        _FakeTicker.instances.append(self)
+    def start(self, symbols, cb, loop):
+        self.started_with = list(symbols); return True
+    def stop(self):
+        self.stopped = True
+
+def t_ws_starts_after_subscribe():
+    from unittest.mock import patch
+    import kite_ticker as _kt
+    def body():
+        async def inner():
+            _FakeTicker.instances.clear()
+            te = TickEngine()
+            with patch.object(_kt, "KiteTicker", _FakeTicker):
+                te.start_loop()                       # server startup — no symbols yet
+                assert not _FakeTicker.instances, "WS must not start with no symbols"
+                te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+                assert te._use_ws and _FakeTicker.instances[-1].started_with == ["RELIANCE"]
+                te.subscribe([{"symbol": "TCS", "exchange": "NSE"}])
+                first, latest = _FakeTicker.instances[0], _FakeTicker.instances[-1]
+                assert first.stopped and latest.started_with == ["RELIANCE", "TCS"]
+                te.stop()
+                assert latest.stopped and not te._use_ws
+                te.start_loop()                       # bot restart
+                assert _FakeTicker.instances[-1].started_with == ["RELIANCE", "TCS"]
+                te.stop()
+        asyncio.run(inner())
+    _with_paper_kite(body)
+
+def t_rest_covers_disconnected_ws():
+    def body():
+        te = TickEngine()
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        fake = _FakeTicker(); fake.is_connected = False
+        te._kite_ticker, te._use_ws = fake, True
+        te._ws_received.add("RELIANCE")
+        asyncio.run(te._fetch_kite_batch())
+        tick, _ = te.latest("RELIANCE")
+        assert tick is not None, "REST must poll symbols while the WebSocket is down"
+    _with_paper_kite(body)
+
+def t_kite_ticker_stop_keeps_reactor():
+    from kite_ticker import KiteTicker as _RealKT
+    class _Kws:
+        closed = halted = False
+        def close(self, *a): self.closed = True
+        def stop(self):      self.halted = True
+    kt = _RealKT(); kws = _Kws(); kt._kws = kws
+    kt.stop()
+    assert kws.closed and not kws.halted, "stop() must close(), not halt the Twisted reactor"
+
+run("Kite WebSocket starts once symbols are subscribed",  t_ws_starts_after_subscribe)
+run("REST polling covers symbols while WS is disconnected", t_rest_covers_disconnected_ws)
+run("KiteTicker.stop() closes socket, keeps reactor",     t_kite_ticker_stop_keeps_reactor)
+
+# No method may be silently overridden by a later duplicate in the same class
+def t_no_duplicate_methods():
+    import ast, collections
+    for path in ("agents/strategy_agents.py", "agents/base_agent.py"):
+        tree = ast.parse(open(path).read())
+        for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+            names = [f.name for f in cls.body
+                     if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            dups = [n for n, c in collections.Counter(names).items() if c > 1]
+            assert not dups, f"{path} {cls.name} defines twice: {dups}"
+
+def t_scalping_uses_pattern_detector():
+    import inspect
+    assert "_detect_pattern" in inspect.getsource(ScalpingAgent.evaluate_tick)
+
+def t_no_duplicate_routes():
+    import ast, collections
+    tree = ast.parse(open("main.py").read())
+    routes = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in node.decorator_list:
+                if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                        and getattr(d.func.value, "id", "") == "app" and d.args
+                        and d.func.attr != "middleware"
+                        and isinstance(d.args[0], ast.Constant)):
+                    routes.append((d.func.attr, d.args[0].value))
+    dups = [r for r, c in collections.Counter(routes).items() if c > 1]
+    assert not dups, f"duplicate routes (later ones never run): {dups}"
+
+def t_adx_computed():
+    n = 40
+    dates = pd.date_range(end=datetime.now(), periods=n, freq="1min")
+    close = [100.0 + i * 0.5 for i in range(n)]          # steady uptrend
+    df = pd.DataFrame({"open": close, "high": [c + 0.6 for c in close],
+                       "low": [c - 0.4 for c in close], "close": close,
+                       "volume": [50000] * n}, index=dates)
+    tick = Tick(symbol="ADXT", ltp=close[-1], bid=close[-1]-0.1, ask=close[-1]+0.1,
+                volume=50000, change=0.0, change_pct=0.0, high=close[-1]+1,
+                low=close[-1]-1, open=close[0], timestamp=datetime.now())
+    ind = IndicatorCalc.compute("ADXT", tick, df)
+    assert ind.adx_14 > 20, f"ADX in a steady trend should be >20, got {ind.adx_14}"
+
+run("IndicatorCalc computes ADX(14)",           t_adx_computed)
+run("No class defines the same method twice",  t_no_duplicate_methods)
+run("ScalpingAgent uses the 5-pattern detector", t_scalping_uses_pattern_detector)
+run("main.py has no duplicate routes",          t_no_duplicate_routes)
 
 
 # ══════════════════════════════════════════════════════════════════════════
