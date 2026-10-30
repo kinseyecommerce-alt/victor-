@@ -1620,6 +1620,144 @@ run("No class defines the same method twice",  t_no_duplicate_methods)
 run("ScalpingAgent uses the 5-pattern detector", t_scalping_uses_pattern_detector)
 run("main.py has no duplicate routes",          t_no_duplicate_routes)
 
+# ── Exits: no leftover SL-M, full bookkeeping release; F&O tracked on the option ──
+import agents.base_agent as _ba
+from trailing_sl_engine import trailing_sl_engine as _tsl_eng
+from order_guard import order_guard as _og_x
+from risk_manager import risk_manager as _rm_x
+from sebi_compliance import sebi_compliance as _sebi_x
+
+def _paper_entry(agent, sym, ltp):
+    """Open a real paper position through agent._try_enter; returns its entry order id."""
+    from unittest.mock import patch
+    import tick_engine as _te_mod
+    async def _noop(*a, **k): return None
+    fake_tick = Tick(symbol=sym, ltp=ltp, bid=ltp, ask=ltp, volume=1, change=0.0,
+                     change_pct=0.0, high=ltp, low=ltp, open=ltp, timestamp=datetime.now())
+    _te_mod.tick_engine._latest_tick[sym] = fake_tick          # paper fill price
+    with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+         patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+         patch.object(_ba, "send_telegram", _noop):
+        asyncio.run(agent._try_enter(_make_snap(symbol=sym, ltp=ltp), "BUY",
+                                     {"stop_loss": round(ltp * 0.99, 2)}))
+    return next(oid for oid, e in _ba._tsl_sl_orders.items() if e["symbol"] == sym)
+
+def _paper_pos(sym):
+    return next((p for p in _te_kite_client._paper_positions if p["tradingsymbol"] == sym), None)
+
+def _order(oid):
+    return next(o for o in _te_kite_client._paper_orders if o["order_id"] == oid)
+
+def t_paper_sl_rests_and_fills_at_ltp():
+    agent = IntradayAgent()
+    oid = _paper_entry(agent, "PFILL", 500.0)
+    entry = _ba._tsl_sl_orders[oid]
+    assert _order(oid)["price"] == 500.0, "paper MARKET must fill at the live LTP, not ₹0"
+    assert _order(entry["sl_order_id"])["status"] == "TRIGGER PENDING"
+    assert _paper_pos("PFILL")["quantity"] > 0, "placing the SL-M must not flatten the position"
+    _ba._close_tracked(oid, "PFILL", "BUY", _paper_pos("PFILL")["quantity"], 0.0, "T", "intraday")
+
+def t_target2_cancels_sl_and_releases():
+    agent = IntradayAgent()
+    before = _rm_x.open_position_count
+    oid = _paper_entry(agent, "TGT2", 1000.0)
+    sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+    pos = _tsl_eng._positions[oid]
+    asyncio.run(_tsl_eng.on_target_hit(pos, 1100.0, 2))
+    assert _order(sl_oid)["status"] == "CANCELLED", "SL-M must be cancelled on target exit"
+    assert _paper_pos("TGT2")["quantity"] == 0
+    assert not _og_x.is_symbol_active_anywhere("TGT2"), "order_guard slot must be released"
+    assert _rm_x.open_position_count == before, "risk position count must drop back"
+    assert oid not in _tsl_eng._positions and oid not in _ba._tsl_sl_orders
+
+def t_strategy_exit_cancels_sl():
+    from unittest.mock import patch
+    agent = IntradayAgent()
+    oid = _paper_entry(agent, "STRX", 800.0)
+    sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+    async def _noop(*a, **k): return None
+    with patch.object(IntradayAgent, "should_exit_position", return_value=(True, "test")), \
+         patch.object(_ba, "send_telegram", _noop):
+        asyncio.run(agent._check_exits_on_tick(_make_snap(symbol="STRX", ltp=810.0)))
+    assert _order(sl_oid)["status"] == "CANCELLED"
+    assert _paper_pos("STRX")["quantity"] == 0
+    assert oid not in _tsl_eng._positions, "must deregister the ENTRY id, not the exit id"
+    assert not _og_x.is_symbol_active_anywhere("STRX")
+
+def t_exit_ignores_other_agents_positions():
+    from unittest.mock import patch
+    owner, other = IntradayAgent(), ScalpingAgent()
+    oid = _paper_entry(owner, "OWNX", 600.0)
+    with patch.object(ScalpingAgent, "should_exit_position", return_value=(True, "x")):
+        asyncio.run(other._check_exits_on_tick(_make_snap(symbol="OWNX", ltp=600.0)))
+    assert _paper_pos("OWNX")["quantity"] > 0, "an agent must not close another agent's position"
+    _ba._close_tracked(oid, "OWNX", "BUY", _paper_pos("OWNX")["quantity"], 0.0, "T", "intraday")
+
+def t_fno_tracked_on_option_premium():
+    from unittest.mock import patch
+    import tick_engine as _te_mod
+    opt = "NIFTYTEST24000CE"
+    class _OptKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 120.0} for i in instruments}
+    async def _noop(*a, **k): return None
+    def body():
+        _te_kite_client._kite = _OptKite()
+        agent = FnOAgent()
+        with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+             patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+             patch.object(_ba, "send_telegram", _noop):
+            asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
+                        {"option_symbol": opt, "exchange": "NFO", "lot_size": 75}))
+        oid = next(o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == opt)
+        try:
+            pos = _tsl_eng._positions[oid]
+            assert pos.symbol == opt and pos.entry_price == 120.0, (pos.symbol, pos.entry_price)
+            assert opt in agent._exit_only and opt in _te_mod.tick_engine.symbols()
+            # An index tick must not touch the option position (this used to fire target 2)
+            asyncio.run(_tsl_eng.on_tick("NIFTY", 24000.0, 15.0))
+            assert oid in _tsl_eng._positions and not pos.target2_hit
+            assert _og_x.is_symbol_active_anywhere("NIFTY") == ["fno"]
+        finally:
+            _ba._close_tracked(oid, opt, "BUY", 75, 0.0, "T", "fno")
+        assert not _og_x.is_symbol_active_anywhere("NIFTY"), "guard keyed on the underlying"
+    _with_paper_kite(body)
+
+def t_fno_skips_without_live_premium():
+    from unittest.mock import patch
+    class _NoQuote(_FakeKite):
+        def quote(self, instruments): return {}
+    def body():
+        _te_kite_client._kite = _NoQuote()
+        n = len(_te_kite_client._paper_orders)
+        with patch.object(_rm_x, "check_before_order", return_value=(True, "")):
+            asyncio.run(FnOAgent()._try_enter(_make_snap(symbol="BANKNIFTY", ltp=50000.0), "BUY",
+                        {"option_symbol": "BNTEST50000CE", "exchange": "NFO", "lot_size": 15}))
+        assert len(_te_kite_client._paper_orders) == n, "no order without a real premium"
+    _with_paper_kite(body)
+
+def t_bracket_callbacks_chain_to_agents():
+    from atomic_bracket import atomic_bracket_engine as _abe
+    _ba._setup_tsl_callbacks()
+    agent_hit = _tsl_eng.on_target_hit
+    _abe._install_tsl_callbacks()
+    try:
+        oid = _paper_entry(IntradayAgent(), "CHAIN", 300.0)
+        asyncio.run(_tsl_eng.on_target_hit(_tsl_eng._positions[oid], 330.0, 2))
+        assert oid not in _tsl_eng._positions, "agent position must still exit after a bracket"
+    finally:
+        _tsl_eng.on_target_hit = agent_hit
+        _tsl_eng.on_sl_hit     = _abe._prev_sl_hit
+        _tsl_eng.on_sl_moved   = _abe._prev_sl_moved
+
+run("Paper: MARKET fills at LTP, SL-M rests, position kept",  t_paper_sl_rests_and_fills_at_ltp)
+run("Target 2 exit cancels SL-M and releases bookkeeping",   t_target2_cancels_sl_and_releases)
+run("Strategy exit cancels SL-M, deregisters entry",         t_strategy_exit_cancels_sl)
+run("Agent never closes another agent's position",           t_exit_ignores_other_agents_positions)
+run("F&O tracked on option premium, not the index",          t_fno_tracked_on_option_premium)
+run("F&O skips entry when no live premium",                  t_fno_skips_without_live_premium)
+run("Bracket TSL callbacks hand agent positions back",       t_bracket_callbacks_chain_to_agents)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 13. SIGNAL ENGINE — indicator computation

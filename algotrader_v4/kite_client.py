@@ -497,6 +497,11 @@ class KiteClient:
         quantity, order_type, product, price, trigger_price, tag,
     ) -> str:
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+        # Stop orders rest until cancelled — exits in paper mode are driven by the
+        # software TSL / strategy rules. Filling them instantly (as before) flattened
+        # every position the moment its SL-M was placed.
+        resting = order_type in ("SL", "SL-M")
+        fill = price if price > 0 else (0.0 if resting else self._paper_ltp(tradingsymbol))
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -505,34 +510,52 @@ class KiteClient:
             "quantity":         quantity,
             "order_type":       order_type,
             "product":          product,
-            "price":            price,
+            "price":            fill,
+            "average_price":    0.0 if resting else fill,
             "trigger_price":    trigger_price,
-            "status":           "COMPLETE",
+            "status":           "TRIGGER PENDING" if resting else "COMPLETE",
             "tag":              tag,
             "placed_at":        datetime.now().isoformat(),
         }
         self._paper_orders.append(record)
-        self._update_paper_position(record)
+        if not resting:
+            self._update_paper_position(record)
         logger.info("[PAPER] {} {} {} qty={} @ ₹{} | id={}",
                     transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
+                    quantity, fill or trigger_price, order_id)
         return order_id
+
+    @staticmethod
+    def _paper_ltp(symbol: str) -> float:
+        """Last traded price the tick engine has seen — the paper fill price for market orders."""
+        from tick_engine import tick_engine   # local import: tick_engine imports this module
+        tick, _ = tick_engine.latest(symbol)
+        return float(tick.ltp) if tick else 0.0
 
     def _update_paper_position(self, order: dict) -> None:
         sym       = order["tradingsymbol"]
+        px        = order["price"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
         for pos in self._paper_positions:
             if pos["tradingsymbol"] == sym:
-                pos["quantity"] += qty_delta
+                old_q = pos["quantity"]
+                new_q = old_q + qty_delta
+                if old_q == 0 or (new_q != 0 and (old_q > 0) != (new_q > 0)):
+                    pos["average_price"] = px                  # fresh or flipped position
+                elif (old_q > 0) == (qty_delta > 0):           # adding to the position
+                    pos["average_price"] = round(
+                        (pos["average_price"] * abs(old_q) + px * abs(qty_delta)) / abs(new_q), 2)
+                pos["quantity"]   = new_q
+                pos["last_price"] = px
                 return
         self._paper_positions.append({
             "tradingsymbol": sym,
             "exchange":      order["exchange"],
             "product":       order["product"],
             "quantity":      qty_delta,
-            "average_price": order["price"],
-            "last_price":    order["price"],
+            "average_price": px,
+            "last_price":    px,
             "pnl":           0.0,
         })
 

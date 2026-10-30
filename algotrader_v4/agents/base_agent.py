@@ -25,9 +25,41 @@ from atomic_bracket import atomic_bracket_engine
 
 
 # ── TSL callback registry ────────────────────────────────────────────────────
-# Maps main order_id → {sl_order_id, product, exchange}
+# Maps entry order_id → {sl_order_id, product, exchange, symbol, guard_symbol, agent, side}
+#   symbol       — the traded instrument (equity, or the option leg for F&O)
+#   guard_symbol — the key order_guard tracks (the underlying for F&O)
 _tsl_sl_orders: dict[str, dict] = {}
 _tsl_callbacks_installed: bool = False
+
+
+def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
+                   pnl: float, tag: str, strategy: str) -> None:
+    """Fully close a tracked position: cancel its resting SL-M, exit at market,
+    and release every piece of bookkeeping. Safe to call once per position."""
+    entry = _tsl_sl_orders.pop(entry_oid, None) or {}
+    sl_oid = entry.get("sl_order_id")
+    if sl_oid:
+        # Must go before the exit: a leftover SL-M would later fire on a flat
+        # position and open an unintended reverse position
+        try:
+            kite_client.cancel_order(sl_oid)
+        except Exception as exc:
+            logger.error("[{}] could not cancel SL-M {} for {}: {}", strategy, sl_oid, symbol, exc)
+    try:
+        kite_client.place_order(
+            tradingsymbol=symbol,
+            exchange=entry.get("exchange", "NSE"),
+            transaction_type="SELL" if side == "BUY" else "BUY",
+            quantity=quantity, order_type="MARKET",
+            product=entry.get("product", "MIS"),
+            tag=tag,
+        )
+    except Exception as exc:
+        logger.critical("[{}] exit order for {} qty={} FAILED: {}", strategy, symbol, quantity, exc)
+    order_guard.release_order(entry.get("guard_symbol", symbol), strategy, side, pnl)
+    risk_manager.record_trade(pnl)
+    risk_manager.position_closed()
+    trailing_sl_engine.deregister(entry_oid)
 
 
 def _setup_tsl_callbacks() -> None:
@@ -39,7 +71,7 @@ def _setup_tsl_callbacks() -> None:
 
     async def _on_sl_moved(pos, old_sl: float, move_type: str) -> None:
         entry = _tsl_sl_orders.get(pos.order_id)
-        if not entry:
+        if not entry or not entry.get("sl_order_id"):
             return
         sl_oid = entry["sl_order_id"]
         try:
@@ -61,36 +93,14 @@ def _setup_tsl_callbacks() -> None:
             entry["sl_order_id"] = new_sl_oid
 
     async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
-        entry = _tsl_sl_orders.pop(pos.order_id, None)
-        if entry and entry.get("sl_order_id"):
-            try:
-                kite_client.cancel_order(entry["sl_order_id"])
-            except Exception:
-                pass
-        kite_client.place_order(
-            tradingsymbol=pos.symbol,
-            exchange=entry.get("exchange", "NSE") if entry else "NSE",
-            transaction_type="SELL" if pos.side == "BUY" else "BUY",
-            quantity=pos.quantity, order_type="MARKET",
-            product=entry.get("product", "MIS") if entry else "MIS",
-            tag=f"TSL-HIT-{pos.strategy}",
-        )
-        order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl)
-        risk_manager.record_trade(pnl)
-        risk_manager.position_closed()
-        trailing_sl_engine.deregister(pos.order_id)
+        _close_tracked(pos.order_id, pos.symbol, pos.side, pos.quantity, pnl,
+                       f"TSL-HIT-{pos.strategy}", pos.strategy)
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
         if level == 2:
-            entry = _tsl_sl_orders.pop(pos.order_id, None)
-            kite_client.place_order(
-                tradingsymbol=pos.symbol,
-                exchange=entry.get("exchange", "NSE") if entry else "NSE",
-                transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                quantity=pos.quantity, order_type="MARKET",
-                product=entry.get("product", "MIS") if entry else "MIS",
-                tag=f"TSL-T{level}-{pos.strategy}",
-            )
+            pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+            _close_tracked(pos.order_id, pos.symbol, pos.side, pos.quantity, pnl,
+                           f"TSL-T{level}-{pos.strategy}", pos.strategy)
 
     trailing_sl_engine.on_sl_moved   = _on_sl_moved
     trailing_sl_engine.on_sl_hit     = _on_sl_hit
@@ -187,6 +197,9 @@ class BaseAgent(ABC):
         self._queue: Optional[asyncio.Queue] = None
         self._task:  Optional[asyncio.Task]  = None
         self._approved: set[str] = set()
+        # Instruments this agent holds but doesn't trade signals on (F&O option legs):
+        # their ticks only drive exits
+        self._exit_only: set[str] = set()
 
     @abstractmethod
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -264,6 +277,14 @@ class BaseAgent(ABC):
             except asyncio.CancelledError:
                 break
 
+            if snap.symbol in self._exit_only:
+                try:
+                    await trailing_sl_engine.on_tick(
+                        snap.symbol, snap.tick.ltp, snap.indicators.atr_14)
+                    await self._check_exits_on_tick(snap)
+                except Exception as exc:
+                    logger.error("[{}] exit tick error {}: {}", self.name, snap.symbol, exc)
+                continue
             if snap.symbol not in self._approved:
                 continue
             if len(snap.candles_1min) < self.min_candles_1min:
@@ -404,13 +425,16 @@ class BaseAgent(ABC):
             atr=snap.indicators.atr_14,
         )
 
-        # Register SL-M order so TSL callbacks can modify/cancel it
-        if sl_order_id:
-            _tsl_sl_orders[order_id] = {
-                "sl_order_id": sl_order_id,
-                "product":     product,
-                "exchange":    exch,
-            }
+        # Track the position so every exit path can cancel its SL-M and release it
+        _tsl_sl_orders[order_id] = {
+            "sl_order_id":  sl_order_id,
+            "product":      product,
+            "exchange":     exch,
+            "symbol":       sym,
+            "guard_symbol": sym,
+            "agent":        self.name,
+            "side":         action,
+        }
 
         ind = snap.indicators
         await send_telegram(
@@ -438,10 +462,14 @@ class BaseAgent(ABC):
     # ── Exit ──────────────────────────────────────────────────────────
 
     async def _check_exits_on_tick(self, snap: MarketSnapshot) -> None:
-        # Symbols managed by atomic bracket are handled by TSL engine callbacks
-        # Only handle exits for positions NOT in atomic bracket
+        """Strategy-rule exits (should_exit_position) for positions this agent opened."""
         sym = snap.symbol
         ind = snap.indicators
+        tracked = next(((oid, e) for oid, e in _tsl_sl_orders.items()
+                        if e.get("symbol") == sym and e.get("agent") == self.name), None)
+        if tracked is None:
+            return   # not ours — another agent's or a manual position
+        entry_oid, entry = tracked
         for pos in kite_client.positions().get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
                 continue
@@ -450,17 +478,13 @@ class BaseAgent(ABC):
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
             qty  = abs(pos["quantity"])
-            pnl  = pos.get("pnl", 0)
-            oid  = kite_client.place_order(
-                tradingsymbol=sym, exchange=pos.get("exchange", "NSE"),
-                transaction_type=side, quantity=qty, order_type="MARKET",
-                product=pos.get("product", self.product), tag=f"Agent-{self.name}-EXIT",
-            )
-            order_guard.release_order(sym, self.name, "BUY" if side == "SELL" else "SELL", pnl)
-            risk_manager.record_trade(pnl)
-            risk_manager.position_closed()
+            if settings.trading_mode == "LIVE" and "pnl" in pos:
+                pnl = pos["pnl"]
+            else:
+                pnl = (snap.tick.ltp - pos.get("average_price", 0.0)) * pos["quantity"]
+            _close_tracked(entry_oid, sym, entry.get("side", "BUY" if side == "SELL" else "SELL"),
+                           qty, pnl, f"Agent-{self.name}-EXIT", self.name)
             self.state.pnl_today += pnl
-            trailing_sl_engine.deregister(oid)
             _dot = "\U0001f534" if pnl < 0 else "\U0001f7e2"
             await send_telegram(
                 f"{_dot} <b>[{self.name.upper()}]</b> EXIT {sym}\n"

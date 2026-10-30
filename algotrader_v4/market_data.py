@@ -294,6 +294,10 @@ class PaperTickSimulator:
             self._prices[sym] = price if price > 0 else 1000.0
             logger.info("Paper seed {} @ ₹{:.2f}", sym, self._prices[sym])
 
+    def set_price(self, symbol: str, price: float) -> None:
+        """Seed a symbol at a known price (e.g. an option leg yfinance can't quote)."""
+        self._prices[symbol] = max(price, 1.0)
+
     def next_tick(self, symbol: str) -> Quote:
         price = self._prices.get(symbol, 1000.0)
         shock = random.gauss(0, 0.00008)

@@ -463,27 +463,34 @@ class TickEngine:
     # ── Setup ─────────────────────────────────────────────────────────
 
     def subscribe(self, watchlist: list[dict]) -> None:
-        added = 0
+        added: list[str] = []
+        seeded: dict[str, float] = {}
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
             if sym in self._bufs_1min:   # already subscribed (e.g. bot restarted)
                 continue
-            added += 1
+            added.append(sym)
+            if item.get("seed_price"):
+                seeded[sym] = float(item["seed_price"])
             self._symbols.append(sym)
             self._exchange[sym]  = exch
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
 
         if not settings.uses_kite_market_data:
-            exchanges = {s: self._exchange[s] for s in self._symbols}
-            paper_sim.seed(self._symbols, exchanges)
+            for sym, px in seeded.items():           # e.g. option legs — yfinance can't price them
+                paper_sim.set_price(sym, px)
+            to_seed = [s for s in added if s not in seeded]
+            if to_seed:
+                paper_sim.seed(to_seed, {s: self._exchange[s] for s in to_seed})
 
         logger.info("TickEngine: subscribed {} symbols via {}",
                     len(self._symbols), self.data_source())
 
         # The WebSocket needs the symbol list, so (re)start it once symbols exist
-        if added and self._running:
+        # Only equities ride the WebSocket (it resolves NSE tokens); option legs use REST
+        if self._running and any(self._exchange[s] in ("NSE", "BSE") for s in added):
             self._start_ws()
 
     def data_source(self) -> str:

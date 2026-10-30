@@ -682,7 +682,12 @@ class FnOAgent(BaseAgent):
 
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         import math
-        from agents.base_agent import send_telegram, place_sl_with_retry, flatten_unprotected
+        from agents.base_agent import (
+            send_telegram, place_sl_with_retry, flatten_unprotected,
+            _setup_tsl_callbacks, _tsl_sl_orders,
+        )
+        from tick_engine import tick_engine
+        from loguru import logger
         from kite_client import kite_client
         from risk_manager import risk_manager
         from order_guard import order_guard
@@ -699,10 +704,23 @@ class FnOAgent(BaseAgent):
         atm_iv     = signal.get("atm_iv", 25.0)
         sf         = signal.pop("_gate_size_factor", 1.0)
 
-        # BS-approximate ATM premium for sizing
-        S         = snap.tick.ltp
-        iv        = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
-        opt_price = max(round(S * iv * math.sqrt(7.0 / 365.0) / math.sqrt(2 * math.pi), 2), 5.0)
+        # Option premium: the real quote whenever prices come from Kite. The
+        # Black-Scholes estimate is only used with the paper simulator, which has
+        # no option prices.
+        if settings.uses_kite_market_data:
+            try:
+                q = kite_client.quote_kite([f"{exch}:{opt_sym}"])
+                opt_price = float(q.get(f"{exch}:{opt_sym}", {}).get("last_price") or 0.0)
+            except Exception as exc:
+                logger.warning("[fno] option quote failed for {}: {}", opt_sym, exc)
+                opt_price = 0.0
+            if opt_price <= 0:
+                logger.warning("[fno] no live premium for {} — skipping entry", opt_sym)
+                return
+        else:
+            S         = snap.tick.ltp
+            iv        = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
+            opt_price = max(round(S * iv * math.sqrt(7.0 / 365.0) / math.sqrt(2 * math.pi), 2), 5.0)
 
         qty = lot_size
         if settings.use_kelly_sizing and sf < 1.0:
@@ -738,6 +756,10 @@ class FnOAgent(BaseAgent):
         )
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
 
+        # Stream the option leg so its exits are driven by the option's own price
+        tick_engine.subscribe([{"symbol": opt_sym, "exchange": exch, "seed_price": opt_price}])
+        self._exit_only.add(opt_sym)
+
         sl_pct  = signal.get("stop_loss_pct", 30)
         tgt_pct = signal.get("target_pct", 65)
         sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
@@ -756,10 +778,21 @@ class FnOAgent(BaseAgent):
         self.state.signals_fired += 1
         self.state.last_signal    = signal
 
+        # Track on the option itself — entry, SL and target are all option premiums.
+        # (Keying it on the underlying compared index points with premium rupees.)
+        _setup_tsl_callbacks()
+        _tsl_sl_orders[order_id] = {
+            "sl_order_id":  sl_order_id,
+            "product":      self.product,
+            "exchange":     exch,
+            "symbol":       opt_sym,
+            "guard_symbol": underlying,
+            "agent":        self.name,
+            "side":         action,
+        }
         trailing_sl_engine.register(
-            symbol=underlying, strategy=self.name, side=action,
+            symbol=opt_sym, strategy=self.name, side=action,
             entry_price=opt_price, quantity=qty, order_id=order_id,
-            atr=snap.indicators.atr_14,
         )
 
         await send_telegram(
