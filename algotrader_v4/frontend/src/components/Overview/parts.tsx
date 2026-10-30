@@ -24,6 +24,7 @@ export interface DashSummary {
         avg_decision_ms: number | null; api_key_set: boolean; trades_today: number }
   watch: { symbol: string; ltp: number; change_pct: number; trend: string; rsi: number }[]
   activity: { t: string; kind: string; text: string; source: string }[]
+  pnl_history?: { t: string; pnl: number }[]
 }
 
 export const inr = (v: number, digits = 0) =>

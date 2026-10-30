@@ -1072,6 +1072,31 @@ async def agent_chat(req: AgentChatRequest):
 
 
 # ── Dashboard overview (one call per refresh for the animated Overview page) ──
+from collections import deque as _deque
+_pnl_history: _deque = _deque(maxlen=5000)       # (IST hh:mm:ss, day P&L) every 5 s — survives reloads
+
+
+def _day_pnl() -> float:
+    from trailing_sl_engine import SLStatus
+    live = tick_engine.all_latest()
+    unreal = 0.0
+    for pos in list(trailing_sl_engine._positions.values()):
+        if pos.status == SLStatus.ACTIVE:
+            ltp = (live.get(pos.symbol) or {}).get("ltp") or pos.entry_price
+            unreal += (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+    return round(risk_manager.daily_realised_pnl + unreal, 2)
+
+
+async def _pnl_sampler() -> None:
+    while True:
+        try:
+            if is_market_open():
+                _pnl_history.append((now_ist().strftime("%H:%M:%S"), _day_pnl()))
+        except Exception as exc:
+            logger.debug("pnl sampler: {}", exc)
+        await asyncio.sleep(5)
+
+
 @app.get("/dashboard/summary", tags=["Dashboard"])
 def dashboard_summary():
     from trailing_sl_engine import SLStatus
@@ -1155,6 +1180,7 @@ def dashboard_summary():
                                   "last_alert", "api_key_set", "trades_today")},
         "watch": watch,
         "activity": activity[:50],
+        "pnl_history": [{"t": t, "pnl": v} for t, v in _pnl_history],
     }
 
 
@@ -1267,6 +1293,7 @@ async def on_startup():
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
+    asyncio.create_task(_pnl_sampler())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 

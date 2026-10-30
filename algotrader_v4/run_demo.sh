@@ -15,6 +15,7 @@ export PAPER_DATA_SOURCE=SIM
 export DEMO_MODE=true
 export SKIP_STARTUP_BACKTEST=true     # demo prices are synthetic — don't backtest on them
 export USE_MULTI_TIMEFRAME=false      # let the demo trade within minutes (keep it ON for real use)
+export COOLDOWN_AFTER_LOSS_SEC=60     # real default is 300 s; shorter keeps the demo moving
 export USE_CLAUDE_TRADE_GATE="${USE_CLAUDE_TRADE_GATE:-false}"
 
 WATCHLIST='[{"symbol":"RELIANCE","exchange":"NSE"},{"symbol":"TCS","exchange":"NSE"},

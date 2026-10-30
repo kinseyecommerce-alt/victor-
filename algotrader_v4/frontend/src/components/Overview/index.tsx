@@ -137,10 +137,12 @@ export default function Overview({ onOpenTrading }: { onOpenTrading: () => void 
         {/* Chart + risk */}
         <section className="grid grid-cols-1 lg:grid-cols-3 gap-5">
           <div className="panel lg:col-span-2 h-72 flex flex-col">
-            <div className="panel-title"><Activity size={14} /> Intraday P&L <span className="text-slate-500 font-normal">· this session</span></div>
+            <div className="panel-title"><Activity size={14} /> Intraday P&L <span className="text-slate-500 font-normal">· today</span></div>
             <div className="flex-1 min-h-0">
-              {pnlSeries.length > 1
-                ? <PnlChart data={pnlSeries} />
+              {(data?.pnl_history?.length ?? 0) > 1 || pnlSeries.length > 1
+                ? <PnlChart data={(data?.pnl_history?.length ?? 0) > 1
+                    ? [...data!.pnl_history!, { t: data!.time_ist, pnl: data!.kpis.day_pnl }]
+                    : pnlSeries} />
                 : <div className="h-full flex items-center justify-center text-sm text-slate-500">Collecting data…</div>}
             </div>
           </div>
