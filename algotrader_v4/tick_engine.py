@@ -452,6 +452,8 @@ class TickEngine:
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
+            if sym in self._bufs_1min:   # already subscribed (e.g. bot restarted)
+                continue
             self._symbols.append(sym)
             self._exchange[sym]  = exch
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
@@ -473,8 +475,12 @@ class TickEngine:
         return "Paper simulator"
 
     def start_loop(self) -> None:
-        """Called once FastAPI is running — starts the async polling loop and WebSocket."""
+        """Starts the async polling loop and WebSocket. Called at FastAPI startup and on bot restart."""
+        if self._running:
+            return
         self._running = True
+        self._use_ws = False
+        self._ws_received.clear()
         self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._poll_loop())
 

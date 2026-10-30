@@ -1432,6 +1432,86 @@ run("PAPER+SIM: quote_kite() returns empty",       t_paper_sim_quote_empty)
 run("PAPER+KITE: ticks come from Kite quotes",     t_paper_kite_ticks)
 run("PAPER+KITE: orders stay simulated",           t_paper_kite_orders_simulated)
 
+# Bot Stop → Start must resume ticks
+def t_te_restart_after_stop():
+    async def body():
+        te = TickEngine()
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        te.start_loop()
+        first = te._task
+        te.stop()
+        assert not te._running
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        te.start_loop()
+        assert te._running and te._task is not first and not te._task.done()
+        assert te.symbols() == ["RELIANCE"], te.symbols()
+        te.stop()
+    asyncio.run(body())
+
+def t_te_start_loop_idempotent():
+    async def body():
+        te = TickEngine()
+        te.start_loop()
+        first = te._task
+        te.start_loop()
+        assert te._task is first
+        te.stop()
+    asyncio.run(body())
+
+run("TickEngine restarts after stop() (bot Stop → Start)", t_te_restart_after_stop)
+run("start_loop() is a no-op while already running",       t_te_start_loop_idempotent)
+
+# Entry must never be left without an exchange SL-M
+def _run_entry_with_failing_sl(exit_fails: bool):
+    from unittest.mock import patch
+    from order_guard import order_guard as _og
+    from risk_manager import risk_manager as _rm
+    from sebi_compliance import sebi_compliance as _sebi
+    import agents.base_agent as _ba
+
+    placed = []
+    def fake_place(**kw):
+        placed.append(kw)
+        if kw["order_type"] == "SL-M":
+            raise RuntimeError("SL-M rejected")
+        if exit_fails and len(placed) > 1:
+            raise RuntimeError("exit rejected")
+        return f"OID-{len(placed)}"
+
+    async def _noop(*a, **k): return None
+
+    agent = IntradayAgent()
+    snap  = _make_snap(symbol="SLFAILTEST")
+    before = _rm.open_position_count
+    with patch.object(_ba.kite_client, "place_order", side_effect=fake_place), \
+         patch.object(_rm, "check_before_order", return_value=(True, "")), \
+         patch.object(_sebi, "pre_order_check", return_value=(True, "ALGO", "")), \
+         patch.object(_ba, "send_telegram", _noop), \
+         patch.object(_ba, "SL_RETRY_DELAY_S", 0):
+        asyncio.run(agent._try_enter(snap, "BUY", {"stop_loss": 2790.0}))
+    return placed, _og.is_symbol_active_anywhere("SLFAILTEST"), before, _rm.open_position_count
+
+def t_sl_fail_flattens_position():
+    placed, active, before, after = _run_entry_with_failing_sl(exit_fails=False)
+    types = [(p["order_type"], p["transaction_type"]) for p in placed]
+    assert types == [("MARKET", "BUY"), ("SL-M", "SELL"), ("SL-M", "SELL"),
+                     ("SL-M", "SELL"), ("MARKET", "SELL")], types
+    assert not active, "flattened entry must not stay registered in order_guard"
+    assert before == after, "flattened entry must not count as an open position"
+
+def t_sl_and_exit_fail_still_tracked():
+    from order_guard import order_guard as _og
+    from trailing_sl_engine import trailing_sl_engine as _tsl
+    placed, active, _, _ = _run_entry_with_failing_sl(exit_fails=True)
+    try:
+        assert active, "unexitable position must stay tracked so TSL can manage it"
+    finally:
+        _og.release_order("SLFAILTEST", "intraday", "BUY", 0.0)
+        _tsl.deregister("OID-1")
+
+run("SL-M rejected → entry closed at market, nothing registered", t_sl_fail_flattens_position)
+run("SL-M and exit both rejected → position stays tracked",      t_sl_and_exit_fail_still_tracked)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 13. SIGNAL ENGINE — indicator computation

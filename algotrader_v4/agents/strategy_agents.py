@@ -682,7 +682,7 @@ class FnOAgent(BaseAgent):
 
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         import math
-        from agents.base_agent import send_telegram
+        from agents.base_agent import send_telegram, place_sl_with_retry, flatten_unprotected
         from kite_client import kite_client
         from risk_manager import risk_manager
         from order_guard import order_guard
@@ -737,6 +737,19 @@ class FnOAgent(BaseAgent):
             tag="Agent-fno",
         )
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
+
+        sl_pct  = signal.get("stop_loss_pct", 30)
+        tgt_pct = signal.get("target_pct", 65)
+        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
+        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
+
+        # Protective SL-M goes in immediately; no position is kept without one
+        sl_order_id = await place_sl_with_retry(
+            self.name, opt_sym, exch, action, qty, self.product, sl_px)
+        if sl_order_id is None and await flatten_unprotected(
+                self.name, opt_sym, exch, action, qty, self.product):
+            return
+
         order_guard.register_order(underlying, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
@@ -747,18 +760,6 @@ class FnOAgent(BaseAgent):
             symbol=underlying, strategy=self.name, side=action,
             entry_price=opt_price, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
-        )
-
-        sl_pct  = signal.get("stop_loss_pct", 30)
-        tgt_pct = signal.get("target_pct", 65)
-        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
-        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
-
-        kite_client.place_order(
-            tradingsymbol=opt_sym, exchange=exch,
-            transaction_type="SELL", quantity=qty,
-            order_type="SL-M", product=self.product,
-            trigger_price=sl_px, tag="Agent-fno-SL",
         )
 
         await send_telegram(

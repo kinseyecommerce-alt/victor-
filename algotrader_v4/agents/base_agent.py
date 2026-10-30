@@ -97,6 +97,57 @@ def _setup_tsl_callbacks() -> None:
     trailing_sl_engine.on_target_hit = _on_target_hit
 
 
+# ── Entry protection ─────────────────────────────────────────────────────────
+SL_PLACE_RETRIES = 3
+SL_RETRY_DELAY_S = 0.2
+
+
+async def place_sl_with_retry(
+    agent: str, symbol: str, exchange: str, side: str,
+    quantity: int, product: str, trigger_price: float,
+) -> Optional[str]:
+    """Place the SL-M for a just-entered position. Returns the SL order id, or None if every attempt failed."""
+    for attempt in range(1, SL_PLACE_RETRIES + 1):
+        try:
+            return kite_client.place_order(
+                tradingsymbol=symbol, exchange=exchange,
+                transaction_type="SELL" if side == "BUY" else "BUY",
+                quantity=quantity, order_type="SL-M", product=product,
+                trigger_price=trigger_price, tag=f"Agent-{agent}-SL",
+            )
+        except Exception as exc:
+            logger.error("[{}] SL-M for {} failed (attempt {}/{}): {}",
+                         agent, symbol, attempt, SL_PLACE_RETRIES, exc)
+            if attempt < SL_PLACE_RETRIES:
+                await asyncio.sleep(SL_RETRY_DELAY_S)
+    return None
+
+
+async def flatten_unprotected(
+    agent: str, symbol: str, exchange: str, side: str,
+    quantity: int, product: str,
+) -> bool:
+    """Close a position whose SL-M could not be placed. Returns True if the exit order went through."""
+    try:
+        kite_client.place_order(
+            tradingsymbol=symbol, exchange=exchange,
+            transaction_type="SELL" if side == "BUY" else "BUY",
+            quantity=quantity, order_type="MARKET", product=product,
+            tag=f"Agent-{agent}-NOSL-EXIT",
+        )
+        logger.critical("[{}] SL-M rejected for {} — position closed at market", agent, symbol)
+        await send_telegram(f"⚠️ <b>[{agent.upper()}]</b> SL-M rejected for {symbol} — "
+                            f"entry closed at market")
+        return True
+    except Exception as exc:
+        logger.critical("[{}] SL-M AND exit both failed for {} qty={}: {} — "
+                        "position is OPEN without exchange SL, software TSL only",
+                        agent, symbol, quantity, exc)
+        await send_telegram(f"🚨 <b>[{agent.upper()}]</b> {symbol} qty={quantity} is OPEN "
+                            f"with NO exchange stop-loss. Check Kite now.")
+        return False
+
+
 @dataclass
 class AgentState:
     name:             str
@@ -320,13 +371,23 @@ class BaseAgent(ABC):
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
             return
 
+        product = signal.get("product", self.product)
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange=exch,
             transaction_type=action, quantity=qty,
-            order_type="MARKET", product=signal.get("product", self.product),
+            order_type="MARKET", product=product,
             tag=f"Agent-{self.name}",
         )
         sebi_compliance.record_order_id(self.name, sym, order_id)
+
+        # Protective SL-M goes in immediately; no position is kept without one
+        sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        sl_order_id = await place_sl_with_retry(
+            self.name, sym, exch, action, qty, product, sl)
+        if sl_order_id is None and await flatten_unprotected(
+                self.name, sym, exch, action, qty, product):
+            return
+
         order_guard.register_order(sym, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
@@ -343,22 +404,13 @@ class BaseAgent(ABC):
             atr=snap.indicators.atr_14,
         )
 
-        sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
-        product = signal.get("product", self.product)
-        sl_order_id = kite_client.place_order(
-            tradingsymbol=sym, exchange=exch,
-            transaction_type="SELL" if action == "BUY" else "BUY",
-            quantity=qty, order_type="SL-M",
-            product=product,
-            trigger_price=sl, tag=f"Agent-{self.name}-SL",
-        )
-
         # Register SL-M order so TSL callbacks can modify/cancel it
-        _tsl_sl_orders[order_id] = {
-            "sl_order_id": sl_order_id,
-            "product":     product,
-            "exchange":    exch,
-        }
+        if sl_order_id:
+            _tsl_sl_orders[order_id] = {
+                "sl_order_id": sl_order_id,
+                "product":     product,
+                "exchange":    exch,
+            }
 
         ind = snap.indicators
         await send_telegram(

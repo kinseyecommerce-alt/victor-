@@ -160,6 +160,8 @@ class MasterAgent:
             }
 
         tick_engine.subscribe(watchlist)
+        # stop() halts the tick loop; restart it so a Stop → Start cycle gets ticks again
+        tick_engine.start_loop()
 
         for strat in strategies:
             agent = ALL_AGENTS.get(strat)
