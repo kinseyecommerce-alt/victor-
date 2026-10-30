@@ -419,7 +419,8 @@ class TickEngine:
     """
     In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
     NSE India API fallback for symbols not yet received via WebSocket.
-    In PAPER mode: GBM simulator seeded from yfinance last price.
+    In PAPER mode: GBM simulator seeded from yfinance last price, or real Kite
+    REST quotes when PAPER_DATA_SOURCE=KITE (orders stay simulated either way).
     """
 
     def __init__(self) -> None:
@@ -443,6 +444,7 @@ class TickEngine:
         self._kite_ticker = None
         self._use_ws: bool = False
         self._ws_received: set[str] = set()
+        self._last_quote_warn: float = 0.0
 
     # ── Setup ─────────────────────────────────────────────────────────
 
@@ -455,13 +457,20 @@ class TickEngine:
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
 
-        if settings.trading_mode == "PAPER":
+        if not settings.uses_kite_market_data:
             exchanges = {s: self._exchange[s] for s in self._symbols}
             paper_sim.seed(self._symbols, exchanges)
 
         logger.info("TickEngine: subscribed {} symbols via {}",
-                    len(self._symbols),
-                    "KiteConnect REST+WS" if settings.trading_mode == "LIVE" else "Paper simulator")
+                    len(self._symbols), self.data_source())
+
+    def data_source(self) -> str:
+        """Human-readable label for where ticks come from."""
+        if settings.trading_mode == "LIVE":
+            return "KiteConnect REST+WS"
+        if settings.paper_data_source == "KITE":
+            return "KiteConnect REST (paper orders)"
+        return "Paper simulator"
 
     def start_loop(self) -> None:
         """Called once FastAPI is running — starts the async polling loop and WebSocket."""
@@ -599,15 +608,15 @@ class TickEngine:
         while self._running:
             t_start = time.monotonic()
 
-            if not is_market_open() and settings.trading_mode == "LIVE":
+            if not is_market_open() and settings.uses_kite_market_data:
                 await asyncio.sleep(30)
                 continue
 
-            if settings.trading_mode == "PAPER":
+            if settings.uses_kite_market_data:
+                await self._fetch_kite_batch()
+            else:
                 tasks = [self._fetch_and_process(sym) for sym in self._symbols]
                 await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                await self._fetch_kite_batch()
 
             # Sleep the remainder of 1 second
             elapsed = time.monotonic() - t_start
@@ -620,7 +629,7 @@ class TickEngine:
         await self._process_tick(symbol, tick, source="PAPER")
 
     async def _fetch_kite_batch(self) -> None:
-        """Single Kite quote() call for all non-WebSocket symbols in LIVE mode."""
+        """Single Kite quote() call for all non-WebSocket symbols (LIVE, or PAPER with Kite data)."""
         pending = [s for s in self._symbols
                    if not (self._use_ws and s in self._ws_received)]
         if not pending:
@@ -631,7 +640,10 @@ class TickEngine:
                 None, lambda: kite_client.quote_kite(instruments)
             )
         except Exception as exc:
-            logger.warning("[tick] Kite batch quote failed: {}", exc)
+            # Throttle: a missing/expired token would otherwise log every second
+            if time.monotonic() - self._last_quote_warn > 60:
+                self._last_quote_warn = time.monotonic()
+                logger.warning("[tick] Kite batch quote failed: {}", exc)
             return
         for sym in pending:
             exch = self._exchange.get(sym, "NSE")
@@ -670,7 +682,7 @@ class TickEngine:
                     "ema21":      round(ind.ema21, 2),
                     "macd_hist":      round(ind.macd_hist, 4),
                     "vol_ratio":      round(ind.volume_ratio, 2),
-                    "source":         "NSE" if settings.trading_mode == "LIVE" else "PAPER",
+                    "source":         "NSE" if settings.uses_kite_market_data else "PAPER",
                     "supertrend":     round(ind.supertrend, 2),
                     "supertrend_dir": ind.supertrend_dir,
                     "hma":            round(ind.hma, 2),

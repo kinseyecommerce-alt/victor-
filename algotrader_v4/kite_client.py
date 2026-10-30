@@ -280,9 +280,14 @@ class KiteClient:
 
     def quote_kite(self, instruments: list[str]) -> dict[str, dict]:
         """Batch live quotes from Kite. instruments = ['NSE:RELIANCE', 'NFO:NIFTY...'].
-        Returns Kite's quote dict keyed by 'EXCHANGE:SYMBOL'. Empty dict in PAPER mode."""
-        if settings.trading_mode == "PAPER" or not instruments:
+        Returns Kite's quote dict keyed by 'EXCHANGE:SYMBOL'. Empty dict in PAPER mode
+        unless PAPER_DATA_SOURCE=KITE (read-only market data; orders stay simulated)."""
+        if not settings.uses_kite_market_data or not instruments:
             return {}
+        if self._kite is None:
+            if not settings.kite_access_token:
+                raise RuntimeError("No Kite session — connect Kite or set KITE_ACCESS_TOKEN")
+            self.set_access_token(access_token=settings.kite_access_token)
         return _with_retry(lambda: self.kite.quote(instruments), label="quote")
 
     # ── Order placement ────────────────────────────────────────────────────

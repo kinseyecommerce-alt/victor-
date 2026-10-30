@@ -24,6 +24,8 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ## Trading Mode
 - **PAPER** (default): Simulates orders, no real money at risk
+  - `PAPER_DATA_SOURCE=SIM` (default): prices from a random simulator
+  - `PAPER_DATA_SOURCE=KITE`: real Kite market prices, orders still simulated (needs a Kite access token)
 - **LIVE**: Real Zerodha Kite orders
 
 ## Architecture

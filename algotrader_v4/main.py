@@ -993,7 +993,7 @@ def whitelist_ip(req: WhitelistIPRequest):
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
             "architecture": "tick-driven 1s",
-            "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
+            "market_data_source": tick_engine.data_source(),
             "market_open": is_market_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
@@ -1011,8 +1011,11 @@ def config_validate():
     use_ws = getattr(tick_engine, "_use_ws", False)
     if settings.trading_mode == "LIVE":
         ticker_source = "KITE_WS" if use_ws else "KITE_REST"
+    elif settings.paper_data_source == "KITE":
+        ticker_source = "KITE_REST"
     else:
         ticker_source = "PAPER"
+    creds["paper_data_source"] = settings.paper_data_source
     creds["ticker_source"] = ticker_source
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)

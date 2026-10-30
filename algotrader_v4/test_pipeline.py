@@ -1381,6 +1381,57 @@ run("EMA values are positive",                 t_te_indicator_ema)
 run("TickBuffer stores ticks",                 t_te_tick_buffer)
 run("add_subscriber() returns asyncio.Queue",  t_te_add_subscriber)
 
+# PAPER mode with real Kite prices (PAPER_DATA_SOURCE=KITE)
+from config import settings as _te_settings
+from kite_client import kite_client as _te_kite_client
+
+class _FakeKite:
+    def quote(self, instruments):
+        return {i: {"last_price": 2500.0, "ohlc": {"open": 2490.0, "high": 2510.0,
+                                                    "low": 2480.0, "close": 2495.0},
+                    "volume_traded": 1000, "depth": {}} for i in instruments}
+    def place_order(self, **kw):
+        raise AssertionError("real Kite order placed in PAPER mode")
+
+def _with_paper_kite(fn):
+    prev_mode, prev_src, prev_kite = (_te_settings.trading_mode,
+                                      _te_settings.paper_data_source, _te_kite_client._kite)
+    _te_settings.trading_mode, _te_settings.paper_data_source = "PAPER", "KITE"
+    _te_kite_client._kite = _FakeKite()
+    try:
+        fn()
+    finally:
+        _te_settings.trading_mode, _te_settings.paper_data_source = prev_mode, prev_src
+        _te_kite_client._kite = prev_kite
+
+def t_paper_sim_quote_empty():
+    prev = _te_settings.paper_data_source
+    _te_settings.paper_data_source = "SIM"
+    try:
+        assert _te_settings.trading_mode != "PAPER" or _te_kite_client.quote_kite(["NSE:RELIANCE"]) == {}
+    finally:
+        _te_settings.paper_data_source = prev
+
+def t_paper_kite_ticks():
+    def body():
+        te = TickEngine()
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        asyncio.run(te._fetch_kite_batch())
+        tick, _ = te.latest("RELIANCE")
+        assert tick is not None and tick.ltp == 2500.0, f"tick={tick}"
+        assert te.data_source() == "KiteConnect REST (paper orders)"
+    _with_paper_kite(body)
+
+def t_paper_kite_orders_simulated():
+    def body():
+        oid = _te_kite_client.place_order("RELIANCE", "NSE", "BUY", 1, tag="Test")
+        assert oid.startswith("PAPER-"), f"Got: {oid}"
+    _with_paper_kite(body)
+
+run("PAPER+SIM: quote_kite() returns empty",       t_paper_sim_quote_empty)
+run("PAPER+KITE: ticks come from Kite quotes",     t_paper_kite_ticks)
+run("PAPER+KITE: orders stay simulated",           t_paper_kite_orders_simulated)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 13. SIGNAL ENGINE — indicator computation

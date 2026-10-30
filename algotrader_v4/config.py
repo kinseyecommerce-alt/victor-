@@ -46,6 +46,8 @@ class Settings(BaseSettings):
 
     # Trading
     trading_mode: Literal["PAPER", "LIVE"] = "PAPER"
+    # PAPER-mode price feed: SIM = GBM simulator, KITE = real Kite quotes (orders stay simulated)
+    paper_data_source: Literal["SIM", "KITE"] = "SIM"
 
     # Risk
     max_daily_loss: float = 5000.0
@@ -124,6 +126,11 @@ class Settings(BaseSettings):
     @property
     def origins_list(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",")]
+
+    @property
+    def uses_kite_market_data(self) -> bool:
+        """True when ticks come from Kite: LIVE mode, or PAPER mode with PAPER_DATA_SOURCE=KITE."""
+        return self.trading_mode == "LIVE" or self.paper_data_source == "KITE"
 
 
 settings = Settings()
