@@ -20,7 +20,7 @@ from risk_manager import risk_manager
 
 class IntradayAgent(BaseAgent):
     """
-    Never-miss NSE intraday agent — 5 entry patterns, all market sessions covered.
+    Never-miss NSE intraday agent — 10 entry patterns, all market sessions covered.
 
     Patterns (fire independently, best score wins each tick):
       1. VWAP_TREND   — price+EMA above VWAP with RSI/MACD/volume (trend continuation)
@@ -28,6 +28,13 @@ class IntradayAgent(BaseAgent):
       3. ORB_BREAK    — opening range breakout (9:30-10:30 execution window)
       4. BREAKOUT     — 15-bar high/low break with heavy volume (≥1.5×)
       5. VWAP_RECLAIM — fresh VWAP cross with volume (regime change entry)
+      6. TTM_SQUEEZE  — squeeze release with momentum
+      7. VWAP_BAND_REVERT — fade a 3σ VWAP band touch
+      8. VWAP_REVERSION — fade a 0.5-2.5% VWAP stretch in a range (ADX<22)
+                          (strategy_signals._signals_vwap_reversion)
+      9. KELTNER_BREAKOUT — close through a Keltner band with ADX + DI + volume
+     10. CCI_MFI_DIP  — CCI back above -100 with low MFI, inside an EMA50 uptrend
+                        (mirror for shorts)
 
     Context bonuses (added to every pattern base score):
       EMA full align (0-2), VWAP side (0-1), RSI zone (0-1),
@@ -55,6 +62,7 @@ class IntradayAgent(BaseAgent):
         self._prev_ltp:        dict = {}
         self._prev_rsi:        dict = {}
         self._prev_squeeze:    dict = {}   # sym → squeeze_on last tick
+        self._prev_cci:        dict = {}   # sym → CCI(20) last tick
         self._orb_high:        dict = {}
         self._orb_low:         dict = {}
         self._orb_fired:       dict = {}
@@ -75,7 +83,9 @@ class IntradayAgent(BaseAgent):
         best_score, best_action, best_pattern = -1, "", ""
         for pat_fn in (self._pat_vwap_trend, self._pat_ema_pullback,
                        self._pat_orb_break, self._pat_breakout, self._pat_vwap_reclaim,
-                       self._pat_ttm_squeeze, self._pat_vwap_band_revert):
+                       self._pat_ttm_squeeze, self._pat_vwap_band_revert,
+                       self._pat_vwap_reversion, self._pat_keltner_breakout,
+                       self._pat_cci_mfi_dip):
             try:
                 action, base, pname = pat_fn(sym, snap, ind, ltp, t)
             except Exception:
@@ -234,6 +244,50 @@ class IntradayAgent(BaseAgent):
             return "BUY", 4, "VWAP_BAND_REVERT"
         return "", 0, ""
 
+    # ── Pattern 8: VWAP_REVERSION (from strategy_signals) ─────────────────────
+    # Range-day mean reversion: price stretched 0.5-2.5% from VWAP, no trend.
+
+    def _pat_vwap_reversion(self, sym, snap, ind, ltp, t):
+        if not ind.vwap or ind.vwap <= 0 or not ind.adx_14 or ind.adx_14 >= 22:
+            return "", 0, ""
+        dev = abs(ltp - ind.vwap) / ind.vwap * 100
+        if not (0.5 < dev < 2.5):
+            return "", 0, ""
+        if ltp < ind.vwap and ind.rsi_14 < 40:
+            return "BUY", 4, "VWAP_REVERSION"
+        if ltp > ind.vwap and ind.rsi_14 > 60:
+            return "SELL", 4, "VWAP_REVERSION"
+        return "", 0, ""
+
+    # ── Pattern 9: KELTNER_BREAKOUT ───────────────────────────────────────────
+    # Fresh break of a Keltner band, confirmed by a real trend (ADX≥20), the
+    # matching DI line in control, and heavy volume.
+
+    def _pat_keltner_breakout(self, sym, snap, ind, ltp, t):
+        ku, kl = ind.keltner_upper, ind.keltner_lower
+        if not (ku > 0 and kl > 0) or ind.adx_14 < 20 or ind.volume_ratio < 1.5:
+            return "", 0, ""
+        prev = self._prev_ltp.get(sym, ltp)
+        if prev <= ku < ltp and ind.plus_di > ind.minus_di:
+            return "BUY", 4, "KELTNER_BREAKOUT"
+        if prev >= kl > ltp and ind.minus_di > ind.plus_di:
+            return "SELL", 4, "KELTNER_BREAKOUT"
+        return "", 0, ""
+
+    # ── Pattern 10: CCI_MFI_DIP ───────────────────────────────────────────────
+    # Buy the dip in an uptrend: CCI recovers above -100 while money flow is
+    # still washed out. Mirror for shorts in a downtrend.
+
+    def _pat_cci_mfi_dip(self, sym, snap, ind, ltp, t):
+        if not ind.ema50 or ind.ema50 <= 0:
+            return "", 0, ""
+        prev_cci = self._prev_cci.get(sym, ind.cci_20)
+        if ltp > ind.ema50 and prev_cci < -100 <= ind.cci_20 and ind.mfi_14 < 40:
+            return "BUY", 4, "CCI_MFI_DIP"
+        if ltp < ind.ema50 and prev_cci > 100 >= ind.cci_20 and ind.mfi_14 > 60:
+            return "SELL", 4, "CCI_MFI_DIP"
+        return "", 0, ""
+
     # ── Context bonus (+0 to +6 points added to every pattern) ───────────────
 
     def _ctx_bonus(self, action: str, sym: str, ind: LiveIndicators, ltp: float) -> int:
@@ -305,6 +359,7 @@ class IntradayAgent(BaseAgent):
         self._prev_ltp[sym]    = ltp
         self._prev_rsi[sym]    = ind.rsi_14
         self._prev_squeeze[sym] = ind.squeeze_on
+        self._prev_cci[sym]    = ind.cci_20
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)
@@ -340,7 +395,7 @@ class IntradayAgent(BaseAgent):
 
 class FnOAgent(BaseAgent):
     """
-    Never-miss NSE/NFO options agent — 7 entry patterns, all market conditions covered.
+    Never-miss NSE/NFO options agent — 8 entry patterns, all market conditions covered.
 
     Patterns (fire independently, best score wins each tick):
       1. EMA_CROSS    — 9/21/50 EMA full alignment (highest conviction trend)
@@ -350,6 +405,8 @@ class FnOAgent(BaseAgent):
       5. BB_SQUEEZE   — Bollinger Band squeeze expanding → volatility breakout
       6. RSI_EXTREME  — RSI > 72 / < 28 with MACD confirmation (momentum)
       7. SURGE        — Large candle body (>0.4%) + heavy volume (>1.8×)
+      8. TREND_BREAKOUT — close outside the Bollinger band, ADX>26, RSI + MACD aligned
+                          (strategy_signals._signals_options)
 
     Context bonuses (added to every pattern score):
       IV rank, options flow, GEX regime, volume, MACD, skew
@@ -412,7 +469,7 @@ class FnOAgent(BaseAgent):
         # Update ORB range (9:15-9:30 window)
         self._update_orb(sym, snap, t)
 
-        # Run all 7 patterns — collect the best signal
+        # Run all 8 patterns — collect the best signal
         best_score, best_opt, best_pattern = -1, "", ""
         patterns = [
             self._pat_ema_cross,
@@ -422,6 +479,7 @@ class FnOAgent(BaseAgent):
             self._pat_bb_squeeze,
             self._pat_rsi_extreme,
             self._pat_surge,
+            self._pat_trend_breakout,
         ]
         for pat_fn in patterns:
             try:
@@ -565,6 +623,18 @@ class FnOAgent(BaseAgent):
         # Oversold with negative MACD → strong downward momentum, buy PE
         if ind.rsi_14 < 28 and ind.macd_hist < 0 and ind.volume_ratio > 1.3:
             return "PE", 3, "RSI_EXTREME"
+        return "", 0, ""
+
+    # ── Pattern 8: TREND_BREAKOUT (from strategy_signals._signals_options) ────
+    # Close outside the Bollinger band with a strong trend and aligned momentum.
+
+    def _pat_trend_breakout(self, sym, snap, ind, ltp, t):
+        if not (ind.bb_upper and ind.bb_lower) or ind.adx_14 <= 26:
+            return "", 0, ""
+        if ltp > ind.bb_upper and ind.rsi_14 > 58 and ind.macd_hist > 0:
+            return "CE", 4, "TREND_BREAKOUT"
+        if ltp < ind.bb_lower and ind.rsi_14 < 42 and ind.macd_hist < 0:
+            return "PE", 4, "TREND_BREAKOUT"
         return "", 0, ""
 
     # ── Pattern 7: SURGE — large candle body + volume ─────────────────────────
@@ -847,12 +917,26 @@ class FnOAgent(BaseAgent):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class SwingAgent(BaseAgent):
+    """
+    CNC delivery swing agent — long only, evaluated once a minute per symbol.
+
+    Patterns (first match wins, in this order):
+      1. EMA50_BOUNCE   — pullback to EMA50 inside an EMA200 uptrend, RSI 40-60
+      2. ICHIMOKU_TREND — Tenkan crosses above Kijun with price above the cloud
+                          and EMA200, +DI in control
+
+    SL/TGT: fixed 3% / 8% (matches should_exit_position).
+    """
     name    = "swing"
     product = "CNC"
     min_candles_1min = 200   # needs EMA200
 
     # Swing only evaluates once per minute (not every tick — saves noise)
     _last_eval: dict[str, float] = {}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._prev_tk_above: dict[str, bool] = {}   # sym → tenkan > kijun at last eval
 
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
         import time as _time
@@ -870,32 +954,46 @@ class SwingAgent(BaseAgent):
         if not ind.ema200:
             return "HOLD", None
 
-        # Long-term uptrend
-        trend_ok   = ltp > ind.ema200
-        # Price pulling back to EMA50 (within 1.5%)
+        pattern = ""
+        for pat_fn in (self._pat_ema50_bounce, self._pat_ichimoku_trend):
+            pattern = pat_fn(sym, ind, ltp)
+            if pattern:
+                break
+        if ind.ichimoku_tenkan and ind.ichimoku_kijun:
+            self._prev_tk_above[sym] = ind.ichimoku_tenkan > ind.ichimoku_kijun
+        if not pattern:
+            return "HOLD", None
+
+        sl  = round(ltp * 0.97, 2)   # 3% SL for swing
+        tgt = round(ltp * 1.08, 2)   # 8% target
+        return "BUY", {
+            "symbol":    sym,
+            "exchange":  "NSE",
+            "side":      "BUY",
+            "price":     ltp,
+            "stop_loss": sl,
+            "target":    tgt,
+            "product":   self.product,
+            "trigger":   f"{pattern} trend=UP rsi={ind.rsi_14:.0f}",
+        }
+
+    def _pat_ema50_bounce(self, sym: str, ind: LiveIndicators, ltp: float) -> str:
+        trend_ok   = ltp > ind.ema200                                   # long-term uptrend
         ema50_near = ind.ema50 > 0 and abs(ltp - ind.ema50) / ind.ema50 < 0.015
-        # Short EMA above long EMA
-        ema_up     = ind.ema21 > 0 and ind.ema50 > 0 and ind.ema21 > ind.ema50
-        # RSI in accumulation zone
-        rsi_ok     = 40 < ind.rsi_14 < 60
-        # Low volatility pullback (ATR not spiking)
-        low_vol    = ind.volatility != "HIGH"
+        rsi_ok     = 40 < ind.rsi_14 < 60                               # accumulation zone
+        low_vol    = ind.volatility != "HIGH"                           # calm pullback
+        return "EMA50-BOUNCE" if trend_ok and ema50_near and rsi_ok and low_vol else ""
 
-        if trend_ok and ema50_near and rsi_ok and low_vol:
-            sl  = round(ltp * 0.97, 2)   # 3% SL for swing
-            tgt = round(ltp * 1.08, 2)   # 8% target
-            return "BUY", {
-                "symbol":    sym,
-                "exchange":  "NSE",
-                "side":      "BUY",
-                "price":     ltp,
-                "stop_loss": sl,
-                "target":    tgt,
-                "product":   self.product,
-                "trigger":   f"EMA50-BOUNCE trend=UP rsi={ind.rsi_14:.0f}",
-            }
-
-        return "HOLD", None
+    def _pat_ichimoku_trend(self, sym: str, ind: LiveIndicators, ltp: float) -> str:
+        tk, kj, top = ind.ichimoku_tenkan, ind.ichimoku_kijun, ind.ichimoku_cloud_top
+        if not (tk and kj and top):
+            return ""
+        was_above = self._prev_tk_above.get(sym, tk > kj)
+        fresh_cross = not was_above and tk > kj
+        if (fresh_cross and ltp > top and ltp > ind.ema200
+                and ind.plus_di > ind.minus_di and ind.rsi_14 < 70):
+            return "ICHIMOKU-TREND"
+        return ""
 
     def should_exit_position(self, pos: dict, ind: LiveIndicators) -> tuple[bool, str]:
         entry = pos.get("average_price", ind.ltp)

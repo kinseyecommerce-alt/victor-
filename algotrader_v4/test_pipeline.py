@@ -1758,6 +1758,142 @@ run("F&O tracked on option premium, not the index",          t_fno_tracked_on_op
 run("F&O skips entry when no live premium",                  t_fno_skips_without_live_premium)
 run("Bracket TSL callbacks hand agent positions back",       t_bracket_callbacks_chain_to_agents)
 
+# ── New indicators ────────────────────────────────────────────────────────
+def _trend_df(n=120, step=0.05, seed=1):
+    rng   = np.random.default_rng(seed)
+    close = 100 + np.cumsum(rng.normal(step, 0.3, n))
+    return pd.DataFrame({"open": close - 0.1, "high": close + 0.4, "low": close - 0.4,
+                         "close": close, "volume": rng.integers(1000, 5000, n)},
+                        index=pd.date_range(end=datetime.now(), periods=n, freq="1min"))
+
+def _compute(df):
+    c = float(df["close"].iloc[-1])
+    tick = Tick(symbol="IND", ltp=c, bid=c, ask=c, volume=1, change=0.0, change_pct=0.0,
+                high=c, low=c, open=float(df["open"].iloc[0]), timestamp=datetime.now())
+    return IndicatorCalc.compute("IND", tick, df)
+
+def t_new_indicators_computed():
+    ind = _compute(_trend_df())
+    assert ind.keltner_lower < ind.keltner_mid < ind.keltner_upper
+    assert 0 <= ind.mfi_14 <= 100 and ind.cci_20 != 0
+    assert ind.plus_di > ind.minus_di, "uptrend: +DI must lead"
+    assert ind.ichimoku_tenkan > 0 and ind.ichimoku_kijun > 0
+    assert 0 < ind.ichimoku_cloud_bot <= ind.ichimoku_cloud_top
+
+def t_ichimoku_cloud_needs_history():
+    ind = _compute(_trend_df(n=60))      # < 52+26 bars: no cloud yet
+    assert ind.ichimoku_tenkan > 0 and ind.ichimoku_cloud_top == 0.0
+
+def t_new_indicators_in_live_feed():
+    te = TickEngine()
+    te.subscribe([{"symbol": "IND", "exchange": "NSE"}])
+    df = _trend_df()
+    te._latest_tick["IND"] = Tick(symbol="IND", ltp=1.0, bid=1.0, ask=1.0, volume=1, change=0.0,
+                                  change_pct=0.0, high=1.0, low=1.0, open=1.0,
+                                  timestamp=datetime.now())
+    te._latest_ind["IND"] = _compute(df)
+    row = te.all_latest()["IND"]
+    for k in ("adx_14", "keltner_u", "cci_20", "mfi_14", "ichimoku_cloud_top"):
+        assert k in row, k
+
+run("Keltner/CCI/MFI/Ichimoku/DI computed",     t_new_indicators_computed)
+run("Ichimoku cloud waits for 78 bars",          t_ichimoku_cloud_needs_history)
+run("New indicators exposed in all_latest()",    t_new_indicators_in_live_feed)
+
+# ── New strategy patterns ─────────────────────────────────────────────────
+import dataclasses as _dc
+
+def _ind(**kw):
+    return _dc.replace(_make_snap().indicators, **kw)
+
+def t_pat_vwap_reversion():
+    a = IntradayAgent()
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=15.0, rsi_14=35.0),
+                                 990.0, None)[0] == "BUY"
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=15.0, rsi_14=65.0),
+                                 1010.0, None)[0] == "SELL"
+    # trending (ADX ≥ 22) → no fade
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=30.0, rsi_14=35.0),
+                                 990.0, None)[0] == ""
+    # stretch too small (0.2%)
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=15.0, rsi_14=35.0),
+                                 998.0, None)[0] == ""
+
+def t_pat_keltner_breakout():
+    a = IntradayAgent()
+    up = _ind(keltner_upper=1000.0, keltner_lower=980.0, adx_14=25.0,
+              plus_di=30.0, minus_di=15.0, volume_ratio=2.0)
+    a._prev_ltp["S"] = 999.0
+    assert a._pat_keltner_breakout("S", None, up, 1001.0, None)[0] == "BUY"
+    a._prev_ltp["S"] = 1001.5                       # already above — not a fresh break
+    assert a._pat_keltner_breakout("S", None, up, 1002.0, None)[0] == ""
+    a._prev_ltp["S"] = 999.0                        # -DI in control → no long
+    assert a._pat_keltner_breakout("S", None, _dc.replace(up, plus_di=10.0), 1001.0, None)[0] == ""
+    dn = _ind(keltner_upper=1000.0, keltner_lower=980.0, adx_14=25.0,
+              plus_di=10.0, minus_di=30.0, volume_ratio=2.0)
+    a._prev_ltp["S"] = 981.0
+    assert a._pat_keltner_breakout("S", None, dn, 979.0, None)[0] == "SELL"
+
+def t_pat_cci_mfi_dip():
+    a = IntradayAgent()
+    a._prev_cci["S"] = -130.0
+    assert a._pat_cci_mfi_dip("S", None, _ind(ema50=900.0, cci_20=-90.0, mfi_14=30.0),
+                              1000.0, None)[0] == "BUY"
+    a._prev_cci["S"] = -130.0                       # below EMA50 → not a dip in an uptrend
+    assert a._pat_cci_mfi_dip("S", None, _ind(ema50=1100.0, cci_20=-90.0, mfi_14=30.0),
+                              1000.0, None)[0] == ""
+    a._prev_cci["S"] = 130.0
+    assert a._pat_cci_mfi_dip("S", None, _ind(ema50=1100.0, cci_20=90.0, mfi_14=70.0),
+                              1000.0, None)[0] == "SELL"
+
+def t_pat_fno_trend_breakout():
+    a = FnOAgent()
+    i = _ind(bb_upper=1000.0, bb_lower=950.0, adx_14=30.0, rsi_14=65.0, macd_hist=1.0)
+    assert a._pat_trend_breakout("S", None, i, 1005.0, None)[0] == "CE"
+    assert a._pat_trend_breakout("S", None, _dc.replace(i, adx_14=20.0), 1005.0, None)[0] == ""
+    j = _ind(bb_upper=1000.0, bb_lower=950.0, adx_14=30.0, rsi_14=35.0, macd_hist=-1.0)
+    assert a._pat_trend_breakout("S", None, j, 945.0, None)[0] == "PE"
+
+def t_pat_swing_ichimoku():
+    a = SwingAgent()
+    i = _ind(ichimoku_tenkan=1010.0, ichimoku_kijun=1000.0, ichimoku_cloud_top=980.0,
+             ema200=900.0, plus_di=25.0, minus_di=10.0, rsi_14=60.0)
+    a._prev_tk_above["S"] = False                   # fresh Tenkan/Kijun cross
+    assert a._pat_ichimoku_trend("S", i, 1020.0) == "ICHIMOKU-TREND"
+    a._prev_tk_above["S"] = True                    # no new cross
+    assert a._pat_ichimoku_trend("S", i, 1020.0) == ""
+    a._prev_tk_above["S"] = False                   # price inside the cloud
+    assert a._pat_ichimoku_trend("S", i, 975.0) == ""
+
+def t_intraday_new_patterns_wired():
+    import inspect
+    src = inspect.getsource(IntradayAgent.evaluate_tick)
+    for p in ("_pat_vwap_reversion", "_pat_keltner_breakout", "_pat_cci_mfi_dip"):
+        assert p in src, p
+    assert "_pat_trend_breakout" in inspect.getsource(FnOAgent.evaluate_tick)
+    assert "_pat_ichimoku_trend" in inspect.getsource(SwingAgent.evaluate_tick)
+
+def t_intraday_fires_keltner_end_to_end():
+    from unittest.mock import patch
+    a = IntradayAgent()
+    snap = _make_snap(symbol="KEL", ltp=1001.0, vwap=990.0, rsi=60.0, volume_ratio=2.0)
+    snap.indicators.keltner_upper, snap.indicators.keltner_lower = 1000.0, 980.0
+    snap.indicators.adx_14, snap.indicators.plus_di, snap.indicators.minus_di = 25.0, 30.0, 15.0
+    a._prev_ltp["KEL"] = 999.0
+    with patch("agents.strategy_agents.now_ist",
+               return_value=datetime(2026, 1, 15, 11, 0, 0)):
+        action, sig = a.evaluate_tick(snap)
+    assert action == "BUY" and sig and sig["stop_loss"] < 1001.0 < sig["target"], (action, sig)
+    assert "KELTNER_BREAKOUT" in sig["trigger"], sig["trigger"]
+
+run("VWAP_REVERSION fades range stretches only",     t_pat_vwap_reversion)
+run("KELTNER_BREAKOUT needs fresh break + DI",       t_pat_keltner_breakout)
+run("CCI_MFI_DIP buys dips in uptrend only",         t_pat_cci_mfi_dip)
+run("F&O TREND_BREAKOUT needs ADX > 26",             t_pat_fno_trend_breakout)
+run("Swing ICHIMOKU_TREND needs fresh cross > cloud", t_pat_swing_ichimoku)
+run("New patterns wired into agents",                t_intraday_new_patterns_wired)
+run("Intraday fires on a Keltner breakout tick",     t_intraday_fires_keltner_end_to_end)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 13. SIGNAL ENGINE — indicator computation

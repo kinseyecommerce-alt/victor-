@@ -128,6 +128,21 @@ class LiveIndicators:
     williams_r:  float = -50.0
     # ADX (14) — trend strength, 0-100; >20 means a trend is present
     adx_14:      float = 0.0
+    plus_di:     float = 0.0    # +DI (14) — bullish directional pressure
+    minus_di:    float = 0.0    # -DI (14) — bearish directional pressure
+    # Keltner Channel (EMA20 ± 2×ATR10)
+    keltner_upper: float = 0.0
+    keltner_mid:   float = 0.0
+    keltner_lower: float = 0.0
+    # CCI (20) — >+100 overbought / strong up, <-100 oversold / strong down
+    cci_20:      float = 0.0
+    # Money Flow Index (14) — volume-weighted RSI, 0-100
+    mfi_14:      float = 50.0
+    # Ichimoku (9, 26, 52): conversion/base lines and the cloud under the current bar
+    ichimoku_tenkan:     float = 0.0
+    ichimoku_kijun:      float = 0.0
+    ichimoku_cloud_top:  float = 0.0
+    ichimoku_cloud_bot:  float = 0.0
     computed_at: float = 0.0
 
 
@@ -288,13 +303,49 @@ def _williams_r(close: pd.Series, high: pd.Series, low: pd.Series, period: int =
         return -50.0
 
 
-def _adx(close: pd.Series, high: pd.Series, low: pd.Series, period: int = 14) -> float:
-    """Average Directional Index — trend strength (0-100). 0.0 when not computable."""
+def _num(series: pd.Series, idx: int = -1, default: float = 0.0) -> float:
+    """Float value at idx, or default when missing/NaN."""
     try:
-        val = float(ta.trend.ADXIndicator(high, low, close, window=period).adx().iloc[-1])
-        return round(val, 2) if not pd.isna(val) else 0.0
+        val = float(series.iloc[idx])
+        return default if pd.isna(val) else round(val, 2)
     except Exception:
-        return 0.0
+        return default
+
+
+def _adx(close: pd.Series, high: pd.Series, low: pd.Series,
+         period: int = 14) -> tuple[float, float, float]:
+    """(ADX, +DI, -DI). ADX = trend strength (0-100); DI lines give its direction."""
+    try:
+        adx = ta.trend.ADXIndicator(high, low, close, window=period)
+        return _num(adx.adx()), _num(adx.adx_pos()), _num(adx.adx_neg())
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
+def _keltner(close: pd.Series, high: pd.Series, low: pd.Series) -> tuple[float, float, float]:
+    """Keltner Channel (EMA20 ± 2×ATR10) → (upper, mid, lower)."""
+    try:
+        kc = ta.volatility.KeltnerChannel(high, low, close, window=20, window_atr=10,
+                                          original_version=False, multiplier=2)
+        return _num(kc.keltner_channel_hband()), _num(kc.keltner_channel_mband()), \
+               _num(kc.keltner_channel_lband())
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
+def _ichimoku(high: pd.Series, low: pd.Series) -> tuple[float, float, float, float]:
+    """Ichimoku → (tenkan, kijun, cloud_top, cloud_bottom).
+    The cloud under today's bar is the span pair computed 26 bars ago."""
+    try:
+        ich = ta.trend.IchimokuIndicator(high, low, 9, 26, 52, visual=False)
+        tenkan, kijun = _num(ich.ichimoku_conversion_line()), _num(ich.ichimoku_base_line())
+        top = bot = 0.0
+        if len(high) >= 52 + 26:
+            a, b = _num(ich.ichimoku_a(), -27), _num(ich.ichimoku_b(), -27)
+            top, bot = max(a, b), min(a, b)
+        return tenkan, kijun, top, bot
+    except Exception:
+        return 0.0, 0.0, 0.0, 0.0
 
 
 # ── Indicator calculator ──────────────────────────────────────────────────────
@@ -380,7 +431,19 @@ class IndicatorCalc:
                 ind.williams_r = _williams_r(close, high, low)
 
             if n >= 28:   # ADX smoothing needs ~2× the window
-                ind.adx_14 = _adx(close, high, low)
+                ind.adx_14, ind.plus_di, ind.minus_di = _adx(close, high, low)
+
+            if n >= 20:
+                ind.keltner_upper, ind.keltner_mid, ind.keltner_lower = _keltner(close, high, low)
+                ind.cci_20 = _num(ta.trend.CCIIndicator(high, low, close, 20).cci())
+
+            if n >= 15:
+                ind.mfi_14 = _num(ta.volume.MFIIndicator(
+                    high, low, close, volume, 14).money_flow_index(), default=50.0)
+
+            if n >= 52:
+                (ind.ichimoku_tenkan, ind.ichimoku_kijun,
+                 ind.ichimoku_cloud_top, ind.ichimoku_cloud_bot) = _ichimoku(high, low)
 
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
@@ -742,6 +805,17 @@ class TickEngine:
                     "stoch_rsi_k":    ind.stoch_rsi_k,
                     "stoch_rsi_d":    ind.stoch_rsi_d,
                     "williams_r":     ind.williams_r,
+                    "adx_14":         ind.adx_14,
+                    "plus_di":        ind.plus_di,
+                    "minus_di":       ind.minus_di,
+                    "keltner_u":      ind.keltner_upper,
+                    "keltner_l":      ind.keltner_lower,
+                    "cci_20":         ind.cci_20,
+                    "mfi_14":         ind.mfi_14,
+                    "ichimoku_tenkan":    ind.ichimoku_tenkan,
+                    "ichimoku_kijun":     ind.ichimoku_kijun,
+                    "ichimoku_cloud_top": ind.ichimoku_cloud_top,
+                    "ichimoku_cloud_bot": ind.ichimoku_cloud_bot,
                     "ts":             tick.timestamp.isoformat(),
                 }
         return result

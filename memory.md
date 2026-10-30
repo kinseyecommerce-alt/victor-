@@ -81,6 +81,11 @@ KiteConnect WebSocket (LIVE) or GBM simulator (PAPER)
 | `vwap_upper2/3`, `vwap_lower2/3` | VWAP Bands (2σ/3σ) |
 | `stoch_rsi_k`, `stoch_rsi_d` | Stochastic RSI (14,3,3) |
 | `williams_r` | Williams %R (14) — added run-3 |
+| `adx_14`, `plus_di`, `minus_di` | ADX (14) + directional lines |
+| `keltner_upper/mid/lower` | Keltner Channel (EMA20 ± 2×ATR10) |
+| `cci_20` | Commodity Channel Index (20) |
+| `mfi_14` | Money Flow Index (14) |
+| `ichimoku_tenkan/kijun`, `ichimoku_cloud_top/bot` | Ichimoku (9,26,52); cloud needs 78 bars |
 | `trend`, `momentum`, `volatility` | Derived labels |
 
 ### IndicatorCalc API
@@ -99,10 +104,20 @@ candles = buf.candles()
 ## Strategy Agents
 
 ### IntradayAgent patterns
-`VWAP_TREND`, `EMA_PULLBACK`, `ORB_BREAK`, `BREAKOUT`, `VWAP_RECLAIM`, `TTM_SQUEEZE`, `VWAP_BAND_REVERT`
+`VWAP_TREND`, `EMA_PULLBACK`, `ORB_BREAK`, `BREAKOUT`, `VWAP_RECLAIM`, `TTM_SQUEEZE`, `VWAP_BAND_REVERT`, `VWAP_REVERSION`, `KELTNER_BREAKOUT`, `CCI_MFI_DIP`
 
 ### ScalpingAgent patterns
-`EMA9X`, `EMA921X`, `VWAP_BOUNCE`, `SURGE`, `ORB`, `SUPERTREND_FLIP`
+`EMA9X`, `EMA921X`, `VWAP_BOUNCE`, `SURGE`, `ORB`, `SUPERTREND_FLIP` (in `_detect_pattern`)
+
+### FnOAgent patterns
+`EMA_CROSS`, `TREND_PULL`, `ORB`, `VWAP_RECLAIM`, `BB_SQUEEZE`, `RSI_EXTREME`, `SURGE`, `TREND_BREAKOUT`
+
+### SwingAgent patterns
+`EMA50-BOUNCE`, `ICHIMOKU-TREND`
+
+### Claude skills (`.claude/skills/`)
+`/preflight` (read-only GO/NO-GO), `/paper-session` (PAPER only), `/trade-review`, `/backtest`, `/abi`.
+Skills read `ALGO_URL` (default `http://127.0.0.1:8000`) and `ALGO_API_KEY` from the environment.
 
 Pattern scoring: base_score + context bonus ≥ MIN_SCORE (4) to fire. Base scores: 3=weak, 4=solid, 5=strong, 6+=very strong.
 
