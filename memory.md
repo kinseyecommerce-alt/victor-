@@ -115,6 +115,19 @@ candles = buf.candles()
 ### SwingAgent patterns
 `EMA50-BOUNCE`, `ICHIMOKU-TREND`
 
+### Autonomous AI trader (`ai_trader.py`)
+Claude (`AI_AGENT_MODEL`, default `claude-opus-5-5`) runs a manual tool-use loop every
+`AI_AGENT_INTERVAL_MIN` minutes while enabled, and answers the dashboard **AI Trader** tab chat.
+- Tools: `get_market_overview`, `get_watchlist_quotes`, `get_symbol_detail`, `get_ai_positions`,
+  `place_trade`, `close_position` (strict schemas, fixed order → prompt-cached prefix).
+- Hard limits in code (`_place_trade`): `AI_AGENT_*` value cap, trades/day, open positions,
+  SL distance 0.2–2%, reward ≥ 1.5× risk, fresh tick, entry window 09:20–14:45, then
+  order_guard → risk_manager → SEBI (`ai` = `ALGO-AI-006`) → entry + SL-M (flatten on SL failure).
+- PAPER only unless `AI_AGENT_ALLOW_LIVE=true`. Daily API cost cap stops cycles. Code closes all AI
+  positions at 15:00. Stops (TSL) and targets are enforced from the tick feed between cycles.
+- API: `GET /agent/status`, `POST /agent/start|stop|cycle|close-all|chat`, `GET /agent/log`.
+- Tests use a fake client (`_FakeClient` in `test_pipeline.py`) — no API spend.
+
 ### Claude skills (`.claude/skills/`)
 `/preflight` (read-only GO/NO-GO), `/paper-session` (PAPER only), `/trade-review`, `/backtest`, `/abi`.
 Skills read `ALGO_URL` (default `http://127.0.0.1:8000`) and `ALGO_API_KEY` from the environment.

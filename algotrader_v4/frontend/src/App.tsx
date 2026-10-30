@@ -10,6 +10,7 @@ import BracketsTab from './components/tabs/BracketsTab'
 import RiskTab from './components/tabs/RiskTab'
 import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
+import AITab from './components/tabs/AITab'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import type { TabId } from './types'
@@ -20,6 +21,7 @@ const TABS: { id: TabId; label: string; emoji: string }[] = [
   { id: 'brackets', label: 'Brackets',  emoji: '🎯' },
   { id: 'risk',     label: 'Risk',      emoji: '⚠️' },
   { id: 'agents',   label: 'Agents',    emoji: '🤖' },
+  { id: 'ai',       label: 'AI Trader', emoji: '🧠' },
   { id: 'sebi',     label: 'SEBI',      emoji: '🛡️' },
 ]
 
@@ -29,6 +31,7 @@ const TAB_COMPONENTS: Record<TabId, React.ComponentType> = {
   brackets:  BracketsTab,
   risk:      RiskTab,
   agents:    AgentsTab,
+  ai:        AITab,
   sebi:      SebiTab,
 }
 

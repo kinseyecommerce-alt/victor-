@@ -81,7 +81,7 @@ app.openapi = _custom_openapi
 _EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/config/validate"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
-    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
+    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log", "/agent/log",
     "/docs", "/redoc",
 })
 
@@ -124,7 +124,7 @@ async def _ip_whitelist_gate(request: Request, call_next):
 # ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW = 60.0
-_RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10}
+_RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10, "/agent/chat": 10, "/agent/cycle": 4}
 
 @app.middleware("http")
 async def _rate_limiter(request: Request, call_next):
@@ -1017,6 +1017,57 @@ def config_validate():
         and creds.get("kite_initialised")
     )
     return creds
+
+
+# ── Autonomous AI trader (Claude) ─────────────────────────────────────────────
+from ai_trader import ai_trader
+
+class AgentStartRequest(BaseModel):
+    watchlist: list[dict] | None = None
+
+class AgentChatRequest(BaseModel):
+    message:         str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = Field(default=None, max_length=40)
+
+@app.get("/agent/status", tags=["AI Trader"])
+def agent_status():
+    return ai_trader.status()
+
+@app.post("/agent/start", tags=["AI Trader"])
+async def agent_start(req: AgentStartRequest):
+    """Turn on autonomous AI decision cycles (every AI_AGENT_INTERVAL_MIN minutes)."""
+    if not settings.anthropic_api_key:
+        raise HTTPException(400, "ANTHROPIC_API_KEY is not set")
+    watchlist = None
+    if req.watchlist:
+        watchlist = [{"symbol": _clean_symbol(w.get("symbol", "")), "exchange": "NSE"}
+                     for w in req.watchlist]
+    return ai_trader.start(watchlist)
+
+@app.post("/agent/stop", tags=["AI Trader"])
+async def agent_stop():
+    """Turn off autonomous cycles. Open AI positions keep their stops and close at 15:00."""
+    return ai_trader.stop()
+
+@app.post("/agent/cycle", tags=["AI Trader"])
+async def agent_cycle():
+    """Run one decision cycle now (same limits as the scheduled ones)."""
+    summary = await ai_trader.run_cycle()
+    return {"ran": summary is not None, "summary": summary, "status": ai_trader.status()}
+
+@app.post("/agent/close-all", tags=["AI Trader"])
+async def agent_close_all():
+    """Close every open AI position at market."""
+    return {"closed": await ai_trader.close_all("closed from dashboard")}
+
+@app.get("/agent/log", tags=["AI Trader"])
+def agent_log(n: int = 100):
+    return {"log": list(ai_trader.log)[-max(1, min(n, 300)):]}
+
+@app.post("/agent/chat", tags=["AI Trader"])
+async def agent_chat(req: AgentChatRequest):
+    """Chat with the AI trader. It uses the same tools and limits as its autonomous cycles."""
+    return await ai_trader.chat(req.message, req.conversation_id)
 
 
 # ── n8n Inbound Webhook ───────────────────────────────────────────────────────

@@ -15,6 +15,16 @@ const ax = () => {
   })
 }
 
+// Agent calls run a multi-step Claude loop — allow minutes, not seconds
+const axLong = () => {
+  const { base, key } = getConfig()
+  return axios.create({
+    baseURL: base,
+    headers: key ? { 'X-API-Key': key } : {},
+    timeout: 300000,
+  })
+}
+
 export const api = {
   health: () => ax().get('/health'),
   configValidate: () => ax().get('/config/validate'),
@@ -49,6 +59,16 @@ export const api = {
   agents: () => ax().get('/agents'),
   pauseAgent: (name: string) => ax().post(`/agents/${name}/pause`),
   resumeAgent: (name: string) => ax().post(`/agents/${name}/resume`),
+
+  // AI trader (Claude)
+  aiStatus: () => ax().get('/agent/status'),
+  aiStart: () => ax().post('/agent/start', {}),
+  aiStop: () => ax().post('/agent/stop'),
+  aiCycle: () => axLong().post('/agent/cycle'),
+  aiCloseAll: () => ax().post('/agent/close-all'),
+  aiLog: (n = 100) => ax().get(`/agent/log?n=${n}`),
+  aiChat: (message: string, conversation_id?: string | null) =>
+    axLong().post('/agent/chat', { message, conversation_id }),
 
   // SEBI
   sebiStatus: () => ax().get('/sebi/status'),

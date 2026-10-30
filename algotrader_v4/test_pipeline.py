@@ -564,7 +564,7 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 5
+    assert len(APPROVED_ALGO_IDS) == 6   # intraday, fno, swing, scalping, manual, ai
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -649,7 +649,7 @@ def t_sebi_strategy_disclosure():
 def t_sebi_full_disclosure():
     sc = SEBICompliance()
     doc = sc.get_disclosure_document()
-    assert len(doc["algo_strategies"]) == 5
+    assert len(doc["algo_strategies"]) == 6
 
 def t_sebi_ip_empty_allows_all():
     sc = SEBICompliance()
@@ -666,7 +666,7 @@ def t_sebi_otr_tracking():
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
     assert sc.status()["orders_placed_today"] == 1
 
-run("5 approved algo IDs registered",          t_sebi_5_algos)
+run("6 approved algo IDs registered",          t_sebi_5_algos)
 run("algo IDs have ALGO- prefix",              t_sebi_algo_id_format)
 run("pre_order_check approves valid order",    t_sebi_approves_valid)
 run("rejects unregistered strategy",           t_sebi_rejects_unknown_strategy)
@@ -680,7 +680,7 @@ run("record_order_id increments executed",     t_sebi_record_executed)
 run("audit log records today's orders",        t_sebi_audit_log_today)
 run("audit log filters by strategy",           t_sebi_audit_filter_strategy)
 run("strategy disclosure returns algo_id",     t_sebi_strategy_disclosure)
-run("full disclosure has 5 strategies",        t_sebi_full_disclosure)
+run("full disclosure has 6 strategies",        t_sebi_full_disclosure)
 run("empty whitelist allows all IPs",          t_sebi_ip_empty_allows_all)
 run("whitelist blocks non-whitelisted IPs",    t_sebi_ip_whitelist)
 run("OTR counter increments per check",        t_sebi_otr_tracking)
@@ -1893,6 +1893,304 @@ run("F&O TREND_BREAKOUT needs ADX > 26",             t_pat_fno_trend_breakout)
 run("Swing ICHIMOKU_TREND needs fresh cross > cloud", t_pat_swing_ichimoku)
 run("New patterns wired into agents",                t_intraday_new_patterns_wired)
 run("Intraday fires on a Keltner breakout tick",     t_intraday_fires_keltner_end_to_end)
+
+# ══════════════════════════════════════════════════════════════════════════
+# AI TRADER — agent loop with a fake Claude client; limits enforced in code
+# ══════════════════════════════════════════════════════════════════════════
+section("AI TRADER")
+import ai_trader as _ai_mod
+from ai_trader import AITrader, ToolRejected, TOOLS as _AI_TOOLS
+from types import SimpleNamespace as _NS
+from unittest.mock import patch as _patch
+from config import settings as _ai_settings
+
+_MKT_NOW = datetime(2026, 1, 15, 11, 0, 0)
+
+def _ai_tick(sym, ltp, age_s=0):
+    import tick_engine as _te_mod
+    _te_mod.tick_engine.subscribe([{"symbol": sym, "exchange": "NSE"}])
+    _te_mod.tick_engine._latest_tick[sym] = Tick(
+        symbol=sym, ltp=ltp, bid=ltp - 0.05, ask=ltp + 0.05, volume=1000, change=0.0,
+        change_pct=0.0, high=ltp, low=ltp, open=ltp, timestamp=datetime.now() - timedelta(seconds=age_s))
+    _te_mod.tick_engine._latest_ind[sym] = _make_snap(symbol=sym, ltp=ltp).indicators
+
+def _ai_env():
+    """Market open, risk check passing — the AI's own limits stay real."""
+    return [_patch.object(_ai_mod, "is_market_open", return_value=True),
+            _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW),
+            _patch.object(_rm_x, "check_before_order", return_value=(True, "")),
+            _patch.object(_ba, "send_telegram", _noop_async)]
+
+async def _noop_async(*a, **k): return None
+
+def _with_ai_env(fn):
+    _og_x._cooldown_until.clear()          # earlier losing tests leave a post-loss cooldown
+    ps = _ai_env()
+    for p in ps: p.start()
+    try:
+        return fn()
+    finally:
+        for p in ps: p.stop()
+
+def _trade_args(sym, side="BUY", qty=10, sl=990.0, tgt=1020.0):
+    return {"symbol": sym, "side": side, "quantity": qty, "stop_loss": sl, "target": tgt,
+            "reasoning": "test"}
+
+def t_ai_tool_schemas_strict():
+    names = [t["name"] for t in _AI_TOOLS]
+    assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
+                     "get_ai_positions", "place_trade", "close_position"], names
+    for t in _AI_TOOLS:
+        sch = t["input_schema"]
+        assert t["strict"] is True and sch["additionalProperties"] is False
+        assert set(sch["required"]) == set(sch["properties"]), t["name"]
+
+def t_ai_trade_lifecycle_paper():
+    def body():
+        ai = AITrader()
+        _ai_tick("AITEST", 1000.0)
+        out = asyncio.run(ai._place_trade(_trade_args("AITEST")))
+        assert out["status"] == "placed" and out["order_id"].startswith("PAPER-")
+        oid = out["order_id"]
+        entry = _ba._tsl_sl_orders[oid]
+        assert entry["agent"] == "ai" and _order(entry["sl_order_id"])["status"] == "TRIGGER PENDING"
+        assert _tsl_eng._positions[oid].current_sl == 990.0, "software stop must equal the AI's stop"
+        assert ai.trades_today == 1 and len(ai._ai_entries()) == 1
+        assert ai._positions()["open"][0]["target"] == 1020.0
+        res = asyncio.run(ai._close_position("AITEST", "test exit"))
+        assert res["status"] == "closed"
+        assert _order(entry["sl_order_id"])["status"] == "CANCELLED"
+        assert not ai._ai_entries() and not _og_x.is_symbol_active_anywhere("AITEST")
+    _with_ai_env(body)
+
+def t_ai_hard_limits():
+    def body():
+        ai = AITrader()
+        _ai_tick("AILIM", 1000.0)
+        cases = [
+            (_trade_args("AILIM", qty=100), "per-trade limit"),           # ₹1,00,000 > ₹50,000
+            (_trade_args("AILIM", sl=1005.0), "wrong side"),
+            (_trade_args("AILIM", sl=950.0, tgt=1100.0), "allowed"),       # 5% stop
+            (_trade_args("AILIM", sl=999.5, tgt=1001.0), "allowed"),       # 0.05% stop
+            (_trade_args("AILIM", tgt=1005.0), "need >= 1.5x"),            # 0.5x reward
+            (_trade_args("AILIM", side="HOLD"), "BUY or SELL"),
+            (_trade_args("NOTSTREAMING"), "not streaming"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_trade(args))
+                raise AssertionError(f"accepted: {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        _ai_tick("AISTALE", 1000.0, age_s=600)
+        try:
+            asyncio.run(ai._place_trade(_trade_args("AISTALE")))
+            raise AssertionError("stale quote accepted")
+        except ToolRejected as e:
+            assert "stale" in str(e)
+        assert ai.trades_today == 0 and not ai._ai_entries()
+        assert sum(1 for e in ai.log if e["kind"] == "rejected") == len(cases) + 1
+    _with_ai_env(body)
+
+def t_ai_trade_count_and_position_limits():
+    def body():
+        ai = AITrader()
+        syms = ["AIP1", "AIP2", "AIP3"]
+        for s in syms: _ai_tick(s, 1000.0)
+        asyncio.run(ai._place_trade(_trade_args("AIP1")))
+        asyncio.run(ai._place_trade(_trade_args("AIP2")))
+        try:
+            asyncio.run(ai._place_trade(_trade_args("AIP3")))
+            raise AssertionError("3rd open position accepted")
+        except ToolRejected as e:
+            assert "max open AI positions" in str(e)
+        asyncio.run(ai.close_all("test"))
+        ai.trades_today = _ai_settings.ai_agent_max_trades_per_day
+        try:
+            asyncio.run(ai._place_trade(_trade_args("AIP3")))
+            raise AssertionError("trade over daily limit accepted")
+        except ToolRejected as e:
+            assert "daily AI trade limit" in str(e)
+    _with_ai_env(body)
+
+def t_ai_live_blocked_by_default():
+    def body():
+        ai = AITrader()
+        _ai_tick("AILIVE", 1000.0)
+        prev = _ai_settings.trading_mode
+        _ai_settings.trading_mode = "LIVE"
+        try:
+            assert _ai_settings.ai_agent_allow_live is False
+            assert ai._mode_label() == "LIVE-BLOCKED"
+            try:
+                asyncio.run(ai._place_trade(_trade_args("AILIVE")))
+                raise AssertionError("LIVE trade accepted without AI_AGENT_ALLOW_LIVE")
+            except ToolRejected as e:
+                assert "AI_AGENT_ALLOW_LIVE" in str(e)
+        finally:
+            _ai_settings.trading_mode = prev
+    _with_ai_env(body)
+
+def t_ai_entry_window():
+    ai = AITrader()
+    with _patch.object(_ai_mod, "is_market_open", return_value=True), \
+         _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 14, 50)):
+        ok, why = ai._trading_allowed()
+    assert not ok and "entry window" in why
+
+def t_ai_target_hit_closes():
+    def body():
+        ai = AITrader()
+        _ai_tick("AITGT", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("AITGT")))["order_id"]
+        _ai_tick("AITGT", 1021.0)
+        asyncio.run(ai._on_snap(_make_snap(symbol="AITGT", ltp=1021.0)))
+        assert oid not in ai._ai_entries(), "target hit must close the AI position"
+        assert any(e["kind"] == "close" and "target" in e["text"] for e in ai.log)
+    _with_ai_env(body)
+
+def t_ai_stop_exit_logged():
+    def body():
+        ai = AITrader()
+        _ai_tick("AISTOP", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("AISTOP")))["order_id"]
+        _ai_tick("AISTOP", 985.0)
+        asyncio.run(ai._on_snap(_make_snap(symbol="AISTOP", ltp=985.0)))   # below the 990 stop
+        assert oid not in ai._ai_entries(), "stop must close the AI position"
+        assert any("stop-loss" in e["text"] for e in ai.log if e["kind"] == "close")
+    _with_ai_env(body)
+
+# ── Fake Claude client for the agent loop ─────────────────────────────────
+def _resp(content, stop, inp=1000, out=200):
+    return _NS(content=content, stop_reason=stop, stop_details=None,
+               usage=_NS(input_tokens=inp, output_tokens=out,
+                         cache_read_input_tokens=0, cache_creation_input_tokens=0))
+
+def _tu(id_, name, inp):
+    return _NS(type="tool_use", id=id_, name=name, input=inp)
+
+def _txt(t):
+    return _NS(type="text", text=t)
+
+class _FakeMessages:
+    def __init__(self, script):
+        self.script, self.calls = list(script), []
+    async def create(self, **kw):
+        kw = dict(kw, messages=list(kw["messages"]))   # snapshot: the loop keeps appending
+        self.calls.append(kw)
+        return self.script.pop(0)
+
+class _FakeClient:
+    def __init__(self, script):
+        self.messages = _FakeMessages(script)
+        self.beta = _NS(messages=self.messages)
+
+def t_ai_agent_loop_places_trade():
+    def body():
+        ai = AITrader()
+        ai._day = _MKT_NOW.date()
+        _ai_tick("AILOOP", 1000.0)
+        fake = _FakeClient([
+            _resp([_tu("t1", "get_market_overview", {}), _tu("t2", "get_ai_positions", {})], "tool_use"),
+            _resp([_tu("t3", "place_trade", _trade_args("AILOOP"))], "tool_use"),
+            _resp([_txt("Bought AILOOP on a VWAP trend setup.")], "end_turn"),
+        ])
+        ai._client = fake
+        prev = _ai_settings.anthropic_api_key
+        _ai_settings.anthropic_api_key = "test"
+        try:
+            summary = asyncio.run(ai.run_cycle())
+        finally:
+            _ai_settings.anthropic_api_key = prev
+        assert summary == "Bought AILOOP on a VWAP trend setup.", summary
+        assert ai.trades_today == 1 and ai.cycles_today == 1
+        calls = fake.messages.calls
+        assert len(calls) == 3
+        first = calls[0]
+        assert first["model"] == _ai_settings.ai_agent_model and first["tools"] == _AI_TOOLS
+        assert first["cache_control"] == {"type": "ephemeral"}
+        assert first["output_config"] == {"effort": _ai_settings.ai_agent_effort}
+        if _ai_settings.ai_agent_model in _ai_mod._FALLBACK_MODELS:
+            assert first["fallbacks"] == "default"
+        # both parallel tool results go back in ONE user message, ids matching
+        results = calls[1]["messages"][-1]["content"]
+        assert [r["tool_use_id"] for r in results] == ["t1", "t2"]
+        assert ai.cost_today_usd > 0
+        asyncio.run(ai.close_all("test"))
+    _with_ai_env(body)
+
+def t_ai_rejection_goes_back_as_error():
+    def body():
+        ai = AITrader()
+        _ai_tick("AIREJ", 1000.0)
+        fake = _FakeClient([
+            _resp([_tu("t1", "place_trade", _trade_args("AIREJ", qty=1000))], "tool_use"),
+            _resp([_txt("Too large; skipped.")], "end_turn"),
+        ])
+        ai._client = fake
+        msgs = [{"role": "user", "content": "go"}]
+        asyncio.run(ai._run_agent(msgs, "test"))
+        res = fake.messages.calls[1]["messages"][-1]["content"][0]
+        assert res["is_error"] is True and res["content"].startswith("REJECTED:")
+        assert ai.trades_today == 0
+    _with_ai_env(body)
+
+def t_ai_refusal_and_step_limit():
+    ai = AITrader()
+    ai._client = _FakeClient([_resp([], "refusal")])
+    assert "declined" in asyncio.run(ai._run_agent([{"role": "user", "content": "x"}], "t"))
+    ai2 = AITrader()
+    loop = [_resp([_tu(f"s{i}", "get_market_overview", {})], "tool_use")
+            for i in range(_ai_settings.ai_agent_max_steps)]
+    ai2._client = _FakeClient(loop)
+    with _patch.object(_ai_mod, "is_market_open", return_value=True), \
+         _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW):
+        out = asyncio.run(ai2._run_agent([{"role": "user", "content": "x"}], "t"))
+    assert "step limit" in out and len(ai2._client.messages.calls) == _ai_settings.ai_agent_max_steps
+
+def t_ai_cost_cap_stops_cycles():
+    ai = AITrader()
+    ai._day = _MKT_NOW.date()             # same day as the patched clock, so no daily reset
+    ai.cost_today_usd = _ai_settings.ai_agent_max_daily_cost_usd
+    ai._client = _FakeClient([])          # any API call would fail the test
+    prev = _ai_settings.anthropic_api_key
+    _ai_settings.anthropic_api_key = "test"
+    try:
+        with _patch.object(_ai_mod, "is_market_open", return_value=True), \
+             _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW):
+            assert asyncio.run(ai.run_cycle()) is None
+    finally:
+        _ai_settings.anthropic_api_key = prev
+    assert ai._client.messages.calls == []
+
+def t_ai_force_exit_at_1500():
+    def body():
+        ai = AITrader()
+        _ai_tick("AIEOD", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("AIEOD")))["order_id"]
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai.run_cycle())
+        assert oid not in ai._ai_entries(), "15:00 must close every AI position"
+    _with_ai_env(body)
+
+def t_ai_sebi_registered():
+    from sebi_compliance import APPROVED_ALGO_IDS
+    assert APPROVED_ALGO_IDS.get("ai") == "ALGO-AI-006"
+
+run("AI tools: strict schemas, fixed order",          t_ai_tool_schemas_strict)
+run("AI paper trade: entry, resting SL-M, close",     t_ai_trade_lifecycle_paper)
+run("AI hard limits reject bad trades",               t_ai_hard_limits)
+run("AI open-position and daily trade limits",        t_ai_trade_count_and_position_limits)
+run("AI cannot trade LIVE unless allowed",            t_ai_live_blocked_by_default)
+run("AI entry window closes at 14:45",                t_ai_entry_window)
+run("AI target hit closes position on tick",          t_ai_target_hit_closes)
+run("AI stop-loss exit closes and is logged",         t_ai_stop_exit_logged)
+run("AI agent loop: tools → trade → summary",         t_ai_agent_loop_places_trade)
+run("AI rejected action returned as tool error",      t_ai_rejection_goes_back_as_error)
+run("AI refusal handled; step limit enforced",        t_ai_refusal_and_step_limit)
+run("AI daily cost cap stops API calls",              t_ai_cost_cap_stops_cycles)
+run("AI positions force-closed at 15:00",             t_ai_force_exit_at_1500)
+run("AI algo registered for SEBI checks",             t_ai_sebi_registered)
 
 
 # ══════════════════════════════════════════════════════════════════════════

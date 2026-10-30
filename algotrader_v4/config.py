@@ -88,6 +88,20 @@ class Settings(BaseSettings):
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
 
+    # Autonomous AI trader (ai_trader.py) — every limit below is enforced in code,
+    # not left to the model. It trades NSE equities intraday (MIS) only.
+    ai_agent_model:               str   = "claude-opus-5-5"
+    ai_agent_effort:              Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    ai_agent_interval_min:        int   = 5        # minutes between autonomous decision cycles
+    ai_agent_allow_live:          bool  = False    # must be True for the AI to trade when TRADING_MODE=LIVE
+    ai_agent_max_trades_per_day:  int   = 5
+    ai_agent_max_open_positions:  int   = 2
+    ai_agent_max_position_value:  float = 50000.0  # ₹ per trade (qty × price)
+    ai_agent_max_sl_pct:          float = 2.0      # stop-loss must sit within this % of price
+    ai_agent_min_sl_pct:          float = 0.2      # …and at least this far away
+    ai_agent_max_steps:           int   = 12       # model ↔ tool round trips per cycle / chat turn
+    ai_agent_max_daily_cost_usd:  float = 20.0     # stop autonomous cycles once today's API spend reaches this
+
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode
 

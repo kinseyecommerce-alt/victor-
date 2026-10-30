@@ -37,6 +37,7 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "swing":    "ALGO-SWING-003",
     "scalping": "ALGO-SCALP-004",
     "manual":   "ALGO-MANUAL-005",
+    "ai":       "ALGO-AI-006",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
@@ -75,6 +76,17 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
         "holding_period": "Seconds to minutes",
         "risk_controls": "Tight stops, max 20 trades/day, 0.5% stop-loss",
         "parameters": {"spread_threshold": 0.05, "min_volume": 50000},
+    },
+    "ai": {
+        "name": "Claude Autonomous Trader",
+        "description": "LLM agent (Claude) reviews live quotes and indicators on a fixed cycle and "
+                       "places intraday trades through the same risk, order-guard and SEBI checks",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET", "SL-M"],
+        "holding_period": "Intraday only — AI positions closed by 15:00",
+        "risk_controls": "Mandatory SL-M within AI_AGENT_MAX_SL_PCT, per-trade value cap, max trades/day, "
+                         "max open positions, daily API-cost cap, PAPER-only unless AI_AGENT_ALLOW_LIVE",
+        "parameters": {},
     },
     "manual": {
         "name": "Manual API Orders",
