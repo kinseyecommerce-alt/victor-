@@ -3,8 +3,14 @@ ai_trader.py — Autonomous Claude trading agent for AlgoTrader Pro.
 
 Claude runs an agentic tool-use loop over the bot's own state: it reads quotes,
 indicators, regime and its own positions, and can open or close intraday
-(MIS) equity positions. It runs on a fixed cycle while enabled, and answers a
-dashboard chat with the same tools.
+(MIS) equity positions. It answers a dashboard chat with the same tools.
+
+Real time: code watches every tick (_detect, microseconds) — the intraday
+pattern engine, momentum bursts, and AI positions nearing their stop or
+flipping trend — and the moment one fires, Claude is called with that live
+data already in the prompt (_handle_event), so it can usually decide and
+place or close the order in a single step. A slower full review
+(AI_AGENT_INTERVAL_MIN) runs as a safety net.
 
 Safety model — the model decides, the code enforces:
   * every trade goes through _place_trade(), which applies the AI_AGENT_* hard
@@ -15,7 +21,9 @@ Safety model — the model decides, the code enforces:
   * autonomous cycles stop once today's estimated API spend hits the cap
   * at 15:00 IST every AI position is closed by code, not by the model
   * the TSL engine and AI targets are driven from the tick feed, so stops work
-    between cycles
+    between decisions
+  * real-time alerts: per-symbol cooldown, min gap between calls, stale alerts
+    dropped, and an entry is rejected if price drifted since the alert
 """
 from __future__ import annotations
 
@@ -76,6 +84,13 @@ noise. Stops and targets are already enforced automatically between your cycles.
 reached, do not try to work around it.
 - The tools enforce hard limits. If a tool rejects an action, accept it and do not retry the \
 same action with tweaked numbers to slip past a limit.
+
+Real-time alerts
+- A REAL-TIME ALERT message means code just detected something on a live tick and already gives \
+you the quote, indicators, recent candles, your positions and limits. Decide fast: act with \
+place_trade or close_position, or pass. Fetch more data only if something essential is missing. \
+An alert is a reason to look, not a reason to trade — most alerts should be passed.
+- If you pass, reply with one line starting "PASS:" and the reason.
 
 When you finish, reply with a short plain summary: what you looked at, what you did and why, or \
 why you did nothing. In chat, answer the owner's question directly and use tools for facts — \
@@ -155,6 +170,19 @@ class AITrader:
         self.tokens_today = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         self.last_cycle_at: Optional[str] = None
         self.last_summary: str = ""
+        # Real-time alerts
+        self._events: dict[str, dict] = {}             # symbol → latest pending alert (coalesced)
+        self._event_signal = asyncio.Event()
+        self._event_task: Optional[asyncio.Task] = None
+        self._trigger_ts: dict[tuple, float] = {}      # (symbol, kind) → monotonic time of last alert
+        self._prev_st: dict[str, str] = {}             # symbol → Supertrend dir at last tick
+        self._event_ltp: dict[str, float] = {}         # symbol → price at the alert being decided
+        self._last_call = 0.0
+        self._scout = None                             # IntradayAgent used only as a pattern detector
+        self.events_today = 0
+        self.decisions_today = 0
+        self._latencies: deque = deque(maxlen=50)
+        self.last_event: Optional[dict] = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -167,17 +195,24 @@ class AITrader:
             tick_engine.subscribe([{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]])
         self._ensure_tick_monitor()
         self.enabled = True
-        if not self._loop_task or self._loop_task.done():
+        if settings.ai_agent_interval_min > 0 and (not self._loop_task or self._loop_task.done()):
             self._loop_task = asyncio.create_task(self._cycle_loop())
-        self._record("system", f"autonomous trading ON ({self._mode_label()})")
+        if settings.ai_agent_realtime and (not self._event_task or self._event_task.done()):
+            self._event_task = asyncio.create_task(self._event_worker())
+        rt = "real-time alerts" if settings.ai_agent_realtime else "no real-time alerts"
+        review = (f"review every {settings.ai_agent_interval_min} min"
+                  if settings.ai_agent_interval_min > 0 else "no periodic review")
+        self._record("system", f"autonomous trading ON ({self._mode_label()}, {rt}, {review})")
         return self.status()
 
     def stop(self) -> dict:
         """Disable autonomous cycles. Open AI positions keep their stops and are still
         force-closed at 15:00."""
         self.enabled = False
-        if self._loop_task and not self._loop_task.done():
-            self._loop_task.cancel()
+        for task in (self._loop_task, self._event_task):
+            if task and not task.done():
+                task.cancel()
+        self._events.clear()
         self._record("system", "autonomous trading OFF")
         return self.status()
 
@@ -203,6 +238,13 @@ class AITrader:
             "tokens_today":      dict(self.tokens_today),
             "last_cycle_at":     self.last_cycle_at,
             "last_summary":      self.last_summary,
+            "realtime":          settings.ai_agent_realtime,
+            "realtime_effort":   settings.ai_agent_realtime_effort,
+            "alerts_today":      self.events_today,
+            "decisions_today":   self.decisions_today,
+            "pending_alerts":    len(self._events),
+            "avg_decision_ms":   int(sum(self._latencies) / len(self._latencies)) if self._latencies else None,
+            "last_alert":        self.last_event,
             "limits":            self._limits(),
             "api_key_set":       bool(settings.anthropic_api_key),
         }
@@ -277,14 +319,14 @@ class AITrader:
             self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         return self._client
 
-    async def _create(self, messages: list):
+    async def _create(self, messages: list, effort: Optional[str] = None):
         kwargs: dict[str, Any] = dict(
             model=settings.ai_agent_model,
             max_tokens=16000,
             system=SYSTEM_PROMPT,
             tools=TOOLS,
             messages=messages,
-            output_config={"effort": settings.ai_agent_effort},
+            output_config={"effort": effort or settings.ai_agent_effort},
             cache_control={"type": "ephemeral"},     # caches tools + system + history prefix
         )
         client = self._get_client()
@@ -294,11 +336,11 @@ class AITrader:
                 betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
         return await client.messages.create(**kwargs)
 
-    async def _run_agent(self, messages: list, purpose: str) -> str:
+    async def _run_agent(self, messages: list, purpose: str, effort: Optional[str] = None) -> str:
         """Manual tool-use loop, capped at ai_agent_max_steps model calls."""
         for _ in range(max(1, settings.ai_agent_max_steps)):
             try:
-                response = await self._create(messages)
+                response = await self._create(messages, effort)
             except anthropic.RateLimitError:
                 return "Claude API rate limit hit — try again shortly."
             except anthropic.AuthenticationError:
@@ -473,6 +515,10 @@ class AITrader:
         if self._tick_age(sym) > TICK_MAX_AGE_S:
             reject(f"{sym} quote is stale ({self._tick_age(sym)}s old)")
         ltp = float(tick.ltp)
+        ref = self._event_ltp.get(sym)
+        if ref and abs(ltp - ref) / ref * 100 > settings.ai_agent_max_drift_pct:
+            reject(f"price moved {abs(ltp - ref) / ref * 100:.2f}% since the alert "
+                   f"(₹{ref:.2f} → ₹{ltp:.2f}); the setup is stale")
         if qty <= 0:
             reject("quantity must be positive")
         if qty * ltp > settings.ai_agent_max_position_value:
@@ -604,6 +650,163 @@ class AITrader:
         self._note_stop_exits()
         if held and now_ist().time() >= FORCE_EXIT:
             await self.close_all("end of AI trading window (15:00)")
+        if self.enabled and settings.ai_agent_realtime:
+            self._detect(snap)
+
+    # ── Real-time: trigger detection (every tick, no API calls) ───────────
+
+    def _detect(self, snap) -> None:
+        sym, ind, ltp = snap.symbol, snap.indicators, snap.tick.ltp
+        st_prev = self._prev_st.get(sym)
+        self._prev_st[sym] = ind.supertrend_dir
+
+        held = [(o, e) for o, e in self._ai_entries().items() if e["symbol"] == sym]
+        if held:
+            oid, e = held[0]
+            pos = trailing_sl_engine._positions.get(oid)
+            if not pos:
+                return
+            long = e["side"] == "BUY"
+            risk = (pos.entry_price - pos.current_sl) if long else (pos.current_sl - pos.entry_price)
+            lost = (pos.entry_price - ltp) if long else (ltp - pos.entry_price)
+            if risk > 0 and lost / risk >= 0.6:
+                self._raise(snap, "position_risk",
+                            f"{e['side']} position has used {lost / risk:.0%} of its stop distance")
+            elif st_prev and st_prev != ind.supertrend_dir and ind.supertrend_dir == ("DOWN" if long else "UP"):
+                self._raise(snap, "trend_flip",
+                            f"Supertrend flipped {ind.supertrend_dir} against the {e['side']} position")
+            return
+
+        if not self._can_consider_entry(sym):
+            return
+        scout = self._get_scout()
+        if len(snap.candles_1min) >= scout.min_candles_1min:
+            try:
+                action, sig = scout.evaluate_tick(snap)
+            except Exception:
+                action, sig = "HOLD", None
+            if action in ("BUY", "SELL") and sig:
+                self._raise(snap, "setup", sig.get("trigger", action),
+                            {"side": action, "suggested_stop": sig.get("stop_loss"),
+                             "suggested_target": sig.get("target")})
+                return
+        if snap.candles_1min:
+            c = snap.candles_1min[-1]
+            move = (ltp - c.open) / c.open * 100 if c.open else 0.0
+            if abs(move) >= settings.ai_agent_burst_pct and ind.volume_ratio >= 2.0:
+                self._raise(snap, "momentum_burst",
+                            f"{move:+.2f}% within the current minute on {ind.volume_ratio:.1f}x volume")
+
+    def _can_consider_entry(self, sym: str) -> bool:
+        if not self._trading_allowed()[0] or not settings.anthropic_api_key:
+            return False
+        if self.cost_today_usd >= settings.ai_agent_max_daily_cost_usd:
+            return False
+        if self.trades_today >= settings.ai_agent_max_trades_per_day:
+            return False
+        if len(self._ai_entries()) >= settings.ai_agent_max_open_positions:
+            return False
+        return not order_guard.is_symbol_active_anywhere(sym)
+
+    def _get_scout(self):
+        if self._scout is None:
+            from agents.strategy_agents import IntradayAgent
+            self._scout = IntradayAgent()
+        return self._scout
+
+    def _raise(self, snap, kind: str, reason: str, extra: Optional[dict] = None) -> None:
+        import time as _t
+        key = (snap.symbol, kind)
+        now = _t.monotonic()
+        if now - self._trigger_ts.get(key, -1e9) < settings.ai_agent_trigger_cooldown_s:
+            return
+        self._trigger_ts[key] = now
+        ev = {"symbol": snap.symbol, "kind": kind, "reason": reason, "ltp": snap.tick.ltp,
+              "at": now_ist().strftime("%H:%M:%S"), "mono": now, **(extra or {})}
+        prev = self._events.get(snap.symbol)
+        if prev and prev["kind"] in ("position_risk", "trend_flip") and kind not in ("position_risk", "trend_flip"):
+            return                                   # never let an entry alert replace an exit alert
+        self._events[snap.symbol] = ev
+        self.events_today += 1
+        self.last_event = {k: ev[k] for k in ("symbol", "kind", "reason", "ltp", "at")}
+        self._record("alert", f"{kind} {snap.symbol} @ ₹{snap.tick.ltp:.2f}: {reason}")
+        self._event_signal.set()
+
+    # ── Real-time: alert worker (one Claude decision at a time) ───────────
+
+    async def _event_worker(self) -> None:
+        import time as _t
+        while self.enabled:
+            try:
+                await self._event_signal.wait()
+                self._event_signal.clear()
+                while self._events and self.enabled:
+                    # exits first, then oldest
+                    sym, ev = min(self._events.items(), key=lambda kv: (
+                        kv[1]["kind"] not in ("position_risk", "trend_flip"), kv[1]["mono"]))
+                    del self._events[sym]
+                    wait = settings.ai_agent_min_call_gap_s - (_t.monotonic() - self._last_call)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    await self._handle_event(ev)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                self._record("error", f"alert worker: {exc}")
+                logger.exception("[ai] alert worker failed")
+
+    async def _handle_event(self, ev: dict) -> Optional[str]:
+        """Ask Claude to decide on one alert. Returns its reply, or None if dropped."""
+        import time as _t
+        sym = ev["symbol"]
+        age = _t.monotonic() - ev["mono"]
+        if age > settings.ai_agent_event_max_age_s:
+            self._record("system", f"dropped stale alert {ev['kind']} {sym} ({age:.0f}s old)")
+            return None
+        if not settings.anthropic_api_key or self.cost_today_usd >= settings.ai_agent_max_daily_cost_usd:
+            return None
+        is_exit = ev["kind"] in ("position_risk", "trend_flip")
+        if not is_exit and not self._can_consider_entry(sym):
+            return None
+
+        async with self._cycle_lock:
+            self._last_call = _t.monotonic()
+            self._event_ltp[sym] = ev["ltp"]
+            t0 = _t.monotonic()
+            try:
+                messages = [{"role": "user", "content": self._alert_prompt(ev)}]
+                reply = await self._run_agent(messages, purpose="alert",
+                                              effort=settings.ai_agent_realtime_effort)
+            finally:
+                self._event_ltp.pop(sym, None)
+            ms = int((_t.monotonic() - t0) * 1000)
+            self._latencies.append(ms)
+            self.decisions_today += 1
+            self._record("decision", f"{ev['kind']} {sym} → {reply[:240]} ({ms / 1000:.1f}s)")
+            return reply
+
+    def _alert_prompt(self, ev: dict) -> str:
+        sym = ev["symbol"]
+        quote = tick_engine.all_latest().get(sym, {})
+        buf = tick_engine._bufs_1min.get(sym)
+        candles = [[c.ts.strftime("%H:%M"), round(c.open, 2), round(c.high, 2), round(c.low, 2),
+                    round(c.close, 2), c.volume] for c in (buf.candles()[-10:] if buf else [])]
+        allowed, blocked = self._trading_allowed()
+        data = {
+            "alert": {k: ev[k] for k in ev if k != "mono"},
+            "quote": quote,
+            "candles_1m_last10": {"columns": ["time", "open", "high", "low", "close", "volume"],
+                                  "rows": candles},
+            "your_positions": self._positions()["open"],
+            "can_open_trades": allowed,
+            "blocked_reason": blocked,
+            "limits": self._limits(),
+        }
+        action = ("Decide now whether to close this position early or keep it (its stop is "
+                  "already working)." if ev["kind"] in ("position_risk", "trend_flip")
+                  else "Decide now: place_trade if the setup is clearly good, otherwise PASS.")
+        return (f"REAL-TIME ALERT {ev['at']} IST — {ev['kind']} on {sym}: {ev['reason']}\n"
+                f"{action}\n{json.dumps(data, default=str)}")
 
     def _note_stop_exits(self) -> None:
         """Log AI positions that the stop-loss / trailing-stop path closed on its own."""

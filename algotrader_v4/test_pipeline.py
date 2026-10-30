@@ -2192,6 +2192,152 @@ run("AI daily cost cap stops API calls",              t_ai_cost_cap_stops_cycles
 run("AI positions force-closed at 15:00",             t_ai_force_exit_at_1500)
 run("AI algo registered for SEBI checks",             t_ai_sebi_registered)
 
+# ── Real-time alerts ──────────────────────────────────────────────────────
+class _FakeScout:
+    min_candles_1min = 0
+    def __init__(self, action="BUY"):
+        self.action = action
+    def evaluate_tick(self, snap):
+        if self.action == "HOLD":
+            return "HOLD", None
+        return self.action, {"trigger": "INTRA-BUY [KELTNER_BREAKOUT] score=6",
+                             "stop_loss": 990.0, "target": 1020.0}
+
+def _rt_ai(action="BUY"):
+    ai = AITrader()
+    ai._day = _MKT_NOW.date()
+    ai._scout = _FakeScout(action)
+    return ai
+
+def _with_key(fn):
+    prev = _ai_settings.anthropic_api_key
+    _ai_settings.anthropic_api_key = "test"
+    try:
+        return fn()
+    finally:
+        _ai_settings.anthropic_api_key = prev
+
+def t_rt_setup_alert_and_cooldown():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTSET", 1000.0)
+        ai._detect(_make_snap(symbol="RTSET", ltp=1000.0))
+        ev = ai._events.get("RTSET")
+        assert ev and ev["kind"] == "setup" and ev["side"] == "BUY" and ev["ltp"] == 1000.0, ev
+        assert "KELTNER_BREAKOUT" in ev["reason"]
+        del ai._events["RTSET"]
+        ai._detect(_make_snap(symbol="RTSET", ltp=1001.0))       # same setup again, within cooldown
+        assert "RTSET" not in ai._events, "cooldown must suppress a repeat alert"
+        assert ai.events_today == 1
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_no_entry_alert_when_blocked():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTBLK", 1000.0)
+        ai.trades_today = _ai_settings.ai_agent_max_trades_per_day
+        ai._detect(_make_snap(symbol="RTBLK", ltp=1000.0))
+        assert not ai._events, "no entry alerts once the daily trade limit is used"
+    _with_ai_env(lambda: _with_key(body))
+    ai = _rt_ai()
+    with _patch.object(_ai_mod, "is_market_open", return_value=False):
+        _with_key(lambda: ai._detect(_make_snap(symbol="RTBLK2", ltp=1000.0)))
+    assert not ai._events, "no entry alerts while the market is closed"
+
+def t_rt_momentum_burst():
+    def body():
+        ai = _rt_ai("HOLD")
+        snap = _make_snap(symbol="RTBURST", ltp=1010.0, volume_ratio=2.5)
+        snap.candles_1min[-1] = Candle(1000.0, 1010.0, 999.0, 1010.0, 9000, datetime.now())
+        ai._detect(snap)                                      # +1.0% inside the minute
+        assert ai._events.get("RTBURST", {}).get("kind") == "momentum_burst"
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_position_risk_alert_has_priority():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTPOS", 1000.0)
+        asyncio.run(ai._place_trade(_trade_args("RTPOS")))    # stop 990
+        ai._detect(_make_snap(symbol="RTPOS", ltp=993.0))     # 70% of the way to the stop
+        ev = ai._events.get("RTPOS")
+        assert ev and ev["kind"] == "position_risk", ev
+        ai._raise(_make_snap(symbol="RTPOS", ltp=993.0), "setup", "x")
+        assert ai._events["RTPOS"]["kind"] == "position_risk", "entry alert must not replace an exit alert"
+        asyncio.run(ai.close_all("test"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_decision_places_trade_in_one_step():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTGO", 1000.0)
+        ai._detect(_make_snap(symbol="RTGO", ltp=1000.0))
+        ev = ai._events.pop("RTGO")
+        ai._client = _FakeClient([
+            _resp([_tu("a1", "place_trade", _trade_args("RTGO"))], "tool_use"),
+            _resp([_txt("Entered on the Keltner breakout.")], "end_turn"),
+        ])
+        reply = asyncio.run(ai._handle_event(ev))
+        assert reply == "Entered on the Keltner breakout." and ai.trades_today == 1
+        first = ai._client.messages.calls[0]
+        prompt = first["messages"][0]["content"]
+        assert prompt.startswith("REAL-TIME ALERT") and '"quote"' in prompt and "RTGO" in prompt
+        assert first["output_config"] == {"effort": _ai_settings.ai_agent_realtime_effort}
+        assert ai.decisions_today == 1 and ai._latencies
+        asyncio.run(ai.close_all("test"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_drift_guard():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTDRIFT", 1005.0)                           # price now 0.5% above the alert
+        ai._event_ltp["RTDRIFT"] = 1000.0
+        try:
+            asyncio.run(ai._place_trade(_trade_args("RTDRIFT", sl=995.0, tgt=1025.0)))
+            raise AssertionError("entry accepted after price drifted past the limit")
+        except ToolRejected as e:
+            assert "since the alert" in str(e)
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_stale_alert_dropped():
+    import time as _t
+    def body():
+        ai = _rt_ai()
+        ai._client = _FakeClient([])                          # any API call fails the test
+        ev = {"symbol": "RTOLD", "kind": "setup", "reason": "x", "ltp": 1000.0, "at": "11:00:00",
+              "mono": _t.monotonic() - _ai_settings.ai_agent_event_max_age_s - 5}
+        assert asyncio.run(ai._handle_event(ev)) is None
+        assert ai._client.messages.calls == [] and ai.decisions_today == 0
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_worker_exits_first():
+    import time as _t
+    async def body():
+        ai = _rt_ai()
+        ai.enabled = True
+        order = []
+        async def fake_handle(ev):
+            order.append(ev["kind"])
+            if len(order) == 2:
+                ai.enabled = False
+        ai._handle_event = fake_handle
+        now = _t.monotonic()
+        ai._events = {"A": {"symbol": "A", "kind": "setup", "mono": now - 5},
+                      "B": {"symbol": "B", "kind": "position_risk", "mono": now}}
+        ai._event_signal.set()
+        with _patch.object(_ai_settings, "ai_agent_min_call_gap_s", 0):
+            await asyncio.wait_for(ai._event_worker(), timeout=5)
+        assert order == ["position_risk", "setup"], order
+    asyncio.run(body())
+
+run("Real-time: setup alert fires; cooldown suppresses repeat", t_rt_setup_alert_and_cooldown)
+run("Real-time: no entry alerts when blocked",          t_rt_no_entry_alert_when_blocked)
+run("Real-time: momentum burst alert",                  t_rt_momentum_burst)
+run("Real-time: position-risk alert outranks entries",  t_rt_position_risk_alert_has_priority)
+run("Real-time: alert → trade in one decision",         t_rt_decision_places_trade_in_one_step)
+run("Real-time: entry rejected if price drifted",       t_rt_drift_guard)
+run("Real-time: stale alert dropped, no API call",      t_rt_stale_alert_dropped)
+run("Real-time: worker handles exit alerts first",      t_rt_worker_exits_first)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 13. SIGNAL ENGINE — indicator computation

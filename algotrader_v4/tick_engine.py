@@ -774,7 +774,7 @@ class TickEngine:
         result = {}
         for sym in self._latest_tick:
             tick = self._latest_tick[sym]
-            ind  = self._latest_ind[sym]
+            ind  = self._latest_ind.get(sym)
             if tick and ind:
                 result[sym] = {
                     "ltp":        tick.ltp,

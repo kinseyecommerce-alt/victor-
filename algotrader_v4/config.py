@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     # not left to the model. It trades NSE equities intraday (MIS) only.
     ai_agent_model:               str   = "claude-opus-5-5"
     ai_agent_effort:              Literal["low", "medium", "high", "xhigh", "max"] = "medium"
-    ai_agent_interval_min:        int   = 5        # minutes between autonomous decision cycles
+    ai_agent_interval_min:        int   = 15       # minutes between full portfolio reviews (0 = off)
     ai_agent_allow_live:          bool  = False    # must be True for the AI to trade when TRADING_MODE=LIVE
     ai_agent_max_trades_per_day:  int   = 5
     ai_agent_max_open_positions:  int   = 2
@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     ai_agent_min_sl_pct:          float = 0.2      # …and at least this far away
     ai_agent_max_steps:           int   = 12       # model ↔ tool round trips per cycle / chat turn
     ai_agent_max_daily_cost_usd:  float = 20.0     # stop autonomous cycles once today's API spend reaches this
+    # Real-time mode: code watches every tick and calls Claude the moment a trigger fires
+    ai_agent_realtime:            bool  = True
+    ai_agent_realtime_effort:     Literal["low", "medium", "high", "xhigh", "max"] = "low"  # fast decisions
+    ai_agent_trigger_cooldown_s:  int   = 180      # same symbol + trigger type at most once per this
+    ai_agent_min_call_gap_s:      int   = 3        # spacing between real-time Claude calls
+    ai_agent_event_max_age_s:     int   = 20       # alerts older than this are dropped, not decided
+    ai_agent_max_drift_pct:       float = 0.3      # reject an entry if price moved this far since the alert
+    ai_agent_burst_pct:           float = 0.5      # 1-minute move that counts as a momentum burst
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

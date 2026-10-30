@@ -116,8 +116,12 @@ candles = buf.candles()
 `EMA50-BOUNCE`, `ICHIMOKU-TREND`
 
 ### Autonomous AI trader (`ai_trader.py`)
-Claude (`AI_AGENT_MODEL`, default `claude-opus-5-5`) runs a manual tool-use loop every
-`AI_AGENT_INTERVAL_MIN` minutes while enabled, and answers the dashboard **AI Trader** tab chat.
+Claude (`AI_AGENT_MODEL`, default `claude-opus-5-5`) trades in **real time**: code watches every tick
+(`_detect`: intraday pattern engine as a scout, 1-min momentum bursts, AI positions ≥60% to their stop
+or Supertrend flipping against them) and the moment one fires, `_handle_event` calls Claude with the
+live data in the prompt (effort `AI_AGENT_REALTIME_EFFORT`, default `low`). Alerts: per symbol+type
+cooldown, exit alerts first, stale alerts (>20 s) dropped, entry rejected if price drifted >0.3%.
+A full review also runs every `AI_AGENT_INTERVAL_MIN` (15; 0 = off). Chat in the **AI Trader** tab.
 - Tools: `get_market_overview`, `get_watchlist_quotes`, `get_symbol_detail`, `get_ai_positions`,
   `place_trade`, `close_position` (strict schemas, fixed order → prompt-cached prefix).
 - Hard limits in code (`_place_trade`): `AI_AGENT_*` value cap, trades/day, open positions,

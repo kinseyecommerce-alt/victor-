@@ -19,6 +19,12 @@ interface AIStatus {
   last_cycle_at: string | null
   last_summary: string
   api_key_set: boolean
+  realtime: boolean
+  alerts_today: number
+  decisions_today: number
+  pending_alerts: number
+  avg_decision_ms: number | null
+  last_alert: { symbol: string; kind: string; reason: string; ltp: number; at: string } | null
   limits: {
     max_trades_per_day: number
     trades_left_today: number
@@ -34,6 +40,8 @@ interface ChatMsg { role: 'user' | 'ai'; text: string; actions?: LogEntry[] }
 
 const KIND_STYLE: Record<string, string> = {
   trade:    'text-green-700',
+  alert:    'text-sky-700',
+  decision: 'text-slate-800',
   close:    'text-indigo-700',
   rejected: 'text-amber-700',
   error:    'text-red-700',
@@ -152,8 +160,23 @@ export default function AITab() {
           <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-slate-600">
             <span>Trades</span>
             <span className="font-mono text-right">{s.trades_today}/{s.limits.max_trades_per_day}</span>
-            <span>Cycles</span>
-            <span className="font-mono text-right">{s.cycles_today} · every {s.interval_min}m</span>
+            <span>Real-time</span>
+            <span className="font-mono text-right">
+              {s.realtime ? `${s.alerts_today} alerts → ${s.decisions_today}` : 'off'}
+            </span>
+            {s.realtime && (
+              <>
+                <span>Decision time</span>
+                <span className="font-mono text-right">
+                  {s.avg_decision_ms != null ? `${(s.avg_decision_ms / 1000).toFixed(1)}s avg` : '—'}
+                  {s.pending_alerts > 0 && ` · ${s.pending_alerts} queued`}
+                </span>
+              </>
+            )}
+            <span>Reviews</span>
+            <span className="font-mono text-right">
+              {s.interval_min > 0 ? `${s.cycles_today} · every ${s.interval_min}m` : 'off'}
+            </span>
             <span>API cost today</span>
             <span className="font-mono text-right">
               ${s.cost_today_usd.toFixed(2)}/{s.limits.daily_cost_cap_usd}
