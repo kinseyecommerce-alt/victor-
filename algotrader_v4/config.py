@@ -109,6 +109,16 @@ class Settings(BaseSettings):
     ai_agent_event_max_age_s:     int   = 20       # alerts older than this are dropped, not decided
     ai_agent_max_drift_pct:       float = 0.3      # reject an entry if price moved this far since the alert
     ai_agent_burst_pct:           float = 0.5      # 1-minute move that counts as a momentum burst
+    # AI option BUYING on index options (CE/PE). Max loss per trade = premium paid.
+    ai_agent_options_enabled:     bool  = True
+    ai_agent_option_underlyings:  str   = "NIFTY,BANKNIFTY"   # of NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
+    ai_agent_max_option_premium:  float = 15000.0  # ₹ premium × quantity per trade
+    ai_agent_max_option_lots:     int   = 2
+    ai_agent_option_min_sl_pct:   float = 15.0     # stop as % of premium
+    ai_agent_option_max_sl_pct:   float = 40.0
+    ai_agent_option_max_spread_pct: float = 3.0    # bid/ask spread as % of premium
+    ai_agent_option_min_premium:  float = 10.0     # ₹ — skip near-worthless far-OTM contracts
+    ai_agent_option_max_iv_rank:  float = 72.0     # don't buy expensive volatility
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

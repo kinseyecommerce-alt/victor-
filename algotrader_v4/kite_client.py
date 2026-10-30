@@ -132,6 +132,7 @@ class KiteClient:
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
         self._instruments_cache: dict[str, list[dict]] = {}
+        self._instruments_day: dict[str, object] = {}
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -178,15 +179,20 @@ class KiteClient:
     # ── Instrument lookup ──────────────────────────────────────────────────
 
     def get_instruments(self, exchange: str = "NSE") -> list[dict]:
-        """Fetch and cache all instruments for the given exchange."""
-        if exchange in self._instruments_cache:
-            return self._instruments_cache[exchange]
-        if settings.trading_mode == "PAPER":
-            return []
+        """Fetch and cache all instruments for the given exchange (refreshed daily —
+        new F&O expiries are listed every week)."""
+        today = datetime.now().date()
+        cached = self._instruments_cache.get(exchange)
+        if cached and self._instruments_day.get(exchange) == today:
+            return cached
+        if not settings.uses_kite_market_data or not self.has_session():
+            return cached or []
         try:
-            instruments = _with_retry(lambda: self.kite.instruments(exchange),
+            kite = self.ensure_session()
+            instruments = _with_retry(lambda: kite.instruments(exchange),
                                       label="instruments")
             self._instruments_cache[exchange] = instruments
+            self._instruments_day[exchange] = today
             logger.info("[kite] Loaded {} instruments for {}", len(instruments), exchange)
             return instruments
         except Exception as exc:

@@ -95,6 +95,16 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.TRAILING,
         atr_multiplier  = 2.0,
     ),
+    "ai_opt": TrailConfig(  # AI trader option buys (premium %)
+        initial_sl_pct  = 35.0,   # % of premium
+        trail_pct       = 20.0,
+        breakeven_pct   = 15.0,
+        activation_pct  = 30.0,
+        target1_pct     = 50.0,
+        target2_pct     = 80.0,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 2.0,
+    ),
     "swing": TrailConfig(
         initial_sl_pct  = 3.00,
         trail_pct       = 1.00,

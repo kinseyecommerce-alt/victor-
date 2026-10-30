@@ -129,6 +129,14 @@ A full review also runs every `AI_AGENT_INTERVAL_MIN` (15; 0 = off). Chat in the
   order_guard → risk_manager → SEBI (`ai` = `ALGO-AI-006`) → entry + SL-M (flatten on SL failure).
 - PAPER only unless `AI_AGENT_ALLOW_LIVE=true`. Daily API cost cap stops cycles. Code closes all AI
   positions at 15:00. Stops (TSL) and targets are enforced from the tick feed between cycles.
+- **Index options (buy only):** `get_option_chain` + `place_option_trade` (CE/PE on
+  `AI_AGENT_OPTION_UNDERLYINGS`, ATM±2). Contracts come from Kite's NFO instrument list via
+  `options_resolver.resolve` (real expiry + lot size, same-day expiry skipped; paper-sim uses
+  synthetic `…SIM…` symbols). Entry = marketable LIMIT, stop = SL (stop-loss LIMIT, not SL-M),
+  exits = LIMIT. Limits: premium cap, max lots, stop 15–40% of premium, target ≥1.5×, spread ≤3%,
+  IV rank ≤72, 09:30–14:30. order_guard/TSL key `ai_opt` (premium-based trail). Index ticks feed
+  the F&O pattern engine → `option_setup` alerts. The rule-based FnOAgent uses the same resolver
+  and SL-limit orders.
 - API: `GET /agent/status`, `POST /agent/start|stop|cycle|close-all|chat`, `GET /agent/log`.
 - Tests use a fake client (`_FakeClient` in `test_pipeline.py`) — no API spend.
 

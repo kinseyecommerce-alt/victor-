@@ -44,6 +44,9 @@ from order_guard import order_guard
 from risk_manager import risk_manager
 from tick_engine import tick_engine
 from trailing_sl_engine import trailing_sl_engine
+from options_resolver import (
+    INDEX_QUOTE, OptionContract, estimate_premium, normalize_underlying, resolve, round_tick,
+)
 
 AGENT = "ai"
 
@@ -51,6 +54,9 @@ ENTRY_START = time(9, 20)    # no entries in the first 5 minutes
 ENTRY_END   = time(14, 45)   # no new entries after this
 FORCE_EXIT  = time(15, 0)    # code closes every AI position here
 TICK_MAX_AGE_S = 120         # quotes older than this are not tradable
+OPT_STRATEGY = "ai_opt"      # order_guard / TSL key for AI option buys (premium-based trail)
+OPT_ENTRY_START = time(9, 30)
+OPT_ENTRY_END   = time(14, 30)
 
 # Per-MTok prices for spend tracking (Anthropic first-party rates, 2026-10).
 # Unknown models are costed at Opus 5.5 rates.
@@ -84,6 +90,15 @@ noise. Stops and targets are already enforced automatically between your cycles.
 reached, do not try to work around it.
 - The tools enforce hard limits. If a tool rejects an action, accept it and do not retry the \
 same action with tweaked numbers to slip past a limit.
+
+Index options (when enabled)
+- You may BUY index options (CE for a bullish view, PE for a bearish view) with \
+place_option_trade. You never sell or write options. The most a trade can lose is the premium paid.
+- Call get_option_chain first: it shows spot, the expiry that will be used, lot size, live \
+premiums and spreads for strikes around the money, and IV rank.
+- Prefer ATM or one strike OTM. Options lose value with time: only buy on a clear directional \
+move in the index that you expect to continue soon, not on a slow drift. Stop and target are \
+percentages of the premium.
 
 Real-time alerts
 - A REAL-TIME ALERT message means code just detected something on a live tick and already gives \
@@ -140,6 +155,25 @@ TOOLS: list[dict] = [
               "reasoning": {"type": "string", "description": "One or two sentences: the setup and why now"},
           },
           ["symbol", "side", "quantity", "stop_loss", "target", "reasoning"]),
+    _tool("get_option_chain",
+          "Index option chain around the money for the nearest tradable expiry (same-day expiry "
+          "excluded): spot, expiry, lot size, CE/PE premiums with bid/ask spread, IV rank.",
+          {"underlying": {"type": "string", "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]}},
+          ["underlying"]),
+    _tool("place_option_trade",
+          "BUY an index option (CE = bullish, PE = bearish) with a protective stop-loss order. "
+          "Intraday; never sells options. Rejected unless every hard limit and risk/SEBI check passes.",
+          {
+              "underlying":    {"type": "string", "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]},
+              "option_type":   {"type": "string", "enum": ["CE", "PE"]},
+              "strike_offset": {"type": "integer", "enum": [-2, -1, 0, 1, 2],
+                                "description": "0 = ATM, 1 = one strike out of the money, -1 = one in the money"},
+              "lots":          {"type": "integer", "description": "Number of lots"},
+              "stop_loss_pct": {"type": "number", "description": "Stop as % below the premium paid"},
+              "target_pct":    {"type": "number", "description": "Target as % above the premium; >= 1.5x the stop %"},
+              "reasoning":     {"type": "string", "description": "One or two sentences: the index setup and why now"},
+          },
+          ["underlying", "option_type", "strike_offset", "lots", "stop_loss_pct", "target_pct", "reasoning"]),
     _tool("close_position",
           "Close an open AI position at market (cancels its stop-loss order).",
           {
@@ -193,6 +227,9 @@ class AITrader:
         if not tick_engine.symbols():
             from symbol_scanner import NIFTY_50
             tick_engine.subscribe([{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]])
+        if settings.ai_agent_options_enabled:
+            tick_engine.subscribe([{"symbol": INDEX_QUOTE[u], "exchange": "NSE"}
+                                   for u in self._option_underlyings()])
         self._ensure_tick_monitor()
         self.enabled = True
         if settings.ai_agent_interval_min > 0 and (not self._loop_task or self._loop_task.done()):
@@ -415,6 +452,11 @@ class AITrader:
         if name == "place_trade":
             async with self._action_lock:
                 return await self._place_trade(args)
+        if name == "get_option_chain":
+            return self._option_chain(str(args.get("underlying", "")))
+        if name == "place_option_trade":
+            async with self._action_lock:
+                return await self._place_option_trade(args)
         if name == "close_position":
             async with self._action_lock:
                 return await self._close_position(str(args.get("symbol", "")).upper(),
@@ -507,6 +549,8 @@ class AITrader:
         allowed, blocked = self._trading_allowed()
         if not allowed:
             reject(blocked)
+        if sym in INDEX_QUOTE.values() or tick_engine._exchange.get(sym, "NSE") != "NSE":
+            reject(f"{sym} is not an NSE equity — use place_option_trade for index options")
         if side not in ("BUY", "SELL"):
             reject("side must be BUY or SELL")
         tick, _ = tick_engine.latest(sym)
@@ -589,6 +633,217 @@ class AITrader:
                 "quantity": qty, "approx_price": ltp, "stop_loss": sl, "target": round(tgt, 2),
                 "mode": self._mode_label()}
 
+    # ── Index options (buy only) ──────────────────────────────────────────
+
+    def _index_spot(self, und: str) -> tuple[str, float]:
+        idx = INDEX_QUOTE[und]
+        tick, _ = tick_engine.latest(idx)
+        if not tick or tick.ltp <= 0:
+            raise ToolRejected(f"{idx} is not streaming — start the AI trader with options enabled")
+        if self._tick_age(idx) > TICK_MAX_AGE_S:
+            raise ToolRejected(f"{idx} quote is stale ({self._tick_age(idx)}s old)")
+        return idx, float(tick.ltp)
+
+    def _option_quotes(self, contracts: list[OptionContract], spot: float) -> dict[str, dict]:
+        """Live bid/ask/LTP from Kite, or a rough estimate for the paper simulator."""
+        out: dict[str, dict] = {}
+        live = [c for c in contracts if c.live]
+        if live and settings.uses_kite_market_data:
+            raw = kite_client.quote_kite([f"NFO:{c.tradingsymbol}" for c in live])
+            for c in live:
+                q = raw.get(f"NFO:{c.tradingsymbol}") or {}
+                depth = q.get("depth") or {}
+                buy, sell = depth.get("buy") or [{}], depth.get("sell") or [{}]
+                out[c.tradingsymbol] = {"ltp": float(q.get("last_price") or 0),
+                                        "bid": float(buy[0].get("price") or 0),
+                                        "ask": float(sell[0].get("price") or 0), "estimated": False}
+        for c in contracts:
+            if c.tradingsymbol not in out:
+                px = estimate_premium(spot, c.strike, c.option_type)
+                out[c.tradingsymbol] = {"ltp": px, "bid": px, "ask": px, "estimated": True}
+        return out
+
+    def _iv_rank(self, und: str) -> Optional[float]:
+        try:
+            from options_intelligence import get_cached
+            for key in (und, INDEX_QUOTE[und]):
+                ctx = get_cached(key)
+                if ctx and ctx.get("iv_rank") is not None:
+                    return float(ctx["iv_rank"])
+        except Exception:
+            pass
+        return None
+
+    def _option_chain(self, underlying: str) -> dict:
+        und = normalize_underlying(underlying)
+        if not settings.ai_agent_options_enabled:
+            raise ToolRejected("option trading is disabled (AI_AGENT_OPTIONS_ENABLED=false)")
+        if und not in self._option_underlyings():
+            raise ToolRejected(f"allowed underlyings: {self._option_underlyings()}")
+        _, spot = self._index_spot(und)
+        today = now_ist().date()
+        rows, contracts = [], []
+        for off in (-2, -1, 0, 1, 2):
+            pair = {}
+            for ot in ("CE", "PE"):
+                c = resolve(und, spot, ot, off, today)
+                if c:
+                    pair[ot] = c
+                    contracts.append(c)
+            if pair:
+                rows.append((off, pair))
+        if not contracts:
+            raise ToolRejected(f"no tradable {und} option contracts found")
+        quotes = self._option_quotes(contracts, spot)
+
+        def view(c: OptionContract) -> dict:
+            q = quotes[c.tradingsymbol]
+            spread = (q["ask"] - q["bid"]) / q["ltp"] * 100 if q["ltp"] and q["ask"] else None
+            return {"symbol": c.tradingsymbol, "strike": c.strike, "ltp": q["ltp"], "bid": q["bid"],
+                    "ask": q["ask"], "spread_pct": round(spread, 2) if spread is not None else None}
+        first = contracts[0]
+        return {
+            "underlying": und, "spot": spot,
+            "expiry": first.expiry.isoformat() if first.expiry else "simulated",
+            "lot_size": first.lot_size, "iv_rank": self._iv_rank(und),
+            "premiums_estimated": any(q["estimated"] for q in quotes.values()),
+            "strikes": [{"offset": off, **{ot: view(c) for ot, c in pair.items()}} for off, pair in rows],
+            "note": "offset is per option type: +1 = one strike OTM (higher for CE, lower for PE)",
+        }
+
+    async def _place_option_trade(self, a: dict) -> dict:
+        from agents.base_agent import (
+            place_sl_with_retry, flatten_unprotected, _setup_tsl_callbacks, _tsl_sl_orders,
+        )
+        from sebi_compliance import sebi_compliance
+        from market_regime import regime_detector
+
+        und  = normalize_underlying(str(a.get("underlying", ""))) or str(a.get("underlying", ""))
+        opt  = str(a.get("option_type", "")).upper()
+        off  = int(a.get("strike_offset") or 0)
+        lots = int(a.get("lots") or 0)
+        slp  = float(a.get("stop_loss_pct") or 0)
+        tgp  = float(a.get("target_pct") or 0)
+        why  = str(a.get("reasoning", ""))[:300]
+
+        def reject(msg: str):
+            self._record("rejected", f"BUY {lots} lot {und} {opt} {off:+d}: {msg}")
+            raise ToolRejected(msg)
+
+        if not settings.ai_agent_options_enabled:
+            reject("option trading is disabled (AI_AGENT_OPTIONS_ENABLED=false)")
+        allowed, blocked = self._trading_allowed()
+        if not allowed:
+            reject(blocked)
+        if not (OPT_ENTRY_START <= now_ist().time() <= OPT_ENTRY_END):
+            reject(f"outside the option entry window {OPT_ENTRY_START:%H:%M}-{OPT_ENTRY_END:%H:%M} IST")
+        if und not in self._option_underlyings():
+            reject(f"underlying must be one of {self._option_underlyings()}")
+        if opt not in ("CE", "PE"):
+            reject("option_type must be CE or PE")
+        if off not in (-2, -1, 0, 1, 2):
+            reject("strike_offset must be between -2 and 2")
+        if not 1 <= lots <= settings.ai_agent_max_option_lots:
+            reject(f"lots must be 1-{settings.ai_agent_max_option_lots}")
+        try:
+            idx, spot = self._index_spot(und)
+        except ToolRejected as e:
+            reject(str(e))
+        ref = self._event_ltp.get(idx)
+        if ref and abs(spot - ref) / ref * 100 > settings.ai_agent_max_drift_pct:
+            reject(f"{idx} moved {abs(spot - ref) / ref * 100:.2f}% since the alert; the setup is stale")
+        ivr = self._iv_rank(und)
+        if ivr is not None and ivr > settings.ai_agent_option_max_iv_rank:
+            reject(f"IV rank {ivr:.0f} is above {settings.ai_agent_option_max_iv_rank:.0f} — premiums too expensive")
+        if not (settings.ai_agent_option_min_sl_pct <= slp <= settings.ai_agent_option_max_sl_pct):
+            reject(f"stop must be {settings.ai_agent_option_min_sl_pct}-{settings.ai_agent_option_max_sl_pct}% "
+                   "of the premium")
+        if tgp < 1.5 * slp:
+            reject(f"target {tgp}% is under 1.5x the {slp}% stop")
+        if self.trades_today >= settings.ai_agent_max_trades_per_day:
+            reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
+        if len(self._ai_entries()) >= settings.ai_agent_max_open_positions:
+            reject(f"max open AI positions ({settings.ai_agent_max_open_positions}) reached")
+        if order_guard.is_symbol_active_anywhere(und):
+            reject(f"{und} already has an open option position")
+
+        c = resolve(und, spot, opt, off, now_ist().date())
+        if not c or c.lot_size <= 0:
+            reject(f"no tradable {und} {opt} contract (expiry/strike not found in the instrument list)")
+        q = self._option_quotes([c], spot)[c.tradingsymbol]
+        ltp, bid, ask = q["ltp"], q["bid"], q["ask"]
+        if ltp < settings.ai_agent_option_min_premium:
+            reject(f"premium ₹{ltp:.2f} is below ₹{settings.ai_agent_option_min_premium:.0f}")
+        if not q["estimated"]:
+            if ask <= 0 or bid <= 0:
+                reject(f"{c.tradingsymbol} has no two-sided quote")
+            spread = (ask - bid) / ltp * 100
+            if spread > settings.ai_agent_option_max_spread_pct:
+                reject(f"{c.tradingsymbol} spread {spread:.1f}% exceeds {settings.ai_agent_option_max_spread_pct}%")
+        entry_px = round_tick((ask or ltp) * 1.01)          # marketable limit
+        qty = lots * c.lot_size
+        if entry_px * qty > settings.ai_agent_max_option_premium:
+            per_lot = entry_px * c.lot_size
+            reject(f"premium ₹{entry_px * qty:,.0f} exceeds ₹{settings.ai_agent_max_option_premium:,.0f} "
+                   f"(₹{per_lot:,.0f}/lot → max {int(settings.ai_agent_max_option_premium // per_lot)} lots)")
+        ok, msg = order_guard.can_place(c.tradingsymbol, OPT_STRATEGY, "BUY")
+        if not ok:
+            reject(msg)
+        ok, msg = risk_manager.check_before_order(c.tradingsymbol, qty, entry_px, "BUY")
+        if not ok:
+            reject(msg)
+        ok, _algo, msg = sebi_compliance.pre_order_check(
+            strategy=AGENT, symbol=c.tradingsymbol, exchange="NFO", transaction_type="BUY", quantity=qty,
+            order_type="LIMIT", price_at_signal=entry_px, signal_source="ai_trader",
+            regime=regime_detector.current_regime.value if regime_detector.current_regime else "UNKNOWN",
+        )
+        if not ok:
+            reject(msg)
+
+        tick_engine.subscribe([{"symbol": c.tradingsymbol, "exchange": "NFO", "seed_price": ltp}])
+        order_id = kite_client.place_order(
+            tradingsymbol=c.tradingsymbol, exchange="NFO", transaction_type="BUY", quantity=qty,
+            order_type="LIMIT", price=entry_px, product="MIS", tag="Agent-ai-opt",
+        )
+        sebi_compliance.record_order_id(AGENT, c.tradingsymbol, order_id)
+
+        sl_px  = round_tick(entry_px * (1 - slp / 100))
+        tgt_px = round_tick(entry_px * (1 + tgp / 100))
+        sl_oid = await place_sl_with_retry(AGENT, c.tradingsymbol, "NFO", "BUY", qty, "MIS", sl_px,
+                                           order_type="SL", limit_buffer_pct=5.0)
+        if sl_oid is None and await flatten_unprotected(
+                AGENT, c.tradingsymbol, "NFO", "BUY", qty, "MIS",
+                exit_limit_price=round_tick(max(bid or ltp, 0.1) * 0.97)):
+            reject("stop-loss order was rejected by the broker; entry was closed")
+
+        order_guard.register_order(und, OPT_STRATEGY, "BUY", order_id)
+        risk_manager.position_opened()
+        _setup_tsl_callbacks()
+        _tsl_sl_orders[order_id] = {
+            "sl_order_id": sl_oid, "product": "MIS", "exchange": "NFO",
+            "symbol": c.tradingsymbol, "guard_symbol": und, "agent": AGENT, "side": "BUY",
+            "sl_type": "SL", "sl_buffer_pct": 5.0, "exit_limit_buffer_pct": 3.0,
+        }
+        pos = trailing_sl_engine.register(
+            symbol=c.tradingsymbol, strategy=OPT_STRATEGY, side="BUY", entry_price=entry_px,
+            quantity=qty, order_id=order_id,
+        )
+        pos.current_sl = sl_px
+        self._targets[order_id] = tgt_px
+        self._open[order_id] = c.tradingsymbol
+        self.trades_today += 1
+        self._ensure_tick_monitor()
+
+        exp = c.expiry.isoformat() if c.expiry else "sim"
+        text = (f"BUY {lots} lot ({qty}) {c.tradingsymbol} [{exp}] @ ₹{entry_px:.2f} "
+                f"SL ₹{sl_px:.2f} TGT ₹{tgt_px:.2f} (cost ₹{entry_px * qty:,.0f}) — {why}")
+        self._record("trade", text)
+        await self._notify(f"🧠 <b>[AI]</b> {text}")
+        return {"status": "placed", "order_id": order_id, "symbol": c.tradingsymbol,
+                "expiry": exp, "quantity": qty, "limit_price": entry_px, "stop_loss": sl_px,
+                "target": tgt_px, "max_loss": round((entry_px - sl_px) * qty, 2),
+                "premium_paid": round(entry_px * qty, 2), "mode": self._mode_label()}
+
     async def _close_position(self, symbol: str, reason: str, by_code: bool = False) -> dict:
         from agents.base_agent import _close_tracked
         found = [(oid, e) for oid, e in self._ai_entries().items() if e["symbol"] == symbol]
@@ -602,7 +857,7 @@ class AITrader:
             tick, _ = tick_engine.latest(symbol)
             ltp = tick.ltp if tick else pos.entry_price
             pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
-            _close_tracked(oid, symbol, pos.side, pos.quantity, pnl, "Agent-ai-EXIT", AGENT)
+            _close_tracked(oid, symbol, pos.side, pos.quantity, pnl, "Agent-ai-EXIT", pos.strategy)
             self._targets.pop(oid, None)
             self._open.pop(oid, None)
             closed.append({"symbol": symbol, "quantity": pos.quantity, "exit_price": ltp,
@@ -679,6 +934,10 @@ class AITrader:
 
         if not self._can_consider_entry(sym):
             return
+        und = normalize_underlying(sym)
+        if und:
+            self._detect_index(snap, und)
+            return
         scout = self._get_scout()
         if len(snap.candles_1min) >= scout.min_candles_1min:
             try:
@@ -696,6 +955,36 @@ class AITrader:
             if abs(move) >= settings.ai_agent_burst_pct and ind.volume_ratio >= 2.0:
                 self._raise(snap, "momentum_burst",
                             f"{move:+.2f}% within the current minute on {ind.volume_ratio:.1f}x volume")
+
+    def _detect_index(self, snap, und: str) -> None:
+        """Index tick: the F&O pattern engine decides whether it is an option-buying setup."""
+        if not settings.ai_agent_options_enabled or und not in self._option_underlyings():
+            return
+        if not (OPT_ENTRY_START <= now_ist().time() <= OPT_ENTRY_END):
+            return
+        if order_guard.is_symbol_active_anywhere(und):
+            return
+        scout = self._get_opt_scout()
+        if len(snap.candles_1min) < scout.min_candles_1min:
+            return
+        try:
+            action, sig = scout.evaluate_tick(snap)
+        except Exception:
+            return
+        if action == "BUY" and sig:
+            self._raise(snap, "option_setup",
+                        f"{sig.get('pattern', '')} → {sig.get('option_type')} (score {sig.get('score')})",
+                        {"underlying": und, "suggested_option_type": sig.get("option_type")})
+
+    def _get_opt_scout(self):
+        if getattr(self, "_opt_scout", None) is None:
+            from agents.strategy_agents import FnOAgent
+            self._opt_scout = FnOAgent()
+        return self._opt_scout
+
+    def _option_underlyings(self) -> list[str]:
+        return [u for u in (normalize_underlying(x) for x in settings.ai_agent_option_underlyings.split(","))
+                if u]
 
     def _can_consider_entry(self, sym: str) -> bool:
         if not self._trading_allowed()[0] or not settings.anthropic_api_key:
@@ -802,9 +1091,14 @@ class AITrader:
             "blocked_reason": blocked,
             "limits": self._limits(),
         }
-        action = ("Decide now whether to close this position early or keep it (its stop is "
-                  "already working)." if ev["kind"] in ("position_risk", "trend_flip")
-                  else "Decide now: place_trade if the setup is clearly good, otherwise PASS.")
+        if ev["kind"] in ("position_risk", "trend_flip"):
+            action = ("Decide now whether to close this position early or keep it (its stop is "
+                      "already working).")
+        elif ev["kind"] == "option_setup":
+            action = ("Index option setup. Check get_option_chain, then place_option_trade if the "
+                      "move is clear and the premium is reasonable, otherwise PASS.")
+        else:
+            action = "Decide now: place_trade if the setup is clearly good, otherwise PASS."
         return (f"REAL-TIME ALERT {ev['at']} IST — {ev['kind']} on {sym}: {ev['reason']}\n"
                 f"{action}\n{json.dumps(data, default=str)}")
 
@@ -857,6 +1151,16 @@ class AITrader:
             "min_reward_to_risk":   1.5,
             "daily_cost_cap_usd":   settings.ai_agent_max_daily_cost_usd,
             "product":              "MIS (NSE equity intraday)",
+            "options": {
+                "enabled":           settings.ai_agent_options_enabled,
+                "underlyings":       self._option_underlyings(),
+                "buy_only":          True,
+                "max_premium_per_trade": settings.ai_agent_max_option_premium,
+                "max_lots":          settings.ai_agent_max_option_lots,
+                "stop_pct_of_premium": [settings.ai_agent_option_min_sl_pct, settings.ai_agent_option_max_sl_pct],
+                "entry_window":      f"{OPT_ENTRY_START:%H:%M}-{OPT_ENTRY_END:%H:%M}",
+                "max_iv_rank":       settings.ai_agent_option_max_iv_rank,
+            },
         }
 
     def _roll_day(self) -> None:

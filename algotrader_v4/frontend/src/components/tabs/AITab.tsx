@@ -32,6 +32,7 @@ interface AIStatus {
     max_position_value: number
     stop_loss_pct_range: [number, number]
     daily_cost_cap_usd: number
+    options?: { enabled: boolean; underlyings: string[]; max_premium_per_trade: number; max_lots: number }
   }
 }
 
@@ -183,6 +184,13 @@ export default function AITab() {
             </span>
             <span>Per trade max</span>
             <span className="font-mono text-right">₹{s.limits.max_position_value.toLocaleString('en-IN')}</span>
+            <span>Options (buy)</span>
+            <span className="font-mono text-right truncate"
+                  title={s.limits.options?.underlyings.join(', ')}>
+              {s.limits.options?.enabled
+                ? `${s.limits.options.underlyings.join('/')} ≤₹${s.limits.options.max_premium_per_trade.toLocaleString('en-IN')}`
+                : 'off'}
+            </span>
             <span>Stop range</span>
             <span className="font-mono text-right">
               {s.limits.stop_loss_pct_range[0]}–{s.limits.stop_loss_pct_range[1]}%

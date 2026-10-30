@@ -778,6 +778,23 @@ class FnOAgent(BaseAgent):
         # Black-Scholes estimate is only used with the paper simulator, which has
         # no option prices.
         if settings.uses_kite_market_data:
+            # The signal's symbol is built from fixed weekday rules; trade the real contract
+            # from Kite's instrument list (actual expiry and lot size) for that strike instead.
+            from options_resolver import resolve, normalize_underlying
+            und = normalize_underlying(underlying) or underlying
+            spot = snap.tick.ltp
+            strike = float(signal.get("strike") or 0)
+            contract = None
+            for off in range(-3, 4):
+                c = resolve(und, spot, signal.get("option_type", "CE"), off, now_ist().date())
+                if c and c.live and abs(c.strike - strike) < 1e-6:
+                    contract = c
+                    break
+            if contract is None:
+                logger.warning("[fno] no listed {} {} {} contract — skipping entry",
+                               und, strike, signal.get("option_type"))
+                return
+            opt_sym, lot_size = contract.tradingsymbol, contract.lot_size
             try:
                 q = kite_client.quote_kite([f"{exch}:{opt_sym}"])
                 opt_price = float(q.get(f"{exch}:{opt_sym}", {}).get("last_price") or 0.0)
@@ -805,10 +822,12 @@ class FnOAgent(BaseAgent):
         if not allowed:
             return
 
+        from options_resolver import round_tick
+        entry_px = round_tick(opt_price * 1.01)     # marketable LIMIT — options don't take MARKET safely
         sebi_ok, _aid, sebi_reason = sebi_compliance.pre_order_check(
             strategy=self.name, symbol=opt_sym, exchange=exch,
             transaction_type=action, quantity=qty,
-            order_type="MARKET", price_at_signal=opt_price,
+            order_type="LIMIT", price_at_signal=entry_px,
             signal_source=f"agent_{self.name}",
             regime=regime_detector.current_regime.value
                    if regime_detector.current_regime else "UNKNOWN",
@@ -821,7 +840,7 @@ class FnOAgent(BaseAgent):
         order_id = kite_client.place_order(
             tradingsymbol=opt_sym, exchange=exch,
             transaction_type=action, quantity=qty,
-            order_type="MARKET", product=self.product,
+            order_type="LIMIT", price=entry_px, product=self.product,
             tag="Agent-fno",
         )
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
@@ -835,11 +854,14 @@ class FnOAgent(BaseAgent):
         sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
         tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
 
-        # Protective SL-M goes in immediately; no position is kept without one
+        # Protective stop goes in immediately; no position is kept without one.
+        # Options take a stop-loss LIMIT ("SL") — brokers reject SL-M on options.
         sl_order_id = await place_sl_with_retry(
-            self.name, opt_sym, exch, action, qty, self.product, sl_px)
+            self.name, opt_sym, exch, action, qty, self.product, sl_px,
+            order_type="SL", limit_buffer_pct=5.0)
         if sl_order_id is None and await flatten_unprotected(
-                self.name, opt_sym, exch, action, qty, self.product):
+                self.name, opt_sym, exch, action, qty, self.product,
+                exit_limit_price=round_tick(max(opt_price * 0.97, 0.1))):
             return
 
         order_guard.register_order(underlying, self.name, action, order_id)
@@ -859,6 +881,9 @@ class FnOAgent(BaseAgent):
             "guard_symbol": underlying,
             "agent":        self.name,
             "side":         action,
+            "sl_type":      "SL",
+            "sl_buffer_pct": 5.0,
+            "exit_limit_buffer_pct": 3.0,
         }
         trailing_sl_engine.register(
             symbol=opt_sym, strategy=self.name, side=action,

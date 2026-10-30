@@ -906,7 +906,8 @@ def t_intraday_buy_signal():
     snap = _make_snap(rsi=55.0, trend="UP", vwap=2790.0,
                       macd_hist=1.5, volume_ratio=1.8,
                       ema9=2810.0, ema21=2795.0)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
+    with patch("agents.strategy_agents.datetime") as mock_dt, \
+         patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent reads IST via now_ist()
         mock_dt.now.return_value = _mkt_dt
         action, _ = agent.evaluate_tick(snap)
     assert action == "BUY", f"Expected BUY, got {action}"
@@ -916,7 +917,8 @@ def t_intraday_hold_overbought():
     _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = IntradayAgent()
     snap = _make_snap(rsi=82.0, macd_hist=0.5, volume_ratio=1.5)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
+    with patch("agents.strategy_agents.datetime") as mock_dt, \
+         patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent reads IST via now_ist()
         mock_dt.now.return_value = _mkt_dt
         action, _ = agent.evaluate_tick(snap)
     assert action in ("HOLD","SELL"), f"Expected HOLD/SELL for RSI=82, got {action}"
@@ -928,7 +930,8 @@ def t_intraday_sell_signal():
     snap = _make_snap(rsi=35.0, trend="DOWN", vwap=2815.0,
                       macd_hist=-1.0, volume_ratio=1.5,
                       ema9=2790.0, ema21=2800.0)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
+    with patch("agents.strategy_agents.datetime") as mock_dt, \
+         patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent reads IST via now_ist()
         mock_dt.now.return_value = _mkt_dt
         action, _ = agent.evaluate_tick(snap)
     assert action == "SELL", f"Expected SELL, got {action}"
@@ -1704,15 +1707,25 @@ def t_fno_tracked_on_option_premium():
     def body():
         _te_kite_client._kite = _OptKite()
         agent = FnOAgent()
+        import options_resolver as _or
+        listed = [{"name": "NIFTY", "instrument_type": "CE", "segment": "NFO-OPT", "strike": 24000.0,
+                   "expiry": datetime.now().date() + timedelta(days=6), "tradingsymbol": opt,
+                   "lot_size": 75}]
         with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
              patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
-             patch.object(_ba, "send_telegram", _noop):
+             patch.object(_ba, "send_telegram", _noop), \
+             patch.object(_or, "_instruments", return_value=listed):
             asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
-                        {"option_symbol": opt, "exchange": "NFO", "lot_size": 75}))
+                        {"option_symbol": "NIFTY-BUILT-SYMBOL", "exchange": "NFO", "lot_size": 75,
+                         "strike": 24000, "option_type": "CE"}))
         oid = next(o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == opt)
         try:
             pos = _tsl_eng._positions[oid]
             assert pos.symbol == opt and pos.entry_price == 120.0, (pos.symbol, pos.entry_price)
+            sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
+            assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING", sl
+            entry_order = _order(oid)
+            assert entry_order["order_type"] == "LIMIT" and entry_order["tradingsymbol"] == opt
             assert opt in agent._exit_only and opt in _te_mod.tick_engine.symbols()
             # An index tick must not touch the option position (this used to fire target 2)
             asyncio.run(_tsl_eng.on_tick("NIFTY", 24000.0, 15.0))
@@ -1939,7 +1952,8 @@ def _trade_args(sym, side="BUY", qty=10, sl=990.0, tgt=1020.0):
 def t_ai_tool_schemas_strict():
     names = [t["name"] for t in _AI_TOOLS]
     assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
-                     "get_ai_positions", "place_trade", "close_position"], names
+                     "get_ai_positions", "place_trade", "get_option_chain",
+                     "place_option_trade", "close_position"], names
     for t in _AI_TOOLS:
         sch = t["input_schema"]
         assert t["strict"] is True and sch["additionalProperties"] is False
@@ -2337,6 +2351,179 @@ run("Real-time: alert → trade in one decision",         t_rt_decision_places_t
 run("Real-time: entry rejected if price drifted",       t_rt_drift_guard)
 run("Real-time: stale alert dropped, no API call",      t_rt_stale_alert_dropped)
 run("Real-time: worker handles exit alerts first",      t_rt_worker_exits_first)
+
+# ── AI index options (buy only) ───────────────────────────────────────────
+import options_resolver as _optres
+from options_resolver import resolve as _resolve, round_tick as _rtick
+
+def _listed(today, strikes=(23900.0, 24000.0, 24100.0), expiries_in=(0, 6)):
+    rows = []
+    for d in expiries_in:
+        for k in strikes:
+            for ot in ("CE", "PE"):
+                rows.append({"name": "NIFTY", "instrument_type": ot, "segment": "NFO-OPT",
+                             "strike": k, "expiry": today + timedelta(days=d), "lot_size": 75,
+                             "tradingsymbol": f"NIFTYX{d}{int(k)}{ot}"})
+    return rows
+
+def t_opt_resolver_live():
+    today = datetime(2026, 1, 15).date()
+    with _patch.object(_optres, "_instruments", return_value=_listed(today)):
+        atm = _resolve("NIFTY 50", 24010.0, "CE", 0, today)
+        otm_ce = _resolve("NIFTY", 24010.0, "CE", 1, today)
+        otm_pe = _resolve("NIFTY", 24010.0, "PE", 1, today)
+        too_far = _resolve("NIFTY", 24010.0, "CE", 2, today)
+    assert atm.live and atm.strike == 24000.0 and atm.lot_size == 75
+    assert atm.expiry == today + timedelta(days=6), "same-day expiry must be skipped"
+    assert otm_ce.strike == 24100.0 and otm_pe.strike == 23900.0, "OTM: CE up, PE down"
+    assert too_far is None, "no strike two steps above the listed chain"
+
+def t_opt_resolver_never_guesses_live_symbol():
+    today = datetime(2026, 1, 15).date()
+    with _patch.object(_optres, "_instruments", return_value=[]):
+        sim = _resolve("NIFTY", 24010.0, "CE", 0, today)          # paper simulator
+        assert sim and not sim.live and "SIM" in sim.tradingsymbol
+        def body():
+            return _resolve("NIFTY", 24010.0, "CE", 0, today)
+        assert _with_paper_kite_ret(body) is None, "Kite feed without instrument list: no contract"
+
+def _with_paper_kite_ret(fn):
+    out = []
+    _with_paper_kite(lambda: out.append(fn()))
+    return out[0]
+
+def _opt_args(**kw):
+    a = {"underlying": "NIFTY", "option_type": "CE", "strike_offset": 0, "lots": 1,
+         "stop_loss_pct": 25.0, "target_pct": 50.0, "reasoning": "test"}
+    a.update(kw)
+    return a
+
+def _with_opt_env(fn):
+    def body():
+        _ai_tick("NIFTY 50", 24000.0)
+        return fn()
+    return _with_ai_env(body)
+
+def t_ai_option_trade_lifecycle_paper():
+    def body():
+        ai = _rt_ai()
+        out = asyncio.run(ai._place_option_trade(_opt_args()))
+        assert out["status"] == "placed" and "SIM" in out["symbol"], out
+        oid, sym = out["order_id"], out["symbol"]
+        entry = _order(oid)
+        assert entry["order_type"] == "LIMIT" and entry["exchange"] == "NFO" and entry["product"] == "MIS"
+        e = _ba._tsl_sl_orders[oid]
+        sl = _order(e["sl_order_id"])
+        assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING"
+        assert 0 < sl["price"] < sl["trigger_price"], "SL limit must sit below its trigger"
+        assert _tsl_eng._positions[oid].strategy == "ai_opt"
+        assert _og_x.is_symbol_active_anywhere("NIFTY") == ["ai_opt"]
+        assert out["max_loss"] < out["premium_paid"] <= _ai_settings.ai_agent_max_option_premium
+        # trail the stop: SL limit order must move with it
+        pos = _tsl_eng._positions[oid]
+        pos.current_sl = round(pos.current_sl + 10, 2)
+        asyncio.run(_tsl_eng.on_sl_moved(pos, pos.current_sl - 10, "trail"))
+        moved = _order(e["sl_order_id"])
+        assert moved["trigger_price"] == pos.current_sl and moved["price"] < moved["trigger_price"]
+        res = asyncio.run(ai._close_position(sym, "test"))
+        assert res["status"] == "closed"
+        assert _order(e["sl_order_id"])["status"] == "CANCELLED"
+        assert _te_kite_client._paper_orders[-1]["order_type"] == "LIMIT", "option exit uses a LIMIT order"
+        assert not _og_x.is_symbol_active_anywhere("NIFTY") and not ai._ai_entries()
+    _with_opt_env(body)
+
+def t_ai_option_hard_limits():
+    def body():
+        ai = _rt_ai()
+        cases = [
+            (_opt_args(lots=_ai_settings.ai_agent_max_option_lots + 1), "lots must be"),
+            (_opt_args(stop_loss_pct=60.0, target_pct=120.0), "stop must be"),
+            (_opt_args(stop_loss_pct=30.0, target_pct=35.0), "1.5x"),
+            (_opt_args(underlying="FINNIFTY"), "underlying must be"),
+            (_opt_args(lots=2), "exceeds"),                              # ~₹25k premium > ₹15k cap
+            (_opt_args(strike_offset=3), "strike_offset"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_option_trade(args))
+                raise AssertionError(f"accepted: {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        with _patch.object(AITrader, "_iv_rank", return_value=85.0):
+            try:
+                asyncio.run(ai._place_option_trade(_opt_args()))
+                raise AssertionError("bought options at IV rank 85")
+            except ToolRejected as e:
+                assert "IV rank" in str(e)
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 14, 40)):
+            try:
+                asyncio.run(ai._place_option_trade(_opt_args()))
+                raise AssertionError("option entry after 14:30 accepted")
+            except ToolRejected as e:
+                assert "option entry window" in str(e)
+        assert ai.trades_today == 0
+    _with_opt_env(body)
+
+def t_ai_option_wide_spread_rejected_live_quotes():
+    today = datetime(2026, 1, 15).date()
+    class _WideKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 150.0, "depth": {"buy": [{"price": 140.0}],
+                                                       "sell": [{"price": 160.0}]}} for i in instruments}
+    def body():
+        _te_kite_client._kite = _WideKite()
+        ai = _rt_ai()
+        with _patch.object(_optres, "_instruments", return_value=_listed(today)):
+            try:
+                asyncio.run(ai._place_option_trade(_opt_args()))
+                raise AssertionError("13% spread accepted")
+            except ToolRejected as e:
+                assert "spread" in str(e)
+    _with_paper_kite(lambda: _with_opt_env(body))
+
+def t_ai_equity_tool_refuses_index():
+    def body():
+        ai = _rt_ai()
+        try:
+            asyncio.run(ai._place_trade(_trade_args("NIFTY 50", qty=1, sl=23900.0, tgt=24200.0)))
+            raise AssertionError("index traded as equity")
+        except ToolRejected as e:
+            assert "place_option_trade" in str(e)
+    _with_opt_env(body)
+
+def t_ai_option_chain_tool():
+    def body():
+        ai = _rt_ai()
+        chain = ai._option_chain("NIFTY")
+        assert chain["spot"] == 24000.0 and chain["premiums_estimated"] is True
+        offsets = [r["offset"] for r in chain["strikes"]]
+        assert offsets == [-2, -1, 0, 1, 2]
+        atm = next(r for r in chain["strikes"] if r["offset"] == 0)
+        assert atm["CE"]["strike"] == atm["PE"]["strike"] == 24000.0
+    _with_opt_env(body)
+
+def t_ai_option_setup_alert_from_index_tick():
+    class _OptScout:
+        min_candles_1min = 0
+        def evaluate_tick(self, snap):
+            return "BUY", {"option_type": "PE", "pattern": "TREND_BREAKOUT", "score": 7}
+    def body():
+        ai = _rt_ai()
+        ai._opt_scout = _OptScout()
+        ai._detect(_make_snap(symbol="NIFTY 50", ltp=24000.0))
+        ev = ai._events.get("NIFTY 50")
+        assert ev and ev["kind"] == "option_setup" and ev["suggested_option_type"] == "PE", ev
+        assert "place_option_trade" in ai._alert_prompt(ev)
+    _with_opt_env(lambda: _with_key(body))
+
+run("Options: contract from Kite instrument list",          t_opt_resolver_live)
+run("Options: never guesses a live tradingsymbol",          t_opt_resolver_never_guesses_live_symbol)
+run("AI option buy: LIMIT entry, SL-limit, trail, LIMIT exit", t_ai_option_trade_lifecycle_paper)
+run("AI option hard limits reject bad trades",               t_ai_option_hard_limits)
+run("AI option rejected on wide live spread",                t_ai_option_wide_spread_rejected_live_quotes)
+run("AI equity tool refuses index symbols",                  t_ai_equity_tool_refuses_index)
+run("AI option chain tool around ATM",                       t_ai_option_chain_tool)
+run("AI option-setup alert from index tick",                 t_ai_option_setup_alert_from_index_tick)
 
 
 # ══════════════════════════════════════════════════════════════════════════
