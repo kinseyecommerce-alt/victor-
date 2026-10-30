@@ -144,6 +144,9 @@ class PositionSL:
     locked_profit:  float = 0.0   # profit locked by current SL level
 
     status:         SLStatus = SLStatus.ACTIVE
+    # True = an external manager (the AI trader) moves the stop; the engine only
+    # watches for the stop being hit and leaves breakeven / trailing / targets alone
+    external_trail: bool  = False
     opened_at:      float = field(default_factory=time.time)
     last_updated:   float = field(default_factory=time.time)
 
@@ -322,6 +325,9 @@ class TrailingSLEngine:
                 await self.on_sl_hit(pos, ltp, pnl)
             return
 
+        if pos.external_trail:
+            return
+
         # ── 3. Target 2 hit ────────────────────────────────────────────
         if not pos.target2_hit:
             t2 = (cfg.target2_pct / 100)
@@ -351,6 +357,9 @@ class TrailingSLEngine:
                     if tighter_sl < pos.current_sl:
                         pos.current_sl = tighter_sl
                         pos.sl_moves  += 1
+                # Keep the exchange stop order in step with the tightened software stop
+                if pos.current_sl != old_sl and self.on_sl_moved:
+                    await self.on_sl_moved(pos, old_sl, "T1")
                 logger.info(
                     "🎯 T1 hit: {} @ ₹{:.2f} → TSL tightened to ₹{:.2f}",
                     pos.symbol, ltp, pos.current_sl

@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     ai_agent_event_max_age_s:     int   = 20       # alerts older than this are dropped, not decided
     ai_agent_max_drift_pct:       float = 0.3      # reject an entry if price moved this far since the alert
     ai_agent_burst_pct:           float = 0.5      # 1-minute move that counts as a momentum burst
+    # AI-managed trailing stops: Claude tightens stops at profit milestones (+1R, +1.5R,
+    # +2R, +3R…) and periodically while price makes new highs. Stops can only tighten.
+    # If the AI is unavailable, the standard mechanical trail takes over that position.
+    ai_agent_ai_trailing:         bool  = True
+    ai_agent_trail_review_s:      int   = 120      # min seconds between trail reviews per position
+    ai_agent_trail_min_gap_pct:   float = 0.15     # equity stop must stay this far from price
+    ai_agent_option_trail_min_gap_pct: float = 5.0 # option stop must stay this far from premium
     # AI option BUYING on index options (CE/PE). Max loss per trade = premium paid.
     ai_agent_options_enabled:     bool  = True
     ai_agent_option_underlyings:  str   = "NIFTY,BANKNIFTY"   # of NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY

@@ -137,6 +137,12 @@ A full review also runs every `AI_AGENT_INTERVAL_MIN` (15; 0 = off). Chat in the
   IV rank ≤72, 09:30–14:30. order_guard/TSL key `ai_opt` (premium-based trail). Index ticks feed
   the F&O pattern engine → `option_setup` alerts. The rule-based FnOAgent uses the same resolver
   and SL-limit orders.
+- **AI-managed trailing stops:** AI positions get `PositionSL.external_trail=True`, so the TSL
+  engine only watches for stop hits. `trail_review` alerts fire at +1R/1.5R/2R/3R/4R/5R and every
+  `AI_AGENT_TRAIL_REVIEW_S` while price makes new highs; Claude calls `adjust_stop` (tighten-only,
+  min gap 0.15% equity / 5% options, updates the exchange SL-M or SL-limit). If the AI is unavailable
+  (stopped, 3 API errors in a row, cost cap) `_handover_if_ai_unavailable` flips the position back
+  to the mechanical trail. Alert priority: position_risk/trend_flip > trail_review > entries.
 - API: `GET /agent/status`, `POST /agent/start|stop|cycle|close-all|chat`, `GET /agent/log`.
 - Tests use a fake client (`_FakeClient` in `test_pipeline.py`) — no API spend.
 

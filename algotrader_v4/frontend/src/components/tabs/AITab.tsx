@@ -44,6 +44,7 @@ const KIND_STYLE: Record<string, string> = {
   alert:    'text-sky-700',
   decision: 'text-slate-800',
   close:    'text-indigo-700',
+  trail:    'text-teal-700',
   rejected: 'text-amber-700',
   error:    'text-red-700',
   cycle:    'text-slate-700',

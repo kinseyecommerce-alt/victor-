@@ -1938,6 +1938,7 @@ async def _noop_async(*a, **k): return None
 
 def _with_ai_env(fn):
     _og_x._cooldown_until.clear()          # earlier losing tests leave a post-loss cooldown
+    _og_x._trade_count.clear()             # …and count toward the per-strategy daily trade cap
     ps = _ai_env()
     for p in ps: p.start()
     try:
@@ -1953,7 +1954,7 @@ def t_ai_tool_schemas_strict():
     names = [t["name"] for t in _AI_TOOLS]
     assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
                      "get_ai_positions", "place_trade", "get_option_chain",
-                     "place_option_trade", "close_position"], names
+                     "place_option_trade", "adjust_stop", "close_position"], names
     for t in _AI_TOOLS:
         sch = t["input_schema"]
         assert t["strict"] is True and sch["additionalProperties"] is False
@@ -2524,6 +2525,151 @@ run("AI option rejected on wide live spread",                t_ai_option_wide_sp
 run("AI equity tool refuses index symbols",                  t_ai_equity_tool_refuses_index)
 run("AI option chain tool around ATM",                       t_ai_option_chain_tool)
 run("AI option-setup alert from index tick",                 t_ai_option_setup_alert_from_index_tick)
+
+# ── AI-managed trailing stops ─────────────────────────────────────────────
+from trailing_sl_engine import TrailingSLEngine as _TSLE
+
+def t_tsl_external_trail_left_alone():
+    eng = _TSLE()
+    pos = eng.register(symbol="EXT", strategy="intraday", side="BUY", entry_price=100.0,
+                       quantity=10, order_id="EXT-1")
+    pos.current_sl, pos.external_trail = 98.0, True
+    asyncio.run(eng.on_tick("EXT", 110.0, 1.0))            # +10%: would breakeven + trail + T2
+    assert pos.current_sl == 98.0 and not pos.trail_active and not pos.target2_hit
+    hits = []
+    async def on_hit(p, ltp, pnl): hits.append(ltp)
+    eng.on_sl_hit = on_hit
+    asyncio.run(eng.on_tick("EXT", 97.5, 1.0))
+    assert hits == [97.5], "stop hits must still fire for AI-managed positions"
+
+def t_tsl_t1_tighten_syncs_exchange():
+    eng = _TSLE()
+    pos = eng.register(symbol="T1S", strategy="intraday", side="BUY", entry_price=100.0,
+                       quantity=10, order_id="T1S-1")
+    moves = []
+    async def on_moved(p, old, kind): moves.append(kind)
+    eng.on_sl_moved = on_moved
+    asyncio.run(eng.on_tick("T1S", 102.5, 1.0))            # past target 1 (2%)
+    assert "T1" in moves, f"T1 tightening must update the exchange stop, got {moves}"
+
+def _ai_with_position(sym="TRL", ltp=1000.0, **kw):
+    ai = _rt_ai()
+    ai.enabled = True
+    _ai_tick(sym, ltp)
+    oid = asyncio.run(ai._place_trade(_trade_args(sym, **kw)))["order_id"]
+    return ai, oid
+
+def t_ai_entry_uses_ai_trailing():
+    def body():
+        ai, oid = _ai_with_position("TRL0")
+        assert _tsl_eng._positions[oid].external_trail is True
+        assert ai._trail[oid]["risk"] == 10.0
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_adjust_stop_tightens_exchange_order():
+    def body():
+        ai, oid = _ai_with_position("TRL1")
+        sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+        _ai_tick("TRL1", 1015.0)
+        out = asyncio.run(ai._adjust_stop({"symbol": "TRL1", "new_stop": 1005.0, "new_target": 1040.0,
+                                           "reasoning": "lock profit above VWAP"}))
+        assert out["status"] == "adjusted" and out["new_stop"] == 1005.0
+        assert _order(sl_oid)["trigger_price"] == 1005.0, "exchange SL-M must move"
+        assert ai._targets[oid] == 1040.0 and out["locked_profit"] == 50.0
+        assert any(e["kind"] == "trail" for e in ai.log)
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_adjust_stop_rules():
+    def body():
+        ai, oid = _ai_with_position("TRL2")
+        _ai_tick("TRL2", 1015.0)
+        cases = [
+            ({"new_stop": 985.0}, "only tighten"),                 # looser than 990
+            ({"new_stop": 1014.0}, "at least"),                    # inside the 0.15% gap
+            ({"new_stop": 1000.0, "new_target": 1010.0}, "beyond the current price"),
+            ({"symbol": "NOPE", "new_stop": 1000.0}, "no open AI position"),
+        ]
+        for extra, msg in cases:
+            args = {"symbol": "TRL2", "new_target": 0, "reasoning": "t", **extra}
+            try:
+                asyncio.run(ai._adjust_stop(args))
+                raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        assert _tsl_eng._positions[oid].current_sl == 990.0
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_adjust_stop_option_sl_limit():
+    def body():
+        ai = _rt_ai()
+        out = asyncio.run(ai._place_option_trade(_opt_args()))
+        oid, sym = out["order_id"], out["symbol"]
+        sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+        prem = out["limit_price"]
+        _ai_tick(sym, round(prem * 1.3, 2))
+        new = round(prem * 1.05, 2)
+        asyncio.run(ai._adjust_stop({"symbol": sym, "new_stop": new, "new_target": 0, "reasoning": "t"}))
+        o = _order(sl_oid)
+        assert o["trigger_price"] == _rtick(new) and 0 < o["price"] < o["trigger_price"], o
+        asyncio.run(ai.close_all("t"))
+    _with_opt_env(lambda: _with_key(body))
+
+def t_ai_trail_review_milestones():
+    def body():
+        ai, oid = _ai_with_position("TRL3")             # entry 1000, stop 990 → 1R = ₹10
+        pos = _tsl_eng._positions[oid]
+        _ai_tick("TRL3", 1010.5); pos.best_price = 1010.5
+        ai._detect(_make_snap(symbol="TRL3", ltp=1010.5))
+        ev = ai._events.pop("TRL3")
+        assert ev["kind"] == "trail_review" and "1R milestone" in ev["reason"], ev
+        ai._detect(_make_snap(symbol="TRL3", ltp=1011.0))     # same milestone: no repeat
+        assert "TRL3" not in ai._events
+        _ai_tick("TRL3", 1015.5); pos.best_price = 1015.5
+        ai._detect(_make_snap(symbol="TRL3", ltp=1015.5))
+        assert "1.5R milestone" in ai._events.pop("TRL3")["reason"]
+        assert "adjust_stop" in ai._alert_prompt(ev)
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_trail_review_alert_priority():
+    def body():
+        ai = _rt_ai()
+        snap = _make_snap(symbol="PRIO", ltp=1000.0)
+        ai._raise(snap, "position_risk", "x")
+        ai._raise(snap, "trail_review", "y", cooldown=0)
+        assert ai._events["PRIO"]["kind"] == "position_risk"
+        ai._events.clear()
+        ai._raise(snap, "trail_review", "y", cooldown=0)
+        ai._raise(snap, "setup", "z")
+        assert ai._events["PRIO"]["kind"] == "trail_review", "an entry alert must not replace a trail review"
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_trailing_falls_back_when_ai_stopped():
+    def body():
+        ai, oid = _ai_with_position("TRL4")
+        pos = _tsl_eng._positions[oid]
+        assert pos.external_trail
+        ai.enabled = False                                    # user pressed Stop
+        _ai_tick("TRL4", 1030.0)
+        asyncio.run(ai._on_snap(_make_snap(symbol="TRL4", ltp=1030.0)))
+        assert pos.external_trail is False, "mechanical trail must take over"
+        assert pos.current_sl > 990.0, "mechanical breakeven/trail should now protect the profit"
+        assert any("standard trailing stop took over" in e["text"] for e in ai.log)
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+run("TSL leaves AI-managed stops alone, still fires hits",   t_tsl_external_trail_left_alone)
+run("TSL target-1 tightening updates exchange stop",          t_tsl_t1_tighten_syncs_exchange)
+run("AI entries are AI-trailed",                              t_ai_entry_uses_ai_trailing)
+run("AI adjust_stop moves the exchange stop + target",        t_ai_adjust_stop_tightens_exchange_order)
+run("AI adjust_stop: tighten-only, min gap, target side",     t_ai_adjust_stop_rules)
+run("AI adjust_stop on option moves SL-limit pair",           t_ai_adjust_stop_option_sl_limit)
+run("AI trail reviews fire at R milestones",                  t_ai_trail_review_milestones)
+run("Trail reviews rank below exits, above entries",          t_ai_trail_review_alert_priority)
+run("AI stopped → mechanical trailing takes over",            t_ai_trailing_falls_back_when_ai_stopped)
 
 
 # ══════════════════════════════════════════════════════════════════════════

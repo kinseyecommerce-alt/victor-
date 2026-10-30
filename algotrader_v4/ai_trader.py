@@ -54,6 +54,9 @@ ENTRY_START = time(9, 20)    # no entries in the first 5 minutes
 ENTRY_END   = time(14, 45)   # no new entries after this
 FORCE_EXIT  = time(15, 0)    # code closes every AI position here
 TICK_MAX_AGE_S = 120         # quotes older than this are not tradable
+# Alert priority: protect positions first, then manage trails, then look for entries
+_ALERT_RANK = {"position_risk": 0, "trend_flip": 0, "trail_review": 1}
+R_MILESTONES = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0)   # profit in multiples of initial risk
 OPT_STRATEGY = "ai_opt"      # order_guard / TSL key for AI option buys (premium-based trail)
 OPT_ENTRY_START = time(9, 30)
 OPT_ENTRY_END   = time(14, 30)
@@ -99,6 +102,14 @@ premiums and spreads for strikes around the money, and IV rank.
 - Prefer ATM or one strike OTM. Options lose value with time: only buy on a clear directional \
 move in the index that you expect to continue soon, not on a slow drift. Stop and target are \
 percentages of the premium.
+
+Trailing stops (you manage them)
+- A trail_review alert means a position is in profit (it lists the R multiple: profit divided by \
+the initial risk). Decide whether to tighten the stop with adjust_stop to lock in profit, move the \
+target, close, or leave it. Stops can only tighten, never loosen.
+- Trail to structure, not to noise: below the recent swing low / VWAP / EMA9 for longs (mirror for \
+shorts), roughly 1-1.5x ATR behind price. Around +1R moving to breakeven is usually sensible; give \
+strong trends room, tighten quickly when momentum fades.
 
 Real-time alerts
 - A REAL-TIME ALERT message means code just detected something on a live tick and already gives \
@@ -174,6 +185,17 @@ TOOLS: list[dict] = [
               "reasoning":     {"type": "string", "description": "One or two sentences: the index setup and why now"},
           },
           ["underlying", "option_type", "strike_offset", "lots", "stop_loss_pct", "target_pct", "reasoning"]),
+    _tool("adjust_stop",
+          "Tighten the stop-loss (and optionally move the target) of an open AI position. The stop "
+          "can only move in the position's favour and must stay a minimum distance from price; the "
+          "exchange stop order is updated.",
+          {
+              "symbol":     {"type": "string", "description": "The position's tradingsymbol"},
+              "new_stop":   {"type": "number"},
+              "new_target": {"type": "number", "description": "New target price, or 0 to keep the current one"},
+              "reasoning":  {"type": "string"},
+          },
+          ["symbol", "new_stop", "new_target", "reasoning"]),
     _tool("close_position",
           "Close an open AI position at market (cancels its stop-loss order).",
           {
@@ -217,6 +239,9 @@ class AITrader:
         self.decisions_today = 0
         self._latencies: deque = deque(maxlen=50)
         self.last_event: Optional[dict] = None
+        # AI-managed trailing: entry order id → {risk, milestone, last_review, best_at_review}
+        self._trail: dict[str, dict] = {}
+        self._ai_errors = 0                            # consecutive Claude API failures
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -379,14 +404,19 @@ class AITrader:
             try:
                 response = await self._create(messages, effort)
             except anthropic.RateLimitError:
+                self._ai_errors += 1
                 return "Claude API rate limit hit — try again shortly."
             except anthropic.AuthenticationError:
+                self._ai_errors += 1
                 return "Claude API key was rejected."
             except anthropic.APIStatusError as exc:
+                self._ai_errors += 1
                 logger.error("[ai] API error {}: {}", exc.status_code, exc.message)
                 return f"Claude API error ({exc.status_code})."
             except anthropic.APIConnectionError:
+                self._ai_errors += 1
                 return "Could not reach the Claude API."
+            self._ai_errors = 0
             self._track_usage(response)
 
             # Keep every block (thinking, fallback, tool_use) — required for valid history
@@ -457,6 +487,9 @@ class AITrader:
         if name == "place_option_trade":
             async with self._action_lock:
                 return await self._place_option_trade(args)
+        if name == "adjust_stop":
+            async with self._action_lock:
+                return await self._adjust_stop(args)
         if name == "close_position":
             async with self._action_lock:
                 return await self._close_position(str(args.get("symbol", "")).upper(),
@@ -520,10 +553,17 @@ class AITrader:
             pnl = None
             if ltp and entry and qty:
                 pnl = round((ltp - entry) * qty * (1 if e["side"] == "BUY" else -1), 2)
+            st = self._trail.get(oid)
+            r = None
+            if st and st["risk"] and ltp and entry:
+                r = round(((ltp - entry) if e["side"] == "BUY" else (entry - ltp)) / st["risk"], 2)
             out.append({"symbol": e["symbol"], "side": e["side"], "quantity": qty,
                         "entry": entry, "ltp": ltp, "unrealised_pnl": pnl,
                         "stop_loss": pos.current_sl if pos else None,
-                        "target": self._targets.get(oid)})
+                        "target": self._targets.get(oid),
+                        "best_price": pos.best_price if pos else None,
+                        "r_multiple": r,
+                        "trailing": ("AI" if pos and pos.external_trail else "standard")})
         return {"open": out}
 
     # ── Actions (hard limits enforced here) ───────────────────────────────
@@ -621,6 +661,7 @@ class AITrader:
             quantity=qty, order_id=order_id,
         )
         pos.current_sl = sl                     # software stop = the AI's stop, not the config default
+        self._start_trail(order_id, pos)
         self._targets[order_id] = round(tgt, 2)
         self._open[order_id] = sym
         self.trades_today += 1
@@ -829,6 +870,7 @@ class AITrader:
             quantity=qty, order_id=order_id,
         )
         pos.current_sl = sl_px
+        self._start_trail(order_id, pos)
         self._targets[order_id] = tgt_px
         self._open[order_id] = c.tradingsymbol
         self.trades_today += 1
@@ -860,6 +902,7 @@ class AITrader:
             _close_tracked(oid, symbol, pos.side, pos.quantity, pnl, "Agent-ai-EXIT", pos.strategy)
             self._targets.pop(oid, None)
             self._open.pop(oid, None)
+            self._trail.pop(oid, None)
             closed.append({"symbol": symbol, "quantity": pos.quantity, "exit_price": ltp,
                            "pnl": round(pnl, 2)})
             text = f"CLOSE {symbol} @ ~₹{ltp:.2f} P&L ₹{pnl:,.0f} — {reason[:200]}"
@@ -893,6 +936,7 @@ class AITrader:
     async def _on_snap(self, snap) -> None:
         held = {oid: e for oid, e in self._ai_entries().items() if e["symbol"] == snap.symbol}
         if held:
+            self._handover_if_ai_unavailable(held)
             await trailing_sl_engine.on_tick(snap.symbol, snap.tick.ltp, snap.indicators.atr_14)
             ltp = snap.tick.ltp
             for oid, e in held.items():
@@ -930,6 +974,8 @@ class AITrader:
             elif st_prev and st_prev != ind.supertrend_dir and ind.supertrend_dir == ("DOWN" if long else "UP"):
                 self._raise(snap, "trend_flip",
                             f"Supertrend flipped {ind.supertrend_dir} against the {e['side']} position")
+            else:
+                self._check_trail(snap, oid, pos)
             return
 
         if not self._can_consider_entry(sym):
@@ -955,6 +1001,108 @@ class AITrader:
             if abs(move) >= settings.ai_agent_burst_pct and ind.volume_ratio >= 2.0:
                 self._raise(snap, "momentum_burst",
                             f"{move:+.2f}% within the current minute on {ind.volume_ratio:.1f}x volume")
+
+    # ── AI-managed trailing stops ─────────────────────────────────────────
+
+    def _start_trail(self, order_id: str, pos) -> None:
+        import time as _t
+        risk = abs(pos.entry_price - pos.current_sl)
+        self._trail[order_id] = {"risk": risk, "milestone": 0.0, "last_review": _t.monotonic(),
+                                 "best_at_review": pos.entry_price}
+        pos.external_trail = bool(settings.ai_agent_ai_trailing and risk > 0)
+
+    def _ai_trailing_available(self) -> bool:
+        return (self.enabled and settings.ai_agent_realtime and bool(settings.anthropic_api_key)
+                and self.cost_today_usd < settings.ai_agent_max_daily_cost_usd and self._ai_errors < 3)
+
+    def _handover_if_ai_unavailable(self, held: dict) -> None:
+        """Runs on every tick of a held position, even when the AI is stopped: if Claude
+        can't manage the trail, give the position back to the mechanical trailing stop."""
+        if self._ai_trailing_available():
+            return
+        for oid in held:
+            pos = trailing_sl_engine._positions.get(oid)
+            if pos and pos.external_trail:
+                pos.external_trail = False
+                self._record("system", f"{pos.symbol}: AI unavailable — standard trailing stop took over")
+
+    def _check_trail(self, snap, oid: str, pos) -> None:
+        """Raise a trail_review at R milestones and while price keeps making new highs;
+        hand the position back to the mechanical trail if the AI can't manage it."""
+        import time as _t
+        st = self._trail.get(oid)
+        if not st or not pos.external_trail:
+            return
+        long = pos.side == "BUY"
+        ltp = snap.tick.ltp
+        r = ((ltp - pos.entry_price) if long else (pos.entry_price - ltp)) / st["risk"]
+        reached = [m for m in R_MILESTONES if m <= r and m > st["milestone"]]
+        now = _t.monotonic()
+        detail = f"+{r:.2f}R, stop ₹{pos.current_sl:.2f}, best ₹{pos.best_price:.2f}"
+        if reached:
+            st["milestone"] = max(reached)
+            st["last_review"], st["best_at_review"] = now, pos.best_price
+            self._raise(snap, "trail_review", f"reached {max(reached):g}R milestone ({detail})",
+                        {"r_multiple": round(r, 2)}, cooldown=0)
+            return
+        better = pos.best_price > st["best_at_review"] if long else pos.best_price < st["best_at_review"]
+        if r >= 0.5 and better and now - st["last_review"] >= settings.ai_agent_trail_review_s:
+            st["last_review"], st["best_at_review"] = now, pos.best_price
+            self._raise(snap, "trail_review", f"new {'high' if long else 'low'} since last review ({detail})",
+                        {"r_multiple": round(r, 2)}, cooldown=settings.ai_agent_trail_review_s)
+
+    async def _adjust_stop(self, a: dict) -> dict:
+        from options_resolver import round_tick as _rt
+        sym = str(a.get("symbol", "")).upper().strip()
+        new_stop = float(a.get("new_stop") or 0)
+        new_tgt = float(a.get("new_target") or 0)
+        why = str(a.get("reasoning", ""))[:300]
+
+        def reject(msg: str):
+            self._record("rejected", f"adjust_stop {sym} → {new_stop}: {msg}")
+            raise ToolRejected(msg)
+
+        found = [(o, e) for o, e in self._ai_entries().items() if e["symbol"] == sym]
+        if not found:
+            reject(f"no open AI position in {sym}")
+        oid, e = found[0]
+        pos = trailing_sl_engine._positions.get(oid)
+        if not pos:
+            reject(f"{sym} is no longer tracked")
+        tick, _ = tick_engine.latest(sym)
+        if not tick or tick.ltp <= 0:
+            reject(f"{sym} has no live price")
+        ltp, long = float(tick.ltp), pos.side == "BUY"
+        new_stop = _rt(new_stop)
+        gap = (settings.ai_agent_option_trail_min_gap_pct if e.get("exchange") == "NFO"
+               else settings.ai_agent_trail_min_gap_pct)
+        if long:
+            if new_stop <= pos.current_sl:
+                reject(f"stops only tighten: {new_stop} is not above the current stop {pos.current_sl}")
+            if new_stop > ltp * (1 - gap / 100):
+                reject(f"stop must stay at least {gap}% below price ₹{ltp:.2f} (max {_rt(ltp * (1 - gap / 100))})")
+        else:
+            if new_stop >= pos.current_sl:
+                reject(f"stops only tighten: {new_stop} is not below the current stop {pos.current_sl}")
+            if new_stop < ltp * (1 + gap / 100):
+                reject(f"stop must stay at least {gap}% above price ₹{ltp:.2f} (min {_rt(ltp * (1 + gap / 100))})")
+        if new_tgt:
+            if (long and new_tgt <= ltp) or (not long and new_tgt >= ltp):
+                reject(f"target {new_tgt} must be beyond the current price ₹{ltp:.2f}")
+            self._targets[oid] = _rt(new_tgt)
+
+        old = pos.current_sl
+        pos.current_sl = new_stop
+        pos.sl_moves += 1
+        pos.locked_profit = (new_stop - pos.entry_price) * pos.quantity * (1 if long else -1)
+        if trailing_sl_engine.on_sl_moved:
+            await trailing_sl_engine.on_sl_moved(pos, old, "AI_TRAIL")   # updates the exchange stop order
+        text = (f"TRAIL {sym} stop ₹{old:.2f} → ₹{new_stop:.2f}"
+                + (f", target → ₹{self._targets[oid]:.2f}" if new_tgt else "")
+                + f" (locks ₹{pos.locked_profit:,.0f}) — {why}")
+        self._record("trail", text)
+        return {"status": "adjusted", "symbol": sym, "old_stop": old, "new_stop": new_stop,
+                "target": self._targets.get(oid), "locked_profit": round(pos.locked_profit, 2)}
 
     def _detect_index(self, snap, und: str) -> None:
         """Index tick: the F&O pattern engine decides whether it is an option-buying setup."""
@@ -1003,18 +1151,20 @@ class AITrader:
             self._scout = IntradayAgent()
         return self._scout
 
-    def _raise(self, snap, kind: str, reason: str, extra: Optional[dict] = None) -> None:
+    def _raise(self, snap, kind: str, reason: str, extra: Optional[dict] = None,
+               cooldown: Optional[int] = None) -> None:
         import time as _t
         key = (snap.symbol, kind)
         now = _t.monotonic()
-        if now - self._trigger_ts.get(key, -1e9) < settings.ai_agent_trigger_cooldown_s:
+        wait = settings.ai_agent_trigger_cooldown_s if cooldown is None else cooldown
+        if now - self._trigger_ts.get(key, -1e9) < wait:
             return
         self._trigger_ts[key] = now
         ev = {"symbol": snap.symbol, "kind": kind, "reason": reason, "ltp": snap.tick.ltp,
               "at": now_ist().strftime("%H:%M:%S"), "mono": now, **(extra or {})}
         prev = self._events.get(snap.symbol)
-        if prev and prev["kind"] in ("position_risk", "trend_flip") and kind not in ("position_risk", "trend_flip"):
-            return                                   # never let an entry alert replace an exit alert
+        if prev and _ALERT_RANK.get(prev["kind"], 2) < _ALERT_RANK.get(kind, 2):
+            return                                   # never let a lower-priority alert replace a higher one
         self._events[snap.symbol] = ev
         self.events_today += 1
         self.last_event = {k: ev[k] for k in ("symbol", "kind", "reason", "ltp", "at")}
@@ -1032,7 +1182,7 @@ class AITrader:
                 while self._events and self.enabled:
                     # exits first, then oldest
                     sym, ev = min(self._events.items(), key=lambda kv: (
-                        kv[1]["kind"] not in ("position_risk", "trend_flip"), kv[1]["mono"]))
+                        _ALERT_RANK.get(kv[1]["kind"], 2), kv[1]["mono"]))
                     del self._events[sym]
                     wait = settings.ai_agent_min_call_gap_s - (_t.monotonic() - self._last_call)
                     if wait > 0:
@@ -1054,7 +1204,7 @@ class AITrader:
             return None
         if not settings.anthropic_api_key or self.cost_today_usd >= settings.ai_agent_max_daily_cost_usd:
             return None
-        is_exit = ev["kind"] in ("position_risk", "trend_flip")
+        is_exit = ev["kind"] in _ALERT_RANK            # about an open position, not a new entry
         if not is_exit and not self._can_consider_entry(sym):
             return None
 
@@ -1094,6 +1244,9 @@ class AITrader:
         if ev["kind"] in ("position_risk", "trend_flip"):
             action = ("Decide now whether to close this position early or keep it (its stop is "
                       "already working).")
+        elif ev["kind"] == "trail_review":
+            action = ("Trail review: tighten the stop with adjust_stop (optionally move the target), "
+                      "close, or leave it. Stops can only tighten.")
         elif ev["kind"] == "option_setup":
             action = ("Index option setup. Check get_option_chain, then place_option_trade if the "
                       "move is clear and the premium is reasonable, otherwise PASS.")
@@ -1108,6 +1261,7 @@ class AITrader:
         for oid in [o for o in self._open if o not in live]:
             sym = self._open.pop(oid)
             self._targets.pop(oid, None)
+            self._trail.pop(oid, None)
             self._record("close", f"[auto] {sym} exited by stop-loss / trailing stop")
 
     # ── Helpers ───────────────────────────────────────────────────────────
