@@ -82,7 +82,7 @@ _EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/conf
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
     "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log", "/agent/log",
-    "/dashboard/summary",
+    "/dashboard/summary", "/settings/credentials/status",
     "/docs", "/redoc",
 })
 
@@ -278,6 +278,11 @@ class CredentialsUpdateRequest(BaseModel):
     anthropic_api_key: str | None = Field(default=None, min_length=1)
     truedata_username: str | None = Field(default=None, min_length=1)
     truedata_password: str | None = Field(default=None, min_length=1)
+    persist:           bool = True     # save encrypted to .secrets/ so they survive a restart
+
+class CredentialsDeleteRequest(BaseModel):
+    fields: list[Literal["kite_api_key", "kite_api_secret", "kite_access_token", "anthropic_api_key",
+                         "truedata_username", "truedata_password"]] = Field(min_length=1)
 
 class AppPasswordRequest(BaseModel):
     username:     str | None = Field(default=None, min_length=1, max_length=50)
@@ -347,6 +352,7 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
         )
     try:
         token = kite_client.set_access_token(request_token=request_token)
+        _remember_kite_token(token)
         return HTMLResponse(f"""
         <html><head><title>Kite Connected</title></head>
         <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
@@ -390,6 +396,7 @@ def login_url(): return {"login_url": kite_client.login_url()}
 @app.post("/auth/token", tags=["Auth"])
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
+    _remember_kite_token(t)
     return {"status": "ok", "access_token": t[:6] + "…"}
 
 
@@ -738,18 +745,90 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
     return get_capital_allocation()
 
 
-@app.post("/settings/credentials", tags=["Settings"])
-def update_credentials(req: CredentialsUpdateRequest):
-    """Update API credentials in-memory. Restart reverts to env values."""
-    if req.kite_api_key      is not None: settings.kite_api_key      = req.kite_api_key
-    if req.kite_api_secret   is not None: settings.kite_api_secret   = req.kite_api_secret
-    if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
-    if req.truedata_username is not None: settings.truedata_username = req.truedata_username
-    if req.truedata_password is not None: settings.truedata_password = req.truedata_password
+_CRED_FIELDS = ("kite_api_key", "kite_api_secret", "anthropic_api_key",
+                "truedata_username", "truedata_password")
+
+
+def _is_loopback(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _refresh_after_credential_change(changed: set[str]) -> None:
+    """Make running components pick up new keys without a restart."""
+    if "anthropic_api_key" in changed:
+        import anthropic, claude_trade_gate, trade_memory
+        from signal_engine import signal_engine
+        ai_trader._client = None
+        claude_trade_gate._client = None
+        trade_memory._client = None
+        master_agent._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        if getattr(signal_engine, "_client", None) is not None:
+            signal_engine._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    if changed & {"kite_api_key", "kite_api_secret"}:
+        kite_client._kite = None          # reopened with the new app key on next use
+
+
+def _credential_view() -> dict:
     creds = kite_client.validate_credentials()
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
-    return {"status": "updated", "credentials": creds}
+    return creds
+
+
+@app.post("/settings/credentials", tags=["Settings"])
+def update_credentials(req: CredentialsUpdateRequest, request: Request):
+    """Set API credentials. With persist=true (default) they are also saved encrypted in .secrets/
+    and reloaded at startup. Values are never returned by any endpoint."""
+    from secret_store import secret_store
+    values = {f: v.strip() for f in _CRED_FIELDS if (v := getattr(req, f)) is not None and v.strip()}
+    if not values:
+        raise HTTPException(422, "No credentials given")
+    if req.persist and not settings.api_key and not _is_loopback(request):
+        raise HTTPException(403, "Set API_KEY in .env before saving keys from another machine")
+    if req.persist:
+        try:
+            secret_store.save(values)
+        except Exception as e:
+            logger.error("Credential vault write failed: {}", e)
+            raise HTTPException(500, "Could not save to the encrypted vault — see server log")
+    for f, v in values.items():
+        setattr(settings, f, v)
+    _refresh_after_credential_change(set(values))
+    logger.info("Credentials updated: {} (persisted={})", sorted(values), req.persist)
+    return {"status": "saved" if req.persist else "updated", "persisted": req.persist,
+            "credentials": _credential_view(), "vault": secret_store.status()}
+
+
+@app.get("/settings/credentials/status", tags=["Settings"])
+def credentials_status():
+    """Which credentials are set, and which are stored in the encrypted vault (no values)."""
+    from secret_store import secret_store
+    return {"credentials": _credential_view(), "vault": secret_store.status()}
+
+
+@app.delete("/settings/credentials", tags=["Settings"])
+def delete_credentials(req: CredentialsDeleteRequest):
+    """Remove credentials from the vault and from the running server."""
+    from secret_store import secret_store
+    secret_store.delete(req.fields)
+    for f in req.fields:
+        setattr(settings, f, "")
+    if "kite_access_token" in req.fields:
+        kite_client._kite = None
+    _refresh_after_credential_change(set(req.fields))
+    logger.info("Credentials deleted: {}", sorted(req.fields))
+    return {"status": "deleted", "credentials": _credential_view(), "vault": secret_store.status()}
+
+
+def _remember_kite_token(token: str) -> None:
+    """Keep today's Kite access token so a restart doesn't need a fresh login (expires next morning)."""
+    from secret_store import secret_store
+    settings.kite_access_token = token
+    try:
+        secret_store.save({"kite_access_token": token})
+    except Exception as e:
+        logger.warning("Kite token not saved to vault: {}", e)
 
 
 @app.post("/settings/app-password", tags=["Settings"])

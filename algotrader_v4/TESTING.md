@@ -95,13 +95,24 @@ AI actually make money.
 TRADING_MODE=PAPER
 PAPER_DATA_SOURCE=KITE
 DEMO_MODE=false
-KITE_API_KEY=...            KITE_API_SECRET=...
-ANTHROPIC_API_KEY=...       # only if you use the AI trader
-API_KEY=<long random>       # protects the dashboard/API
+API_KEY=<long random>       # protects the dashboard/API — set this before saving any keys
 ```
 
+**Your keys — enter them in the app, not in chat or files you share.** Trading view → ⚙ Settings →
+**API Keys**: paste the Kite API key and secret (from developers.kite.trade) and, for the AI trader,
+the Anthropic key. With "Remember on this server" ticked they are saved **encrypted** in
+`.secrets/vault.enc` (permissions 600, git-ignored), reloaded at startup, and never shown again —
+only the last 4 characters. **Remove** deletes one from the vault and the running server.
+`python3 secret_store.py` prints what is stored (no values).
+
+In the Kite developer console set the redirect URL to `http://<your-server>:8000/auth/kite/callback`.
+
+**Your Zerodha user ID, password and TOTP are never entered into this app.** Kite Connect requires
+you to log in yourself on Zerodha's own page once a day; the app only receives the day's access token,
+which it keeps (encrypted) until Kite expires it the next morning.
+
 Each trading day:
-1. Log in to Kite through the app (Trading view → ⚙ Settings, or `/auth/kite/callback`).
+1. Settings → API Keys → **Log in with Zerodha** and log in on Zerodha's page.
 2. In Claude Code run `/preflight` — it must say **GO**.
 3. Start the bot and/or the AI from the Overview top bar. Use `/paper-session` to have Claude
    watch it for you.

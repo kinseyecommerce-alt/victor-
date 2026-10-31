@@ -181,3 +181,7 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Keys saved from the dashboard live encrypted in .secrets/ (see secret_store.py) and override .env.
+from secret_store import apply_to as _apply_stored_secrets  # noqa: E402
+_apply_stored_secrets(settings)

@@ -100,7 +100,12 @@ export const api = {
     anthropic_api_key?: string
     truedata_username?: string
     truedata_password?: string
+    persist?: boolean
   }) => ax().post('/settings/credentials', data),
+  credentialsStatus: () => ax().get('/settings/credentials/status'),
+  deleteCredentials: (fields: string[]) => ax().delete('/settings/credentials', { data: { fields } }),
+  kiteLoginUrl: () => ax().get('/auth/login-url'),
+  kiteStatus: () => ax().get('/auth/kite/status'),
 
   // App login
   updateAppPassword: (data: { username?: string; new_password: string }) =>

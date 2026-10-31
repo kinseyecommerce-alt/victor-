@@ -3621,6 +3621,82 @@ run("CE and PE cooldown tracked independently",             t_fno_cooldown_per_d
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("17. ENCRYPTED KEY VAULT")
+# ══════════════════════════════════════════════════════════════════════════
+import tempfile as _vtmp
+from pathlib import Path
+import os
+from secret_store import SecretStore as _Vault, apply_to as _vault_apply
+
+def _vault():
+    return _Vault(Path(_vtmp.mkdtemp()) / "s")
+
+def t_vault_roundtrip_encrypted():
+    v = _vault(); v.save({"anthropic_api_key": "sk-ant-secret-1234", "kite_api_key": "kitekey9876"})
+    assert v.load() == {"anthropic_api_key": "sk-ant-secret-1234", "kite_api_key": "kitekey9876"}
+    raw = v.vault.read_bytes()
+    assert b"sk-ant" not in raw and b"kitekey" not in raw
+
+def t_vault_file_permissions():
+    v = _vault(); v.save({"kite_api_key": "abc"})
+    assert v.keyfile.stat().st_mode & 0o777 == 0o600
+    assert v.vault.stat().st_mode & 0o777 == 0o600
+    assert v.dir.stat().st_mode & 0o777 == 0o700
+
+def t_vault_status_has_no_values():
+    v = _vault(); v.save({"kite_api_secret": "verysecretvalue42"})
+    st = v.status()
+    assert st["fields"]["kite_api_secret"]["stored"] and st["fields"]["kite_api_secret"]["hint"] == "…ue42"
+    assert "verysecret" not in str(st)
+
+def t_vault_rejects_unknown_fields():
+    v = _vault()
+    try:
+        v.save({"api_key": "x"}); assert False, "should reject"
+    except ValueError:
+        pass
+
+def t_vault_kite_token_expires_next_day():
+    v = _vault(); v.save({"kite_access_token": "tok"})
+    assert v.load()["kite_access_token"] == "tok"
+    d = v._read(); d["kite_access_token"]["day"] = "2000-01-01"; v._write(d)
+    assert "kite_access_token" not in v.load()
+    assert v.status()["fields"]["kite_access_token"]["expired"] is True
+
+def t_vault_delete():
+    v = _vault(); v.save({"kite_api_key": "a", "kite_api_secret": "b"})
+    v.delete(["kite_api_key"]); assert list(v.load()) == ["kite_api_secret"]
+    v.delete(["kite_api_secret"]); assert not v.vault.exists()
+
+def t_vault_wrong_key_does_not_crash_startup():
+    from cryptography.fernet import Fernet
+    v = _vault(); v.save({"kite_api_key": "a"})
+    old = os.environ.get("SECRETS_MASTER_KEY")
+    os.environ["SECRETS_MASTER_KEY"] = Fernet.generate_key().decode()
+    try:
+        class S: pass
+        assert _vault_apply(S(), v) == []
+        assert "cannot be decrypted" in v.status()["error"]
+    finally:
+        if old is None: os.environ.pop("SECRETS_MASTER_KEY", None)
+        else: os.environ["SECRETS_MASTER_KEY"] = old
+
+def t_vault_apply_overrides_settings():
+    v = _vault(); v.save({"anthropic_api_key": "from-vault"})
+    class S: anthropic_api_key = "from-env"
+    s = S(); assert _vault_apply(s, v) == ["anthropic_api_key"] and s.anthropic_api_key == "from-vault"
+
+run("vault: round-trip, nothing stored in plain text",       t_vault_roundtrip_encrypted)
+run("vault: key 600, vault 600, dir 700",                    t_vault_file_permissions)
+run("vault: status shows last 4 chars only",                 t_vault_status_has_no_values)
+run("vault: unknown fields rejected",                        t_vault_rejects_unknown_fields)
+run("vault: Kite access token ignored the next day",         t_vault_kite_token_expires_next_day)
+run("vault: delete fields; empty vault removed",             t_vault_delete)
+run("vault: wrong master key → server still starts",         t_vault_wrong_key_does_not_crash_startup)
+run("vault: stored values override .env values",             t_vault_apply_overrides_settings)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
