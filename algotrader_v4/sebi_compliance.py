@@ -212,8 +212,11 @@ class SEBICompliance:
         price_at_signal:  float,
         signal_source:    str,
         regime:           str,
+        is_future:        bool = False,
     ) -> tuple[bool, str, str]:
-        """Returns (approved: bool, algo_id: str, reason: str)."""
+        """Returns (approved: bool, algo_id: str, reason: str).
+        is_future: index futures carry a contract value far above their margin (one NIFTY lot
+        is ~₹18 lakh), so they are checked against MAX_FUTURES_ORDER_VALUE instead."""
         with self._lock:
             algo_id = APPROVED_ALGO_IDS.get(strategy, "ALGO-UNKNOWN")
 
@@ -241,7 +244,8 @@ class SEBICompliance:
                 return False, algo_id, reason
 
             # Reg 4: max order value (₹10 lakh per order as SEBI guideline)
-            max_order_value = max(settings.max_position_size, 1_000_000.0)
+            max_order_value = (settings.max_futures_order_value if is_future
+                               else max(settings.max_position_size, 1_000_000.0))
             order_value     = quantity * max(price_at_signal, 1.0)
             if order_value > max_order_value:
                 reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI limit "

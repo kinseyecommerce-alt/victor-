@@ -132,6 +132,7 @@ class KiteClient:
         self._kite: Optional[KiteConnect] = None
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
+        self._paper_gtts:      dict[int, dict] = {}
         self._instruments_cache: dict[str, list[dict]] = {}
         self._instruments_day: dict[str, object] = {}
 
@@ -391,6 +392,8 @@ class KiteClient:
         for pos in self.positions().get("net", []):
             if pos.get("quantity", 0) == 0:
                 continue
+            if pos.get("product") == "CNC":       # delivery (swing) positions are held overnight
+                continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
             qty  = abs(pos["quantity"])
             oid  = self.place_order(
@@ -405,6 +408,85 @@ class KiteClient:
             order_ids.append(oid)
             logger.info("Square-off {} {} qty={}", side, pos["tradingsymbol"], qty)
         return order_ids
+
+    # ── GTT (good-till-triggered) stops for delivery positions ─────────────
+    # A day SL order on a CNC holding expires at the close; a single-leg GTT stays at
+    # Zerodha until it triggers (it then places a LIMIT order), so it protects a swing
+    # position overnight and while this server is down. Paper GTTs are recorded only:
+    # the software stop closes paper positions.
+
+    def place_gtt_stop(self, tradingsymbol: str, exchange: str, quantity: int,
+                       trigger_price: float, limit_price: float, last_price: float) -> int:
+        """Single-leg GTT that SELLs `quantity` (CNC) when price falls to trigger_price."""
+        if settings.trading_mode == "PAPER":
+            gid = int(time.time() * 1000) % 1_000_000_000 + len(self._paper_gtts)   # unique across restarts
+            self._paper_gtts[gid] = {"id": gid, "tradingsymbol": tradingsymbol, "exchange": exchange,
+                                     "quantity": quantity, "trigger": trigger_price,
+                                     "limit": limit_price, "status": "active"}
+            logger.info("PAPER GTT {} | SELL {} {} trigger {} limit {}", gid, quantity,
+                        tradingsymbol, trigger_price, limit_price)
+            return gid
+        kite = self.ensure_session()
+        res = _with_retry(lambda: kite.place_gtt(
+            trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol, exchange=exchange,
+            trigger_values=[trigger_price], last_price=last_price,
+            orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
+                     "quantity": quantity, "order_type": "LIMIT", "product": "CNC",
+                     "price": limit_price}]), label="place_gtt")
+        gid = int(res["trigger_id"])
+        logger.info("LIVE GTT {} | SELL {} {} trigger {} limit {}", gid, quantity,
+                    tradingsymbol, trigger_price, limit_price)
+        return gid
+
+    def modify_gtt_stop(self, gtt_id: int, tradingsymbol: str, exchange: str, quantity: int,
+                        trigger_price: float, limit_price: float, last_price: float) -> None:
+        if settings.trading_mode == "PAPER":
+            g = self._paper_gtts.get(int(gtt_id))
+            if g:
+                g.update(trigger=trigger_price, limit=limit_price, quantity=quantity)
+            return
+        kite = self.ensure_session()
+        _with_retry(lambda: kite.modify_gtt(
+            trigger_id=int(gtt_id), trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol,
+            exchange=exchange, trigger_values=[trigger_price], last_price=last_price,
+            orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
+                     "quantity": quantity, "order_type": "LIMIT", "product": "CNC",
+                     "price": limit_price}]), label="modify_gtt")
+
+    def delete_gtt(self, gtt_id: int) -> None:
+        if settings.trading_mode == "PAPER":
+            g = self._paper_gtts.get(int(gtt_id))
+            if g:
+                g["status"] = "deleted"
+            return
+        kite = self.ensure_session()
+        _with_retry(lambda: kite.delete_gtt(int(gtt_id)), label="delete_gtt")
+
+    def gtt_status(self, gtt_id: int) -> str:
+        """active | triggered | cancelled | deleted | expired | rejected | disabled | unknown"""
+        if settings.trading_mode == "PAPER":
+            return self._paper_gtts.get(int(gtt_id), {}).get("status", "unknown")
+        kite = self.ensure_session()
+        try:
+            return str(_with_retry(lambda: kite.get_gtt(int(gtt_id)), label="get_gtt").get("status", "unknown"))
+        except Exception:
+            return "unknown"
+
+    def order_margin(self, tradingsymbol: str, exchange: str, transaction_type: str, quantity: int,
+                     product: str, order_type: str, price: float) -> Optional[float]:
+        """Margin Zerodha would block for this order (₹), or None when it can't be asked."""
+        if settings.trading_mode == "PAPER" or not self.has_session():
+            return None
+        kite = self.ensure_session()
+        try:
+            res = _with_retry(lambda: kite.order_margins([{
+                "exchange": exchange, "tradingsymbol": tradingsymbol,
+                "transaction_type": transaction_type, "variety": "regular", "product": product,
+                "order_type": order_type, "quantity": quantity, "price": price}]), label="order_margins")
+            return float(res[0]["total"])
+        except Exception as exc:
+            logger.warning("[kite] order_margins failed for {}: {}", tradingsymbol, exc)
+            return None
 
     # ── Historical data (rate-limited + auto-chunked) ──────────────────────
 
@@ -423,8 +505,9 @@ class KiteClient:
           day data    → 2 000-day chunks
         Chunks are merged and returned as a single list.
         """
-        if settings.trading_mode == "PAPER":
+        if not settings.uses_kite_market_data:      # PAPER+SIM has no Kite session
             return []
+        kite = self.ensure_session()
 
         is_minute = "minute" in interval
         max_days  = _KITE_HIST_MIN_DAYS if is_minute else _KITE_HIST_DAY_DAYS
@@ -436,7 +519,7 @@ class KiteClient:
             chunk_end = min(chunk_start + window, to_date)
 
             def _fetch(cs=chunk_start, ce=chunk_end):
-                return self.kite.historical_data(
+                return kite.historical_data(
                     instrument_token=instrument_token,
                     from_date=cs, to_date=ce,
                     interval=interval, continuous=continuous, oi=oi,

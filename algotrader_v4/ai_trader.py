@@ -2,8 +2,13 @@
 ai_trader.py — Autonomous Claude trading agent for AlgoTrader Pro.
 
 Claude runs an agentic tool-use loop over the bot's own state: it reads quotes,
-indicators, regime and its own positions, and can open or close intraday
-(MIS) equity positions. It answers a dashboard chat with the same tools.
+indicators, regime and its own positions, and can trade
+  * intraday NSE equity (MIS, long or short)
+  * index options (buy only, intraday)
+  * index futures (NFO, intraday, long or short — off unless AI_AGENT_FUTURES_ENABLED)
+  * swing NSE equity (CNC delivery, long only, held for days, protected by a GTT stop at
+    Zerodha and saved to data/ai_swing_positions.json so it survives restarts)
+It answers a dashboard chat with the same tools.
 
 Real time: code watches every tick (_detect, microseconds) — the intraday
 pattern engine, momentum bursts, and AI positions nearing their stop or
@@ -19,7 +24,8 @@ Safety model — the model decides, the code enforces:
     the strategy agents use; a rejected check is returned to Claude as an error
   * LIVE orders only when AI_AGENT_ALLOW_LIVE=true (PAPER otherwise)
   * autonomous cycles stop once today's estimated API spend hits the cap
-  * at 15:00 IST every AI position is closed by code, not by the model
+  * at 15:00 IST every intraday AI position is closed by code, not by the model;
+    swing positions are exited by code when their maximum holding period ends
   * the TSL engine and AI targets are driven from the tick feed, so stops work
     between decisions
   * real-time alerts: per-symbol cooldown, min gap between calls, stale alerts
@@ -29,9 +35,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 import uuid
 from collections import deque
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 import anthropic
@@ -45,7 +54,8 @@ from risk_manager import risk_manager
 from tick_engine import tick_engine
 from trailing_sl_engine import trailing_sl_engine
 from options_resolver import (
-    INDEX_QUOTE, OptionContract, estimate_premium, normalize_underlying, resolve, round_tick,
+    INDEX_QUOTE, OptionContract, estimate_premium, normalize_underlying, resolve, resolve_future,
+    round_tick,
 )
 
 AGENT = "ai"
@@ -60,6 +70,14 @@ R_MILESTONES = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0)   # profit in multiples of initial
 OPT_STRATEGY = "ai_opt"      # order_guard / TSL key for AI option buys (premium-based trail)
 OPT_ENTRY_START = time(9, 30)
 OPT_ENTRY_END   = time(14, 30)
+FUT_STRATEGY   = "ai_fut"      # AI index futures (intraday)
+SWING_STRATEGY = "ai_swing"    # AI swing / delivery
+SWING_ENTRY_END = time(15, 15) # swing buys may use the last part of the session (daily close)
+SWING_TIME_EXIT = time(15, 10) # code exits swing positions whose holding period ends today
+SWING_REVIEW_S  = 1800         # swing trail reviews at most every 30 min (daily timeframe)
+GTT_TRIGGER_OFFSET_PCT = 0.25  # GTT sits just beyond the software stop: the software stop exits
+                               # first during market hours; the GTT covers gaps and downtime
+SWING_FILE = Path(os.getenv("AI_SWING_FILE") or Path(__file__).resolve().parent / "data" / "ai_swing_positions.json")
 
 # Per-MTok prices for spend tracking (Anthropic first-party rates, 2026-10).
 # Unknown models are costed at Opus 5.5 rates.
@@ -72,8 +90,9 @@ _PRICES = {
 # Models that accept the server-side refusal fallback (`fallbacks: "default"`)
 _FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 
-SYSTEM_PROMPT = """You are the autonomous intraday trader inside AlgoTrader Pro, an algorithmic \
-trading system for NSE (India) equities. You trade with real or paper money on behalf of the \
+SYSTEM_PROMPT = """You are the autonomous trader inside AlgoTrader Pro, an algorithmic \
+trading system for NSE (India): intraday equities, index options, index futures and swing \
+(delivery) equities. You trade with real or paper money on behalf of the \
 account owner, so capital preservation comes first: a skipped trade costs nothing, a bad one costs money.
 
 How you work
@@ -102,6 +121,26 @@ premiums and spreads for strikes around the money, and IV rank.
 - Prefer ATM or one strike OTM. Options lose value with time: only buy on a clear directional \
 move in the index that you expect to continue soon, not on a slow drift. Stop and target are \
 percentages of the premium.
+
+Index futures (when enabled)
+- place_future_trade opens an intraday NIFTY/BANKNIFTY future, long (BUY) or short (SELL). \
+Futures are leveraged: a 1% index move is ~1% of the whole contract value (lakhs of rupees), \
+so stops are tight (a fraction of a percent) and the code caps the rupee loss at the stop and \
+the margin per trade. Use them for a clear, strong intraday index trend; prefer options when \
+you want the loss limited to the premium. Closed by code at 15:00 like every intraday trade.
+
+Swing trades (when enabled)
+- place_swing_trade buys an NSE stock for delivery (CNC) and holds it for days (long only). \
+Decide on the DAILY chart: call get_daily_chart first (EMA20/50/200, RSI, ATR, 20-day and \
+52-week range). Buy uptrends at a breakout above the 20-day high on good volume, or on a \
+pullback to the 20-day EMA that is holding — not extended moves far above the EMAs.
+- Stop below daily structure (the pullback low / below EMA20 / ~1.5-2x daily ATR), target at \
+least 2x the risk, and a maximum holding period in days. The stop is placed at Zerodha as a \
+GTT so it also works overnight. Swing positions are NOT closed at 15:00; code exits them at \
+the end of their holding period.
+- A DAILY SWING SCAN message near the close lists shortlisted stocks and your swing positions. \
+Most days you should buy nothing. Review held positions on the daily chart: trail the stop \
+under new daily higher lows with adjust_stop, or close if the trend has broken.
 
 Trailing stops (you manage them)
 - A trail_review alert means a position is in profit (it lists the R multiple: profit divided by \
@@ -152,7 +191,8 @@ TOOLS: list[dict] = [
           {"symbol": {"type": "string", "description": "NSE trading symbol, e.g. RELIANCE"}},
           ["symbol"]),
     _tool("get_ai_positions",
-          "Open positions this AI holds: entry, live price, unrealised P&L, stop and target.",
+          "Open positions this AI holds (intraday, option, future, swing): entry, live price, "
+          "unrealised P&L, stop, target, and for swing the days held and exit date.",
           {}, []),
     _tool("place_trade",
           "Open an intraday (MIS) NSE equity position at market with a protective stop-loss. "
@@ -166,6 +206,40 @@ TOOLS: list[dict] = [
               "reasoning": {"type": "string", "description": "One or two sentences: the setup and why now"},
           },
           ["symbol", "side", "quantity", "stop_loss", "target", "reasoning"]),
+    _tool("get_daily_chart",
+          "Daily (swing) view of an NSE stock: EMA20/50/200, RSI14, ATR14, 20-day and 52-week "
+          "high/low, volume vs average, trend label and the last 30 daily candles.",
+          {"symbol": {"type": "string", "description": "NSE trading symbol, e.g. RELIANCE"}},
+          ["symbol"]),
+    _tool("place_swing_trade",
+          "BUY an NSE stock for delivery (CNC) to hold for days, with a GTT stop-loss at the broker "
+          "that also works overnight. Long only. Rejected unless every hard limit and risk/SEBI check passes.",
+          {
+              "symbol":        {"type": "string", "description": "NSE trading symbol from the watchlist"},
+              "quantity":      {"type": "integer", "description": "Shares; quantity x price within the swing per-trade limit"},
+              "stop_loss":     {"type": "number", "description": "Stop price below the current price (daily structure)"},
+              "target":        {"type": "number", "description": "Target price, at least the swing minimum reward:risk"},
+              "max_hold_days": {"type": "integer", "description": "Trading days to hold at most; code exits after that"},
+              "reasoning":     {"type": "string", "description": "One or two sentences: the daily setup and why now"},
+          },
+          ["symbol", "quantity", "stop_loss", "target", "max_hold_days", "reasoning"]),
+    _tool("get_future_quote",
+          "Nearest-month index future: contract, expiry, lot size, live price and spread, index spot "
+          "and basis, estimated margin per lot, and the stop distance the rupee risk limit allows.",
+          {"underlying": {"type": "string", "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]}},
+          ["underlying"]),
+    _tool("place_future_trade",
+          "Open an intraday index FUTURE (nearest month), long (BUY) or short (SELL), with a "
+          "stop-loss order. Leveraged. Rejected unless every hard limit and risk/SEBI check passes.",
+          {
+              "underlying": {"type": "string", "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]},
+              "side":       {"type": "string", "enum": ["BUY", "SELL"]},
+              "lots":       {"type": "integer", "description": "Number of lots"},
+              "stop_loss":  {"type": "number", "description": "Stop as a FUTURE price (below for BUY, above for SELL)"},
+              "target":     {"type": "number", "description": "Target as a FUTURE price, >= 1.5x the risk away"},
+              "reasoning":  {"type": "string", "description": "One or two sentences: the index setup and why now"},
+          },
+          ["underlying", "side", "lots", "stop_loss", "target", "reasoning"]),
     _tool("get_option_chain",
           "Index option chain around the money for the nearest tradable expiry (same-day expiry "
           "excluded): spot, expiry, lot size, CE/PE premiums with bid/ask spread, IV rank.",
@@ -242,6 +316,11 @@ class AITrader:
         # AI-managed trailing: entry order id → {risk, milestone, last_review, best_at_review}
         self._trail: dict[str, dict] = {}
         self._ai_errors = 0                            # consecutive Claude API failures
+        # Swing (delivery) positions: entry order id → {opened, hold_until, reason, initial_risk}
+        self._swing_meta: dict[str, dict] = {}
+        self._swing_scan_day: Optional[date] = None
+        self._swing_scan_task: Optional[asyncio.Task] = None
+        self._gtt_checked: dict[str, float] = {}       # entry order id → monotonic time of last GTT check
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -482,6 +561,16 @@ class AITrader:
         if name == "place_trade":
             async with self._action_lock:
                 return await self._place_trade(args)
+        if name == "get_daily_chart":
+            return await self._daily_chart(str(args.get("symbol", "")).upper().strip())
+        if name == "place_swing_trade":
+            async with self._action_lock:
+                return await self._place_swing_trade(args)
+        if name == "get_future_quote":
+            return self._future_quote(str(args.get("underlying", "")))
+        if name == "place_future_trade":
+            async with self._action_lock:
+                return await self._place_future_trade(args)
         if name == "get_option_chain":
             return self._option_chain(str(args.get("underlying", "")))
         if name == "place_option_trade":
@@ -505,7 +594,8 @@ class AITrader:
             "time_ist":       now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "mode":           self._mode_label(),
             "market_open":    is_market_open(),
-            "entry_window":   f"{ENTRY_START:%H:%M}-{ENTRY_END:%H:%M} IST; AI positions force-closed at {FORCE_EXIT:%H:%M}",
+            "entry_window":   (f"{ENTRY_START:%H:%M}-{ENTRY_END:%H:%M} IST (swing buys until {SWING_ENTRY_END:%H:%M}); "
+                               f"intraday AI positions force-closed at {FORCE_EXIT:%H:%M}, swing positions held"),
             "can_open_trades": allowed,
             "blocked_reason": why,
             "regime":         regime_detector.current_regime.value if regime_detector.current_regime else "UNKNOWN",
@@ -557,13 +647,19 @@ class AITrader:
             r = None
             if st and st["risk"] and ltp and entry:
                 r = round(((ltp - entry) if e["side"] == "BUY" else (entry - ltp)) / st["risk"], 2)
-            out.append({"symbol": e["symbol"], "side": e["side"], "quantity": qty,
-                        "entry": entry, "ltp": ltp, "unrealised_pnl": pnl,
-                        "stop_loss": pos.current_sl if pos else None,
-                        "target": self._targets.get(oid),
-                        "best_price": pos.best_price if pos else None,
-                        "r_multiple": r,
-                        "trailing": ("AI" if pos and pos.external_trail else "standard")})
+            row = {"symbol": e["symbol"], "kind": self._kind(e), "product": e.get("product", "MIS"),
+                   "side": e["side"], "quantity": qty,
+                   "entry": entry, "ltp": ltp, "unrealised_pnl": pnl,
+                   "stop_loss": pos.current_sl if pos else None,
+                   "target": self._targets.get(oid),
+                   "best_price": pos.best_price if pos else None,
+                   "r_multiple": r,
+                   "trailing": ("AI" if pos and pos.external_trail else "standard")}
+            meta = self._swing_meta.get(oid)
+            if meta:
+                row.update(opened=meta["opened"], hold_until=meta["hold_until"],
+                           days_held=self._sessions_between(date.fromisoformat(meta["opened"]), now_ist().date()))
+            out.append(row)
         return {"open": out}
 
     # ── Actions (hard limits enforced here) ───────────────────────────────
@@ -620,8 +716,8 @@ class AITrader:
             reject(f"target {tgt} gives {reward / risk_dist:.2f}x risk; need >= 1.5x")
         if self.trades_today >= settings.ai_agent_max_trades_per_day:
             reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
-        if len(self._ai_entries()) >= settings.ai_agent_max_open_positions:
-            reject(f"max open AI positions ({settings.ai_agent_max_open_positions}) reached")
+        if len(self._intraday_entries()) >= settings.ai_agent_max_open_positions:
+            reject(f"max open intraday AI positions ({settings.ai_agent_max_open_positions}) reached")
         ok, msg = order_guard.can_place(sym, AGENT, side)
         if not ok:
             reject(msg)
@@ -654,7 +750,7 @@ class AITrader:
         _setup_tsl_callbacks()
         _tsl_sl_orders[order_id] = {
             "sl_order_id": sl_oid, "product": "MIS", "exchange": "NSE",
-            "symbol": sym, "guard_symbol": sym, "agent": AGENT, "side": side,
+            "symbol": sym, "guard_symbol": sym, "agent": AGENT, "side": side, "kind": "equity",
         }
         pos = trailing_sl_engine.register(
             symbol=sym, strategy=AGENT, side=side, entry_price=ltp,
@@ -803,10 +899,10 @@ class AITrader:
             reject(f"target {tgp}% is under 1.5x the {slp}% stop")
         if self.trades_today >= settings.ai_agent_max_trades_per_day:
             reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
-        if len(self._ai_entries()) >= settings.ai_agent_max_open_positions:
-            reject(f"max open AI positions ({settings.ai_agent_max_open_positions}) reached")
+        if len(self._intraday_entries()) >= settings.ai_agent_max_open_positions:
+            reject(f"max open intraday AI positions ({settings.ai_agent_max_open_positions}) reached")
         if order_guard.is_symbol_active_anywhere(und):
-            reject(f"{und} already has an open option position")
+            reject(f"{und} already has an open option or future position")
 
         c = resolve(und, spot, opt, off, now_ist().date())
         if not c or c.lot_size <= 0:
@@ -863,7 +959,7 @@ class AITrader:
         _tsl_sl_orders[order_id] = {
             "sl_order_id": sl_oid, "product": "MIS", "exchange": "NFO",
             "symbol": c.tradingsymbol, "guard_symbol": und, "agent": AGENT, "side": "BUY",
-            "sl_type": "SL", "sl_buffer_pct": 5.0, "exit_limit_buffer_pct": 3.0,
+            "sl_type": "SL", "sl_buffer_pct": 5.0, "exit_limit_buffer_pct": 3.0, "kind": "option",
         }
         pos = trailing_sl_engine.register(
             symbol=c.tradingsymbol, strategy=OPT_STRATEGY, side="BUY", entry_price=entry_px,
@@ -886,6 +982,471 @@ class AITrader:
                 "target": tgt_px, "max_loss": round((entry_px - sl_px) * qty, 2),
                 "premium_paid": round(entry_px * qty, 2), "mode": self._mode_label()}
 
+    # ── Swing (delivery, long only) ───────────────────────────────────────
+
+    async def _daily_chart(self, symbol: str) -> dict:
+        from daily_data import daily_view
+        if not symbol or symbol in INDEX_QUOTE.values() or tick_engine._exchange.get(symbol, "NSE") != "NSE":
+            raise ToolRejected(f"{symbol} is not an NSE equity")
+        v = await asyncio.to_thread(daily_view, symbol)
+        if not v:
+            raise ToolRejected(f"no daily history for {symbol} (is it streaming?)")
+        return v
+
+    async def _place_swing_trade(self, a: dict) -> dict:
+        from agents.base_agent import flatten_unprotected, _setup_tsl_callbacks, _tsl_sl_orders, sl_limit_price
+        from sebi_compliance import sebi_compliance
+        from market_regime import regime_detector
+
+        sym  = str(a.get("symbol", "")).upper().strip()
+        qty  = int(a.get("quantity") or 0)
+        sl   = float(a.get("stop_loss") or 0)
+        tgt  = float(a.get("target") or 0)
+        hold = int(a.get("max_hold_days") or 0)
+        why  = str(a.get("reasoning", ""))[:300]
+
+        def reject(msg: str):
+            self._record("rejected", f"SWING BUY {qty} {sym}: {msg}")
+            raise ToolRejected(msg)
+
+        if not settings.ai_agent_swing_enabled:
+            reject("swing trading is disabled (AI_AGENT_SWING_ENABLED=false)")
+        allowed, blocked = self._trading_allowed(swing=True)
+        if not allowed:
+            reject(blocked)
+        if sym in INDEX_QUOTE.values() or tick_engine._exchange.get(sym, "NSE") != "NSE":
+            reject(f"{sym} is not an NSE equity")
+        tick, _ = tick_engine.latest(sym)
+        if not tick or tick.ltp <= 0:
+            reject(f"{sym} is not streaming")
+        if self._tick_age(sym) > TICK_MAX_AGE_S:
+            reject(f"{sym} quote is stale ({self._tick_age(sym)}s old)")
+        ltp = float(tick.ltp)
+        if qty <= 0:
+            reject("quantity must be positive")
+        if qty * ltp > settings.ai_agent_max_swing_value:
+            reject(f"value ₹{qty * ltp:,.0f} exceeds the swing per-trade limit "
+                   f"₹{settings.ai_agent_max_swing_value:,.0f} (max qty {int(settings.ai_agent_max_swing_value // ltp)})")
+        risk_dist = ltp - sl
+        if risk_dist <= 0:
+            reject(f"stop_loss {sl} must be below price {ltp}")
+        sl_pct = risk_dist / ltp * 100
+        if not (settings.ai_agent_swing_min_sl_pct <= sl_pct <= settings.ai_agent_swing_max_sl_pct):
+            reject(f"stop is {sl_pct:.2f}% away; swing allows {settings.ai_agent_swing_min_sl_pct}-"
+                   f"{settings.ai_agent_swing_max_sl_pct}%")
+        if tgt - ltp < settings.ai_agent_swing_min_rr * risk_dist:
+            reject(f"target {tgt} gives {(tgt - ltp) / risk_dist:.2f}x risk; swing needs >= "
+                   f"{settings.ai_agent_swing_min_rr}x")
+        if not 1 <= hold <= settings.ai_agent_swing_max_hold_days:
+            reject(f"max_hold_days must be 1-{settings.ai_agent_swing_max_hold_days}")
+        if self.trades_today >= settings.ai_agent_max_trades_per_day:
+            reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
+        if len(self._swing_entries()) >= settings.ai_agent_max_swing_positions:
+            reject(f"max swing positions ({settings.ai_agent_max_swing_positions}) reached")
+        ok, msg = order_guard.can_place(sym, SWING_STRATEGY, "BUY")
+        if not ok:
+            reject(msg)
+        if order_guard.is_symbol_active_anywhere(sym):
+            reject(f"{sym} already has an open position")
+        ok, msg = risk_manager.check_before_order(sym, qty, ltp, "BUY")
+        if not ok:
+            reject(msg)
+        ok, _algo, msg = sebi_compliance.pre_order_check(
+            strategy=AGENT, symbol=sym, exchange="NSE", transaction_type="BUY", quantity=qty,
+            order_type="MARKET", price_at_signal=ltp, signal_source="ai_trader",
+            regime=regime_detector.current_regime.value if regime_detector.current_regime else "UNKNOWN",
+        )
+        if not ok:
+            reject(msg)
+
+        order_id = kite_client.place_order(
+            tradingsymbol=sym, exchange="NSE", transaction_type="BUY", quantity=qty,
+            order_type="MARKET", product="CNC", tag="Agent-ai-swing",
+        )
+        sebi_compliance.record_order_id(AGENT, sym, order_id)
+
+        sl = round_tick(sl)
+        buf = settings.ai_agent_swing_gtt_buffer_pct
+        gtt_trigger = round_tick(sl * (1 - GTT_TRIGGER_OFFSET_PCT / 100))
+        gtt_id = None
+        for attempt in range(3):
+            try:
+                gtt_id = kite_client.place_gtt_stop(sym, "NSE", qty, gtt_trigger,
+                                                    sl_limit_price(gtt_trigger, "BUY", buf), ltp)
+                break
+            except Exception as exc:
+                logger.error("[ai] GTT for {} failed (attempt {}/3): {}", sym, attempt + 1, exc)
+                await asyncio.sleep(0.2)
+        if gtt_id is None and await flatten_unprotected(AGENT, sym, "NSE", "BUY", qty, "CNC"):
+            reject("the GTT stop-loss was rejected by the broker; the purchase was sold again")
+
+        today = now_ist().date()
+        order_guard.register_order(sym, SWING_STRATEGY, "BUY", order_id)
+        risk_manager.position_opened()
+        _setup_tsl_callbacks()
+        _tsl_sl_orders[order_id] = {
+            "sl_order_id": None, "gtt_id": gtt_id, "gtt_buffer_pct": buf,
+            "gtt_trigger_offset_pct": GTT_TRIGGER_OFFSET_PCT, "product": "CNC", "exchange": "NSE",
+            "symbol": sym, "guard_symbol": sym, "agent": AGENT, "side": "BUY", "kind": "swing",
+        }
+        pos = trailing_sl_engine.register(symbol=sym, strategy=SWING_STRATEGY, side="BUY",
+                                          entry_price=ltp, quantity=qty, order_id=order_id)
+        pos.current_sl = sl
+        self._start_trail(order_id, pos)
+        self._targets[order_id] = round_tick(tgt)
+        self._open[order_id] = sym
+        hold_until = self._add_sessions(today, hold)
+        self._swing_meta[order_id] = {"opened": today.isoformat(), "hold_until": hold_until.isoformat(),
+                                      "reason": why, "initial_risk": risk_dist}
+        self._save_swing()
+        self.trades_today += 1
+        self._ensure_tick_monitor()
+
+        text = (f"SWING BUY {qty} {sym} @ ~₹{ltp:.2f} SL ₹{sl:.2f} (GTT) TGT ₹{tgt:.2f}, "
+                f"hold until {hold_until:%d %b} — {why}")
+        self._record("trade", text)
+        await self._notify(f"🧠 <b>[AI]</b> {text}")
+        return {"status": "placed", "order_id": order_id, "symbol": sym, "product": "CNC",
+                "quantity": qty, "approx_price": ltp, "stop_loss": sl, "gtt_id": gtt_id,
+                "target": round_tick(tgt), "hold_until": hold_until.isoformat(), "mode": self._mode_label()}
+
+    async def _swing_housekeeping(self, held: dict, now_t: time) -> None:
+        """Time exit at the end of the holding period; in LIVE, notice a GTT that already sold."""
+        import time as _t
+        today = now_ist().date()
+        for oid, e in held.items():
+            meta = self._swing_meta.get(oid)
+            if (meta and now_t >= SWING_TIME_EXIT and today >= date.fromisoformat(meta["hold_until"])
+                    and oid in self._ai_entries()):
+                async with self._action_lock:
+                    try:
+                        await self._close_position(e["symbol"], "maximum holding period reached", by_code=True)
+                    except ToolRejected:
+                        pass
+                continue
+            if settings.trading_mode == "LIVE" and e.get("gtt_id"):
+                last = self._gtt_checked.get(oid, 0.0)
+                if _t.monotonic() - last >= 300:
+                    self._gtt_checked[oid] = _t.monotonic()
+                    status = await asyncio.to_thread(kite_client.gtt_status, e["gtt_id"])
+                    if status == "triggered":
+                        self._forget_position(oid, "GTT stop triggered at Zerodha")
+
+    def _forget_position(self, oid: str, note: str) -> None:
+        """Drop a position that the broker already closed (no exit order is sent)."""
+        from agents.base_agent import _tsl_sl_orders
+        e = _tsl_sl_orders.pop(oid, None)
+        pos = trailing_sl_engine._positions.get(oid)
+        if not e:
+            return
+        tick, _ = tick_engine.latest(e["symbol"])
+        px = (pos.current_sl if pos else 0.0) or (tick.ltp if tick else 0.0)
+        pnl = (px - pos.entry_price) * pos.quantity if pos else 0.0
+        order_guard.release_order(e.get("guard_symbol", e["symbol"]), pos.strategy if pos else SWING_STRATEGY,
+                                  e["side"], pnl)
+        risk_manager.record_trade(pnl)
+        risk_manager.position_closed()
+        trailing_sl_engine.deregister(oid)
+        self._open.pop(oid, None)
+        self._targets.pop(oid, None)
+        self._trail.pop(oid, None)
+        if self._swing_meta.pop(oid, None) is not None:
+            self._save_swing()
+        self._record("close", f"[auto] {e['symbol']}: {note} (≈₹{pnl:,.0f})")
+
+    def _maybe_swing_scan(self, now_t: time) -> None:
+        if not (self.enabled and settings.ai_agent_swing_enabled and settings.anthropic_api_key):
+            return
+        today = now_ist().date()
+        try:
+            h, m = (int(x) for x in settings.ai_agent_swing_scan_time.split(":"))
+        except ValueError:
+            return
+        if self._swing_scan_day == today or not (time(h, m) <= now_t <= SWING_ENTRY_END):
+            return
+        if self._swing_scan_task and not self._swing_scan_task.done():
+            return
+        self._swing_scan_day = today
+        self._swing_scan_task = asyncio.create_task(self.run_swing_scan())
+
+    async def run_swing_scan(self) -> Optional[str]:
+        """Once a day near the close: shortlist swing setups in code, then let Claude decide,
+        and review held swing positions on the daily chart."""
+        from daily_data import swing_candidates
+        if self.cost_today_usd >= settings.ai_agent_max_daily_cost_usd:
+            return None
+        held = {e["symbol"] for e in self._ai_entries().values()}
+        universe = [s for s in tick_engine.symbols()
+                    if tick_engine._exchange.get(s, "NSE") == "NSE" and s not in INDEX_QUOTE.values()
+                    and s not in held]
+        try:
+            cands = await asyncio.to_thread(swing_candidates, universe)
+        except Exception as exc:
+            self._record("error", f"swing scan: {exc}")
+            cands = []
+        swing_pos = [p for p in self._positions()["open"] if p["kind"] == "swing"]
+        if not cands and not swing_pos:
+            self._record("cycle", "swing scan: no candidates, no swing positions")
+            return None
+        allowed, blocked = self._trading_allowed(swing=True)
+        data = {"candidates": cands, "your_swing_positions": swing_pos,
+                "can_open_trades": allowed, "blocked_reason": blocked, "limits": self._limits()["swing"]}
+        prompt = (f"DAILY SWING SCAN {now_ist():%H:%M} IST. Code shortlisted these uptrending stocks "
+                  "(breakout or pullback to EMA20). For any you consider, call get_daily_chart, then "
+                  "place_swing_trade only if the daily setup is clearly good. Review each held swing "
+                  "position on its daily chart: trail with adjust_stop, close, or hold. Buying nothing "
+                  f"is normal.\n{json.dumps(data, default=str)}")
+        async with self._cycle_lock:
+            reply = await self._run_agent([{"role": "user", "content": prompt}], purpose="swing_scan")
+        self._record("cycle", f"swing scan → {reply[:240]}")
+        return reply
+
+    def _save_swing(self) -> None:
+        """Persist open swing positions (atomic write) so a restart can pick them up."""
+        rows = []
+        for oid, e in self._swing_entries().items():
+            pos = trailing_sl_engine._positions.get(oid)
+            meta = self._swing_meta.get(oid)
+            if not pos or not meta:
+                continue
+            rows.append({"order_id": oid, "symbol": e["symbol"], "quantity": pos.quantity,
+                         "entry": pos.entry_price, "stop": pos.current_sl, "best": pos.best_price,
+                         "target": self._targets.get(oid), "gtt_id": e.get("gtt_id"),
+                         "gtt_buffer_pct": e.get("gtt_buffer_pct", settings.ai_agent_swing_gtt_buffer_pct),
+                         **meta})
+        try:
+            SWING_FILE.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=SWING_FILE.parent, prefix=".swing.")
+            with os.fdopen(fd, "w") as f:
+                json.dump({"saved_at": now_ist().isoformat(timespec="seconds"), "positions": rows}, f, indent=1)
+            os.replace(tmp, SWING_FILE)
+        except Exception as exc:
+            logger.error("[ai] could not save swing positions: {}", exc)
+
+    def restore_swing(self) -> list[str]:
+        """Re-track swing positions saved by an earlier run (startup). Positions whose GTT
+        already triggered at Zerodha are dropped instead."""
+        from agents.base_agent import _setup_tsl_callbacks, _tsl_sl_orders
+        try:
+            rows = json.loads(SWING_FILE.read_text()).get("positions", [])
+        except FileNotFoundError:
+            return []
+        except Exception as exc:
+            logger.error("[ai] swing file unreadable: {}", exc)
+            return []
+        restored = []
+        for r in rows:
+            oid = r["order_id"]
+            if oid in _tsl_sl_orders:
+                continue
+            if settings.trading_mode == "LIVE" and r.get("gtt_id") and kite_client.has_session():
+                if kite_client.gtt_status(r["gtt_id"]) == "triggered":
+                    self._record("close", f"[auto] {r['symbol']}: GTT stop triggered while the server was down")
+                    continue
+            _setup_tsl_callbacks()
+            _tsl_sl_orders[oid] = {
+                "sl_order_id": None, "gtt_id": r.get("gtt_id"), "gtt_buffer_pct": r.get("gtt_buffer_pct", 1.0),
+                "gtt_trigger_offset_pct": GTT_TRIGGER_OFFSET_PCT, "product": "CNC", "exchange": "NSE",
+                "symbol": r["symbol"], "guard_symbol": r["symbol"], "agent": AGENT, "side": "BUY", "kind": "swing",
+            }
+            pos = trailing_sl_engine.register(symbol=r["symbol"], strategy=SWING_STRATEGY, side="BUY",
+                                              entry_price=r["entry"], quantity=r["quantity"], order_id=oid)
+            pos.current_sl = r["stop"]
+            pos.best_price = r.get("best") or r["entry"]
+            self._start_trail(oid, pos)
+            self._trail[oid]["risk"] = r.get("initial_risk") or self._trail[oid]["risk"]
+            if r.get("target"):
+                self._targets[oid] = r["target"]
+            self._open[oid] = r["symbol"]
+            self._swing_meta[oid] = {k: r[k] for k in ("opened", "hold_until", "reason", "initial_risk") if k in r}
+            order_guard.restore_active(r["symbol"], SWING_STRATEGY, "BUY", oid)
+            risk_manager.position_opened()
+            tick_engine.subscribe([{"symbol": r["symbol"], "exchange": "NSE", "seed_price": r.get("best") or r["entry"]}])
+            restored.append(r["symbol"])
+        if restored:
+            try:
+                asyncio.get_running_loop()
+                self._ensure_tick_monitor()     # stops/targets/time exits run from the tick feed
+            except RuntimeError:
+                pass                            # no loop yet: started with the AI or the next trade
+            self._record("system", f"restored swing positions: {', '.join(restored)}")
+        self._save_swing()
+        return restored
+
+    def reapply_overnight(self) -> None:
+        """After the daily counter reset: positions held from earlier days still exist."""
+        for oid, e in self._swing_entries().items():
+            order_guard.restore_active(e["guard_symbol"], SWING_STRATEGY, "BUY", oid)
+            risk_manager.position_opened()
+
+    # ── Index futures (intraday, long or short) ───────────────────────────
+
+    def _future_price(self, c, spot: float) -> dict:
+        if c.live and settings.uses_kite_market_data:
+            q = kite_client.quote_kite([f"NFO:{c.tradingsymbol}"]).get(f"NFO:{c.tradingsymbol}") or {}
+            depth = q.get("depth") or {}
+            buy, sell = depth.get("buy") or [{}], depth.get("sell") or [{}]
+            return {"ltp": float(q.get("last_price") or 0), "bid": float(buy[0].get("price") or 0),
+                    "ask": float(sell[0].get("price") or 0), "estimated": False}
+        tick, _ = tick_engine.latest(c.tradingsymbol)
+        px = float(tick.ltp) if tick and tick.ltp > 0 else spot
+        return {"ltp": px, "bid": px, "ask": px, "estimated": True}
+
+    def _future_margin(self, c, side: str, qty: int, price: float) -> float:
+        m = kite_client.order_margin(c.tradingsymbol, "NFO", side, qty, "MIS", "LIMIT", price)
+        return m if m else price * qty * settings.ai_agent_future_margin_pct / 100
+
+    def _future_quote(self, underlying: str) -> dict:
+        und = normalize_underlying(underlying)
+        if not settings.ai_agent_futures_enabled:
+            raise ToolRejected("futures trading is disabled (AI_AGENT_FUTURES_ENABLED=false)")
+        if und not in self._future_underlyings():
+            raise ToolRejected(f"allowed underlyings: {self._future_underlyings()}")
+        _, spot = self._index_spot(und)
+        c = resolve_future(und, now_ist().date())
+        if not c or c.lot_size <= 0:
+            raise ToolRejected(f"no tradable {und} future found in the instrument list")
+        q = self._future_price(c, spot)
+        ltp = q["ltp"] or spot
+        margin = self._future_margin(c, "BUY", c.lot_size, ltp)
+        max_stop = settings.ai_agent_max_future_risk / c.lot_size
+        return {"underlying": und, "contract": c.tradingsymbol,
+                "expiry": c.expiry.isoformat() if c.expiry else "simulated", "lot_size": c.lot_size,
+                "ltp": ltp, "bid": q["bid"], "ask": q["ask"], "price_estimated": q["estimated"],
+                "spot": spot, "basis": round(ltp - spot, 2),
+                "notional_per_lot": round(ltp * c.lot_size), "margin_per_lot": round(margin),
+                "max_stop_distance_points_for_1_lot": round(max_stop, 2),
+                "max_stop_distance_pct_for_1_lot": round(max_stop / ltp * 100, 3),
+                "note": "stop_loss and target are future prices; the rupee loss at the stop is capped"}
+
+    async def _place_future_trade(self, a: dict) -> dict:
+        from agents.base_agent import (
+            place_sl_with_retry, flatten_unprotected, _setup_tsl_callbacks, _tsl_sl_orders,
+        )
+        from sebi_compliance import sebi_compliance
+        from market_regime import regime_detector
+
+        und  = normalize_underlying(str(a.get("underlying", ""))) or str(a.get("underlying", ""))
+        side = str(a.get("side", "")).upper()
+        lots = int(a.get("lots") or 0)
+        sl   = float(a.get("stop_loss") or 0)
+        tgt  = float(a.get("target") or 0)
+        why  = str(a.get("reasoning", ""))[:300]
+
+        def reject(msg: str):
+            self._record("rejected", f"{side} {lots} lot {und} FUT: {msg}")
+            raise ToolRejected(msg)
+
+        if not settings.ai_agent_futures_enabled:
+            reject("futures trading is disabled (AI_AGENT_FUTURES_ENABLED=false)")
+        allowed, blocked = self._trading_allowed()
+        if not allowed:
+            reject(blocked)
+        if not (OPT_ENTRY_START <= now_ist().time() <= OPT_ENTRY_END):
+            reject(f"outside the futures entry window {OPT_ENTRY_START:%H:%M}-{OPT_ENTRY_END:%H:%M} IST")
+        if und not in self._future_underlyings():
+            reject(f"underlying must be one of {self._future_underlyings()}")
+        if side not in ("BUY", "SELL"):
+            reject("side must be BUY or SELL")
+        if not 1 <= lots <= settings.ai_agent_max_future_lots:
+            reject(f"lots must be 1-{settings.ai_agent_max_future_lots}")
+        try:
+            idx, spot = self._index_spot(und)
+        except ToolRejected as e:
+            reject(str(e))
+        ref = self._event_ltp.get(idx)
+        if ref and abs(spot - ref) / ref * 100 > settings.ai_agent_max_drift_pct:
+            reject(f"{idx} moved {abs(spot - ref) / ref * 100:.2f}% since the alert; the setup is stale")
+        c = resolve_future(und, now_ist().date())
+        if not c or c.lot_size <= 0:
+            reject(f"no tradable {und} future found in the instrument list")
+        q = self._future_price(c, spot)
+        ltp = q["ltp"]
+        if ltp <= 0:
+            reject(f"{c.tradingsymbol} has no price")
+        if not q["estimated"] and (q["bid"] <= 0 or q["ask"] <= 0):
+            reject(f"{c.tradingsymbol} has no two-sided quote")
+        entry_px = round_tick((q["ask"] or ltp) * 1.0005 if side == "BUY" else (q["bid"] or ltp) * 0.9995)
+        qty = lots * c.lot_size
+        risk_dist = (entry_px - sl) if side == "BUY" else (sl - entry_px)
+        if risk_dist <= 0:
+            reject(f"stop_loss {sl} is on the wrong side of the future price {entry_px}")
+        sl_pct = risk_dist / entry_px * 100
+        if not (settings.ai_agent_future_min_sl_pct <= sl_pct <= settings.ai_agent_future_max_sl_pct):
+            reject(f"stop is {sl_pct:.2f}% away; futures allow {settings.ai_agent_future_min_sl_pct}-"
+                   f"{settings.ai_agent_future_max_sl_pct}%")
+        if risk_dist * qty > settings.ai_agent_max_future_risk:
+            reject(f"loss at the stop would be ₹{risk_dist * qty:,.0f}; the limit is "
+                   f"₹{settings.ai_agent_max_future_risk:,.0f} (max {settings.ai_agent_max_future_risk / qty:.1f} points)")
+        reward = (tgt - entry_px) if side == "BUY" else (entry_px - tgt)
+        if reward < 1.5 * risk_dist:
+            reject(f"target {tgt} gives {reward / risk_dist:.2f}x risk; need >= 1.5x")
+        margin = self._future_margin(c, side, qty, entry_px)
+        if margin > settings.ai_agent_max_future_margin:
+            reject(f"margin ₹{margin:,.0f} exceeds the per-trade limit ₹{settings.ai_agent_max_future_margin:,.0f}")
+        if self.trades_today >= settings.ai_agent_max_trades_per_day:
+            reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
+        if len(self._intraday_entries()) >= settings.ai_agent_max_open_positions:
+            reject(f"max open intraday AI positions ({settings.ai_agent_max_open_positions}) reached")
+        if order_guard.is_symbol_active_anywhere(und):
+            reject(f"{und} already has an open option or future position")
+        ok, msg = order_guard.can_place(und, FUT_STRATEGY, side)
+        if not ok:
+            reject(msg)
+        ok, msg = risk_manager.check_before_order(c.tradingsymbol, qty, entry_px, side, check_size=False)
+        if not ok:
+            reject(msg)
+        ok, _algo, msg = sebi_compliance.pre_order_check(
+            strategy=AGENT, symbol=c.tradingsymbol, exchange="NFO", transaction_type=side, quantity=qty,
+            order_type="LIMIT", price_at_signal=entry_px, signal_source="ai_trader",
+            regime=regime_detector.current_regime.value if regime_detector.current_regime else "UNKNOWN",
+            is_future=True,
+        )
+        if not ok:
+            reject(msg)
+
+        tick_engine.subscribe([{"symbol": c.tradingsymbol, "exchange": "NFO", "seed_price": entry_px}])
+        order_id = kite_client.place_order(
+            tradingsymbol=c.tradingsymbol, exchange="NFO", transaction_type=side, quantity=qty,
+            order_type="LIMIT", price=entry_px, product="MIS", tag="Agent-ai-fut",
+        )
+        sebi_compliance.record_order_id(AGENT, c.tradingsymbol, order_id)
+
+        sl, tgt = round_tick(sl), round_tick(tgt)
+        sl_oid = await place_sl_with_retry(AGENT, c.tradingsymbol, "NFO", side, qty, "MIS", sl,
+                                           order_type="SL", limit_buffer_pct=0.5)
+        exit_px = round_tick(entry_px * (0.997 if side == "BUY" else 1.003))
+        if sl_oid is None and await flatten_unprotected(AGENT, c.tradingsymbol, "NFO", side, qty, "MIS",
+                                                        exit_limit_price=exit_px):
+            reject("stop-loss order was rejected by the broker; entry was closed")
+
+        order_guard.register_order(und, FUT_STRATEGY, side, order_id)
+        risk_manager.position_opened()
+        _setup_tsl_callbacks()
+        _tsl_sl_orders[order_id] = {
+            "sl_order_id": sl_oid, "product": "MIS", "exchange": "NFO",
+            "symbol": c.tradingsymbol, "guard_symbol": und, "agent": AGENT, "side": side,
+            "sl_type": "SL", "sl_buffer_pct": 0.5, "exit_limit_buffer_pct": 0.3, "kind": "future",
+        }
+        pos = trailing_sl_engine.register(symbol=c.tradingsymbol, strategy=FUT_STRATEGY, side=side,
+                                          entry_price=entry_px, quantity=qty, order_id=order_id)
+        pos.current_sl = sl
+        self._start_trail(order_id, pos)
+        self._targets[order_id] = tgt
+        self._open[order_id] = c.tradingsymbol
+        self.trades_today += 1
+        self._ensure_tick_monitor()
+
+        exp = c.expiry.isoformat() if c.expiry else "sim"
+        text = (f"{side} {lots} lot ({qty}) {c.tradingsymbol} [{exp}] @ ₹{entry_px:.2f} SL ₹{sl:.2f} "
+                f"TGT ₹{tgt:.2f} (risk ₹{risk_dist * qty:,.0f}, margin ≈₹{margin:,.0f}) — {why}")
+        self._record("trade", text)
+        await self._notify(f"🧠 <b>[AI]</b> {text}")
+        return {"status": "placed", "order_id": order_id, "symbol": c.tradingsymbol, "expiry": exp,
+                "side": side, "quantity": qty, "limit_price": entry_px, "stop_loss": sl, "target": tgt,
+                "max_loss_at_stop": round(risk_dist * qty, 2), "margin": round(margin),
+                "mode": self._mode_label()}
+
     async def _close_position(self, symbol: str, reason: str, by_code: bool = False) -> dict:
         from agents.base_agent import _close_tracked
         found = [(oid, e) for oid, e in self._ai_entries().items() if e["symbol"] == symbol]
@@ -903,6 +1464,8 @@ class AITrader:
             self._targets.pop(oid, None)
             self._open.pop(oid, None)
             self._trail.pop(oid, None)
+            if self._swing_meta.pop(oid, None) is not None:
+                self._save_swing()
             closed.append({"symbol": symbol, "quantity": pos.quantity, "exit_price": ltp,
                            "pnl": round(pnl, 2)})
             text = f"CLOSE {symbol} @ ~₹{ltp:.2f} P&L ₹{pnl:,.0f} — {reason[:200]}"
@@ -910,9 +1473,11 @@ class AITrader:
             await self._notify(f"🧠 <b>[AI]</b> {text}")
         return {"status": "closed", "closed": closed}
 
-    async def close_all(self, reason: str) -> list:
+    async def close_all(self, reason: str, include_swing: bool = True) -> list:
+        """Close AI positions. The 15:00 force exit passes include_swing=False."""
         out = []
-        for sym in sorted({e["symbol"] for e in self._ai_entries().values()}):
+        entries = self._ai_entries() if include_swing else self._intraday_entries()
+        for sym in sorted({e["symbol"] for e in entries.values()}):
             async with self._action_lock:
                 try:
                     out.append(await self._close_position(sym, reason, by_code=True))
@@ -947,8 +1512,13 @@ class AITrader:
                     async with self._action_lock:
                         await self._close_position(snap.symbol, f"target ₹{tgt:.2f} hit", by_code=True)
         self._note_stop_exits()
-        if held and now_ist().time() >= FORCE_EXIT:
-            await self.close_all("end of AI trading window (15:00)")
+        now_t = now_ist().time()
+        if now_t >= FORCE_EXIT and any(self._kind(e) != "swing" for e in held.values()):
+            await self.close_all("end of AI trading window (15:00)", include_swing=False)
+        swing_held = {o: e for o, e in held.items() if self._kind(e) == "swing" and o in self._ai_entries()}
+        if swing_held:
+            await self._swing_housekeeping(swing_held, now_t)
+        self._maybe_swing_scan(now_t)
         if self.enabled and settings.ai_agent_realtime:
             self._detect(snap)
 
@@ -971,7 +1541,8 @@ class AITrader:
             if risk > 0 and lost / risk >= 0.6:
                 self._raise(snap, "position_risk",
                             f"{e['side']} position has used {lost / risk:.0%} of its stop distance")
-            elif st_prev and st_prev != ind.supertrend_dir and ind.supertrend_dir == ("DOWN" if long else "UP"):
+            elif (self._kind(e) != "swing" and st_prev and st_prev != ind.supertrend_dir
+                  and ind.supertrend_dir == ("DOWN" if long else "UP")):
                 self._raise(snap, "trend_flip",
                             f"Supertrend flipped {ind.supertrend_dir} against the {e['side']} position")
             else:
@@ -1046,10 +1617,11 @@ class AITrader:
                         {"r_multiple": round(r, 2)}, cooldown=0)
             return
         better = pos.best_price > st["best_at_review"] if long else pos.best_price < st["best_at_review"]
-        if r >= 0.5 and better and now - st["last_review"] >= settings.ai_agent_trail_review_s:
+        gap_s = SWING_REVIEW_S if pos.strategy == SWING_STRATEGY else settings.ai_agent_trail_review_s
+        if r >= 0.5 and better and now - st["last_review"] >= gap_s:
             st["last_review"], st["best_at_review"] = now, pos.best_price
             self._raise(snap, "trail_review", f"new {'high' if long else 'low'} since last review ({detail})",
-                        {"r_multiple": round(r, 2)}, cooldown=settings.ai_agent_trail_review_s)
+                        {"r_multiple": round(r, 2)}, cooldown=gap_s)
 
     async def _adjust_stop(self, a: dict) -> dict:
         from options_resolver import round_tick as _rt
@@ -1074,7 +1646,7 @@ class AITrader:
             reject(f"{sym} has no live price")
         ltp, long = float(tick.ltp), pos.side == "BUY"
         new_stop = _rt(new_stop)
-        gap = (settings.ai_agent_option_trail_min_gap_pct if e.get("exchange") == "NFO"
+        gap = (settings.ai_agent_option_trail_min_gap_pct if self._kind(e) == "option"
                else settings.ai_agent_trail_min_gap_pct)
         if long:
             if new_stop <= pos.current_sl:
@@ -1101,12 +1673,17 @@ class AITrader:
                 + (f", target → ₹{self._targets[oid]:.2f}" if new_tgt else "")
                 + f" (locks ₹{pos.locked_profit:,.0f}) — {why}")
         self._record("trail", text)
+        if oid in self._swing_meta:
+            self._save_swing()
         return {"status": "adjusted", "symbol": sym, "old_stop": old, "new_stop": new_stop,
                 "target": self._targets.get(oid), "locked_profit": round(pos.locked_profit, 2)}
 
     def _detect_index(self, snap, und: str) -> None:
-        """Index tick: the F&O pattern engine decides whether it is an option-buying setup."""
-        if not settings.ai_agent_options_enabled or und not in self._option_underlyings():
+        """Index tick: the F&O pattern engine decides whether it is a directional index setup
+        (traded with an option buy or a future)."""
+        opt_ok = settings.ai_agent_options_enabled and und in self._option_underlyings()
+        fut_ok = settings.ai_agent_futures_enabled and und in self._future_underlyings()
+        if not (opt_ok or fut_ok):
             return
         if not (OPT_ENTRY_START <= now_ist().time() <= OPT_ENTRY_END):
             return
@@ -1122,13 +1699,19 @@ class AITrader:
         if action == "BUY" and sig:
             self._raise(snap, "option_setup",
                         f"{sig.get('pattern', '')} → {sig.get('option_type')} (score {sig.get('score')})",
-                        {"underlying": und, "suggested_option_type": sig.get("option_type")})
+                        {"underlying": und, "suggested_option_type": sig.get("option_type"),
+                         "direction": "BULLISH" if sig.get("option_type") == "CE" else "BEARISH",
+                         "options_allowed": opt_ok, "futures_allowed": fut_ok})
 
     def _get_opt_scout(self):
         if getattr(self, "_opt_scout", None) is None:
             from agents.strategy_agents import FnOAgent
             self._opt_scout = FnOAgent()
         return self._opt_scout
+
+    def _future_underlyings(self) -> list[str]:
+        return [u for u in (normalize_underlying(x) for x in settings.ai_agent_future_underlyings.split(","))
+                if u]
 
     def _option_underlyings(self) -> list[str]:
         return [u for u in (normalize_underlying(x) for x in settings.ai_agent_option_underlyings.split(","))
@@ -1141,7 +1724,7 @@ class AITrader:
             return False
         if self.trades_today >= settings.ai_agent_max_trades_per_day:
             return False
-        if len(self._ai_entries()) >= settings.ai_agent_max_open_positions:
+        if len(self._intraday_entries()) >= settings.ai_agent_max_open_positions:
             return False
         return not order_guard.is_symbol_active_anywhere(sym)
 
@@ -1248,8 +1831,13 @@ class AITrader:
             action = ("Trail review: tighten the stop with adjust_stop (optionally move the target), "
                       "close, or leave it. Stops can only tighten.")
         elif ev["kind"] == "option_setup":
-            action = ("Index option setup. Check get_option_chain, then place_option_trade if the "
-                      "move is clear and the premium is reasonable, otherwise PASS.")
+            ways = []
+            if ev.get("options_allowed"):
+                ways.append("buy an option (get_option_chain, then place_option_trade)")
+            if ev.get("futures_allowed"):
+                ways.append("trade the future (get_future_quote, then place_future_trade)")
+            action = (f"Index {ev.get('direction', '').lower()} setup. If the move is clear, "
+                      f"{' or '.join(ways) or 'PASS'}; otherwise PASS.")
         else:
             action = "Decide now: place_trade if the setup is clearly good, otherwise PASS."
         return (f"REAL-TIME ALERT {ev['at']} IST — {ev['kind']} on {sym}: {ev['reason']}\n"
@@ -1262,6 +1850,8 @@ class AITrader:
             sym = self._open.pop(oid)
             self._targets.pop(oid, None)
             self._trail.pop(oid, None)
+            if self._swing_meta.pop(oid, None) is not None:
+                self._save_swing()
             self._record("close", f"[auto] {sym} exited by stop-loss / trailing stop")
 
     # ── Helpers ───────────────────────────────────────────────────────────
@@ -1269,6 +1859,34 @@ class AITrader:
     def _ai_entries(self) -> dict:
         from agents.base_agent import _tsl_sl_orders
         return {oid: e for oid, e in _tsl_sl_orders.items() if e.get("agent") == AGENT}
+
+    @staticmethod
+    def _kind(e: dict) -> str:
+        """equity | option | future | swing"""
+        return e.get("kind") or ("option" if e.get("exchange") == "NFO" else "equity")
+
+    def _intraday_entries(self) -> dict:
+        return {o: e for o, e in self._ai_entries().items() if self._kind(e) != "swing"}
+
+    def _swing_entries(self) -> dict:
+        return {o: e for o, e in self._ai_entries().items() if self._kind(e) == "swing"}
+
+    @staticmethod
+    def _sessions_between(a: date, b: date) -> int:
+        """Weekdays after `a` up to and including `b` (exchange holidays not excluded)."""
+        n, d = 0, a
+        while d < b:
+            d += timedelta(days=1)
+            n += d.weekday() < 5
+        return n
+
+    @staticmethod
+    def _add_sessions(a: date, n: int) -> date:
+        d = a
+        while n > 0:
+            d += timedelta(days=1)
+            n -= d.weekday() < 5
+        return d
 
     def _tick_age(self, symbol: str) -> int:
         tick, _ = tick_engine.latest(symbol)
@@ -1283,14 +1901,15 @@ class AITrader:
             return "LIVE" if settings.ai_agent_allow_live else "LIVE-BLOCKED"
         return "PAPER-KITE" if settings.paper_data_source == "KITE" else "PAPER-SIM"
 
-    def _trading_allowed(self) -> tuple[bool, str]:
+    def _trading_allowed(self, swing: bool = False) -> tuple[bool, str]:
         if settings.trading_mode == "LIVE" and not settings.ai_agent_allow_live:
             return False, "server is LIVE and AI_AGENT_ALLOW_LIVE is false — the AI may not place live orders"
         t = now_ist().time()
         if not is_market_open():
             return False, "market is closed"
-        if not (ENTRY_START <= t <= ENTRY_END):
-            return False, f"outside the AI entry window {ENTRY_START:%H:%M}-{ENTRY_END:%H:%M} IST"
+        end = SWING_ENTRY_END if swing else ENTRY_END
+        if not (ENTRY_START <= t <= end):
+            return False, f"outside the AI entry window {ENTRY_START:%H:%M}-{end:%H:%M} IST"
         if risk_manager.is_trading_halted:
             return False, "trading halted for the day (daily loss limit)"
         return True, ""
@@ -1304,7 +1923,30 @@ class AITrader:
             "stop_loss_pct_range":  [settings.ai_agent_min_sl_pct, settings.ai_agent_max_sl_pct],
             "min_reward_to_risk":   1.5,
             "daily_cost_cap_usd":   settings.ai_agent_max_daily_cost_usd,
-            "product":              "MIS (NSE equity intraday)",
+            "product":              "MIS (NSE equity intraday); intraday limits above exclude swing",
+            "swing": {
+                "enabled":           settings.ai_agent_swing_enabled,
+                "product":           "CNC delivery, long only, GTT stop at the broker",
+                "max_positions":     settings.ai_agent_max_swing_positions,
+                "open_positions":    len(self._swing_entries()),
+                "max_value_per_trade": settings.ai_agent_max_swing_value,
+                "stop_loss_pct_range": [settings.ai_agent_swing_min_sl_pct, settings.ai_agent_swing_max_sl_pct],
+                "min_reward_to_risk": settings.ai_agent_swing_min_rr,
+                "max_hold_days":     settings.ai_agent_swing_max_hold_days,
+                "entry_window":      f"{ENTRY_START:%H:%M}-{SWING_ENTRY_END:%H:%M}",
+                "daily_scan_at":     settings.ai_agent_swing_scan_time,
+            },
+            "futures": {
+                "enabled":           settings.ai_agent_futures_enabled,
+                "underlyings":       self._future_underlyings(),
+                "intraday_only":     True,
+                "max_lots":          settings.ai_agent_max_future_lots,
+                "max_loss_at_stop":  settings.ai_agent_max_future_risk,
+                "max_margin_per_trade": settings.ai_agent_max_future_margin,
+                "stop_loss_pct_range": [settings.ai_agent_future_min_sl_pct, settings.ai_agent_future_max_sl_pct],
+                "min_reward_to_risk": 1.5,
+                "entry_window":      f"{OPT_ENTRY_START:%H:%M}-{OPT_ENTRY_END:%H:%M}",
+            },
             "options": {
                 "enabled":           settings.ai_agent_options_enabled,
                 "underlyings":       self._option_underlyings(),

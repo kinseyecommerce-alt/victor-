@@ -8,6 +8,11 @@ export interface DashPosition {
   id: string; symbol: string; strategy: string; side: 'BUY' | 'SELL'; quantity: number
   entry: number; ltp: number; stop: number; target: number; pnl: number; pnl_pct: number
   r_multiple: number | null; exchange: string; trailing: 'AI' | 'ON' | 'WAIT'; sl_moves: number
+  product?: string; hold_until?: string | null
+}
+
+const STRATEGY_LABEL: Record<string, string> = {
+  ai: 'AI intraday', ai_opt: 'AI option', ai_fut: 'AI future', ai_swing: 'AI swing',
 }
 export interface DashSummary {
   time_ist: string; date: string; demo: boolean; mode: string; market_open: boolean
@@ -191,7 +196,8 @@ export function PositionCard({ p }: { p: DashPosition }) {
             <span className="font-semibold text-white truncate">{p.symbol}</span>
           </div>
           <div className="mt-0.5 text-xs text-slate-400">
-            {p.strategy} · {p.quantity} qty · entry {p.entry.toFixed(2)}
+            {STRATEGY_LABEL[p.strategy] ?? p.strategy} · {p.quantity} qty · entry {p.entry.toFixed(2)}
+            {p.hold_until ? ` · hold to ${p.hold_until.slice(5)}` : ''}
           </div>
         </div>
         <div className="text-right shrink-0">

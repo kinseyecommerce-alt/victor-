@@ -108,3 +108,33 @@ def estimate_premium(spot: float, strike: float, option_type: str, iv: float = 0
     intrinsic = max(moneyness, 0.0)
     time_value = atm * math.exp(-abs(moneyness) / max(spot * iv * math.sqrt(t), 1e-6))
     return round_tick(max(intrinsic + time_value, TICK))
+
+
+@dataclass
+class FutureContract:
+    tradingsymbol: str
+    underlying:    str
+    expiry:        Optional[date]
+    lot_size:      int
+    live:          bool
+
+
+def resolve_future(underlying: str, today: date, skip_expiry_today: bool = True) -> Optional[FutureContract]:
+    """Nearest-month index future (on expiry day the next month, so an intraday trade never
+    holds a contract that is about to settle)."""
+    und = normalize_underlying(underlying)
+    if not und:
+        return None
+    rows = [i for i in _instruments()
+            if i.get("name") == und and i.get("instrument_type") == "FUT"
+            and str(i.get("segment", "")).endswith("FUT")]
+    if rows:
+        rows = sorted((r for r in rows if r.get("expiry") and r["expiry"] >= today
+                       and not (skip_expiry_today and r["expiry"] == today)), key=lambda r: r["expiry"])
+        if not rows:
+            return None
+        r = rows[0]
+        return FutureContract(r["tradingsymbol"], und, r["expiry"], int(r.get("lot_size") or 0), live=True)
+    if settings.uses_kite_market_data:
+        return None              # real feed but no instrument master: never guess a live symbol
+    return FutureContract(f"{und}SIMFUT", und, None, _SIM_LOT[und], live=False)

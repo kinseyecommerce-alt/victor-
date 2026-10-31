@@ -121,6 +121,24 @@ Each trading day:
 Move on only after 2–4 weeks that are profitable **after brokerage and taxes**, with no flags in
 `/trade-review` (no position without a stop, no leftover stop orders, no reversed positions).
 
+### What the AI can trade
+
+| Type | Product | Direction | Held | Stop | On by default |
+|---|---|---|---|---|---|
+| Intraday stocks | MIS | long / short | closed 15:00 | SL-M order | yes |
+| Index options | MIS (NFO) | buy CE / PE only | closed 15:00 | SL-limit order | yes |
+| Index futures | MIS (NFO) | long / short | closed 15:00 | SL-limit order | **no** — `AI_AGENT_FUTURES_ENABLED=true` |
+| Swing stocks | CNC delivery | long only | up to 15 days | **GTT** at Zerodha | yes |
+
+- **Swing:** a daily scan at 14:50 shortlists uptrending stocks (breakout or pullback to the
+  20-day EMA) and Claude decides on the daily chart. The stop is a GTT, so it works overnight
+  and if the server is off. Open swing positions are saved to `data/ai_swing_positions.json`
+  and picked up again on restart; code sells on the last day of the holding period. Check in the
+  Kite app (Orders → GTT) that every swing position has its GTT.
+- **Futures:** one lot of NIFTY is ~₹18 lakh of contract value, so a 1% move is ~₹18,000. The
+  code caps the loss at the stop (₹5,000 by default), the margin per trade and the lots. Your
+  account must have the F&O segment active and enough margin.
+
 ---
 
 ## 4. Small live trading

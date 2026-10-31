@@ -326,6 +326,8 @@ class MasterAgent:
         order_guard.reset_daily()
         for a in ALL_AGENTS.values():
             a.reset_daily()
+        from ai_trader import ai_trader
+        ai_trader.reapply_overnight()        # swing positions held from earlier days still count
         await send_telegram("<b>New trading day</b> — counters reset")
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("system", {"type": "daily_reset"}))

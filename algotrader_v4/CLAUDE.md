@@ -14,7 +14,7 @@ cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 # Start the server (production, via main)
 cd algotrader_v4 && python main.py
 
-# Run all tests (417 tests)
+# Run all tests
 cd algotrader_v4 && python test_pipeline.py
 
 # Run a single test class or method

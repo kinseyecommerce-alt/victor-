@@ -30,6 +30,8 @@ from atomic_bracket import atomic_bracket_engine
 #   guard_symbol — the key order_guard tracks (the underlying for F&O)
 # Options add:  sl_type="SL" + sl_buffer_pct (stop-loss LIMIT, not SL-M, which
 #   brokers reject on options) and exit_limit_buffer_pct (exits as marketable LIMIT)
+# Delivery (CNC) swing positions add: gtt_id + gtt_buffer_pct — the stop is a GTT at
+#   Zerodha instead of a day SL order, so it survives the close and server restarts
 _tsl_sl_orders: dict[str, dict] = {}
 _tsl_callbacks_installed: bool = False
 
@@ -73,6 +75,13 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     entry = _tsl_sl_orders.pop(entry_oid, None) or {}
     tracked = trailing_sl_engine._positions.get(entry_oid)
     fallback_px = tracked.entry_price if tracked else 0.0
+    gtt_id = entry.get("gtt_id")
+    if gtt_id:
+        # Same reason as the SL-M below: a GTT left behind would sell holdings later
+        try:
+            kite_client.delete_gtt(gtt_id)
+        except Exception as exc:
+            logger.error("[{}] could not delete GTT {} for {}: {}", strategy, gtt_id, symbol, exc)
     sl_oid = entry.get("sl_order_id")
     if sl_oid:
         # Must go before the exit: a leftover SL-M would later fire on a flat
@@ -108,6 +117,18 @@ def _setup_tsl_callbacks() -> None:
 
     async def _on_sl_moved(pos, old_sl: float, move_type: str) -> None:
         entry = _tsl_sl_orders.get(pos.order_id)
+        if entry and entry.get("gtt_id"):
+            off = entry.get("gtt_trigger_offset_pct", 0.0) / 100
+            trigger = round(pos.current_sl * (1 - off if pos.side == "BUY" else 1 + off), 2)
+            try:
+                kite_client.modify_gtt_stop(
+                    entry["gtt_id"], pos.symbol, entry.get("exchange", "NSE"), pos.quantity,
+                    trigger, sl_limit_price(trigger, pos.side, entry.get("gtt_buffer_pct", 1.0)),
+                    pos.best_price or pos.entry_price)
+            except Exception as exc:
+                logger.error("[{}] GTT {} update for {} failed: {} — software stop still active",
+                             pos.strategy, entry["gtt_id"], pos.symbol, exc)
+            return
         if not entry or not entry.get("sl_order_id"):
             return
         sl_oid = entry["sl_order_id"]

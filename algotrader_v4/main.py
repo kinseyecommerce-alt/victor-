@@ -1205,7 +1205,8 @@ def dashboard_summary():
             "pnl": round(pnl, 2), "pnl_pct": round((ltp / pos.entry_price - 1) * 100 * sign, 2),
             "r_multiple": r_mult, "exchange": entry.get("exchange", "NSE"),
             "trailing": "AI" if pos.external_trail else ("ON" if pos.trail_active else "WAIT"),
-            "sl_moves": pos.sl_moves,
+            "sl_moves": pos.sl_moves, "product": entry.get("product", "MIS"),
+            "hold_until": (ai_trader._swing_meta.get(oid) or {}).get("hold_until"),
         })
 
     realised = risk_manager.daily_realised_pnl
@@ -1373,6 +1374,10 @@ async def on_startup():
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
     asyncio.create_task(_pnl_sampler())
+    try:
+        ai_trader.restore_swing()           # AI swing (delivery) positions from earlier runs
+    except Exception as exc:
+        logger.error("Swing restore failed: {}", exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 

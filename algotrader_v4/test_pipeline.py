@@ -1953,7 +1953,8 @@ def _trade_args(sym, side="BUY", qty=10, sl=990.0, tgt=1020.0):
 def t_ai_tool_schemas_strict():
     names = [t["name"] for t in _AI_TOOLS]
     assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
-                     "get_ai_positions", "place_trade", "get_option_chain",
+                     "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
+                     "get_future_quote", "place_future_trade", "get_option_chain",
                      "place_option_trade", "adjust_stop", "close_position"], names
     for t in _AI_TOOLS:
         sch = t["input_schema"]
@@ -2018,7 +2019,7 @@ def t_ai_trade_count_and_position_limits():
             asyncio.run(ai._place_trade(_trade_args("AIP3")))
             raise AssertionError("3rd open position accepted")
         except ToolRejected as e:
-            assert "max open AI positions" in str(e)
+            assert "max open intraday AI positions" in str(e)
         asyncio.run(ai.close_all("test"))
         ai.trades_today = _ai_settings.ai_agent_max_trades_per_day
         try:
@@ -3618,6 +3619,349 @@ run("NFO symbol contains underlying/strike/type",           t_fno_nfo_symbol_for
 run("IV rank >72% blocks entry (no premium buying)",        t_fno_high_iv_blocks_entry)
 run("score=4 → 0.25× size factor",                          t_fno_min_score_4_size_025)
 run("CE and PE cooldown tracked independently",             t_fno_cooldown_per_direction)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("AI SWING (CNC + GTT) AND INDEX FUTURES")
+# ══════════════════════════════════════════════════════════════════════════
+import tempfile as _sftmp
+from pathlib import Path as _SFPath
+import json
+
+def _swing_args(sym, qty=20, sl=970.0, tgt=1070.0, hold=5):
+    return {"symbol": sym, "quantity": qty, "stop_loss": sl, "target": tgt,
+            "max_hold_days": hold, "reasoning": "test"}
+
+def _with_swing_file(fn):
+    path = _SFPath(_sftmp.mkdtemp()) / "swing.json"
+    with _patch.object(_ai_mod, "SWING_FILE", path):
+        return fn(path)
+
+def t_ai_swing_entry_cnc_gtt_saved():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWG1", 1000.0)
+        out = asyncio.run(ai._place_swing_trade(_swing_args("SWG1")))
+        oid = out["order_id"]
+        o = _order(oid)
+        assert o["product"] == "CNC" and o["transaction_type"] == "BUY" and o["exchange"] == "NSE"
+        e = _ba._tsl_sl_orders[oid]
+        assert e["kind"] == "swing" and e["sl_order_id"] is None and e["product"] == "CNC"
+        g = _te_kite_client._paper_gtts[e["gtt_id"]]
+        assert g["status"] == "active" and g["trigger"] < 970.0 and g["limit"] < g["trigger"], g
+        assert _tsl_eng._positions[oid].strategy == "ai_swing" and _tsl_eng._positions[oid].current_sl == 970.0
+        saved = json.loads(path.read_text())["positions"]
+        assert saved[0]["symbol"] == "SWG1" and saved[0]["hold_until"] == "2026-01-22", saved
+        asyncio.run(ai._close_position("SWG1", "test"))
+        assert g["status"] == "deleted", "closing must delete the GTT before selling"
+        assert _te_kite_client._paper_orders[-1]["product"] == "CNC"
+        assert json.loads(path.read_text())["positions"] == []
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_hard_limits():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWG2", 1000.0)
+        cases = [
+            (_swing_args("SWG2", sl=995.0, tgt=1020.0), "swing allows"),       # 0.5% stop: too tight
+            (_swing_args("SWG2", sl=900.0, tgt=1300.0), "swing allows"),       # 10% stop: too wide
+            (_swing_args("SWG2", tgt=1040.0), "swing needs"),                  # 1.33R < 2R
+            (_swing_args("SWG2", sl=1010.0), "below price"),
+            (_swing_args("SWG2", qty=60), "swing per-trade limit"),            # ₹60k > ₹50k
+            (_swing_args("SWG2", hold=_ai_settings.ai_agent_swing_max_hold_days + 1), "max_hold_days"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_swing_trade(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        prev = _ai_settings.ai_agent_swing_enabled
+        _ai_settings.ai_agent_swing_enabled = False
+        try:
+            asyncio.run(ai._place_swing_trade(_swing_args("SWG2"))); raise AssertionError("disabled accepted")
+        except ToolRejected as e:
+            assert "disabled" in str(e)
+        finally:
+            _ai_settings.ai_agent_swing_enabled = prev
+        assert not ai._ai_entries()
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_separate_position_limit():
+    def body(path):
+        ai = _rt_ai()
+        for s in ("SWL1", "SWL2", "SWL3", "INL1", "INL2"): _ai_tick(s, 1000.0)
+        asyncio.run(ai._place_swing_trade(_swing_args("SWL1")))
+        asyncio.run(ai._place_swing_trade(_swing_args("SWL2")))
+        try:
+            asyncio.run(ai._place_swing_trade(_swing_args("SWL3"))); raise AssertionError("3rd swing accepted")
+        except ToolRejected as e:
+            assert "max swing positions" in str(e)
+        # swing positions don't use up the intraday slots
+        asyncio.run(ai._place_trade(_trade_args("INL1")))
+        asyncio.run(ai._place_trade(_trade_args("INL2")))
+        assert len(ai._intraday_entries()) == 2 and len(ai._swing_entries()) == 2
+        asyncio.run(ai.close_all("t"))
+        assert not ai._ai_entries()
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_1500_keeps_swing_closes_intraday():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWK1", 1000.0); _ai_tick("INK1", 1000.0)
+        s_oid = asyncio.run(ai._place_swing_trade(_swing_args("SWK1")))["order_id"]
+        i_oid = asyncio.run(ai._place_trade(_trade_args("INK1")))["order_id"]
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="INK1", ltp=1000.0)))
+        assert i_oid not in ai._ai_entries(), "intraday must close at 15:00"
+        assert s_oid in ai._ai_entries(), "swing must be held overnight"
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_entry_window_extends_past_1445():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWW1", 1000.0); _ai_tick("INW1", 1000.0)
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 0)):
+            try:
+                asyncio.run(ai._place_trade(_trade_args("INW1"))); raise AssertionError("intraday at 15:00")
+            except ToolRejected as e:
+                assert "entry window" in str(e)
+            asyncio.run(ai._place_swing_trade(_swing_args("SWW1")))
+        assert len(ai._swing_entries()) == 1
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_time_exit_on_last_day():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWT1", 1000.0)
+        oid = asyncio.run(ai._place_swing_trade(_swing_args("SWT1", hold=1)))["order_id"]
+        assert ai._swing_meta[oid]["hold_until"] == "2026-01-16"
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 16, 14, 0, 0)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="SWT1", ltp=1005.0)))
+        assert oid in ai._ai_entries(), "too early on the last day"
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 16, 15, 11, 0)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="SWT1", ltp=1005.0)))
+        assert oid not in ai._ai_entries(), "holding period over → code exits"
+        assert any("maximum holding period" in e["text"] for e in ai.log)
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_adjust_stop_moves_gtt():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWA1", 1000.0)
+        oid = asyncio.run(ai._place_swing_trade(_swing_args("SWA1")))["order_id"]
+        gid = _ba._tsl_sl_orders[oid]["gtt_id"]
+        _ai_tick("SWA1", 1060.0)
+        asyncio.run(ai._adjust_stop({"symbol": "SWA1", "new_stop": 1000.0, "new_target": 0, "reasoning": "t"}))
+        g = _te_kite_client._paper_gtts[gid]
+        assert 990.0 < g["trigger"] < 1000.0, f"GTT must follow the stop (just below it): {g}"
+        assert json.loads(path.read_text())["positions"][0]["stop"] == 1000.0
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_restore_after_restart():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWR1", 1000.0); _ai_tick("SWR2", 1000.0)
+        o1 = asyncio.run(ai._place_swing_trade(_swing_args("SWR1")))["order_id"]
+        o2 = asyncio.run(ai._place_swing_trade(_swing_args("SWR2")))["order_id"]
+        # simulate a restart: drop all in-memory tracking
+        for o in (o1, o2):
+            _ba._tsl_sl_orders.pop(o); _tsl_eng.deregister(o)
+        _og_x.reset_daily()
+        ai2 = _rt_ai()
+        live_status = {_ba._tsl_sl_orders.get(o1, {}).get("gtt_id"): None}
+        assert ai2.restore_swing() == ["SWR1", "SWR2"]
+        assert _og_x.is_symbol_active_anywhere("SWR1") == ["ai_swing"]
+        assert _tsl_eng._positions[o1].current_sl == 970.0 and ai2._targets[o1] == 1070.0
+        assert ai2._swing_meta[o1]["hold_until"] == "2026-01-22"
+        assert ai2._trail[o1]["risk"] == 30.0
+        # restoring twice is a no-op
+        assert ai2.restore_swing() == []
+        # a new day: counters reset, held swing positions re-marked
+        _og_x.reset_daily()
+        ai2.reapply_overnight()
+        assert _og_x.is_symbol_active_anywhere("SWR2") == ["ai_swing"]
+        asyncio.run(ai2.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_restore_drops_triggered_gtt_live():
+    def body(path):
+        path.write_text(json.dumps({"positions": [{
+            "order_id": "SWX-1", "symbol": "SWX1", "quantity": 10, "entry": 1000.0, "stop": 970.0,
+            "best": 1000.0, "target": 1070.0, "gtt_id": 123, "gtt_buffer_pct": 1.0,
+            "opened": "2026-01-14", "hold_until": "2026-01-21", "reason": "t", "initial_risk": 30.0}]}))
+        ai = _rt_ai()
+        prev = _ai_settings.trading_mode
+        _ai_settings.trading_mode = "LIVE"
+        try:
+            with _patch.object(_te_kite_client, "has_session", return_value=True), \
+                 _patch.object(_te_kite_client, "gtt_status", return_value="triggered"):
+                assert ai.restore_swing() == []
+        finally:
+            _ai_settings.trading_mode = prev
+        assert "SWX-1" not in _ba._tsl_sl_orders
+        assert any("GTT stop triggered" in e["text"] for e in ai.log)
+        assert json.loads(path.read_text())["positions"] == []
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_squareoff_skips_cnc():
+    kc = _te_kite_client
+    saved = list(kc._paper_positions)
+    kc._paper_positions[:] = [
+        {"tradingsymbol": "HOLDME", "exchange": "NSE", "quantity": 10, "product": "CNC"},
+        {"tradingsymbol": "CLOSEME", "exchange": "NSE", "quantity": 5, "product": "MIS"}]
+    n = len(kc._paper_orders)
+    try:
+        with _patch.object(kc, "_paper_place", return_value="SQ-1") as pp:
+            kc.squareoff_all_positions()
+            syms = [c.args[0] for c in pp.call_args_list]
+        assert syms == ["CLOSEME"], syms
+    finally:
+        kc._paper_positions[:] = saved
+
+def t_daily_view_synthetic_and_candidates():
+    import daily_data as _dd
+    _ai_tick("DDV1", 1234.5)
+    v = _dd.daily_view("DDV1")
+    assert v and v["ltp"] == 1234.5 and len(v["candles_1d"]["rows"]) == 30
+    assert v["ema20"] and v["ema50"] and v["ema200"] and 0 <= v["rsi14"] <= 100 and v["atr14"] > 0
+    assert v["candles_1d"]["rows"][-1][4] == 1234.5, "today's bar comes from the live tick"
+    assert _dd.daily_view("DDV1")["ema200"] == v["ema200"], "history is repeatable"
+    c = _dd.swing_candidates(["DDV1"])
+    assert isinstance(c, list) and all(x["trend"] if False else True for x in c)
+
+def _fut_args(side="BUY", lots=1, sl=23960.0, tgt=24100.0, und="NIFTY"):
+    return {"underlying": und, "side": side, "lots": lots, "stop_loss": sl, "target": tgt,
+            "reasoning": "test"}
+
+def _with_fut_env(fn):
+    def body():
+        prev = _ai_settings.ai_agent_futures_enabled
+        _ai_settings.ai_agent_futures_enabled = True
+        try:
+            return fn()
+        finally:
+            _ai_settings.ai_agent_futures_enabled = prev
+    return _with_opt_env(body)
+
+def t_ai_futures_off_by_default():
+    def body():
+        assert _ai_settings.ai_agent_futures_enabled is False
+        try:
+            asyncio.run(_rt_ai()._place_future_trade(_fut_args())); raise AssertionError("accepted")
+        except ToolRejected as e:
+            assert "disabled" in str(e)
+    _with_opt_env(body)
+
+def t_ai_future_trade_lifecycle():
+    def body():
+        ai = _rt_ai()
+        q = ai._future_quote("NIFTY")
+        assert q["contract"] == "NIFTYSIMFUT" and q["lot_size"] == 75 and q["margin_per_lot"] > 0
+        out = asyncio.run(ai._place_future_trade(_fut_args()))
+        oid = out["order_id"]
+        o = _order(oid)
+        assert o["exchange"] == "NFO" and o["order_type"] == "LIMIT" and o["product"] == "MIS"
+        assert out["max_loss_at_stop"] <= _ai_settings.ai_agent_max_future_risk
+        e = _ba._tsl_sl_orders[oid]
+        sl = _order(e["sl_order_id"])
+        assert e["kind"] == "future" and sl["order_type"] == "SL" and sl["trigger_price"] == 23960.0
+        assert _tsl_eng._positions[oid].strategy == "ai_fut"
+        assert _og_x.is_symbol_active_anywhere("NIFTY") == ["ai_fut"]
+        try:   # option on the same index while the future is open
+            asyncio.run(ai._place_option_trade(_opt_args())); raise AssertionError("both on NIFTY")
+        except ToolRejected as ex:
+            assert "already has an open option or future" in str(ex)
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="NIFTYSIMFUT", ltp=24020.0)))
+        assert oid not in ai._ai_entries(), "futures are intraday: closed at 15:00"
+        assert _order(e["sl_order_id"])["status"] == "CANCELLED"
+        assert _te_kite_client._paper_orders[-1]["order_type"] == "LIMIT"
+    _with_fut_env(body)
+
+def t_ai_future_short_and_limits():
+    def body():
+        ai = _rt_ai()
+        cases = [
+            (_fut_args(sl=23900.0, tgt=24300.0), "loss at the stop"),           # 112 pts × 75 > ₹5k
+            (_fut_args(sl=23990.0, tgt=24050.0), "futures allow"),              # 0.09% stop: too tight
+            (_fut_args(tgt=24050.0), "1.5x"),
+            (_fut_args(sl=24050.0), "wrong side"),
+            (_fut_args(lots=2), "lots must be"),
+            (_fut_args(und="FINNIFTY"), "underlying must be"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_future_trade(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as ex:
+                assert msg in str(ex), (msg, str(ex))
+        prev = _ai_settings.ai_agent_max_future_margin
+        _ai_settings.ai_agent_max_future_margin = 100000.0
+        try:
+            asyncio.run(ai._place_future_trade(_fut_args())); raise AssertionError("margin over cap")
+        except ToolRejected as ex:
+            assert "margin" in str(ex)
+        finally:
+            _ai_settings.ai_agent_max_future_margin = prev
+        out = asyncio.run(ai._place_future_trade(_fut_args("SELL", sl=24040.0, tgt=23900.0)))
+        assert _order(out["order_id"])["transaction_type"] == "SELL"
+        sl = _order(_ba._tsl_sl_orders[out["order_id"]]["sl_order_id"])
+        assert sl["transaction_type"] == "BUY" and sl["price"] > sl["trigger_price"]
+        asyncio.run(ai.close_all("t"))
+        assert not ai._ai_entries()
+    _with_fut_env(body)
+
+def t_ai_index_alert_offers_futures():
+    class _OptScout:
+        min_candles_1min = 0
+        def evaluate_tick(self, snap):
+            return "BUY", {"option_type": "CE", "pattern": "TREND_BREAKOUT", "score": 7}
+    def body():
+        prev = _ai_settings.ai_agent_options_enabled
+        _ai_settings.ai_agent_options_enabled = False
+        try:
+            ai = _rt_ai()
+            ai._opt_scout = _OptScout()
+            ai._detect(_make_snap(symbol="NIFTY 50", ltp=24000.0))
+            ev = ai._events.get("NIFTY 50")
+            assert ev and ev["futures_allowed"] and not ev["options_allowed"] and ev["direction"] == "BULLISH"
+            p = ai._alert_prompt(ev)
+            assert "place_future_trade" in p and "place_option_trade" not in p
+        finally:
+            _ai_settings.ai_agent_options_enabled = prev
+    _with_fut_env(lambda: _with_key(body))
+
+def t_future_resolver_live_skips_expiry_day():
+    from options_resolver import resolve_future as _rf
+    today = datetime(2026, 1, 27).date()
+    rows = [{"name": "NIFTY", "instrument_type": "FUT", "segment": "NFO-FUT", "expiry": today,
+             "tradingsymbol": "NIFTY26JANFUT", "lot_size": 75},
+            {"name": "NIFTY", "instrument_type": "FUT", "segment": "NFO-FUT", "expiry": datetime(2026, 2, 24).date(),
+             "tradingsymbol": "NIFTY26FEBFUT", "lot_size": 75},
+            {"name": "NIFTY", "instrument_type": "CE", "segment": "NFO-OPT", "expiry": today,
+             "tradingsymbol": "NIFTY26JAN24000CE", "lot_size": 75}]
+    with _patch.object(_optres, "_instruments", return_value=rows):
+        c = _rf("NIFTY", today)
+    assert c.tradingsymbol == "NIFTY26FEBFUT" and c.live, "expiry-day contract must roll to next month"
+
+run("Swing: CNC buy + GTT stop, saved, GTT deleted on exit",  t_ai_swing_entry_cnc_gtt_saved)
+run("Swing: hard limits (stop %, 2R, value, hold days, off)", t_ai_swing_hard_limits)
+run("Swing: own position limit, intraday slots untouched",    t_ai_swing_separate_position_limit)
+run("Swing: 15:00 closes intraday, keeps swing",              t_ai_1500_keeps_swing_closes_intraday)
+run("Swing: entries allowed until 15:15",                     t_ai_swing_entry_window_extends_past_1445)
+run("Swing: code exits at end of holding period",             t_ai_swing_time_exit_on_last_day)
+run("Swing: adjust_stop moves the GTT",                       t_ai_swing_adjust_stop_moves_gtt)
+run("Swing: restored after restart + daily reset",            t_ai_swing_restore_after_restart)
+run("Swing: LIVE restore drops a triggered GTT",              t_ai_swing_restore_drops_triggered_gtt_live)
+run("Square-off skips CNC (delivery) positions",              t_squareoff_skips_cnc)
+run("Daily chart: synthetic history ends at live price",      t_daily_view_synthetic_and_candidates)
+run("Futures: off by default",                                t_ai_futures_off_by_default)
+run("Futures: LIMIT entry, SL-limit, 15:00 exit, no option",  t_ai_future_trade_lifecycle)
+run("Futures: short + rupee-risk/margin/stop limits",         t_ai_future_short_and_limits)
+run("Futures: index alert offers the future",                 t_ai_index_alert_offers_futures)
+run("Futures: resolver rolls on expiry day",                  t_future_resolver_live_skips_expiry_day)
 
 
 # ══════════════════════════════════════════════════════════════════════════

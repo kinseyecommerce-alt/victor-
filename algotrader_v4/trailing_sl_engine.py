@@ -105,6 +105,26 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.TRAILING,
         atr_multiplier  = 2.0,
     ),
+    "ai_fut": TrailConfig(   # AI index futures (intraday, leveraged → tight)
+        initial_sl_pct  = 0.50,
+        trail_pct       = 0.30,
+        breakeven_pct   = 0.30,
+        activation_pct  = 0.50,
+        target1_pct     = 0.80,
+        target2_pct     = 1.50,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.2,
+    ),
+    "ai_swing": TrailConfig(  # AI swing (delivery), fallback when Claude can't trail it.
+        initial_sl_pct  = 5.00,   # percent trail: the tick feed's ATR is 1-minute, far too
+        trail_pct       = 3.00,   # tight for a position held for days
+        breakeven_pct   = 2.00,
+        activation_pct  = 4.00,
+        target1_pct     = 8.00,
+        target2_pct     = 15.00,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 1.5,
+    ),
     "swing": TrailConfig(
         initial_sl_pct  = 3.00,
         trail_pct       = 1.00,

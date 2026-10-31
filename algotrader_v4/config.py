@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     # Risk
     max_daily_loss: float = 5000.0
     max_position_size: float = 50000.0
+    max_futures_order_value: float = 2_500_000.0  # per-order contract value cap for index futures
     max_open_positions: int = 5
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
@@ -130,6 +131,25 @@ class Settings(BaseSettings):
     ai_agent_option_max_spread_pct: float = 3.0    # bid/ask spread as % of premium
     ai_agent_option_min_premium:  float = 10.0     # ₹ — skip near-worthless far-OTM contracts
     ai_agent_option_max_iv_rank:  float = 72.0     # don't buy expensive volatility
+    # AI swing trades — NSE equity delivery (CNC), long only, held for days
+    ai_agent_swing_enabled:       bool  = True
+    ai_agent_max_swing_positions: int   = 2        # separate from the intraday open-position limit
+    ai_agent_max_swing_value:     float = 50000.0  # ₹ per swing trade (qty × price)
+    ai_agent_swing_min_sl_pct:    float = 1.5      # swing stops sit further away than intraday ones
+    ai_agent_swing_max_sl_pct:    float = 8.0
+    ai_agent_swing_min_rr:        float = 2.0      # target at least this many times the risk
+    ai_agent_swing_max_hold_days: int   = 15       # code exits on the last allowed day at 15:10
+    ai_agent_swing_scan_time:     str   = "14:50"  # daily swing scan (IST), near the close
+    ai_agent_swing_gtt_buffer_pct: float = 1.0     # GTT stop's limit price this far below its trigger
+    # AI futures — NSE index futures (NIFTY/BANKNIFTY…), intraday only, long or short
+    ai_agent_futures_enabled:     bool  = False    # leveraged: off until you choose to turn it on
+    ai_agent_future_underlyings:  str   = "NIFTY,BANKNIFTY"
+    ai_agent_max_future_lots:     int   = 1
+    ai_agent_max_future_risk:     float = 5000.0   # ₹ lost if the stop is hit (|entry − stop| × qty)
+    ai_agent_max_future_margin:   float = 300000.0 # ₹ margin blocked per trade
+    ai_agent_future_margin_pct:   float = 15.0     # margin estimate (% of notional) when the broker can't be asked
+    ai_agent_future_min_sl_pct:   float = 0.15
+    ai_agent_future_max_sl_pct:   float = 1.0
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

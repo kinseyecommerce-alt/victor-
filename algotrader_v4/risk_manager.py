@@ -55,7 +55,10 @@ class RiskManager:
         quantity: int,
         price: float,
         transaction_type: str,
+        check_size: bool = True,
     ) -> tuple[bool, str]:
+        """check_size=False for leveraged instruments (futures), whose notional value is not
+        the money at risk; their callers cap margin and loss-at-stop instead."""
         if self.is_trading_halted:
             return False, "Trading halted for the day (daily loss limit hit)"
 
@@ -73,9 +76,10 @@ class RiskManager:
             if not ok:
                 return False, msg
 
-        ok, msg = self._check_position_size(quantity, price)
-        if not ok:
-            return False, msg
+        if check_size:
+            ok, msg = self._check_position_size(quantity, price)
+            if not ok:
+                return False, msg
 
         return True, "OK"
 
