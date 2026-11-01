@@ -124,7 +124,7 @@ def _setup_tsl_callbacks() -> None:
                 kite_client.modify_gtt_stop(
                     entry["gtt_id"], pos.symbol, entry.get("exchange", "NSE"), pos.quantity,
                     trigger, sl_limit_price(trigger, pos.side, entry.get("gtt_buffer_pct", 1.0)),
-                    pos.best_price or pos.entry_price)
+                    pos.best_price or pos.entry_price, product=entry.get("product", "CNC"))
             except Exception as exc:
                 logger.error("[{}] GTT {} update for {} failed: {} — software stop still active",
                              pos.strategy, entry["gtt_id"], pos.symbol, exc)

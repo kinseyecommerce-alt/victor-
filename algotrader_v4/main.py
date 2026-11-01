@@ -1208,6 +1208,17 @@ def dashboard_summary():
             "sl_moves": pos.sl_moves, "product": entry.get("product", "MIS"),
             "hold_until": (ai_trader._swing_meta.get(oid) or {}).get("hold_until"),
         })
+    for sid, sp in list(ai_trader._spreads.items()):        # AI credit spreads (two legs)
+        pnl = (sp["credit"] - sp["value"]) * sp["qty"]
+        unrealised += pnl
+        positions.append({
+            "id": sid, "symbol": f"{sp['underlying']} {sp['short']['strike']:g}/{sp['long']['strike']:g} {sp['option_type']}",
+            "strategy": "ai_spread", "side": "SELL", "quantity": sp["qty"], "entry": sp["credit"],
+            "ltp": sp["value"], "stop": sp["stop_value"], "target": sp["target_value"], "pnl": round(pnl, 2),
+            "pnl_pct": round((sp["credit"] - sp["value"]) / sp["credit"] * 100, 2) if sp["credit"] else 0.0,
+            "r_multiple": None, "exchange": "NFO", "trailing": "WAIT", "sl_moves": 0, "product": "MIS",
+            "hold_until": None,
+        })
 
     realised = risk_manager.daily_realised_pnl
     closed = risk_manager.wins_today + risk_manager.losses_today

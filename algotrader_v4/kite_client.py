@@ -416,8 +416,10 @@ class KiteClient:
     # the software stop closes paper positions.
 
     def place_gtt_stop(self, tradingsymbol: str, exchange: str, quantity: int,
-                       trigger_price: float, limit_price: float, last_price: float) -> int:
-        """Single-leg GTT that SELLs `quantity` (CNC) when price falls to trigger_price."""
+                       trigger_price: float, limit_price: float, last_price: float,
+                       product: str = "CNC") -> int:
+        """Single-leg GTT that SELLs `quantity` when price falls to trigger_price (a long
+        delivery holding, or a long option held overnight with product NRML)."""
         if settings.trading_mode == "PAPER":
             gid = int(time.time() * 1000) % 1_000_000_000 + len(self._paper_gtts)   # unique across restarts
             self._paper_gtts[gid] = {"id": gid, "tradingsymbol": tradingsymbol, "exchange": exchange,
@@ -431,7 +433,7 @@ class KiteClient:
             trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol, exchange=exchange,
             trigger_values=[trigger_price], last_price=last_price,
             orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
-                     "quantity": quantity, "order_type": "LIMIT", "product": "CNC",
+                     "quantity": quantity, "order_type": "LIMIT", "product": product,
                      "price": limit_price}]), label="place_gtt")
         gid = int(res["trigger_id"])
         logger.info("LIVE GTT {} | SELL {} {} trigger {} limit {}", gid, quantity,
@@ -439,7 +441,8 @@ class KiteClient:
         return gid
 
     def modify_gtt_stop(self, gtt_id: int, tradingsymbol: str, exchange: str, quantity: int,
-                        trigger_price: float, limit_price: float, last_price: float) -> None:
+                        trigger_price: float, limit_price: float, last_price: float,
+                        product: str = "CNC") -> None:
         if settings.trading_mode == "PAPER":
             g = self._paper_gtts.get(int(gtt_id))
             if g:
@@ -450,7 +453,7 @@ class KiteClient:
             trigger_id=int(gtt_id), trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol,
             exchange=exchange, trigger_values=[trigger_price], last_price=last_price,
             orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
-                     "quantity": quantity, "order_type": "LIMIT", "product": "CNC",
+                     "quantity": quantity, "order_type": "LIMIT", "product": product,
                      "price": limit_price}]), label="modify_gtt")
 
     def delete_gtt(self, gtt_id: int) -> None:

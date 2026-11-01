@@ -174,8 +174,9 @@ def daily_view(symbol: str, candles: int = 30) -> Optional[dict]:
 
 
 def swing_candidates(symbols: list[str], limit: int = 5) -> list[dict]:
-    """Uptrending symbols at a breakout or a pullback to the 20-day EMA — a shortlist for the
-    AI to look at, not a buy signal."""
+    """A shortlist for the AI to look at, not a buy signal:
+      BULLISH — uptrend at a 20-day breakout or a pullback to the 20-day EMA
+      BEARISH — downtrend at a 20-day breakdown or a bounce up into the 20-day EMA"""
     out = []
     for sym in symbols:
         try:
@@ -183,15 +184,25 @@ def swing_candidates(symbols: list[str], limit: int = 5) -> list[dict]:
         except Exception as exc:
             logger.debug("[daily] {} skipped: {}", sym, exc)
             continue
-        if not v or v["trend"] != "UP" or v["rsi14"] is None or not (45 <= v["rsi14"] <= 72):
+        if not v or v["rsi14"] is None or not v["ema20"]:
             continue
-        breakout = v["pct_from_20d_high"] >= -1.0
-        pullback = v["ema20"] and abs(v["ltp"] - v["ema20"]) / v["ema20"] * 100 <= 1.5
-        if not (breakout or pullback):
+        near_ema = abs(v["ltp"] - v["ema20"]) / v["ema20"] * 100 <= 1.5
+        vol_bonus = 1 if (v["volume_vs_20d_avg"] or 0) >= 1.3 else 0
+        if v["trend"] == "UP" and 45 <= v["rsi14"] <= 72:
+            breakout = v["pct_from_20d_high"] >= -1.0
+            if not (breakout or near_ema):
+                continue
+            direction, setup = "BULLISH", "breakout" if breakout else "pullback to EMA20"
+            score = (2 if breakout else 1) + vol_bonus + (1 if 55 <= v["rsi14"] <= 68 else 0)
+        elif v["trend"] == "DOWN" and 28 <= v["rsi14"] <= 55:
+            breakdown = (v["ltp"] - v["low_20d"]) / v["low_20d"] * 100 <= 1.0
+            if not (breakdown or near_ema):
+                continue
+            direction, setup = "BEARISH", "breakdown" if breakdown else "bounce into EMA20"
+            score = (2 if breakdown else 1) + vol_bonus + (1 if 32 <= v["rsi14"] <= 45 else 0)
+        else:
             continue
-        score = (2 if breakout else 1) + (1 if (v["volume_vs_20d_avg"] or 0) >= 1.3 else 0) \
-            + (1 if 55 <= v["rsi14"] <= 68 else 0)
-        out.append({"symbol": sym, "setup": "breakout" if breakout else "pullback to EMA20",
-                    "score": score, **{k: v[k] for k in ("ltp", "rsi14", "atr_pct", "ema20", "ema50",
-                                                          "high_20d", "volume_vs_20d_avg")}})
+        out.append({"symbol": sym, "direction": direction, "setup": setup, "score": score,
+                    **{k: v[k] for k in ("ltp", "rsi14", "atr_pct", "ema20", "ema50", "high_20d", "low_20d",
+                                         "volume_vs_20d_avg")}})
     return sorted(out, key=lambda c: -c["score"])[:limit]

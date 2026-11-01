@@ -1008,17 +1008,20 @@ def t_scalping_win_resets_streak():
 
 def t_scalping_dedup_90s():
     """Same symbol+direction within 90s should be deduplicated."""
-    agent = ScalpingAgent()
-    sym = "TESTDEDUP"
-    agent._last_signal_ts[sym]  = datetime.now()
-    agent._last_signal_dir[sym] = "BUY"
-    # Force an EMA9 cross setup
-    agent._prev_ema9[sym] = 2810.0
-    agent._prev_ltp[sym]  = 2808.0
-    snap = _make_snap(symbol=sym, ltp=2812.0, ema9=2809.0, n_candles=15,
-                      rsi=56.0, volume_ratio=1.5, macd_hist=0.5, vwap=2800.0)
-    action, _ = agent.evaluate_tick(snap)
-    assert action == "HOLD", "Dedup should suppress signal within 90s"
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
+    def setup(last_ts):
+        agent = ScalpingAgent()
+        agent._last_signal_ts = {"TESTDEDUP": last_ts}
+        agent._last_signal_dir = {"TESTDEDUP": "BUY"}
+        # Force an EMA9 cross setup
+        agent._prev_ema9["TESTDEDUP"] = 2810.0
+        agent._prev_ltp["TESTDEDUP"]  = 2808.0
+        snap = _make_snap(symbol="TESTDEDUP", ltp=2812.0, ema9=2809.0, n_candles=15,
+                          rsi=56.0, volume_ratio=1.5, macd_hist=0.5, vwap=2800.0)
+        with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent's clock is IST
+            return agent.evaluate_tick(snap)[0]
+    assert setup(_mkt_dt.replace(tzinfo=None)) == "HOLD", "Dedup should suppress signal within 90s"
 
 def t_scalping_5_patterns_exist():
     """The agent must define all 5 pattern types in _detect_pattern."""
@@ -1954,6 +1957,7 @@ def t_ai_tool_schemas_strict():
     names = [t["name"] for t in _AI_TOOLS]
     assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
                      "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
+                     "place_swing_put", "place_option_spread",
                      "get_future_quote", "place_future_trade", "get_option_chain",
                      "place_option_trade", "adjust_stop", "close_position"], names
     for t in _AI_TOOLS:
@@ -3962,6 +3966,231 @@ run("Futures: LIMIT entry, SL-limit, 15:00 exit, no option",  t_ai_future_trade_
 run("Futures: short + rupee-risk/margin/stop limits",         t_ai_future_short_and_limits)
 run("Futures: index alert offers the future",                 t_ai_index_alert_offers_futures)
 run("Futures: resolver rolls on expiry day",                  t_future_resolver_live_skips_expiry_day)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("AI OPTION SELLING (CREDIT SPREADS) AND BEARISH SWING PUTS")
+# ══════════════════════════════════════════════════════════════════════════
+def _spread_args(view="BULLISH", off=1, width=1, lots=1, slp=100.0, tgp=50.0, und="NIFTY"):
+    return {"underlying": und, "view": view, "short_strike_offset": off, "width_strikes": width,
+            "lots": lots, "stop_loss_pct": slp, "target_pct": tgp, "reasoning": "test"}
+
+def _with_sell_env(fn):
+    def body():
+        prev = _ai_settings.ai_agent_option_selling_enabled
+        _ai_settings.ai_agent_option_selling_enabled = True
+        try:
+            return fn()
+        finally:
+            _ai_settings.ai_agent_option_selling_enabled = prev
+    return _with_opt_env(body)
+
+def _index_snap(px):
+    _ai_tick("NIFTY 50", px)
+    return _make_snap(symbol="NIFTY 50", ltp=px)
+
+def t_ai_spread_off_by_default():
+    def body():
+        assert _ai_settings.ai_agent_option_selling_enabled is False
+        try:
+            asyncio.run(_rt_ai()._place_option_spread(_spread_args())); raise AssertionError("accepted")
+        except ToolRejected as e:
+            assert "disabled" in str(e)
+    _with_opt_env(body)
+
+def t_ai_bull_put_spread_lifecycle():
+    def body():
+        ai = _rt_ai()
+        n0 = len(_te_kite_client._paper_orders)
+        out = asyncio.run(ai._place_option_spread(_spread_args()))
+        legs = _te_kite_client._paper_orders[n0:]
+        assert [o["transaction_type"] for o in legs] == ["BUY", "SELL"], "protective leg must go first"
+        buy, sell = legs
+        assert buy["tradingsymbol"].endswith("23900PE") and sell["tradingsymbol"].endswith("23950PE"), (buy, sell)
+        assert all(o["order_type"] == "LIMIT" and o["exchange"] == "NFO" and o["product"] == "MIS" for o in legs)
+        assert 0 < out["credit_per_unit"] < 50 and out["max_loss"] == round((50 - out["credit_per_unit"]) * 75, 2)
+        assert out["max_loss"] <= _ai_settings.ai_agent_max_spread_loss
+        assert _og_x.is_symbol_active_anywhere("NIFTY") == ["ai_spread"]
+        pos = [p for p in ai._positions()["open"] if p["kind"] == "spread"]
+        assert pos and pos[0]["structure"] == "bull put spread"
+        for fn, args in ((ai._place_option_trade, _opt_args()), (ai._place_option_spread, _spread_args("BEARISH"))):
+            try:
+                asyncio.run(fn(args)); raise AssertionError("second NIFTY position accepted")
+            except ToolRejected as e:
+                assert "already has an open" in str(e)
+        n1 = len(_te_kite_client._paper_orders)
+        res = asyncio.run(ai._close_position("NIFTY", "test"))
+        exits = _te_kite_client._paper_orders[n1:]
+        assert [(o["transaction_type"], o["tradingsymbol"][-7:]) for o in exits] == \
+            [("BUY", "23950PE"), ("SELL", "23900PE")], "buy back the short leg first"
+        assert res["status"] == "closed" and not ai._spreads and not _og_x.is_symbol_active_anywhere("NIFTY")
+    _with_sell_env(body)
+
+def t_ai_bear_call_spread_strikes():
+    def body():
+        ai = _rt_ai()
+        n0 = len(_te_kite_client._paper_orders)
+        asyncio.run(ai._place_option_spread(_spread_args("BEARISH")))
+        buy, sell = _te_kite_client._paper_orders[n0:]
+        assert sell["tradingsymbol"].endswith("24050CE") and buy["tradingsymbol"].endswith("24100CE"), (buy, sell)
+        asyncio.run(ai.close_all("t"))
+    _with_sell_env(body)
+
+def t_ai_spread_limits():
+    def body():
+        ai = _rt_ai()
+        cases = [
+            (_spread_args(width=4, off=0), "worst-case loss"),          # 200-pt width × 75 > ₹10k
+            (_spread_args(off=4, width=1), "credit"),                    # far OTM: too little credit
+            (_spread_args(lots=2), "lots must be"),
+            (_spread_args(slp=300.0), "stop_loss_pct"),
+            (_spread_args(tgp=95.0), "target_pct"),
+            (_spread_args(off=5), "short_strike_offset"),
+            (_spread_args(und="FINNIFTY"), "underlying must be"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_option_spread(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        assert not ai._spreads
+    _with_sell_env(body)
+
+def t_ai_spread_stop_and_take_profit():
+    def body():
+        ai = _rt_ai()
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        asyncio.run(ai._on_snap(_index_snap(24010.0)))
+        assert ai._spreads, "small move: spread stays open"
+        asyncio.run(ai._on_snap(_index_snap(23800.0)))              # index falls through the short put
+        assert not ai._spreads and any("stop: spread cost" in e["text"] for e in ai.log)
+        assert _og_x._cooldown_until["ai_spread"] > 0, "a losing spread starts the post-loss cooldown"
+        _og_x._cooldown_until.clear()
+        _index_snap(24000.0)
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        asyncio.run(ai._on_snap(_index_snap(24400.0)))              # rally: puts decay
+        assert not ai._spreads and any("take profit" in e["text"] for e in ai.log)
+        assert ai.trades_today == 2
+    _with_sell_env(body)
+
+def t_ai_spread_closed_at_1500():
+    def body():
+        ai = _rt_ai()
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_index_snap(24000.0)))
+        assert not ai._spreads, "spreads are intraday"
+    _with_sell_env(body)
+
+def _put_args(und="PUTSTK", off=0, lots=1, slp=35.0, tgp=70.0, hold=5):
+    return {"underlying": und, "strike_offset": off, "lots": lots, "stop_loss_pct": slp,
+            "target_pct": tgp, "max_hold_days": hold, "reasoning": "test"}
+
+def t_ai_swing_put_lifecycle():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("PUTSTK", 1000.0)
+        out = asyncio.run(ai._place_swing_put(_put_args()))
+        oid = out["order_id"]
+        o = _order(oid)
+        assert o["exchange"] == "NFO" and o["product"] == "NRML" and o["order_type"] == "LIMIT"
+        assert o["tradingsymbol"] == "PUTSTKSIM1000PE", o["tradingsymbol"]
+        assert out["expiry"] >= "2026-01-29", "expiry must be well after the planned exit"
+        e = _ba._tsl_sl_orders[oid]
+        g = _te_kite_client._paper_gtts[e["gtt_id"]]
+        assert e["kind"] == "swing" and e["product"] == "NRML" and g["status"] == "active"
+        assert _og_x.is_symbol_active_anywhere("PUTSTK") == ["ai_swing_opt"]
+        assert out["premium_paid"] <= _ai_settings.ai_agent_max_swing_put_premium
+        row = json.loads(path.read_text())["positions"][0]
+        assert row["exchange"] == "NFO" and row["strategy"] == "ai_swing_opt" and row["guard_symbol"] == "PUTSTK"
+        # held through 15:00
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="PUTSTKSIM1000PE", ltp=12.0)))
+        assert oid in ai._ai_entries()
+        # restart → restored with its exchange/product/strategy
+        _ba._tsl_sl_orders.pop(oid); _tsl_eng.deregister(oid); _og_x.reset_daily()
+        ai2 = _rt_ai()
+        assert ai2.restore_swing() == ["PUTSTKSIM1000PE"]
+        e2 = _ba._tsl_sl_orders[oid]
+        assert e2["exchange"] == "NFO" and e2["product"] == "NRML" and _tsl_eng._positions[oid].strategy == "ai_swing_opt"
+        n = len(_te_kite_client._paper_orders)
+        asyncio.run(ai2._close_position("PUTSTKSIM1000PE", "t"))
+        ex = _te_kite_client._paper_orders[n]
+        assert ex["product"] == "NRML" and ex["order_type"] == "LIMIT" and ex["transaction_type"] == "SELL"
+        assert g["status"] == "deleted" or _te_kite_client._paper_gtts[e2["gtt_id"]]["status"] == "deleted"
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_put_limits():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("PUTLIM", 1000.0)
+        cases = [
+            (_put_args("PUTLIM", slp=10.0, tgp=30.0), "stop must be"),
+            (_put_args("PUTLIM", slp=40.0, tgp=50.0), "1.5x"),
+            (_put_args("PUTLIM", off=3), "strike_offset"),
+            (_put_args("PUTLIM", lots=2, off=-1), "exceeds"),                 # ITM × 2 lots > ₹15k
+            (_put_args("PUTLIM", hold=_ai_settings.ai_agent_swing_max_hold_days + 1), "max_hold_days"),
+            (_put_args("NOTSTREAMING"), "not streaming"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_swing_put(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        assert not ai._ai_entries()
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_swing_candidates_bearish():
+    import daily_data as _dd
+    views = {
+        "DNX": {"trend": "DOWN", "rsi14": 38.0, "ema20": 1010.0, "ltp": 1000.0, "low_20d": 995.0,
+                "pct_from_20d_high": -8.0, "volume_vs_20d_avg": 1.5, "atr_pct": 2.0, "ema50": 1050.0,
+                "high_20d": 1090.0},
+        "UPX": {"trend": "UP", "rsi14": 60.0, "ema20": 990.0, "ltp": 1000.0, "low_20d": 950.0,
+                "pct_from_20d_high": -0.5, "volume_vs_20d_avg": 1.0, "atr_pct": 2.0, "ema50": 960.0,
+                "high_20d": 1005.0},
+        "FLAT": {"trend": "SIDEWAYS", "rsi14": 50.0, "ema20": 1000.0, "ltp": 1000.0, "low_20d": 950.0,
+                 "pct_from_20d_high": -3.0, "volume_vs_20d_avg": 1.0, "atr_pct": 2.0, "ema50": 1000.0,
+                 "high_20d": 1030.0},
+    }
+    with _patch.object(_dd, "daily_view", side_effect=lambda s, candles=0: views[s]):
+        c = {x["symbol"]: x for x in _dd.swing_candidates(list(views))}
+    assert c["DNX"]["direction"] == "BEARISH" and c["DNX"]["setup"] == "breakdown"
+    assert c["UPX"]["direction"] == "BULLISH" and "FLAT" not in c
+
+def t_ai_spread_never_naked():
+    async def never(*a, **k): return False
+    def body():
+        ai = _rt_ai()
+        n0 = len(_te_kite_client._paper_orders)
+        with _patch.object(ai, "_wait_filled", never):           # protective leg doesn't fill
+            try:
+                asyncio.run(ai._place_option_spread(_spread_args())); raise AssertionError("accepted")
+            except ToolRejected as e:
+                assert "did not fill" in str(e)
+        sent = _te_kite_client._paper_orders[n0:]
+        assert [o["transaction_type"] for o in sent] == ["BUY"] and sent[0]["status"] == "CANCELLED", \
+            "no SELL may go out before the hedge fills"
+        assert not ai._spreads and not _og_x.is_symbol_active_anywhere("NIFTY")
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        n1 = len(_te_kite_client._paper_orders)
+        with _patch.object(ai, "_wait_filled", never):           # buy-back doesn't fill
+            asyncio.run(ai._close_position("NIFTY", "t"))
+        sent = _te_kite_client._paper_orders[n1:]
+        assert [o["transaction_type"] for o in sent] == ["BUY"], "the hedge must be kept until the buy-back fills"
+        assert any("was KEPT" in e["text"] for e in ai.log)
+    _with_sell_env(body)
+
+run("Spreads: option selling off by default",               t_ai_spread_off_by_default)
+run("Spreads: never naked on entry or exit",                t_ai_spread_never_naked)
+run("Spreads: bull put — hedge first, defined loss, exit",  t_ai_bull_put_spread_lifecycle)
+run("Spreads: bear call strikes above spot",                t_ai_bear_call_spread_strikes)
+run("Spreads: width/credit/lots/stop/target limits",        t_ai_spread_limits)
+run("Spreads: code stop and take-profit on index moves",    t_ai_spread_stop_and_take_profit)
+run("Spreads: closed at 15:00",                             t_ai_spread_closed_at_1500)
+run("Swing put: NRML put + GTT, held, restored, closed",    t_ai_swing_put_lifecycle)
+run("Swing put: hard limits",                               t_ai_swing_put_limits)
+run("Swing scan: bearish breakdown candidates",             t_swing_candidates_bearish)
 
 
 # ══════════════════════════════════════════════════════════════════════════

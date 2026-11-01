@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     ai_agent_swing_max_hold_days: int   = 15       # code exits on the last allowed day at 15:10
     ai_agent_swing_scan_time:     str   = "14:50"  # daily swing scan (IST), near the close
     ai_agent_swing_gtt_buffer_pct: float = 1.0     # GTT stop's limit price this far below its trigger
+    # Bearish swing = BUY a put (stock or index) held for days, NRML; loss limited to the premium
+    ai_agent_swing_puts_enabled:  bool  = True
+    ai_agent_max_swing_put_premium: float = 15000.0 # ₹ premium × quantity per trade
+    ai_agent_swing_put_min_sl_pct: float = 25.0    # stop as % of the premium
+    ai_agent_swing_put_max_sl_pct: float = 50.0
+    ai_agent_swing_put_expiry_buffer_days: int = 7 # option must expire this many days after the planned exit
     # AI futures — NSE index futures (NIFTY/BANKNIFTY…), intraday only, long or short
     ai_agent_futures_enabled:     bool  = False    # leveraged: off until you choose to turn it on
     ai_agent_future_underlyings:  str   = "NIFTY,BANKNIFTY"
@@ -150,6 +156,13 @@ class Settings(BaseSettings):
     ai_agent_future_margin_pct:   float = 15.0     # margin estimate (% of notional) when the broker can't be asked
     ai_agent_future_min_sl_pct:   float = 0.15
     ai_agent_future_max_sl_pct:   float = 1.0
+    # AI option SELLING — only as defined-risk credit spreads (sell one, buy a further OTM one),
+    # intraday. Naked option selling is never allowed.
+    ai_agent_option_selling_enabled: bool = False
+    ai_agent_max_spread_lots:     int   = 1
+    ai_agent_max_spread_loss:     float = 10000.0  # ₹ worst case: (width − credit) × quantity
+    ai_agent_max_spread_margin:   float = 150000.0 # ₹ margin blocked per spread
+    ai_agent_spread_min_credit_pct: float = 20.0   # credit must be at least this % of the strike width
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

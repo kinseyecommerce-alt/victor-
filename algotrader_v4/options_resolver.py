@@ -63,11 +63,23 @@ def _instruments() -> list[dict]:
         return []
 
 
+def _sim_step_lot(und: str, spot: float) -> tuple[float, int]:
+    """Paper-simulator strike step and lot size; stock values roughly follow NSE's scheme."""
+    if und in _SIM_STEP:
+        return _SIM_STEP[und], _SIM_LOT[und]
+    step = 5 if spot < 500 else 10 if spot < 1000 else 20 if spot < 2500 else 50
+    lot = max(1, int(round(600000 / spot / 25.0)) * 25)        # ~₹6 lakh contract value
+    return step, lot
+
+
 def resolve(underlying: str, spot: float, option_type: str, strike_offset: int,
-            today: date, skip_expiry_today: bool = True) -> Optional[OptionContract]:
+            today: date, skip_expiry_today: bool = True,
+            min_expiry: Optional[date] = None) -> Optional[OptionContract]:
     """Nearest-expiry contract `strike_offset` strikes from ATM.
-    Positive offset = out of the money (higher strike for CE, lower for PE)."""
-    und = normalize_underlying(underlying)
+    Positive offset = out of the money (higher strike for CE, lower for PE).
+    underlying: an index (NIFTY, "NIFTY 50", BANKNIFTY…) or an F&O stock (RELIANCE).
+    min_expiry: first expiry on or after this date (a swing position must not outlive its option)."""
+    und = normalize_underlying(underlying) or underlying.strip().upper()
     if not und or option_type not in ("CE", "PE") or spot <= 0:
         return None
 
@@ -76,7 +88,8 @@ def resolve(underlying: str, spot: float, option_type: str, strike_offset: int,
             and str(i.get("segment", "")).endswith("OPT")]
     if rows:
         expiries = sorted({r["expiry"] for r in rows if r.get("expiry") and r["expiry"] >= today
-                           and not (skip_expiry_today and r["expiry"] == today)})
+                           and not (skip_expiry_today and r["expiry"] == today)
+                           and (min_expiry is None or r["expiry"] >= min_expiry)})
         if not expiries:
             return None
         exp = expiries[0]
@@ -92,11 +105,11 @@ def resolve(underlying: str, spot: float, option_type: str, strike_offset: int,
 
     if settings.uses_kite_market_data:
         return None              # real feed but no instrument master: never guess a live symbol
-    step = _SIM_STEP[und]
+    step, lot = _sim_step_lot(und, spot)
     atm = round(spot / step) * step
     strike = atm + strike_offset * step * (1 if option_type == "CE" else -1)
-    return OptionContract(f"{und}SIM{int(strike)}{option_type}", und, None, float(strike),
-                          option_type, _SIM_LOT[und], live=False)
+    return OptionContract(f"{und}SIM{int(strike)}{option_type}", und, min_expiry, float(strike),
+                          option_type, lot, live=False)
 
 
 def estimate_premium(spot: float, strike: float, option_type: str, iv: float = 0.15,

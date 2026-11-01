@@ -115,6 +115,16 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.ATR_TRAIL,
         atr_multiplier  = 1.2,
     ),
+    "ai_swing_opt": TrailConfig(  # AI bearish swing: long put held for days (premium %)
+        initial_sl_pct  = 40.0,
+        trail_pct       = 25.0,
+        breakeven_pct   = 20.0,
+        activation_pct  = 40.0,
+        target1_pct     = 60.0,
+        target2_pct     = 100.0,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 2.0,
+    ),
     "ai_swing": TrailConfig(  # AI swing (delivery), fallback when Claude can't trail it.
         initial_sl_pct  = 5.00,   # percent trail: the tick feed's ATR is 1-minute, far too
         trail_pct       = 3.00,   # tight for a position held for days

@@ -13,6 +13,7 @@ export interface DashPosition {
 
 const STRATEGY_LABEL: Record<string, string> = {
   ai: 'AI intraday', ai_opt: 'AI option', ai_fut: 'AI future', ai_swing: 'AI swing',
+  ai_swing_opt: 'AI swing put', ai_spread: 'AI credit spread',
 }
 export interface DashSummary {
   time_ist: string; date: string; demo: boolean; mode: string; market_open: boolean
