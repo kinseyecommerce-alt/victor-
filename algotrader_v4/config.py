@@ -182,6 +182,9 @@ class Settings(BaseSettings):
     risk_per_trade_pct:           float = 0.5      # max loss at the stop as % of total capital (vol-targeted size)
     portfolio_var_cap_pct:        float = 2.0      # 1-day 95% VaR of the open book, % of capital
     max_portfolio_heat:           float = 0.7      # avg pairwise correlation of the book above which no new equity entry
+    # ── Execution ───────────────────────────────────────────────────────────
+    use_limit_entries:            bool  = True     # equity entries as marketable LIMIT (ask/bid ± buffer), never raw MARKET
+    entry_limit_buffer_pct:       float = 0.10     # how far past the touch the limit may fill (protects against a bad print)
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

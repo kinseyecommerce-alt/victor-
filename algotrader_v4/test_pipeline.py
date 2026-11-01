@@ -1504,7 +1504,7 @@ def _run_entry_with_failing_sl(exit_fails: bool):
 def t_sl_fail_flattens_position():
     placed, active, before, after = _run_entry_with_failing_sl(exit_fails=False)
     types = [(p["order_type"], p["transaction_type"]) for p in placed]
-    assert types == [("MARKET", "BUY"), ("SL-M", "SELL"), ("SL-M", "SELL"),
+    assert types == [("LIMIT", "BUY"), ("SL-M", "SELL"), ("SL-M", "SELL"),
                      ("SL-M", "SELL"), ("MARKET", "SELL")], types
     assert not active, "flattened entry must not stay registered in order_guard"
     assert before == after, "flattened entry must not count as an open position"
@@ -4653,6 +4653,49 @@ run("Risk: event block / scale, correlation block, heat cap", t_risk_event_and_c
 run("Risk: daily VaR cap limits new entries",                 t_risk_daily_var_cap)
 run("Risk: AI rejects oversize with the max; agents scale",   t_risk_applied_to_ai_and_agents)
 run("Market context: every block present, nothing invented",  t_market_context_shape)
+
+# ── Execution quality ─────────────────────────────────────────────────────
+import execution as _ex
+
+def t_exec_marketable_limit_and_paper_fill():
+    tick = Tick(symbol="EXQ", ltp=1000.0, bid=999.5, ask=1000.5, volume=1, change=0, change_pct=0,
+                high=0, low=0, open=0, timestamp=datetime.now())
+    o = _ex.entry_order("BUY", tick, 1000.0)
+    assert o["order_type"] == "LIMIT" and abs(o["price"] - 1001.5) < 0.06, o          # ask + 0.1%
+    o = _ex.entry_order("SELL", tick, 1000.0)
+    assert o["order_type"] == "LIMIT" and abs(o["price"] - 998.5) < 0.06, o          # bid − 0.1%
+    prev = _ai_settings.use_limit_entries; _ai_settings.use_limit_entries = False
+    try:
+        assert _ex.entry_order("BUY", tick, 1000.0) == {"order_type": "MARKET"}
+    finally:
+        _ai_settings.use_limit_entries = prev
+    # paper: a marketable limit fills at the touch, not at its limit; a passive one at its limit
+    _ai_tick("EXQ", 1000.0)
+    oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "LIMIT", "MIS", price=1001.5)
+    assert _te_kite_client.fill_price(oid) == 1000.0
+    oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "LIMIT", "MIS", price=1003.0)
+    assert _te_kite_client.fill_price(oid) == 1003.0
+    assert _ex.slippage_bps(1000.0, 1000.5, "BUY") == 5.0 and _ex.slippage_bps(1000.0, 999.0, "SELL") == 10.0
+    assert _ex.slippage_bps(1000.0, 999.0, "BUY") == -10.0
+
+def t_exec_ai_entry_uses_real_fill_and_ledger_slippage():
+    def body(p, path):
+        ai = _rt_ai(); _ai_tick("EXF1", 1000.0)
+        with _patch.object(_te_kite_client, "fill_price", return_value=1000.8):     # broker says we paid more
+            out = asyncio.run(ai._place_trade(_trade_args("EXF1", qty=10)))
+        assert out["fill_price"] == 1000.8 and out["signal_price"] == 1000.0
+        oid = out["order_id"]
+        assert _order(oid)["order_type"] == "LIMIT"
+        assert _tsl_eng._positions[oid].entry_price == 1000.8, "stop/P&L start from the real fill"
+        asyncio.run(ai.close_all("t"))
+        t = p.trades[-1]
+        assert t["signal"] == 1000.0 and t["entry"] == 1000.8 and t["slip_bps"] == 8.0, t
+        ex = p.execution_stats()
+        assert ex["per_strategy"]["ai"]["avg_bps"] == 8.0 and ex["overall"]["trades"] == 1
+    _with_ai_env(lambda: _with_perf(body))
+
+run("Execution: marketable limit entries; paper fills at the touch", t_exec_marketable_limit_and_paper_fill)
+run("Execution: AI uses the real fill; slippage in the ledger",     t_exec_ai_entry_uses_real_fill_and_ledger_slippage)
 
 
 # ══════════════════════════════════════════════════════════════════════════

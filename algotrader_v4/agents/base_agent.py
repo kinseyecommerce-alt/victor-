@@ -109,7 +109,8 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     try:
         from performance import performance
         performance.record_trade(strategy, symbol, side, quantity, fallback_px, pnl,
-                                 entry.get("exchange", "NSE"), entry.get("product", "MIS"), note=tag)
+                                 entry.get("exchange", "NSE"), entry.get("product", "MIS"), note=tag,
+                                 signal_price=entry.get("signal_price"))
     except Exception as exc:
         logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
 
@@ -481,13 +482,15 @@ class BaseAgent(ABC):
             return
 
         product = signal.get("product", self.product)
+        from execution import entry_order, fill_after
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange=exch,
             transaction_type=action, quantity=qty,
-            order_type="MARKET", product=product,
-            tag=f"Agent-{self.name}",
+            product=product, tag=f"Agent-{self.name}",
+            **(entry_order(action, snap.tick, ltp) if exch == "NSE" else {"order_type": "MARKET"}),
         )
         sebi_compliance.record_order_id(self.name, sym, order_id)
+        fill = fill_after(order_id, ltp)          # the real average price, for the stop, P&L and slippage
 
         # Protective SL-M goes in immediately; no position is kept without one
         sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
@@ -509,7 +512,7 @@ class BaseAgent(ABC):
         # Register with trailing SL engine (monitors every tick)
         tsl_pos = trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
-            entry_price=ltp, quantity=qty, order_id=order_id,
+            entry_price=fill, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
         )
         # Start the software stop where the exchange stop actually is. Otherwise the engine
@@ -525,6 +528,7 @@ class BaseAgent(ABC):
             "guard_symbol": sym,
             "agent":        self.name,
             "side":         action,
+            "signal_price": ltp,
         }
 
         ind = snap.indicators

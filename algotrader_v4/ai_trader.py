@@ -848,11 +848,13 @@ class AITrader:
         if not ok:
             reject(msg)
 
+        from execution import entry_order, fill_after
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange="NSE", transaction_type=side, quantity=qty,
-            order_type="MARKET", product="MIS", tag="Agent-ai",
+            product="MIS", tag="Agent-ai", **entry_order(side, tick, ltp),
         )
         sebi_compliance.record_order_id(AGENT, sym, order_id)
+        fill = fill_after(order_id, ltp)
 
         sl = round(sl, 2)
         sl_oid = await place_sl_with_retry(AGENT, sym, "NSE", side, qty, "MIS", sl)
@@ -865,9 +867,10 @@ class AITrader:
         _tsl_sl_orders[order_id] = {
             "sl_order_id": sl_oid, "product": "MIS", "exchange": "NSE",
             "symbol": sym, "guard_symbol": sym, "agent": AGENT, "side": side, "kind": "equity",
+            "signal_price": ltp,
         }
         pos = trailing_sl_engine.register(
-            symbol=sym, strategy=AGENT, side=side, entry_price=ltp,
+            symbol=sym, strategy=AGENT, side=side, entry_price=fill,
             quantity=qty, order_id=order_id,
         )
         pos.current_sl = sl                     # software stop = the AI's stop, not the config default
@@ -877,11 +880,11 @@ class AITrader:
         self.trades_today += 1
         self._ensure_tick_monitor()
 
-        text = f"{side} {qty} {sym} @ ~₹{ltp:.2f} SL ₹{sl:.2f} TGT ₹{tgt:.2f} — {why}"
+        text = f"{side} {qty} {sym} @ ₹{fill:.2f} SL ₹{sl:.2f} TGT ₹{tgt:.2f} — {why}"
         self._record("trade", text)
         await self._notify(f"🧠 <b>[AI]</b> {text}")
         return {"status": "placed", "order_id": order_id, "symbol": sym, "side": side,
-                "quantity": qty, "approx_price": ltp, "stop_loss": sl, "target": round(tgt, 2),
+                "quantity": qty, "fill_price": fill, "signal_price": ltp, "stop_loss": sl, "target": round(tgt, 2),
                 "mode": self._mode_label()}
 
     # ── Index options (buy only) ──────────────────────────────────────────
@@ -1084,6 +1087,7 @@ class AITrader:
             "sl_order_id": sl_oid, "product": "MIS", "exchange": "NFO",
             "symbol": c.tradingsymbol, "guard_symbol": und, "agent": AGENT, "side": "BUY",
             "sl_type": "SL", "sl_buffer_pct": 5.0, "exit_limit_buffer_pct": 3.0, "kind": "option",
+            "signal_price": ltp,
         }
         pos = trailing_sl_engine.register(
             symbol=c.tradingsymbol, strategy=OPT_STRATEGY, side="BUY", entry_price=entry_px,
@@ -1206,11 +1210,13 @@ class AITrader:
         if not ok:
             reject(msg)
 
+        from execution import entry_order, fill_after
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange="NSE", transaction_type="BUY", quantity=qty,
-            order_type="MARKET", product="CNC", tag="Agent-ai-mom" if momentum else "Agent-ai-swing",
+            product="CNC", tag="Agent-ai-mom" if momentum else "Agent-ai-swing", **entry_order("BUY", tick, ltp),
         )
         sebi_compliance.record_order_id(AGENT, sym, order_id)
+        fill = fill_after(order_id, ltp)
 
         sl = round_tick(sl)
         buf = settings.ai_agent_swing_gtt_buffer_pct
@@ -1235,9 +1241,10 @@ class AITrader:
             "sl_order_id": None, "gtt_id": gtt_id, "gtt_buffer_pct": buf,
             "gtt_trigger_offset_pct": GTT_TRIGGER_OFFSET_PCT, "product": "CNC", "exchange": "NSE",
             "symbol": sym, "guard_symbol": sym, "agent": AGENT, "side": "BUY", "kind": "swing",
+            "signal_price": ltp,
         }
         pos = trailing_sl_engine.register(symbol=sym, strategy=_strategy, side="BUY",
-                                          entry_price=ltp, quantity=qty, order_id=order_id)
+                                          entry_price=fill, quantity=qty, order_id=order_id)
         pos.current_sl = sl
         self._start_trail(order_id, pos)
         if momentum:
@@ -1602,6 +1609,7 @@ class AITrader:
             "sl_order_id": sl_oid, "product": "MIS", "exchange": "NFO",
             "symbol": c.tradingsymbol, "guard_symbol": und, "agent": AGENT, "side": side,
             "sl_type": "SL", "sl_buffer_pct": 0.5, "exit_limit_buffer_pct": 0.3, "kind": "future",
+            "signal_price": ltp,
         }
         pos = trailing_sl_engine.register(symbol=c.tradingsymbol, strategy=FUT_STRATEGY, side=side,
                                           entry_price=entry_px, quantity=qty, order_id=order_id)
@@ -1759,7 +1767,7 @@ class AITrader:
             "sl_order_id": None, "gtt_id": gtt_id, "gtt_buffer_pct": buf,
             "gtt_trigger_offset_pct": GTT_TRIGGER_OFFSET_PCT, "product": "NRML", "exchange": "NFO",
             "symbol": c.tradingsymbol, "guard_symbol": und, "agent": AGENT, "side": "BUY", "kind": "swing",
-            "exit_limit_buffer_pct": 3.0,
+            "exit_limit_buffer_pct": 3.0, "signal_price": ltp,
         }
         pos = trailing_sl_engine.register(symbol=c.tradingsymbol, strategy=SWING_OPT_STRATEGY, side="BUY",
                                           entry_price=entry_px, quantity=qty, order_id=order_id)

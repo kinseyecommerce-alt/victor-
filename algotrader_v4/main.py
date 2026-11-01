@@ -1316,6 +1316,12 @@ def performance_strategies():
                      "enabled": settings.prune_enabled}}
 
 
+@app.get("/performance/execution", tags=["Performance"])
+def performance_execution():
+    """Entry slippage vs the signal price, per strategy (basis points)."""
+    return performance.execution_stats()
+
+
 @app.get("/performance/trades", tags=["Performance"])
 def performance_trades(n: int = 100, strategy: str | None = None):
     rows = [t for t in performance.trades if not strategy or t["strategy"] == strategy]

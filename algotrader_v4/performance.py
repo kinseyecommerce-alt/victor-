@@ -81,7 +81,8 @@ class Performance:
     # ── recording ────────────────────────────────────────────────────────
     def record_trade(self, strategy: str, symbol: str, side: str, quantity: int, entry_price: float,
                      pnl: float, exchange: str = "NSE", product: str = "MIS",
-                     exit_price: Optional[float] = None, note: str = "") -> dict:
+                     exit_price: Optional[float] = None, note: str = "",
+                     signal_price: Optional[float] = None) -> dict:
         """Called once per closed trade with its gross P&L. Returns the stored row (net of costs)."""
         if exit_price is None and quantity and entry_price:
             exit_price = entry_price + (pnl / quantity) * (1 if side == "BUY" else -1)
@@ -90,6 +91,10 @@ class Performance:
                "side": side, "qty": quantity, "entry": round(entry_price, 2),
                "exit": round(exit_price or entry_price, 2), "gross": round(pnl, 2), "cost": cost,
                "net": round(pnl - cost, 2), "product": product, "exchange": exchange, "note": note[:80]}
+        if signal_price:
+            from execution import slippage_bps
+            row["signal"] = round(signal_price, 2)
+            row["slip_bps"] = slippage_bps(signal_price, entry_price, side)
         with self._lock:
             self.trades.append(row)
             self.trades = self.trades[-MAX_TRADES:]
@@ -179,6 +184,23 @@ class Performance:
                 "avg_net_per_trade": round(sum(nets) / len(rows), 2) if rows else None,
                 "profit_factor": round(gp / gl, 2) if gl > 0 else (None if not wins else 99.0),
                 "max_drawdown": round(dd, 2)}
+
+    def execution_stats(self) -> dict:
+        """Entry slippage (fill vs signal price) per strategy, in basis points. Positive = paid more."""
+        by: dict[str, list[float]] = defaultdict(list)
+        for t in self.trades:
+            if t.get("slip_bps") is not None:
+                by[t["strategy"]].append(t["slip_bps"])
+        out = {}
+        for s, v in by.items():
+            v_sorted = sorted(v)
+            out[s] = {"trades": len(v), "avg_bps": round(sum(v) / len(v), 1), "median_bps": v_sorted[len(v) // 2],
+                      "worst_bps": max(v), "best_bps": min(v),
+                      "cost_inr_per_lakh": round(sum(v) / len(v) / 10000 * 100000, 0)}
+        allv = [x for v in by.values() for x in v]
+        return {"per_strategy": out,
+                "overall": {"trades": len(allv), "avg_bps": round(sum(allv) / len(allv), 1) if allv else None},
+                "note": "entry fills only; exits are at market/marketable limit and not yet measured"}
 
     def strategy_stats(self) -> dict[str, dict]:
         import bot_state
