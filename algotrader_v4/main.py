@@ -207,6 +207,14 @@ class BacktestRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
     lookback_days: int | None = None; walk_forward: bool = True
 
+class ReplayRequest(BaseModel):
+    agent: Literal["intraday", "scalping", "swing"] = "intraday"
+    symbols: list[str] = Field(min_length=1, max_length=25)
+    days: int = Field(default=30, ge=2, le=60)
+    slippage_bps: float = Field(default=5.0, ge=0, le=100)
+    params: dict | None = None            # agent attribute overrides, e.g. {"MIN_SCORE": 5}
+    include_trades: bool = False
+
 class BatchBacktestRequest(BaseModel):
     symbols: list[dict]; strategy: str = "intraday"; walk_forward: bool = True
 
@@ -1316,6 +1324,12 @@ def performance_strategies():
                      "enabled": settings.prune_enabled}}
 
 
+@app.get("/performance/execution", tags=["Performance"])
+def performance_execution():
+    """Entry slippage vs the signal price, per strategy (basis points)."""
+    return performance.execution_stats()
+
+
 @app.get("/performance/trades", tags=["Performance"])
 def performance_trades(n: int = 100, strategy: str | None = None):
     rows = [t for t in performance.trades if not strategy or t["strategy"] == strategy]
@@ -1338,6 +1352,22 @@ def performance_snapshot():
     return performance.snapshot_today(ai_trader.cost_today_usd)
 
 
+@app.get("/risk/portfolio", tags=["Risk"])
+def risk_portfolio():
+    """Open-book VaR vs cap, portfolio heat, rupee risk per trade."""
+    import portfolio_risk
+    return portfolio_risk.status()
+
+
+@app.get("/market/context/{symbol}", tags=["Market Regime"])
+def market_context_view(symbol: str):
+    """Everything known about a symbol beyond its price (cache reads only)."""
+    import market_context
+    from options_resolver import normalize_underlying, INDEX_QUOTE
+    und = normalize_underlying(symbol)
+    return market_context.context_for(INDEX_QUOTE[und] if und else symbol.upper())
+
+
 @app.get("/market/trend-filter", tags=["Market Regime"])
 def trend_filter(refresh: bool = False):
     return market_filter.state(refresh=refresh)
@@ -1353,6 +1383,80 @@ def momentum_rankings(top: int = 20):
 async def momentum_rebalance(execute: bool = True):
     """Run the monthly rotation now (execute=false shows the plan only)."""
     return await ai_trader.run_momentum_rebalance(execute=execute)
+
+
+@app.post("/backtest/replay", tags=["Backtest"])
+async def backtest_replay(req: ReplayRequest):
+    """Replay real minute bars through the live agent code (same patterns, sizing, trailing
+    stop) with slippage and costs. Returns net results vs buy-and-hold of the symbols and NIFTY."""
+    import replay_backtest as rb
+    res = await rb.replay_async(req.agent, [s.upper() for s in req.symbols], req.days, req.slippage_bps, req.params)
+    return {**res.to_dict(include_trades=req.include_trades), "benchmark": rb.benchmark_for(res)}
+
+
+@app.get("/backtest/replay/last", tags=["Backtest"])
+def backtest_replay_last():
+    import replay_backtest as rb
+    return rb._LAST
+
+
+# ── Walk-forward parameter optimisation ───────────────────────────────────
+import optimizer as _optimizer
+
+class OptimizeRequest(BaseModel):
+    symbols: list[str] | None = None      # default: the current watchlist (first 8 NSE symbols)
+    days: int = Field(default=45, ge=5, le=60)
+
+
+def _optimise_universe(req_symbols: list[str] | None) -> list[str]:
+    if req_symbols:
+        return [s.upper() for s in req_symbols][:12]
+    syms = [s for s in tick_engine.symbols() if tick_engine._exchange.get(s, "NSE") == "NSE" and " " not in s][:8]
+    if not syms:
+        from symbol_scanner import NIFTY_50
+        syms = NIFTY_50[:8]
+    return syms
+
+
+@app.post("/optimize/run", tags=["Optimize"])
+async def optimize_run(req: OptimizeRequest):
+    """Walk-forward search over the intraday and scalping parameter grids (background)."""
+    if _optimizer._state["running"]:
+        return {"status": "already running", **_optimizer.status()}
+    asyncio.create_task(_optimizer.run_all_async(_optimise_universe(req.symbols), req.days))
+    return {"status": "started", "symbols": _optimise_universe(req.symbols), "days": req.days}
+
+
+@app.get("/optimize/status", tags=["Optimize"])
+def optimize_status():
+    return _optimizer.status()
+
+
+@app.post("/optimize/params/{agent}/reset", tags=["Optimize"])
+def optimize_reset(agent: Literal["intraday", "scalping"]):
+    _optimizer.reset(agent)
+    return {"status": "reset", "agent": agent, "params": _optimizer.current_params(agent)}
+
+
+# ── Weekly research loop ──────────────────────────────────────────────────
+import research_loop as _research
+
+
+@app.post("/research/run", tags=["Research"])
+async def research_run(symbols: list[str] | None = Body(default=None)):
+    """Run the weekly cycle now: evidence → one Claude proposal → replay A/B → adopt or reject."""
+    return await _research.run_cycle(symbols)
+
+
+@app.get("/research/log", tags=["Research"])
+def research_log(n: int = 20):
+    return {"log": _research.log(n)}
+
+
+@app.get("/research/evidence", tags=["Research"])
+def research_evidence():
+    """What the analyst would be shown right now."""
+    return _research.gather_evidence()
 
 
 @app.get("/backtest/momentum", tags=["Backtest"])
@@ -1475,6 +1579,10 @@ async def on_startup():
         ai_trader.restore_swing()           # AI swing (delivery) positions from earlier runs
     except Exception as exc:
         logger.error("Swing restore failed: {}", exc)
+    try:
+        _optimizer.apply_params()           # walk-forward-chosen agent parameters, if any
+    except Exception as exc:
+        logger.error("Parameter apply failed: {}", exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 

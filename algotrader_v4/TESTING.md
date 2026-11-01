@@ -173,6 +173,34 @@ with a 12% GTT stop and names that dropped out are sold — code only, no Claude
 plan first: `POST /momentum/rebalance?execute=false`; backtest it against NIFTY with
 `GET /backtest/momentum?months=24` (real data only once the server has Kite/yfinance access).
 
+**Portfolio risk** (`GET /risk/portfolio`): every entry, AI or rule agent, is sized so a stop
+hit costs at most `RISK_PER_TRADE_PCT` of capital, is blocked or scaled when correlated with
+open positions or ahead of a results/RBI event, and must fit under the book's one-day VaR cap.
+The AI is told the maximum size and why; agents are scaled down silently (see the log).
+
+**What the AI sees** (`GET /market/context/{symbol}`, tool `get_market_context`): regime and
+India VIX, event risk, support/resistance, institutional flow, option-chain data, multi-timeframe
+alignment, correlation with the book, the trend filter and recent trade lessons. A compact form
+rides on every real-time alert.
+
+**Replay backtest** (`POST /backtest/replay`, `/backtest` skill): feeds real minute bars from
+Kite (or yfinance) through the *same* agent code that trades live — patterns, scoring,
+cooldowns, risk sizing, the trailing-stop engine — with slippage and Zerodha costs, and
+compares the result with NIFTY over the same days. In the paper simulator it runs on
+synthetic bars and says so. Use it, not the older 15-minute approximation, to judge a change.
+
+**Walk-forward optimiser** (`POST /optimize/run`, Saturday 21:30): tries small grids of the
+agents' stop / target / score thresholds on the last 45 days, scoring each candidate on
+time-ordered train folds and then on the unseen test folds, and adopts one only if it beats
+the current parameters out of sample with enough trades and no worse drawdown.
+`GET /optimize/status`, `POST /optimize/params/{agent}/reset`.
+
+**Research loop** (`POST /research/run`, Sunday 21:30, `/research` skill): Claude is shown
+the week — results per strategy after costs, slippage, the scoreboard, pruning, trade lessons,
+the optimiser's report — and proposes **one** parameter change from the allowed grid. The
+proposal is A/B-replayed on the last 30 days; it is adopted only if it wins after costs.
+Every cycle is logged (`GET /research/log`). Claude proposes; the replay decides.
+
 **Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
 with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
 
