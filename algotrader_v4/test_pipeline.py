@@ -4694,6 +4694,109 @@ def t_exec_ai_entry_uses_real_fill_and_ledger_slippage():
         assert ex["per_strategy"]["ai"]["avg_bps"] == 8.0 and ex["overall"]["trades"] == 1
     _with_ai_env(lambda: _with_perf(body))
 
+# ── Replay backtester ─────────────────────────────────────────────────────
+import replay_backtest as _rb
+import agents.strategy_agents as _sa_mod
+
+def _trend_bars(symbol="RPL", days=3, start=1000.0, drift=0.0006, seed=7):
+    """Deterministic 1-minute bars with an upward drift and a volume burst every ~40 bars."""
+    import random as _r
+    rng = _r.Random(seed); bars = []; px = start
+    for d in range(days):
+        ts0 = datetime(2026, 1, 12 + d, 9, 15)
+        for i in range(375):
+            o = px; px = px * (1 + drift + rng.gauss(0, 0.0012)); h = max(o, px) * 1.0004; l = min(o, px) * 0.9996
+            bars.append({"ts": ts0 + timedelta(minutes=i), "open": o, "high": h, "low": l, "close": px,
+                         "volume": int(50000 * (4.0 if i % 40 == 0 else rng.uniform(0.5, 1.5)))})
+    return bars
+
+def t_replay_runs_live_agent_code():
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = {"RPL": _trend_bars()}
+        res = _rb.replay("intraday", ["RPL"], days=3, bars_by_symbol=bars)
+        m = res.metrics()
+        assert res.bars == 1125 and res.source == "provided" and res.period[0].startswith("2026-01-12")
+        assert m["trades"] >= 1, "a trending series with volume bursts must trigger the intraday patterns"
+        assert m["costs"] > 0 and m["net_pnl"] == round(m["gross_pnl"] - m["costs"], 2)
+        t = res.trades[0]
+        assert t.signal.startswith("INTRA-") and t.qty >= 1 and t.exit_reason in ("STOP", "TARGET", "TSL_STOP", "TARGET2", "SQUARE_OFF", "END")
+        assert all(x.exit_ts.time() <= time(15, 16) or x.exit_reason == "END" for x in res.trades), "MIS squared off by 15:15"
+        assert all(x.entry_ts > bars["RPL"][29]["ts"] for x in res.trades), "no entries before 30 bars of warm-up"
+        d = res.to_dict()
+        assert "trades" in d and d["exit_reasons"] and _rb._LAST["intraday"]["trades"] == m["trades"]
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+    # the live agents' shared state must not carry replay aliases, and the clock must be restored
+    assert not any(k.endswith("#BT") for attr in vars(IntradayAgent).values() if isinstance(attr, dict) for k in attr)
+    from ist_clock import now_ist as _real
+    assert _sa_mod.now_ist is _real
+
+def t_replay_stop_before_target_and_slippage():
+    """One bar that touches both stop and target fills the stop (pessimistic); slippage is charged."""
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = _trend_bars("RPS", days=2, seed=3)
+        res0 = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": bars})
+        res5 = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=50.0, bars_by_symbol={"RPS": bars})
+        assert res0.trades and res5.trades
+        a, b5 = res0.trades[0], res5.trades[0]
+        assert a.entry_ts == b5.entry_ts and a.side == b5.side
+        assert (b5.entry > a.entry) if a.side == "BUY" else (b5.entry < a.entry), "50 bps slippage must worsen the fill"
+        # craft: force a trade then a wide bar touching both sides
+        t0 = res0.trades[0]
+        i = next(k for k, b in enumerate(bars) if b["ts"] == t0.entry_ts)
+        crafted = [dict(b) for b in bars[: i + 1]]
+        crafted.append({**bars[i + 1], "high": t0.entry * 1.10, "low": t0.entry * 0.90})
+        r = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": crafted})
+        assert r.trades and r.trades[0].exit_reason == "STOP" and r.trades[0].net < 0, r.trades[0]
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+def t_replay_param_override_and_validation():
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = {"RPP": _trend_bars("RPP")}
+        base = _rb.replay("intraday", ["RPP"], days=3, bars_by_symbol=bars).metrics()["trades"]
+        strict = _rb.replay("intraday", ["RPP"], days=3, params={"MIN_SCORE": 9}, bars_by_symbol=bars).metrics()["trades"]
+        assert strict <= base, "a stricter MIN_SCORE can only reduce trades"
+        assert IntradayAgent.MIN_SCORE == 4, "overrides are per replay instance, never the live class"
+        try:
+            _rb.replay("intraday", ["RPP"], days=3, params={"NOPE": 1}, bars_by_symbol=bars); raise AssertionError("bad param accepted")
+        except ValueError as e:
+            assert "no parameter" in str(e)
+        try:
+            _rb.replay("fno", ["RPP"], days=3, bars_by_symbol=bars); raise AssertionError("fno accepted")
+        except ValueError:
+            pass
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+def t_indicator_frame_matches_live_compute():
+    """The vectorised frame must agree with the live per-bar computation."""
+    bars = _trend_bars("IFX", days=1)
+    buf = TickBuffer(60, maxlen=500)
+    rows = []
+    for b in bars[:120]:
+        for px, v in ((b["open"], 0), (b["high"], 0), (b["low"], 0), (b["close"], b["volume"])):
+            buf.push(px, v, b["ts"])
+        rows.append(buf.as_dataframe())
+    full = pd.DataFrame([{k: b[k] for k in ("open", "high", "low", "close", "volume")} for b in bars[:120]])
+    frame = IndicatorCalc.compute_frame(full)
+    tick = Tick(symbol="IFX", ltp=bars[119]["close"], bid=0, ask=0, volume=0, change=0, change_pct=0,
+                high=0, low=0, open=0, timestamp=bars[119]["ts"])
+    live = IndicatorCalc.compute("IFX", tick, rows[-1])
+    vec = IndicatorCalc.from_row("IFX", tick, frame.iloc[119], 120)
+    for k in ("ema9", "ema21", "ema50", "rsi_14", "macd_hist", "bb_upper", "atr_14", "adx_14", "cci_20", "mfi_14",
+              "keltner_upper", "vwap", "stoch_rsi_k", "williams_r", "hma", "supertrend", "ichimoku_kijun"):
+        a, b_ = getattr(live, k), getattr(vec, k)
+        assert abs(a - b_) <= max(1e-6, abs(a) * 0.002), (k, a, b_)
+    assert live.supertrend_dir == vec.supertrend_dir and live.trend == vec.trend and live.squeeze_on == vec.squeeze_on
+
+run("Replay: real agent code, costs, square-off, warm-up, clean state", t_replay_runs_live_agent_code)
+run("Replay: stop fills before target in one bar; slippage charged", t_replay_stop_before_target_and_slippage)
+run("Replay: parameter overrides per run, validated",                  t_replay_param_override_and_validation)
+run("Indicators: vectorised frame == live per-bar compute",            t_indicator_frame_matches_live_compute)
 run("Execution: marketable limit entries; paper fills at the touch", t_exec_marketable_limit_and_paper_fill)
 run("Execution: AI uses the real fill; slippage in the ledger",     t_exec_ai_entry_uses_real_fill_and_ledger_slippage)
 

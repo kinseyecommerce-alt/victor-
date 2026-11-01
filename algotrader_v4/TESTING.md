@@ -183,6 +183,12 @@ India VIX, event risk, support/resistance, institutional flow, option-chain data
 alignment, correlation with the book, the trend filter and recent trade lessons. A compact form
 rides on every real-time alert.
 
+**Replay backtest** (`POST /backtest/replay`, `/backtest` skill): feeds real minute bars from
+Kite (or yfinance) through the *same* agent code that trades live — patterns, scoring,
+cooldowns, risk sizing, the trailing-stop engine — with slippage and Zerodha costs, and
+compares the result with NIFTY over the same days. In the paper simulator it runs on
+synthetic bars and says so. Use it, not the older 15-minute approximation, to judge a change.
+
 **Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
 with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
 

@@ -207,6 +207,14 @@ class BacktestRequest(BaseModel):
     symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
     lookback_days: int | None = None; walk_forward: bool = True
 
+class ReplayRequest(BaseModel):
+    agent: Literal["intraday", "scalping", "swing"] = "intraday"
+    symbols: list[str] = Field(min_length=1, max_length=25)
+    days: int = Field(default=30, ge=2, le=60)
+    slippage_bps: float = Field(default=5.0, ge=0, le=100)
+    params: dict | None = None            # agent attribute overrides, e.g. {"MIN_SCORE": 5}
+    include_trades: bool = False
+
 class BatchBacktestRequest(BaseModel):
     symbols: list[dict]; strategy: str = "intraday"; walk_forward: bool = True
 
@@ -1375,6 +1383,21 @@ def momentum_rankings(top: int = 20):
 async def momentum_rebalance(execute: bool = True):
     """Run the monthly rotation now (execute=false shows the plan only)."""
     return await ai_trader.run_momentum_rebalance(execute=execute)
+
+
+@app.post("/backtest/replay", tags=["Backtest"])
+async def backtest_replay(req: ReplayRequest):
+    """Replay real minute bars through the live agent code (same patterns, sizing, trailing
+    stop) with slippage and costs. Returns net results vs buy-and-hold of the symbols and NIFTY."""
+    import replay_backtest as rb
+    res = await rb.replay_async(req.agent, [s.upper() for s in req.symbols], req.days, req.slippage_bps, req.params)
+    return {**res.to_dict(include_trades=req.include_trades), "benchmark": rb.benchmark_for(res)}
+
+
+@app.get("/backtest/replay/last", tags=["Backtest"])
+def backtest_replay_last():
+    import replay_backtest as rb
+    return rb._LAST
 
 
 @app.get("/backtest/momentum", tags=["Backtest"])
