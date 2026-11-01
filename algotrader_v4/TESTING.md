@@ -176,6 +176,13 @@ plan first: `POST /momentum/rebalance?execute=false`; backtest it against NIFTY 
 **Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
 with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
 
+## Deploying to a server
+
+`deploy/AWS.md` walks through a Mumbai EC2 server: `deploy/user-data.sh` installs everything
+on first boot, `deploy/setup-ec2.sh` is the idempotent installer (systemd + nginx + HTTPS +
+dashboard build + generated secrets, PAPER on real prices), `deploy/update.sh` pulls new code
+and restarts **only if the test suite passes**.
+
 ## 4. Small live trading
 
 ```

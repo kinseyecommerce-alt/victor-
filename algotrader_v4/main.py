@@ -54,6 +54,18 @@ app = FastAPI(
 app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# The React dashboard (frontend/dist, built by `npm run build`) is served by this process, so a
+# single uvicorn behind nginx is a complete deployment. The build calls the API at /api/... and
+# the WebSocket at /ws-proxy/ws (same paths the Vite dev proxy uses); strip those prefixes here.
+_FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
+if (_FRONTEND_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
+
+
+@app.websocket("/ws-proxy/ws")
+async def ws_endpoint_prefixed(ws: WebSocket):
+    await ws_endpoint(ws)
+
 # MED-1: restrict CORS to explicit methods and headers (no wildcard)
 app.add_middleware(
     CORSMiddleware,
@@ -298,10 +310,13 @@ def login_page():
 
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_page():
-    """Serve the main trading dashboard."""
+    """Serve the React dashboard build, or the legacy static page if it hasn't been built."""
+    built = _FRONTEND_DIST / "index.html"
+    if built.exists():
+        return HTMLResponse(built.read_text())
     p = Path("static/dashboard.html")
     if not p.exists():
-        return HTMLResponse("<h2>Dashboard not found — run deploy to build static assets.</h2>", status_code=404)
+        return HTMLResponse("<h2>Dashboard not found — run `npm run build` in frontend/.</h2>", status_code=404)
     return HTMLResponse(p.read_text())
 
 @app.get("/", include_in_schema=False)
@@ -1468,3 +1483,14 @@ async def on_startup():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)
+
+
+# Outermost middleware (added last): strips the /api prefix the built dashboard uses BEFORE the
+# API-key gate looks at the path, so /api/dashboard/summary is protected like /dashboard/summary.
+@app.middleware("http")
+async def _strip_frontend_prefixes(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if path.startswith("/api/"):
+        request.scope["path"] = path[4:]
+        request.scope["raw_path"] = request.scope["path"].encode()
+    return await call_next(request)

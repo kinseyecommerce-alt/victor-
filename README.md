@@ -23,6 +23,10 @@ Open http://localhost:5000 — the animated Overview dashboard runs on simulated
 no keys, no real orders). See [algotrader_v4/TESTING.md](algotrader_v4/TESTING.md) for the full
 test path from demo to live.
 
+## Deploy to AWS
+See [algotrader_v4/deploy/AWS.md](algotrader_v4/deploy/AWS.md): one t3.small in Mumbai, set up by
+`deploy/user-data.sh` on first boot; `deploy/update.sh` for updates.
+
 ## Setup
 ```bash
 cd algotrader_v4
