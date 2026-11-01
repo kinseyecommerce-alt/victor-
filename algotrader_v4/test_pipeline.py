@@ -4793,6 +4793,209 @@ def t_indicator_frame_matches_live_compute():
         assert abs(a - b_) <= max(1e-6, abs(a) * 0.002), (k, a, b_)
     assert live.supertrend_dir == vec.supertrend_dir and live.trend == vec.trend and live.squeeze_on == vec.squeeze_on
 
+# ── Walk-forward optimiser ────────────────────────────────────────────────
+import optimizer as _opt
+
+def _with_params_file(fn):
+    path = _SFPath(_sftmp.mkdtemp()) / "params.json"
+    with _patch.object(_opt, "PARAMS_FILE", path):
+        try:
+            return fn(path)
+        finally:
+            for a in ("MIN_SCORE", "SL_MIN_PCT", "TGT_MIN_PCT"):
+                if a in vars(ALL_AGENTS["intraday"]): delattr(ALL_AGENTS["intraday"], a)
+
+def t_opt_folds_are_time_ordered():
+    bars = _trend_bars("OPF", days=6)
+    folds = _opt._folds(bars, n_folds=3, train_frac=0.7)
+    assert len(folds) == 3
+    for tr, te in folds:
+        assert tr and te and max(b["ts"] for b in tr) < min(b["ts"] for b in te), "test strictly after train"
+    assert _opt._folds(bars[:375 * 2]) == [], "fewer than 4 days → no folds"
+
+def t_opt_adopts_only_out_of_sample_winners():
+    """Decision logic with canned scores: a candidate must beat the current params on unseen data,
+    with enough trades and no worse drawdown; otherwise nothing changes."""
+    bars = {"OPT": _trend_bars("OPT", days=6)}
+    grid = {"MIN_SCORE": [4, 5]}
+    def scorer(net_for):
+        async def _score(agent, params, bars_by_symbol, days):
+            return {"net": net_for(params), "trades": 8, "win_rate": 50.0, "pf": 1.1, "max_dd": 100.0}
+        return _score
+    def body(path):
+        with _patch.dict(_opt.GRIDS, {"intraday": grid}), \
+             _patch.object(_opt, "_score", scorer(lambda p: 500.0 if p["MIN_SCORE"] == 5 else 100.0)):
+            rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
+        assert rep["folds"] == 3 and rep["candidates"] == 2 and rep["current"]["params"]["MIN_SCORE"] == 4
+        assert rep["adopted"] == {"MIN_SCORE": 5}, rep["top"]
+        assert _opt.load_params()["intraday"]["params"] == {"MIN_SCORE": 5}
+        assert ALL_AGENTS["intraday"].MIN_SCORE == 5 and IntradayAgent.MIN_SCORE == 4, "applied to the instance, not the class"
+        # a candidate that is better in sample but worse out of sample is NOT adopted
+        _opt.reset("intraday")
+        assert ALL_AGENTS["intraday"].MIN_SCORE == 4 and "intraday" not in _opt.load_params()
+        calls = {"n": 0}
+        async def tricky(agent, params, bars_by_symbol, days):
+            calls["n"] += 1
+            in_sample = len(next(iter(bars_by_symbol.values()))) > 375 * 1.2       # train parts are bigger
+            if params["MIN_SCORE"] == 5:
+                return {"net": 900.0 if in_sample else -50.0, "trades": 8, "win_rate": 50.0, "pf": 1.0, "max_dd": 100.0}
+            return {"net": 100.0, "trades": 8, "win_rate": 50.0, "pf": 1.0, "max_dd": 100.0}
+        with _patch.dict(_opt.GRIDS, {"intraday": grid}), _patch.object(_opt, "_score", tricky):
+            rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
+        assert rep["adopted"] is None and any("does not beat" in r.get("verdict", "") or "loses" in r.get("verdict", "")
+                                               for r in rep["top"] if not r["is_current"]), rep["top"]
+        assert ALL_AGENTS["intraday"].MIN_SCORE == 4
+        # too few out-of-sample trades → not adopted either
+        async def thin(agent, params, bars_by_symbol, days):
+            return {"net": 1000.0 if params["MIN_SCORE"] == 5 else 1.0, "trades": 1, "win_rate": 50.0, "pf": 1.0, "max_dd": 10.0}
+        with _patch.dict(_opt.GRIDS, {"intraday": grid}), _patch.object(_opt, "_score", thin):
+            rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
+        assert rep["adopted"] is None and "too few" in [r.get("verdict", "") for r in rep["top"] if not r["is_current"]][0]
+    _with_params_file(body)
+
+def t_opt_apply_and_persist():
+    def body(path):
+        _opt.save_params({"intraday": {"params": {"SL_MIN_PCT": 0.7, "BOGUS": 1}}})
+        applied = _opt.apply_params()
+        assert applied == {"intraday": {"SL_MIN_PCT": 0.7, "BOGUS": 1}}
+        assert ALL_AGENTS["intraday"].SL_MIN_PCT == 0.7 and not hasattr(ALL_AGENTS["intraday"], "BOGUS") or \
+               "BOGUS" not in vars(ALL_AGENTS["intraday"]), "only grid keys are applied"
+        assert _opt.current_params("intraday")["SL_MIN_PCT"] == 0.7 and _opt.current_params("intraday")["MIN_SCORE"] == 4
+        _opt.reset("intraday")
+        assert ALL_AGENTS["intraday"].SL_MIN_PCT == IntradayAgent.SL_MIN_PCT
+    _with_params_file(body)
+
+def t_opt_real_run_small_grid():
+    """End to end on provided bars with a 2-candidate grid: runs, reports, never applies a loser."""
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    bars = {"OPR": _trend_bars("OPR", days=6, seed=11)}
+    def body(path):
+        with _patch.dict(_opt.GRIDS, {"intraday": {"MIN_SCORE": [4, 9]}}):
+            rep = _opt.optimise("intraday", ["OPR"], 6, bars_by_symbol=bars)
+        assert rep["folds"] == 3 and len(rep["top"]) >= 1 and "test" in rep["current"]
+        assert rep["adopted"] in (None, {"MIN_SCORE": 9}) and rep["data"] == "provided"
+        if rep["adopted"]:
+            assert rep["top"][0]["test"]["net"] > rep["current"]["test"]["net"]
+    try:
+        _with_params_file(body)
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+# ── Research loop ─────────────────────────────────────────────────────────
+import research_loop as _rl
+
+class _FakeResearchClient:
+    """Returns one canned propose_change tool call."""
+    def __init__(self, proposal):
+        self.proposal = proposal; self.calls = []
+        class _M:
+            def __init__(s2, outer): s2.outer = outer
+            async def create(s2, **kw):
+                s2.outer.calls.append(kw)
+                blk = _NS(type="tool_use", name="propose_change", input=dict(s2.outer.proposal), id="p1")
+                return _NS(content=[blk], usage=_NS(input_tokens=10, output_tokens=5, cache_read_input_tokens=0,
+                                                   cache_creation_input_tokens=0), stop_reason="tool_use")
+        self.messages = _M(self)
+        self.beta = _NS(messages=_M(self))
+
+def _with_research_files(fn):
+    d = _SFPath(_sftmp.mkdtemp())
+    with _patch.object(_rl, "LOG_FILE", d / "research.json"), _patch.object(_opt, "PARAMS_FILE", d / "params.json"):
+        try:
+            return fn(d)
+        finally:
+            for a in ("MIN_SCORE", "SL_MIN_PCT", "TGT_MIN_PCT"):
+                if a in vars(ALL_AGENTS["intraday"]): delattr(ALL_AGENTS["intraday"], a)
+
+def t_research_validate_proposals():
+    def body(d):
+        assert _rl.validate({"agent": "none", "param": "", "value": 0}) is None
+        assert _rl.validate({"agent": "intraday", "param": "SL_MIN_PCT", "value": 0.7}) is None
+        assert "not in" in _rl.validate({"agent": "intraday", "param": "COOL_S", "value": 60})
+        assert "not an allowed value" in _rl.validate({"agent": "intraday", "param": "SL_MIN_PCT", "value": 3.0})
+        assert "already the current" in _rl.validate({"agent": "intraday", "param": "MIN_SCORE", "value": 4})
+        assert "not tunable" in _rl.validate({"agent": "swing", "param": "x", "value": 1})
+    _with_research_files(body)
+
+def t_research_ab_test_verdicts():
+    def fake_replay(a, b):
+        async def _r(agent, symbols, days, slippage_bps=5.0, params=None, bars_by_symbol=None):
+            m = b if params and params.get("SL_MIN_PCT") == 0.7 else a
+            return _NS(metrics=lambda: m)
+        return _r
+    base = {"trades": 20, "net_pnl": 500.0, "max_drawdown": 800.0}
+    cases = [
+        ({"trades": 25, "net_pnl": 900.0, "max_drawdown": 850.0}, "adopt"),
+        ({"trades": 25, "net_pnl": 400.0, "max_drawdown": 500.0}, "does not beat"),
+        ({"trades": 5,  "net_pnl": 9000.0, "max_drawdown": 100.0}, "only 5 trades"),
+        ({"trades": 25, "net_pnl": 900.0, "max_drawdown": 2000.0}, "drawdown"),
+    ]
+    def body(d):
+        for cand, expect in cases:
+            with _patch.object(_rb, "replay_async", fake_replay(base, cand)):
+                ab = asyncio.run(_rl.ab_test("intraday", "SL_MIN_PCT", 0.7, ["X"], bars_by_symbol={"X": [1]}))
+            assert expect in ab["verdict"], (expect, ab["verdict"])
+            assert ab["proposed"]["params"]["SL_MIN_PCT"] == 0.7 and ab["current"]["params"]["SL_MIN_PCT"] == 0.5
+    _with_research_files(body)
+
+def t_research_cycle_adopts_and_logs():
+    def body(d):
+        prev = _ai_settings.anthropic_api_key; _ai_settings.anthropic_api_key = "test"
+        try:
+            client = _FakeResearchClient({"agent": "intraday", "param": "SL_MIN_PCT", "value": 0.7, "rationale": "stops too tight"})
+            good = {"trades": 25, "net_pnl": 900.0, "max_drawdown": 850.0}; base = {"trades": 20, "net_pnl": 500.0, "max_drawdown": 800.0}
+            async def _r(agent, symbols, days, slippage_bps=5.0, params=None, bars_by_symbol=None):
+                return _NS(metrics=lambda: good if params.get("SL_MIN_PCT") == 0.7 else base)
+            with _patch.object(_rb, "replay_async", _r):
+                entry = asyncio.run(_rl.run_cycle(client=client, bars_by_symbol={"X": [1]}))
+            assert entry["kind"] == "adopted" and entry["ab"]["verdict"] == "adopt"
+            assert client.calls[0]["tools"] == [_rl.PROPOSAL_TOOL] and client.calls[0]["tool_choice"]["name"] == "propose_change"
+            assert "WEEKLY EVIDENCE" in client.calls[0]["messages"][0]["content"]
+            assert ALL_AGENTS["intraday"].SL_MIN_PCT == 0.7 and _opt.load_params()["intraday"]["source"] == "research_loop"
+            assert _rl.log()[-1]["kind"] == "adopted" and "adopted" in _rl.telegram_text(entry)
+            # second cycle: a losing proposal is rejected and nothing changes
+            client2 = _FakeResearchClient({"agent": "intraday", "param": "MIN_SCORE", "value": 6, "rationale": "fewer trades"})
+            async def _r2(agent, symbols, days, slippage_bps=5.0, params=None, bars_by_symbol=None):
+                return _NS(metrics=lambda: {"trades": 12, "net_pnl": 100.0, "max_drawdown": 100.0} if params.get("MIN_SCORE") == 6 else good)
+            with _patch.object(_rb, "replay_async", _r2):
+                entry = asyncio.run(_rl.run_cycle(client=client2, bars_by_symbol={"X": [1]}))
+            assert entry["kind"] == "rejected" and ALL_AGENTS["intraday"].MIN_SCORE == 4 and "rejected" in _rl.telegram_text(entry)
+            # invalid and no-change proposals are logged without touching anything
+            e = asyncio.run(_rl.run_cycle(client=_FakeResearchClient({"agent": "intraday", "param": "SL_MIN_PCT", "value": 9, "rationale": "x"}),
+                                          bars_by_symbol={"X": [1]}))
+            assert e["kind"] == "invalid"
+            e = asyncio.run(_rl.run_cycle(client=_FakeResearchClient({"agent": "none", "param": "", "value": 0, "rationale": "sample too small"}),
+                                          bars_by_symbol={"X": [1]}))
+            assert e["kind"] == "no_change" and len(_rl.log()) == 4
+        finally:
+            _ai_settings.anthropic_api_key = prev
+    _with_research_files(body)
+
+def t_research_skips_without_key():
+    def body(d):
+        prev = _ai_settings.anthropic_api_key; _ai_settings.anthropic_api_key = ""
+        try:
+            e = asyncio.run(_rl.run_cycle())
+            assert e["kind"] == "skipped"
+        finally:
+            _ai_settings.anthropic_api_key = prev
+    _with_research_files(body)
+
+def t_research_evidence_shape():
+    ev = _rl.gather_evidence()
+    for k in ("per_strategy", "scoreboard", "pruned", "execution", "current_params", "allowed_grid", "lessons", "trend_filter"):
+        assert k in ev, k
+    assert ev["allowed_grid"] == _opt.GRIDS and set(ev["current_params"]) == set(_opt.GRIDS)
+
+run("Research: proposals validated against the grid",          t_research_validate_proposals)
+run("Research: A/B verdicts (adopt / not better / thin / DD)",  t_research_ab_test_verdicts)
+run("Research: cycle adopts a winner, rejects a loser, logs",   t_research_cycle_adopts_and_logs)
+run("Research: skipped without an Anthropic key",               t_research_skips_without_key)
+run("Research: evidence has every block",                       t_research_evidence_shape)
+run("Optimiser: walk-forward folds are time-ordered",          t_opt_folds_are_time_ordered)
+run("Optimiser: adopts only out-of-sample winners",             t_opt_adopts_only_out_of_sample_winners)
+run("Optimiser: params persist, apply to instances, reset",     t_opt_apply_and_persist)
+run("Optimiser: end-to-end on provided bars",                   t_opt_real_run_small_grid)
 run("Replay: real agent code, costs, square-off, warm-up, clean state", t_replay_runs_live_agent_code)
 run("Replay: stop fills before target in one bar; slippage charged", t_replay_stop_before_target_and_slippage)
 run("Replay: parameter overrides per run, validated",                  t_replay_param_override_and_validation)

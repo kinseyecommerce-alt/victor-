@@ -1400,6 +1400,65 @@ def backtest_replay_last():
     return rb._LAST
 
 
+# ── Walk-forward parameter optimisation ───────────────────────────────────
+import optimizer as _optimizer
+
+class OptimizeRequest(BaseModel):
+    symbols: list[str] | None = None      # default: the current watchlist (first 8 NSE symbols)
+    days: int = Field(default=45, ge=5, le=60)
+
+
+def _optimise_universe(req_symbols: list[str] | None) -> list[str]:
+    if req_symbols:
+        return [s.upper() for s in req_symbols][:12]
+    syms = [s for s in tick_engine.symbols() if tick_engine._exchange.get(s, "NSE") == "NSE" and " " not in s][:8]
+    if not syms:
+        from symbol_scanner import NIFTY_50
+        syms = NIFTY_50[:8]
+    return syms
+
+
+@app.post("/optimize/run", tags=["Optimize"])
+async def optimize_run(req: OptimizeRequest):
+    """Walk-forward search over the intraday and scalping parameter grids (background)."""
+    if _optimizer._state["running"]:
+        return {"status": "already running", **_optimizer.status()}
+    asyncio.create_task(_optimizer.run_all_async(_optimise_universe(req.symbols), req.days))
+    return {"status": "started", "symbols": _optimise_universe(req.symbols), "days": req.days}
+
+
+@app.get("/optimize/status", tags=["Optimize"])
+def optimize_status():
+    return _optimizer.status()
+
+
+@app.post("/optimize/params/{agent}/reset", tags=["Optimize"])
+def optimize_reset(agent: Literal["intraday", "scalping"]):
+    _optimizer.reset(agent)
+    return {"status": "reset", "agent": agent, "params": _optimizer.current_params(agent)}
+
+
+# ── Weekly research loop ──────────────────────────────────────────────────
+import research_loop as _research
+
+
+@app.post("/research/run", tags=["Research"])
+async def research_run(symbols: list[str] | None = Body(default=None)):
+    """Run the weekly cycle now: evidence → one Claude proposal → replay A/B → adopt or reject."""
+    return await _research.run_cycle(symbols)
+
+
+@app.get("/research/log", tags=["Research"])
+def research_log(n: int = 20):
+    return {"log": _research.log(n)}
+
+
+@app.get("/research/evidence", tags=["Research"])
+def research_evidence():
+    """What the analyst would be shown right now."""
+    return _research.gather_evidence()
+
+
 @app.get("/backtest/momentum", tags=["Backtest"])
 def backtest_momentum(months: int = 12, top_n: int | None = None):
     """Monthly momentum rotation vs buy-and-hold NIFTY 50 over the same dates."""
@@ -1520,6 +1579,10 @@ async def on_startup():
         ai_trader.restore_swing()           # AI swing (delivery) positions from earlier runs
     except Exception as exc:
         logger.error("Swing restore failed: {}", exc)
+    try:
+        _optimizer.apply_params()           # walk-forward-chosen agent parameters, if any
+    except Exception as exc:
+        logger.error("Parameter apply failed: {}", exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 

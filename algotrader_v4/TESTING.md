@@ -189,6 +189,18 @@ cooldowns, risk sizing, the trailing-stop engine — with slippage and Zerodha c
 compares the result with NIFTY over the same days. In the paper simulator it runs on
 synthetic bars and says so. Use it, not the older 15-minute approximation, to judge a change.
 
+**Walk-forward optimiser** (`POST /optimize/run`, Saturday 21:30): tries small grids of the
+agents' stop / target / score thresholds on the last 45 days, scoring each candidate on
+time-ordered train folds and then on the unseen test folds, and adopts one only if it beats
+the current parameters out of sample with enough trades and no worse drawdown.
+`GET /optimize/status`, `POST /optimize/params/{agent}/reset`.
+
+**Research loop** (`POST /research/run`, Sunday 21:30, `/research` skill): Claude is shown
+the week — results per strategy after costs, slippage, the scoreboard, pruning, trade lessons,
+the optimiser's report — and proposes **one** parameter change from the allowed grid. The
+proposal is A/B-replayed on the last 30 days; it is adopted only if it wins after costs.
+Every cycle is logged (`GET /research/log`). Claude proposes; the replay decides.
+
 **Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
 with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
 
