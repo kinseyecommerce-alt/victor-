@@ -110,6 +110,9 @@ class NSEClient:
         self._client: Optional[httpx.AsyncClient] = None
         self._session_ok = False
         self._last_session = 0.0
+        # Rate-limit: cap at 8 req/s per NSE Circular 54/2024 (10 OPS limit)
+        self._last_req_ts: float = 0.0
+        self._MIN_INTERVAL: float = 0.125
 
     async def _ensure_session(self) -> None:
         now = time.time()
@@ -130,6 +133,12 @@ class NSEClient:
 
     async def get(self, url: str) -> Optional[dict]:
         await self._ensure_session()
+        # Throttle to 8 req/s
+        import asyncio as _aio
+        wait = self._MIN_INTERVAL - (time.monotonic() - self._last_req_ts)
+        if wait > 0:
+            await _aio.sleep(wait)
+        self._last_req_ts = time.monotonic()
         try:
             resp = await self._client.get(url)
             resp.raise_for_status()
@@ -219,6 +228,17 @@ class YFinanceClient:
         return symbol + suffix
 
     def historical(self, symbol, exchange="NSE", interval="1m", period="5d") -> pd.DataFrame:
+        from config import settings as _s
+        if _s.use_truedata_historical:
+            try:
+                from truedata_client import truedata_historical
+                lookback = {"5d": 5, "15d": 15, "30d": 30, "60d": 60, "90d": 90}.get(period, 5)
+                df = truedata_historical.historical(symbol, exchange, interval, lookback)
+                if not df.empty:
+                    return df
+            except Exception as exc:
+                logger.debug("TrueData historical fallback to yfinance for {}: {}", symbol, exc)
+
         ticker = self._ticker(symbol, exchange)
         try:
             df = yf.download(ticker, period=period, interval=interval,
@@ -239,6 +259,16 @@ class YFinanceClient:
             return pd.DataFrame()
 
     def current_price(self, symbol: str, exchange: str = "NSE") -> float:
+        from config import settings as _s
+        if _s.use_truedata_historical:
+            try:
+                from truedata_client import truedata_historical
+                price = truedata_historical.current_price(symbol, exchange)
+                if price > 0:
+                    return price
+            except Exception:
+                pass
+
         ticker = self._ticker(symbol, exchange)
         try:
             info = yf.Ticker(ticker).fast_info
@@ -248,34 +278,50 @@ class YFinanceClient:
 
 
 # ── Market hours helper ──────────────────────────────────────────────────
-def is_market_open() -> bool:
-    now = datetime.now()
-    if now.weekday() >= 5:
-        return False
-    t = now.time()
-    return datetime(1, 1, 1, 9, 15).time() <= t <= datetime(1, 1, 1, 15, 30).time()
+from ist_clock import is_market_open  # noqa: E402  (IST-aware; replaces datetime.now())
 
 
 # ── Paper-mode tick simulator ─────────────────────────────────────────────
 class PaperTickSimulator:
     def __init__(self) -> None:
         self._prices: dict[str, float] = {}
+        self._regime: dict[str, tuple[float, int]] = {}     # demo: symbol → (drift, ticks left)
         self._yf = YFinanceClient()
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
+        from config import settings
         for sym in symbols:
             exch = exchanges.get(sym, "NSE")
             price = self._yf.current_price(sym, exch)
+            if price <= 0 and settings.demo_active:
+                price = 200.0 + (sum(map(ord, sym)) * 37) % 3800     # varied, stable per symbol
             self._prices[sym] = price if price > 0 else 1000.0
+            self._prices[sym + "__base__"] = self._prices[sym]     # reference for change %
             logger.info("Paper seed {} @ ₹{:.2f}", sym, self._prices[sym])
 
+    def set_price(self, symbol: str, price: float) -> None:
+        """Seed a symbol at a known price (e.g. an option leg yfinance can't quote)."""
+        self._prices[symbol] = max(price, 1.0)
+        self._prices[symbol + "__base__"] = self._prices[symbol]
+
     def next_tick(self, symbol: str) -> Quote:
+        from config import settings
         price = self._prices.get(symbol, 1000.0)
-        shock = random.gauss(0, 0.00008)
+        if settings.demo_active:
+            # Trending bursts: each symbol drifts one way for a while, then re-rolls,
+            # with volume surging on the bigger moves — enough for patterns to fire
+            drift, left = self._regime.get(symbol, (0.0, 0))
+            if left <= 0:
+                drift, left = random.choice((-1, 0, 0, 1)) * random.uniform(0.0001, 0.0004), random.randint(60, 240)
+            self._regime[symbol] = (drift, left - 1)
+            shock = drift + random.gauss(0, 0.0005)
+            vol_tick = int(random.randint(300, 2500) * (1 + 40 * abs(shock)))
+        else:
+            shock = random.gauss(0, 0.00008)
+            vol_tick = random.randint(100, 2000)
         price = max(price * math.exp(shock), 1.0)
         self._prices[symbol] = price
         spread   = round(price * 0.0002, 2)
-        vol_tick = random.randint(100, 2000)
         pct      = round((price / self._prices.get(symbol + "__base__", price) - 1) * 100, 2)
         return Quote(
             symbol=symbol, ltp=round(price, 2),

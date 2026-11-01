@@ -1,36 +1,50 @@
-# ── Broker (orders only, no market data) ──────────────────────────
+# ── Broker ──────────────────────────────────────────────────────
 kiteconnect==5.0.1
 
-# ── Market data (free, no broker) ─────────────────────────────────
-yfinance==0.2.40
-httpx==0.27.0
+# ── Market data ───────────────────────────────────────────────────
+yfinance==0.2.51
+# TrueData WebSocket feed (live ticks, OHLCV history, options chain)
+# Install only if you have a TrueData subscription:
+#   pip install truedata-ws
+truedata-ws; extra == "truedata"
+httpx==0.28.1
 
 # ── API server ────────────────────────────────────────────────────
-# LOW-1: fastapi 0.115.x pulls starlette>=0.40.0 (fixes CVE-2024-47874)
-fastapi==0.115.5
-starlette==0.41.2
-uvicorn[standard]==0.30.1
+# NOTE: upgrade fastapi→0.115.x + starlette→0.41.x to fix CVE-2024-47874
+fastapi==0.111.0
+starlette==0.37.2
+uvicorn[standard]==0.34.3
 websockets==12.0
 
 # ── Security ──────────────────────────────────────────────────────
 slowapi==0.1.9
+pyotp==2.9.0
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 
-# ── AI ─────────────────────────────────────────────────────────────
-# LOW-1: updated for security patches
-anthropic==0.40.0
+# ── AI ────────────────────────────────────────────────────────────
+anthropic>=2.3.0   # ai_trader.py needs output_config + server-side fallbacks
 
-# ── Technical analysis + charting ────────────────────────────────
+# ── Data / Technical analysis / Charting ─────────────────────────
 pandas==2.2.2
 numpy==1.26.4
 ta==0.11.0
 matplotlib==3.10.9
 
-# ── Scheduling + utilities ────────────────────────────────────────
-apscheduler==3.10.4
+# ── Scheduling ────────────────────────────────────────────────────
+apscheduler==3.11.2
+
+# ── Utilities ────────────────────────────────────────────────────
 python-dotenv==1.0.1
 python-telegram-bot==21.3
 pydantic==2.7.3
 pydantic-settings==2.3.4
 loguru==0.7.2
-aiofiles==23.2.1
-swagger-ui-bundle==0.0.9
+aiofiles==25.1.0
+
+# ── Swagger UI (served locally, no CDN dependency) ────────────────
+swagger-ui-bundle==1.1.0
+
+# ── Testing (not needed in production) ───────────────────────────
+playwright==1.52.0

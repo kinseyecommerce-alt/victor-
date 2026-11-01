@@ -37,6 +37,7 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "swing":    "ALGO-SWING-003",
     "scalping": "ALGO-SCALP-004",
     "manual":   "ALGO-MANUAL-005",
+    "ai":       "ALGO-AI-006",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
@@ -75,6 +76,17 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
         "holding_period": "Seconds to minutes",
         "risk_controls": "Tight stops, max 20 trades/day, 0.5% stop-loss",
         "parameters": {"spread_threshold": 0.05, "min_volume": 50000},
+    },
+    "ai": {
+        "name": "Claude Autonomous Trader",
+        "description": "LLM agent (Claude) reviews live quotes and indicators on a fixed cycle and "
+                       "places intraday trades through the same risk, order-guard and SEBI checks",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET", "SL-M"],
+        "holding_period": "Intraday only — AI positions closed by 15:00",
+        "risk_controls": "Mandatory SL-M within AI_AGENT_MAX_SL_PCT, per-trade value cap, max trades/day, "
+                         "max open positions, daily API-cost cap, PAPER-only unless AI_AGENT_ALLOW_LIVE",
+        "parameters": {},
     },
     "manual": {
         "name": "Manual API Orders",
@@ -200,8 +212,11 @@ class SEBICompliance:
         price_at_signal:  float,
         signal_source:    str,
         regime:           str,
+        is_future:        bool = False,
     ) -> tuple[bool, str, str]:
-        """Returns (approved: bool, algo_id: str, reason: str)."""
+        """Returns (approved: bool, algo_id: str, reason: str).
+        is_future: index futures carry a contract value far above their margin (one NIFTY lot
+        is ~₹18 lakh), so they are checked against MAX_FUTURES_ORDER_VALUE instead."""
         with self._lock:
             algo_id = APPROVED_ALGO_IDS.get(strategy, "ALGO-UNKNOWN")
 
@@ -229,7 +244,8 @@ class SEBICompliance:
                 return False, algo_id, reason
 
             # Reg 4: max order value (₹10 lakh per order as SEBI guideline)
-            max_order_value = max(settings.max_position_size, 1_000_000.0)
+            max_order_value = (settings.max_futures_order_value if is_future
+                               else max(settings.max_position_size, 1_000_000.0))
             order_value     = quantity * max(price_at_signal, 1.0)
             if order_value > max_order_value:
                 reason = (f"Order value ₹{order_value:,.0f} exceeds SEBI limit "

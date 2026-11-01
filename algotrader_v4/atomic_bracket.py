@@ -121,6 +121,11 @@ class AtomicBracketEngine:
     def __init__(self) -> None:
         self._brackets: dict[str, BracketOrder] = {}
         self.ws_broadcast: Optional[Callable] = None
+        # TSL callbacks that were installed before ours (the agents'); positions
+        # that aren't brackets are handed back to them
+        self._prev_sl_hit:     Optional[Callable] = None
+        self._prev_target_hit: Optional[Callable] = None
+        self._prev_sl_moved:   Optional[Callable] = None
 
     async def execute(self, strategy: str, symbol: str, exchange: str, side: str,
                       quantity: int, signal_price: float, product: str = "MIS",
@@ -177,9 +182,7 @@ class AtomicBracketEngine:
             return None
         trailing_sl_engine.register(symbol=symbol, strategy=strategy, side=side,
             entry_price=fill_price, quantity=quantity, order_id=bracket_id)
-        trailing_sl_engine.on_sl_hit    = self._on_tsl_sl_hit
-        trailing_sl_engine.on_target_hit = self._on_tsl_target_hit
-        trailing_sl_engine.on_sl_moved   = self._on_tsl_sl_moved
+        self._install_tsl_callbacks()
         order_guard.register_order(symbol, strategy, side, entry_oid)
         risk_manager.position_opened()
         bracket.status = BracketStatus.ACTIVE
@@ -233,9 +236,27 @@ class AtomicBracketEngine:
         except Exception as exc:
             logger.critical("Emergency reverse ALSO FAILED: {}", exc)
 
+    def _install_tsl_callbacks(self) -> None:
+        """Chain in front of whatever TSL callbacks exist instead of replacing them —
+        overwriting them stopped every agent-opened position from exiting via TSL."""
+        if trailing_sl_engine.on_sl_hit == self._on_tsl_sl_hit:
+            return
+        self._prev_sl_hit     = trailing_sl_engine.on_sl_hit
+        self._prev_target_hit = trailing_sl_engine.on_target_hit
+        self._prev_sl_moved   = trailing_sl_engine.on_sl_moved
+        trailing_sl_engine.on_sl_hit     = self._on_tsl_sl_hit
+        trailing_sl_engine.on_target_hit = self._on_tsl_target_hit
+        trailing_sl_engine.on_sl_moved   = self._on_tsl_sl_moved
+
+    def _bracket_for(self, pos) -> Optional[BracketOrder]:
+        b = self._brackets.get(pos.order_id)      # brackets register TSL under bracket_id
+        return b if b and b.status == BracketStatus.ACTIVE else None
+
     async def _on_tsl_sl_hit(self, pos, ltp: float, pnl: float) -> None:
-        bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
-        if not bracket: return
+        bracket = self._bracket_for(pos)
+        if not bracket:
+            if self._prev_sl_hit: await self._prev_sl_hit(pos, ltp, pnl)
+            return
         bracket.status = BracketStatus.SL_HIT
         bracket.pnl    = pnl
         bracket.closed_at = time.time()
@@ -256,8 +277,10 @@ class AtomicBracketEngine:
         await self._broadcast_update(bracket)
 
     async def _on_tsl_target_hit(self, pos, ltp: float, level: int) -> None:
-        bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
-        if not bracket: return
+        bracket = self._bracket_for(pos)
+        if not bracket:
+            if self._prev_target_hit: await self._prev_target_hit(pos, ltp, level)
+            return
         if level == 2:
             bracket.status = BracketStatus.TARGET_HIT
             bracket.pnl = (ltp - bracket.entry_price) * bracket.quantity * (1 if bracket.side == "BUY" else -1)
@@ -279,8 +302,11 @@ class AtomicBracketEngine:
             await self._broadcast_update(bracket)
 
     async def _on_tsl_sl_moved(self, pos, old_sl: float, move_type: str) -> None:
-        bracket = self._find_by_symbol_strategy(pos.symbol, pos.strategy)
-        if not bracket or not bracket.sl_order_id: return
+        bracket = self._bracket_for(pos)
+        if not bracket:
+            if self._prev_sl_moved: await self._prev_sl_moved(pos, old_sl, move_type)
+            return
+        if not bracket.sl_order_id: return
         new_sl = pos.current_sl
         bracket.sl_price = new_sl
         bracket.trail_sl = new_sl

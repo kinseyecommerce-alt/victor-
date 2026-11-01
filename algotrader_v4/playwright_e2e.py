@@ -7,10 +7,21 @@ from __future__ import annotations
 import os, time, json, base64
 from playwright.sync_api import sync_playwright, Page, expect
 
-BASE        = "http://127.0.0.1:8001"
+BASE        = os.getenv("E2E_BASE", "http://127.0.0.1:8000")
 CHROMIUM    = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 SCREENSHOT  = "/tmp/pw_screenshots"
 os.makedirs(SCREENSHOT, exist_ok=True)
+
+# Load credentials from .env
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+API_KEY = ""
+KILL_SWITCH_RESET_SECRET = ""
+if os.path.exists(_env_path):
+    for _line in open(_env_path):
+        if _line.startswith("API_KEY="):
+            API_KEY = _line.split("=", 1)[1].strip()
+        elif _line.startswith("KILL_SWITCH_RESET_SECRET="):
+            KILL_SWITCH_RESET_SECRET = _line.split("=", 1)[1].strip()
 
 PASS = 0; FAIL = 0
 ISSUES: list[str] = []
@@ -40,8 +51,28 @@ def api(page: Page, method: str, path: str, body: dict | None = None) -> tuple[i
     async () => {{
         const r = await fetch('{BASE}{path}', {{
             method: '{method}',
-            headers: {{'Content-Type': 'application/json'}},
+            headers: {{'Content-Type': 'application/json', 'X-API-Key': '{API_KEY}'}},
             body: {json.dumps(json.dumps(body)) if body else 'undefined'}
+        }});
+        const text = await r.text();
+        let data;
+        try {{ data = JSON.parse(text); }} catch(e) {{ data = {{_raw: text}}; }}
+        return {{status: r.status, data}};
+    }}
+    """
+    result = page.evaluate(js)
+    return result["status"], result["data"]
+
+
+def api_form(page: Page, method: str, path: str, fields: dict) -> tuple[int, dict]:
+    """POST application/x-www-form-urlencoded (used for OAuth2 /auth/login)."""
+    encoded = "&".join(f"{k}={v}" for k, v in fields.items())
+    js = f"""
+    async () => {{
+        const r = await fetch('{BASE}{path}', {{
+            method: '{method}',
+            headers: {{'Content-Type': 'application/x-www-form-urlencoded', 'X-API-Key': '{API_KEY}'}},
+            body: '{encoded}'
         }});
         const text = await r.text();
         let data;
@@ -119,23 +150,38 @@ def test_health(page: Page) -> None:
 def test_auth_flow(page: Page) -> None:
     print("\n── 3. AUTH FLOW (via browser fetch) ──────────────")
 
-    # Empty body → 422
-    status, body = api(page, "POST", "/auth/token", {})
+    # Empty form → 422
+    status, body = api_form(page, "POST", "/auth/login", {})
     if status == 422:
-        ok("POST /auth/token empty body → 422 Unprocessable")
+        ok("POST /auth/login empty body → 422 Unprocessable")
     else:
         fail("Auth empty body", f"got {status}")
 
-    # Valid access_token → 200
-    status, body = api(page, "POST", "/auth/token", {"access_token": "pw_test_token"})
-    if status == 200 and "access_token" in body:
-        ok("POST /auth/token with access_token → 200")
+    # Wrong password → 401
+    status, body = api_form(page, "POST", "/auth/login", {"username": "admin", "password": "wrongpassword"})
+    if status == 401:
+        ok("POST /auth/login wrong password → 401")
     else:
-        fail("Auth valid token", f"got {status} — {body}")
+        fail("Auth wrong password", f"got {status} — {body}")
+
+    # /auth/me via X-API-Key
+    status, body = api(page, "GET", "/auth/me")
+    if status == 200 and body.get("auth_method") == "api_key":
+        ok("GET /auth/me with X-API-Key → auth_method=api_key")
+    else:
+        fail("Auth /me with API key", f"got {status} — {body}")
+
+    # Kite status (no real token — just checks endpoint exists)
+    status, body = api(page, "GET", "/auth/kite/status")
+    if status == 200:
+        ok(f"GET /auth/kite/status → connected={body.get('connected')}")
 
 
 def test_bot_lifecycle(page: Page) -> None:
     print("\n── 4. BOT LIFECYCLE ──────────────────────────────")
+
+    # Ensure clean state — stop if already running
+    api(page, "POST", "/bot/stop")
 
     # Start bot
     status, body = api(page, "POST", "/bot/start", {"strategies": ["intraday", "scalping"]})
@@ -215,7 +261,7 @@ def test_backtest(page: Page) -> None:
     snap(page, "05_equity_chart")
     # Check content-type via JS
     js = f"""async () => {{
-        const r = await fetch('{BASE}/backtest/equity/RELIANCE/intraday');
+        const r = await fetch('{BASE}/backtest/equity/RELIANCE/intraday', {{headers: {{'X-API-Key': '{API_KEY}'}}}});
         return r.headers.get('content-type');
     }}"""
     ct = page.evaluate(js)
@@ -226,7 +272,7 @@ def test_backtest(page: Page) -> None:
 
     # CSV download headers
     js = f"""async () => {{
-        const r = await fetch('{BASE}/backtest/trades/RELIANCE/intraday');
+        const r = await fetch('{BASE}/backtest/trades/RELIANCE/intraday', {{headers: {{'X-API-Key': '{API_KEY}'}}}});
         return {{ct: r.headers.get('content-type'), cd: r.headers.get('content-disposition'), status: r.status}};
     }}"""
     res = page.evaluate(js)
@@ -270,6 +316,8 @@ def test_orders_and_risk(page: Page) -> None:
         ok(f"POST /orders/place BUY HDFCBANK → order_id={body['order_id']}")
     elif status == 400 and "trading hours" in str(body):
         ok("POST /orders/place outside market hours → 400 (correct risk block)")
+    elif status == 400 and "duplicate" in str(body).lower():
+        ok(f"POST /orders/place → 400 Duplicate guard (position already active)")
     else:
         fail("Place order", f"HTTP {status}: {body}")
 
@@ -327,12 +375,12 @@ def test_sebi(page: Page) -> None:
     else:
         fail("Kill-switch order block", f"got {status}: {body}")
 
-    # Reset
-    status, _ = api(page, "POST", "/sebi/reset-kill-switch")
+    # Reset (requires kill_switch_reset_secret)
+    status, body = api(page, "POST", "/sebi/reset-kill-switch", {"secret": KILL_SWITCH_RESET_SECRET})
     if status == 200:
         ok("POST /sebi/reset-kill-switch → 200")
     else:
-        fail("SEBI reset", f"HTTP {status}")
+        fail("SEBI reset", f"HTTP {status}: {body}")
 
     # Audit log
     from datetime import date
@@ -481,6 +529,149 @@ def test_swagger_interaction(page: Page) -> None:
     page.goto(f"{BASE}/docs")  # reset
 
 
+def test_simulation_orders_flow(page: Page) -> None:
+    print("\n── 12. SIMULATION ORDERS FLOW ────────────────────")
+
+    # Reset paper state via squareoff
+    api(page, "POST", "/orders/squareoff")
+
+    # 1. Paper BUY → PAPER-XXXXXXXX id
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "RELIANCE", "exchange": "NSE",
+        "transaction_type": "BUY", "quantity": 1,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    paper_oid = None
+    if status == 200 and body.get("order_id", "").startswith("PAPER-"):
+        paper_oid = body["order_id"]
+        ok(f"BUY RELIANCE → {paper_oid}")
+    elif status == 400 and "trading hours" in str(body).lower():
+        ok("BUY outside market hours → 400 risk block (correct)")
+        paper_oid = None
+    else:
+        fail("Paper BUY", f"HTTP {status}: {body}")
+        paper_oid = None
+
+    # 2. Portfolio has position
+    status, pos = api(page, "GET", "/portfolio/positions")
+    if status == 200:
+        net = pos.get("net", [])
+        reliance = next((p for p in net if p.get("tradingsymbol") == "RELIANCE"), None)
+        if reliance and reliance.get("quantity", 0) > 0:
+            ok(f"Portfolio shows RELIANCE qty={reliance['quantity']}")
+        elif paper_oid is None:
+            ok("Portfolio check skipped (market hours block)")
+        else:
+            fail("Portfolio position", f"RELIANCE not found or qty=0 in net={net[:2]}")
+    else:
+        fail("Portfolio positions", f"HTTP {status}")
+
+    # 3. SELL → closes position
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "RELIANCE", "exchange": "NSE",
+        "transaction_type": "SELL", "quantity": 1,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    if status == 200 and body.get("order_id", "").startswith("PAPER-"):
+        ok(f"SELL RELIANCE → {body['order_id']}")
+    elif status == 400:
+        ok(f"SELL blocked → 400 ({str(body)[:60]})")
+    else:
+        warn("SELL RELIANCE", f"HTTP {status}: {body}")
+
+    # 4. Place new BUY for cancel test
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "TCS", "exchange": "NSE",
+        "transaction_type": "BUY", "quantity": 1,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    cancel_oid = body.get("order_id") if status == 200 else None
+
+    # 5. Cancel order
+    if cancel_oid:
+        status, body = api(page, "DELETE", f"/orders/{cancel_oid}")
+        if status == 200:
+            ok(f"DELETE /orders/{cancel_oid} → cancelled")
+        else:
+            fail("Cancel order", f"HTTP {status}: {body}")
+    else:
+        ok("Cancel order skipped (no order placed)")
+
+    # 6. Squareoff → all positions cleared
+    status, body = api(page, "POST", "/orders/squareoff")
+    if status == 200 and "squared_off" in body:
+        ok(f"POST /orders/squareoff → squared_off={body['squared_off']}")
+    else:
+        fail("Squareoff", f"HTTP {status}: {body}")
+
+    # 7. Oversized order → 400
+    status, body = api(page, "POST", "/orders/place", {
+        "symbol": "HDFCBANK", "exchange": "NSE",
+        "transaction_type": "BUY", "quantity": 9999999,
+        "order_type": "MARKET", "product": "MIS"
+    })
+    if status == 400:
+        ok("Oversized qty → 400 risk block")
+    else:
+        fail("Oversized risk block", f"got {status}: {body}")
+
+    # 8. GET /config/validate → fields present
+    status, body = api(page, "GET", "/config/validate")
+    if status == 200:
+        required_keys = ["kite_api_key", "trading_mode", "ready_to_trade", "ticker_source"]
+        missing = [k for k in required_keys if k not in body]
+        if not missing:
+            ok(f"GET /config/validate → trading_mode={body.get('trading_mode')}, "
+               f"ticker_source={body.get('ticker_source')}")
+        else:
+            fail("Config validate fields", f"missing: {missing}")
+    else:
+        fail("GET /config/validate", f"HTTP {status}: {body}")
+
+    # 9. WebSocket → tick event within 5s
+    ws_js = f"""
+    async () => {{
+        return new Promise((resolve) => {{
+            const ws = new WebSocket('ws://127.0.0.1:8000/ws?token={API_KEY}');
+            let gotTick = false;
+            ws.onmessage = (e) => {{
+                try {{
+                    const d = JSON.parse(e.data);
+                    if (d.event === 'tick' || d.ltp) gotTick = true;
+                }} catch(e) {{}}
+            }};
+            setTimeout(() => {{ ws.close(); resolve(gotTick); }}, 5000);
+        }});
+    }}
+    """
+    try:
+        got_tick = page.evaluate(ws_js, timeout=7000)
+        if got_tick:
+            ok("WebSocket received tick event within 5s")
+        else:
+            warn("WebSocket tick", "No tick in 5s (market may be closed or bot not running)")
+    except Exception as e:
+        warn("WebSocket tick", f"evaluation error: {e}")
+
+    # 10. Market live → ltp > 0 (at least one subscribed symbol)
+    status, mkt = api(page, "GET", "/market/live")
+    if status == 200:
+        symbols = list(mkt.keys()) if isinstance(mkt, dict) else []
+        has_ltp = any(
+            isinstance(v, dict) and v.get("ltp", 0) > 0
+            for v in mkt.values()
+        ) if isinstance(mkt, dict) else False
+        if has_ltp:
+            sym0 = symbols[0]
+            ok(f"GET /market/live → ltp={mkt[sym0].get('ltp')} for {sym0}")
+        else:
+            ok(f"GET /market/live → {len(symbols)} symbols (ltp may be 0 if market closed)")
+    else:
+        fail("GET /market/live", f"HTTP {status}")
+
+    snap(page, "12_simulation_flow_done")
+
+
 # ── Main runner ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -495,7 +686,10 @@ def main() -> None:
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        ctx  = browser.new_context(viewport={"width": 1440, "height": 900})
+        ctx  = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            extra_http_headers={"X-API-Key": API_KEY},
+        )
         page = ctx.new_page()
         page.set_default_timeout(15000)
 
@@ -511,6 +705,7 @@ def main() -> None:
             test_regime_adaptive(page)
             test_symbol_scanner(page)
             test_swagger_interaction(page)
+            test_simulation_orders_flow(page)
         except Exception as exc:
             fail("UNEXPECTED CRASH", str(exc))
             import traceback; traceback.print_exc()

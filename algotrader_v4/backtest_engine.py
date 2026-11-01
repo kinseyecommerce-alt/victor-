@@ -21,6 +21,7 @@ import io
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Optional
 
 import matplotlib
 matplotlib.use("Agg")   # non-interactive backend — no display needed
@@ -59,6 +60,11 @@ class BacktestResult:
     oos_total_pnl: float    = 0.0
     oos_trades: int         = 0
     walk_forward_used: bool = False
+    # Out-of-sample return of the strategy vs simply holding, over the same OOS windows
+    oos_return_pct: float   = 0.0           # Σ (pnl / entry) across OOS trades, full capital per trade
+    oos_hold_return_pct: Optional[float] = None    # buy-and-hold of the symbol over the OOS windows
+    oos_nifty_return_pct: Optional[float] = None   # NIFTY 50 over the same windows
+    beats_index: Optional[bool] = None
     # Raw trade log and equity curve (not serialised by default)
     trades: list[dict]      = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
@@ -85,6 +91,10 @@ class BacktestResult:
             "oos_win_rate":      round(self.oos_win_rate, 1),
             "oos_total_pnl":     round(self.oos_total_pnl, 0),
             "oos_trades":        self.oos_trades,
+            "oos_return_pct":    round(self.oos_return_pct, 2),
+            "oos_hold_return_pct": self.oos_hold_return_pct,
+            "oos_nifty_return_pct": self.oos_nifty_return_pct,
+            "beats_index":       self.beats_index,
         }
         if include_trades:
             d["trades"] = self.trades
@@ -342,6 +352,7 @@ class BacktestEngine:
         window = n // n_splits
 
         oos_trades_all: list[dict] = []
+        oos_windows: list[tuple] = []            # (first bar, last bar) of each OOS fold
 
         for i in range(n_splits):
             start = i * window
@@ -353,6 +364,7 @@ class BacktestEngine:
                 continue
             sigs = self._generate_signals(oos_df.copy(), strategy)
             oos_trades_all.extend(self._simulate_trades(oos_df, sigs, params))
+            oos_windows.append((oos_df.iloc[0], oos_df.iloc[-1]))
 
         # Full-data IS result (for primary metrics)
         signals = self._generate_signals(df, strategy)
@@ -366,8 +378,37 @@ class BacktestEngine:
             result.oos_win_rate  = len(oos_wins) / len(oos_pnls) * 100
             result.oos_total_pnl = sum(oos_pnls)
             result.oos_trades    = len(oos_pnls)
+            result.oos_return_pct = sum(t["pnl"] / t["entry"] for t in oos_trades_all if t.get("entry")) * 100
         result.walk_forward_used = True
+        self._attach_benchmarks(result, oos_windows)
         return result
+
+    def _attach_benchmarks(self, result: BacktestResult, windows: list[tuple]) -> None:
+        """Buy-and-hold of the symbol and of NIFTY 50 across the same out-of-sample windows."""
+        if not windows:
+            return
+        try:
+            result.oos_hold_return_pct = round(sum(
+                (last["close"] / first["close"] - 1) * 100 for first, last in windows), 2)
+        except Exception:
+            result.oos_hold_return_pct = None
+        try:
+            from performance import performance
+            total = 0.0
+            for first, last in windows:
+                d0, d1 = first.get("date"), last.get("date")
+                if d0 is None or d1 is None:
+                    raise ValueError("no dates")
+                r = performance.benchmark_return("NIFTY50", str(d0)[:10], str(d1)[:10])
+                if r is None:
+                    raise ValueError("no NIFTY data")
+                total += r
+            result.oos_nifty_return_pct = round(total, 2)
+            result.beats_index = result.oos_return_pct > total
+        except Exception as exc:
+            logger.debug("[backtest] NIFTY benchmark unavailable for {}: {}", result.symbol, exc)
+            result.oos_nifty_return_pct = None
+            result.beats_index = None
 
     # ── Data fetching ──────────────────────────────────────────────────────────
 
@@ -560,6 +601,9 @@ class BacktestEngine:
                 reasons.append(
                     f"OOS win rate degraded ({r.oos_win_rate:.0f}% < {oos_floor:.0f}% floor)"
                 )
+        if settings.bt_require_beats_index and r.beats_index is False:
+            reasons.append(f"Does not beat NIFTY out of sample ({r.oos_return_pct:.1f}% vs "
+                           f"{r.oos_nifty_return_pct:.1f}% buy-and-hold over the same periods)")
         r.passed      = len(reasons) == 0
         r.fail_reasons = reasons
         return r

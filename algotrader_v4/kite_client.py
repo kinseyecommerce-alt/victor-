@@ -40,6 +40,7 @@ from kiteconnect.exceptions import (
 from loguru import logger
 
 from config import settings
+from ist_clock import now_ist
 
 
 # ── Kite-documented limits ─────────────────────────────────────────────────
@@ -131,6 +132,9 @@ class KiteClient:
         self._kite: Optional[KiteConnect] = None
         self._paper_orders:    list[dict] = []
         self._paper_positions: list[dict] = []
+        self._paper_gtts:      dict[int, dict] = {}
+        self._instruments_cache: dict[str, list[dict]] = {}
+        self._instruments_day: dict[str, object] = {}
 
     # ── Auth ───────────────────────────────────────────────────────────────
 
@@ -154,6 +158,18 @@ class KiteClient:
         logger.info("Kite auth OK (orders-only, rate-limited mode)")
         return token
 
+    def has_session(self) -> bool:
+        """True if a Kite session exists or can be opened from KITE_ACCESS_TOKEN."""
+        return self._kite is not None or bool(settings.kite_access_token)
+
+    def ensure_session(self) -> KiteConnect:
+        """Return the Kite session, opening one from KITE_ACCESS_TOKEN if needed."""
+        if self._kite is None:
+            if not settings.kite_access_token:
+                raise RuntimeError("No Kite session — connect Kite or set KITE_ACCESS_TOKEN")
+            self.set_access_token(access_token=settings.kite_access_token)
+        return self._kite
+
     @property
     def kite(self) -> KiteConnect:
         if self._kite is None:
@@ -161,6 +177,96 @@ class KiteClient:
                 "KiteClient not initialised — call set_access_token() first."
             )
         return self._kite
+
+    # ── Instrument lookup ──────────────────────────────────────────────────
+
+    def get_instruments(self, exchange: str = "NSE") -> list[dict]:
+        """Fetch and cache all instruments for the given exchange (refreshed daily —
+        new F&O expiries are listed every week)."""
+        today = datetime.now().date()
+        cached = self._instruments_cache.get(exchange)
+        if cached and self._instruments_day.get(exchange) == today:
+            return cached
+        if not settings.uses_kite_market_data or not self.has_session():
+            return cached or []
+        try:
+            kite = self.ensure_session()
+            instruments = _with_retry(lambda: kite.instruments(exchange),
+                                      label="instruments")
+            self._instruments_cache[exchange] = instruments
+            self._instruments_day[exchange] = today
+            logger.info("[kite] Loaded {} instruments for {}", len(instruments), exchange)
+            return instruments
+        except Exception as exc:
+            logger.warning("[kite] instruments fetch failed: {}", exc)
+            return []
+
+    def get_instrument_tokens(self, symbols: list[str], exchange: str = "NSE") -> dict[str, int]:
+        """Return {symbol: instrument_token} for the given symbols."""
+        instruments = self.get_instruments(exchange)
+        token_map: dict[str, int] = {}
+        for inst in instruments:
+            sym = inst.get("tradingsymbol", "")
+            if sym in symbols:
+                token_map[sym] = int(inst["instrument_token"])
+        missing = set(symbols) - set(token_map)
+        if missing:
+            logger.warning("[kite] No instrument tokens found for: {}", missing)
+        return token_map
+
+    def setup_ticker(
+        self,
+        token_to_symbol: dict[int, str],
+        on_tick_cb,
+        on_connect_cb=None,
+        on_error_cb=None,
+        on_close_cb=None,
+    ):
+        """Create and return a KiteTicker wired to the given callbacks.
+        Caller is responsible for starting it in a daemon thread."""
+        from kiteconnect import KiteTicker
+        tokens = list(token_to_symbol.keys())
+        access_token = (
+            settings.kite_access_token
+            or (getattr(self._kite, "access_token", "") if self._kite else "")
+        )
+        ticker = KiteTicker(api_key=settings.kite_api_key, access_token=access_token)
+
+        def _on_connect(ws, response):
+            logger.info("[KiteTicker] Connected — subscribing {} tokens", len(tokens))
+            ws.subscribe(tokens)
+            ws.set_mode(ws.MODE_FULL, tokens)
+            if on_connect_cb:
+                on_connect_cb(ws, response)
+
+        def _on_error(ws, code, reason):
+            logger.warning("[KiteTicker] Error {}: {}", code, reason)
+            if on_error_cb:
+                on_error_cb(ws, code, reason)
+
+        def _on_close(ws, code, reason):
+            logger.info("[KiteTicker] Closed {}: {}", code, reason)
+            if on_close_cb:
+                on_close_cb(ws, code, reason)
+
+        ticker.on_ticks = on_tick_cb
+        ticker.on_connect = _on_connect
+        ticker.on_error = _on_error
+        ticker.on_close = _on_close
+        return ticker
+
+    def validate_credentials(self) -> dict:
+        """Return status of all required credentials and Kite initialisation."""
+        return {
+            "kite_api_key":       bool(settings.kite_api_key),
+            "kite_api_secret":    bool(settings.kite_api_secret),
+            "kite_access_token":  bool(settings.kite_access_token),
+            "kite_initialised":   self._kite is not None,
+            "anthropic_api_key":  bool(settings.anthropic_api_key),
+            "telegram_bot_token": bool(settings.telegram_bot_token),
+            "api_key_set":        bool(settings.api_key),
+            "trading_mode":       settings.trading_mode,
+        }
 
     # ── Portfolio (read-only) ──────────────────────────────────────────────
 
@@ -191,6 +297,15 @@ class KiteClient:
         if settings.trading_mode == "PAPER":
             return {"equity": {"available": {"live_balance": settings.max_position_size * 5}}}
         return _with_retry(self.kite.margins, label="margins")
+
+    def quote_kite(self, instruments: list[str]) -> dict[str, dict]:
+        """Batch live quotes from Kite. instruments = ['NSE:RELIANCE', 'NFO:NIFTY...'].
+        Returns Kite's quote dict keyed by 'EXCHANGE:SYMBOL'. Empty dict in PAPER mode
+        unless PAPER_DATA_SOURCE=KITE (read-only market data; orders stay simulated)."""
+        if not settings.uses_kite_market_data or not instruments:
+            return {}
+        kite = self.ensure_session()
+        return _with_retry(lambda: kite.quote(instruments), label="quote")
 
     # ── Order placement ────────────────────────────────────────────────────
 
@@ -277,6 +392,8 @@ class KiteClient:
         for pos in self.positions().get("net", []):
             if pos.get("quantity", 0) == 0:
                 continue
+            if pos.get("product") == "CNC":       # delivery (swing) positions are held overnight
+                continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
             qty  = abs(pos["quantity"])
             oid  = self.place_order(
@@ -291,6 +408,88 @@ class KiteClient:
             order_ids.append(oid)
             logger.info("Square-off {} {} qty={}", side, pos["tradingsymbol"], qty)
         return order_ids
+
+    # ── GTT (good-till-triggered) stops for delivery positions ─────────────
+    # A day SL order on a CNC holding expires at the close; a single-leg GTT stays at
+    # Zerodha until it triggers (it then places a LIMIT order), so it protects a swing
+    # position overnight and while this server is down. Paper GTTs are recorded only:
+    # the software stop closes paper positions.
+
+    def place_gtt_stop(self, tradingsymbol: str, exchange: str, quantity: int,
+                       trigger_price: float, limit_price: float, last_price: float,
+                       product: str = "CNC") -> int:
+        """Single-leg GTT that SELLs `quantity` when price falls to trigger_price (a long
+        delivery holding, or a long option held overnight with product NRML)."""
+        if settings.trading_mode == "PAPER":
+            gid = int(time.time() * 1000) % 1_000_000_000 + len(self._paper_gtts)   # unique across restarts
+            self._paper_gtts[gid] = {"id": gid, "tradingsymbol": tradingsymbol, "exchange": exchange,
+                                     "quantity": quantity, "trigger": trigger_price,
+                                     "limit": limit_price, "status": "active"}
+            logger.info("PAPER GTT {} | SELL {} {} trigger {} limit {}", gid, quantity,
+                        tradingsymbol, trigger_price, limit_price)
+            return gid
+        kite = self.ensure_session()
+        res = _with_retry(lambda: kite.place_gtt(
+            trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol, exchange=exchange,
+            trigger_values=[trigger_price], last_price=last_price,
+            orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
+                     "quantity": quantity, "order_type": "LIMIT", "product": product,
+                     "price": limit_price}]), label="place_gtt")
+        gid = int(res["trigger_id"])
+        logger.info("LIVE GTT {} | SELL {} {} trigger {} limit {}", gid, quantity,
+                    tradingsymbol, trigger_price, limit_price)
+        return gid
+
+    def modify_gtt_stop(self, gtt_id: int, tradingsymbol: str, exchange: str, quantity: int,
+                        trigger_price: float, limit_price: float, last_price: float,
+                        product: str = "CNC") -> None:
+        if settings.trading_mode == "PAPER":
+            g = self._paper_gtts.get(int(gtt_id))
+            if g:
+                g.update(trigger=trigger_price, limit=limit_price, quantity=quantity)
+            return
+        kite = self.ensure_session()
+        _with_retry(lambda: kite.modify_gtt(
+            trigger_id=int(gtt_id), trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol,
+            exchange=exchange, trigger_values=[trigger_price], last_price=last_price,
+            orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
+                     "quantity": quantity, "order_type": "LIMIT", "product": product,
+                     "price": limit_price}]), label="modify_gtt")
+
+    def delete_gtt(self, gtt_id: int) -> None:
+        if settings.trading_mode == "PAPER":
+            g = self._paper_gtts.get(int(gtt_id))
+            if g:
+                g["status"] = "deleted"
+            return
+        kite = self.ensure_session()
+        _with_retry(lambda: kite.delete_gtt(int(gtt_id)), label="delete_gtt")
+
+    def gtt_status(self, gtt_id: int) -> str:
+        """active | triggered | cancelled | deleted | expired | rejected | disabled | unknown"""
+        if settings.trading_mode == "PAPER":
+            return self._paper_gtts.get(int(gtt_id), {}).get("status", "unknown")
+        kite = self.ensure_session()
+        try:
+            return str(_with_retry(lambda: kite.get_gtt(int(gtt_id)), label="get_gtt").get("status", "unknown"))
+        except Exception:
+            return "unknown"
+
+    def order_margin(self, tradingsymbol: str, exchange: str, transaction_type: str, quantity: int,
+                     product: str, order_type: str, price: float) -> Optional[float]:
+        """Margin Zerodha would block for this order (₹), or None when it can't be asked."""
+        if settings.trading_mode == "PAPER" or not self.has_session():
+            return None
+        kite = self.ensure_session()
+        try:
+            res = _with_retry(lambda: kite.order_margins([{
+                "exchange": exchange, "tradingsymbol": tradingsymbol,
+                "transaction_type": transaction_type, "variety": "regular", "product": product,
+                "order_type": order_type, "quantity": quantity, "price": price}]), label="order_margins")
+            return float(res[0]["total"])
+        except Exception as exc:
+            logger.warning("[kite] order_margins failed for {}: {}", tradingsymbol, exc)
+            return None
 
     # ── Historical data (rate-limited + auto-chunked) ──────────────────────
 
@@ -309,8 +508,9 @@ class KiteClient:
           day data    → 2 000-day chunks
         Chunks are merged and returned as a single list.
         """
-        if settings.trading_mode == "PAPER":
+        if not settings.uses_kite_market_data:      # PAPER+SIM has no Kite session
             return []
+        kite = self.ensure_session()
 
         is_minute = "minute" in interval
         max_days  = _KITE_HIST_MIN_DAYS if is_minute else _KITE_HIST_DAY_DAYS
@@ -322,7 +522,7 @@ class KiteClient:
             chunk_end = min(chunk_start + window, to_date)
 
             def _fetch(cs=chunk_start, ce=chunk_end):
-                return self.kite.historical_data(
+                return kite.historical_data(
                     instrument_token=instrument_token,
                     from_date=cs, to_date=ce,
                     interval=interval, continuous=continuous, oi=oi,
@@ -390,6 +590,11 @@ class KiteClient:
         quantity, order_type, product, price, trigger_price, tag,
     ) -> str:
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+        # Stop orders rest until cancelled — exits in paper mode are driven by the
+        # software TSL / strategy rules. Filling them instantly (as before) flattened
+        # every position the moment its SL-M was placed.
+        resting = order_type in ("SL", "SL-M")
+        fill = price if price > 0 else (0.0 if resting else self._paper_ltp(tradingsymbol))
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -398,34 +603,52 @@ class KiteClient:
             "quantity":         quantity,
             "order_type":       order_type,
             "product":          product,
-            "price":            price,
+            "price":            fill,
+            "average_price":    0.0 if resting else fill,
             "trigger_price":    trigger_price,
-            "status":           "COMPLETE",
+            "status":           "TRIGGER PENDING" if resting else "COMPLETE",
             "tag":              tag,
-            "placed_at":        datetime.now().isoformat(),
+            "placed_at":        now_ist().isoformat(),      # IST, like every other timestamp
         }
         self._paper_orders.append(record)
-        self._update_paper_position(record)
+        if not resting:
+            self._update_paper_position(record)
         logger.info("[PAPER] {} {} {} qty={} @ ₹{} | id={}",
                     transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
+                    quantity, fill or trigger_price, order_id)
         return order_id
+
+    @staticmethod
+    def _paper_ltp(symbol: str) -> float:
+        """Last traded price the tick engine has seen — the paper fill price for market orders."""
+        from tick_engine import tick_engine   # local import: tick_engine imports this module
+        tick, _ = tick_engine.latest(symbol)
+        return float(tick.ltp) if tick else 0.0
 
     def _update_paper_position(self, order: dict) -> None:
         sym       = order["tradingsymbol"]
+        px        = order["price"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
         for pos in self._paper_positions:
             if pos["tradingsymbol"] == sym:
-                pos["quantity"] += qty_delta
+                old_q = pos["quantity"]
+                new_q = old_q + qty_delta
+                if old_q == 0 or (new_q != 0 and (old_q > 0) != (new_q > 0)):
+                    pos["average_price"] = px                  # fresh or flipped position
+                elif (old_q > 0) == (qty_delta > 0):           # adding to the position
+                    pos["average_price"] = round(
+                        (pos["average_price"] * abs(old_q) + px * abs(qty_delta)) / abs(new_q), 2)
+                pos["quantity"]   = new_q
+                pos["last_price"] = px
                 return
         self._paper_positions.append({
             "tradingsymbol": sym,
             "exchange":      order["exchange"],
             "product":       order["product"],
             "quantity":      qty_delta,
-            "average_price": order["price"],
-            "last_price":    order["price"],
+            "average_price": px,
+            "last_price":    px,
             "pnl":           0.0,
         })
 

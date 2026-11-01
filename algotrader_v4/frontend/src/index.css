@@ -2,26 +2,55 @@
 @tailwind components;
 @tailwind utilities;
 
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
-    background-color: #0f172a;
-    color: #f8fafc;
-    font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-.card {
-    background-color: #1e293b;
-    border-radius: 0.75rem;
-    padding: 1rem;
-    border: 1px solid #334155;
-}
+.font-mono { font-family: 'JetBrains Mono', monospace; }
 
-.badge-buy { background: #16a34a; color: white; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; }
-.badge-sell { background: #dc2626; color: white; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; }
-.badge-paper { background: #2563eb; color: white; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; }
-.badge-live { background: #dc2626; color: white; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; }
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #F1F5F9; }
+::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+
+/* Smooth number transitions */
+.tick-up { color: #16A34A !important; }
+.tick-down { color: #DC2626 !important; }
+
+/* Chart container */
+.chart-container { position: relative; width: 100%; }
+
+/* ── Overview dashboard ─────────────────────────────────────────────── */
+.overview-bg {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(99, 102, 241, 0.18), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(168, 85, 247, 0.14), transparent 60%),
+    radial-gradient(800px 600px at 50% 120%, rgba(16, 185, 129, 0.10), transparent 60%),
+    #070b16;
+}
+.panel {
+  @apply rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur p-4;
+}
+.panel-title {
+  @apply flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-slate-300 mb-3;
+}
+.btn-dash {
+  @apply inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed;
+}
+.ticker-track { animation: ticker-scroll linear infinite; }
+.ticker-mask:hover .ticker-track { animation-play-state: paused; }
+.ticker-mask {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 6%, #000 94%, transparent);
+          mask-image: linear-gradient(90deg, transparent, #000 6%, #000 94%, transparent);
+}
+@keyframes ticker-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.dash-scroll::-webkit-scrollbar-track { background: transparent; }
+.dash-scroll::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.25); }
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track { animation: none; }
+  .animate-pulse { animation: none; }
+}

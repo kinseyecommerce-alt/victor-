@@ -66,6 +66,13 @@ class OrderGuard:
                                              order_id=order_id, placed_at=time.time())
             self._trade_count[strategy] += 1
 
+    def restore_active(self, symbol: str, strategy: str, side: str, order_id: str) -> None:
+        """Re-mark a position held from an earlier day (after reset_daily or a restart)
+        without counting it as a new trade today."""
+        with self._lock:
+            self._active.setdefault((symbol, strategy, side), ActiveOrder(
+                symbol=symbol, strategy=strategy, side=side, order_id=order_id, placed_at=time.time()))
+
     def release_order(self, symbol: str, strategy: str, side: str, pnl: float = 0.0) -> None:
         with self._lock:
             key = (symbol, strategy, side)
