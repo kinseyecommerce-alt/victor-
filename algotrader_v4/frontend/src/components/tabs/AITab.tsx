@@ -141,7 +141,7 @@ export default function AITab() {
           {s && <Badge variant={MODE_VARIANT[s.mode] || 'neutral'}>{s.mode}</Badge>}
         </div>
         {s && !s.api_key_set && (
-          <div className="text-red-700">ANTHROPIC_API_KEY is not set on the server.</div>
+          <div className="text-red-700">No Anthropic key yet — add it in ⚙ Settings → API Keys (stored encrypted on the server).</div>
         )}
         {s && !s.can_trade && <div className="text-amber-700">Entries blocked: {s.blocked_reason}</div>}
         <div className="flex gap-1.5">
@@ -255,7 +255,7 @@ export default function AITab() {
             className="flex-1 border border-slate-300 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             value={input}
             onChange={e => setInput(e.target.value)}
-            placeholder={s?.api_key_set ? 'Message the AI trader…' : 'Set ANTHROPIC_API_KEY to chat'}
+            placeholder={s?.api_key_set ? 'Message the AI trader…' : 'Add the Anthropic key in Settings → API Keys to chat'}
             disabled={busy || !s?.api_key_set}
             maxLength={4000}
           />

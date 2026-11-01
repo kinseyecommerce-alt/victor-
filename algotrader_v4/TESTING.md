@@ -66,7 +66,7 @@ With the demo still running (it provides the backend and dashboard):
 ```bash
 cd algotrader_v4
 
-# Dashboard in a real browser (14 checks, saves screenshots to e2e_screenshots/)
+# Dashboard in a real browser (27 checks, saves screenshots to e2e_screenshots/)
 pip install playwright==1.52.0 && python3 -m playwright install chromium   # first time
 python3 dashboard_e2e.py
 ```
