@@ -6,7 +6,7 @@ import { api } from '../../api/client'
 import { useStore } from '../../store'
 import {
   ActivityFeed, AgentOrb, AnimatedNumber, DashSummary, KpiCard, LossGauge, PnlChart, PositionCard,
-  TickerTape, inr,
+  ScoreboardPanel, StrategyTable, TickerTape, inr,
 } from './parts'
 
 const POLL_MS = 1500
@@ -151,6 +151,20 @@ export default function Overview({ onOpenTrading }: { onOpenTrading: () => void 
             <LossGauge usedPct={k?.loss_used_pct ?? 0} maxLoss={k?.max_daily_loss ?? 0} />
             <div className="text-xs text-slate-400">SEBI kill switch: <span className={clsx(
               'font-semibold', data?.sebi_state === 'ACTIVE' ? 'text-emerald-300' : 'text-rose-300')}>{data?.sebi_state ?? '—'}</span></div>
+          </div>
+        </section>
+
+        {/* Scoreboard vs index + strategy health */}
+        <section className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div className="panel">
+            <div className="panel-title"><Activity size={14} /> Are we beating the index? <span className="text-slate-500 font-normal">· after costs</span></div>
+            <ScoreboardPanel sb={data?.scoreboard} trend={data?.trend_filter} />
+          </div>
+          <div className="panel">
+            <div className="panel-title"><Bot size={14} /> Strategy health <span className="text-slate-500 font-normal">· losers are pruned automatically</span></div>
+            <StrategyTable rows={data?.strategy_stats} onToggle={s => run(
+              () => (s.pruned || !s.enabled ? api.strategyEnable(s.strategy) : api.strategyDisable(s.strategy)),
+              s.pruned || !s.enabled ? `${s.label} enabled` : `${s.label} disabled`)} />
           </div>
         </section>
 

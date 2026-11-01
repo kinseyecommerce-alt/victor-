@@ -6,6 +6,10 @@ Run: cd algotrader_v4 && python test_pipeline.py
 from __future__ import annotations
 
 import asyncio
+import os as _os, tempfile as _tmp0
+# The ledger must never write into the repo's data/ during tests, and pruning must not
+# switch agents off mid-suite because of synthetic losing trades (its own tests enable it).
+_os.environ.setdefault("PERFORMANCE_FILE", _os.path.join(_tmp0.mkdtemp(), "performance.json"))
 import sys
 import time as _time_mod
 import uuid
@@ -1919,6 +1923,7 @@ from ai_trader import AITrader, ToolRejected, TOOLS as _AI_TOOLS
 from types import SimpleNamespace as _NS
 from unittest.mock import patch as _patch
 from config import settings as _ai_settings
+_ai_settings.prune_enabled = False          # see the top of this file; section 18 turns it on explicitly
 
 _MKT_NOW = datetime(2026, 1, 15, 11, 0, 0)
 
@@ -1932,8 +1937,11 @@ def _ai_tick(sym, ltp, age_s=0):
 
 def _ai_env():
     """Market open, risk check passing — the AI's own limits stay real."""
+    import market_filter as _mf
     return [_patch.object(_ai_mod, "is_market_open", return_value=True),
             _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW),
+            _patch.object(_mf, "state", return_value={"state": "RISK_ON", "size_factor": 1.0}),   # tests set it explicitly
+            _patch.object(_ai_mod.performance, "pruned", {}),
             _patch.object(_rm_x, "check_before_order", return_value=(True, "")),
             _patch.object(_ba, "send_telegram", _noop_async)]
 
@@ -3667,8 +3675,8 @@ def t_ai_swing_hard_limits():
         ai = _rt_ai()
         _ai_tick("SWG2", 1000.0)
         cases = [
-            (_swing_args("SWG2", sl=995.0, tgt=1020.0), "swing allows"),       # 0.5% stop: too tight
-            (_swing_args("SWG2", sl=900.0, tgt=1300.0), "swing allows"),       # 10% stop: too wide
+            (_swing_args("SWG2", sl=995.0, tgt=1020.0), "allowed 1.5"),        # 0.5% stop: too tight
+            (_swing_args("SWG2", sl=900.0, tgt=1300.0), "allowed 1.5"),        # 10% stop: too wide
             (_swing_args("SWG2", tgt=1040.0), "swing needs"),                  # 1.33R < 2R
             (_swing_args("SWG2", sl=1010.0), "below price"),
             (_swing_args("SWG2", qty=60), "swing per-trade limit"),            # ₹60k > ₹50k
@@ -4191,6 +4199,332 @@ run("Spreads: closed at 15:00",                             t_ai_spread_closed_a
 run("Swing put: NRML put + GTT, held, restored, closed",    t_ai_swing_put_lifecycle)
 run("Swing put: hard limits",                               t_ai_swing_put_limits)
 run("Swing scan: bearish breakdown candidates",             t_swing_candidates_bearish)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("18. SCOREBOARD, PRUNING, TREND FILTER, MOMENTUM, INDEX GATE")
+# ══════════════════════════════════════════════════════════════════════════
+import tempfile as _pftmp
+from pathlib import Path as _PFPath
+from fastapi.testclient import TestClient
+import performance as _perf_mod
+import market_filter as _mf_mod
+import momentum_rotation as _mom
+from costs import trade_cost as _tc, round_trip_cost as _rtc
+
+def _fresh_perf():
+    path = _PFPath(_pftmp.mkdtemp()) / "perf.json"
+    with _patch.object(_perf_mod, "FILE", path):
+        p = _perf_mod.Performance()
+    p_file = path
+    return p, p_file
+
+def _with_perf(fn):
+    import main as _main
+    p, path = _fresh_perf()
+    prev = _ai_settings.prune_enabled
+    _ai_settings.prune_enabled = True
+    try:
+        with _patch.object(_perf_mod, "FILE", path), _patch.object(_perf_mod, "performance", p), \
+             _patch.object(_ai_mod, "performance", p), _patch.object(_main, "performance", p):
+            return fn(p, path)
+    finally:
+        _ai_settings.prune_enabled = prev
+
+def t_costs_realistic():
+    mis = _tc(1000.0, 1010.0, 50, "BUY", "NSE", "MIS")          # ₹50k intraday round trip
+    cnc = _tc(1000.0, 1010.0, 50, "BUY", "NSE", "CNC")
+    opt = _tc(100.0, 120.0, 75, "BUY", "NFO", "MIS", "NIFTY26JAN24000CE")
+    fut = _tc(24000.0, 24050.0, 75, "BUY", "NFO", "MIS", "NIFTY26JANFUT")
+    assert 40 <= mis <= 70, mis                                   # ~₹30 brokerage+GST, ₹12.6 STT, small exch/stamp
+    assert 100 <= cnc <= 130, cnc                                 # 0.1% STT both sides ≈ ₹100, no brokerage
+    assert 50 <= opt <= 70, opt                                   # ₹40 brokerage+GST, ₹9 STT on sell premium
+    assert 480 <= fut <= 560, fut                                 # 0.02% STT on ₹18 lakh ≈ ₹360 + exch/GST/stamp
+    assert _rtc(0, 0, "equity_mis") == 0.0
+
+def t_perf_ledger_and_stats():
+    def body(p, path):
+        p.record_trade("ai", "RELIANCE", "BUY", 10, 1000.0, 150.0)
+        p.record_trade("ai", "TCS", "SELL", 10, 1000.0, -80.0, product="MIS")
+        p.record_trade("ai_swing", "INFY", "BUY", 20, 1000.0, 400.0, product="CNC")
+        st = p.strategy_stats()
+        a = st["ai"]
+        assert a["trades"] == 2 and a["wins"] == 1 and a["gross_pnl"] == 70.0 and a["costs"] > 0
+        assert a["net_pnl"] == round(70.0 - a["costs"], 2) and a["win_rate"] == 50.0
+        assert st["ai_swing"]["net_pnl"] < 400.0 and st["ai_swing"]["enabled"]
+        assert a["trades_until_judgement"] == _ai_settings.prune_min_trades - 2
+        reloaded = _perf_mod.Performance()
+        assert len(reloaded.trades) == 3, "ledger persists"
+    _with_perf(body)
+
+def t_perf_pruning_disables_losers_and_reenable():
+    def body(p, path):
+        import bot_state
+        for i in range(_ai_settings.prune_min_trades):
+            p.record_trade("scalping", "X", "BUY", 10, 1000.0, 30.0 if i % 3 == 0 else -60.0)
+        assert "scalping" in p.pruned and not bot_state.is_agent_enabled("scalping")
+        ok, why = p.is_allowed("scalping")
+        assert not ok and "disabled automatically" in why
+        assert p.strategy_stats()["scalping"]["pruned"]["reason"].startswith("last 30 trades")
+        # winners are never pruned
+        for i in range(_ai_settings.prune_min_trades):
+            p.record_trade("intraday", "Y", "BUY", 10, 1000.0, 200.0 if i % 2 == 0 else -50.0)
+        assert "intraday" not in p.pruned and p.is_allowed("intraday")[0]
+        # manual re-enable restarts the judgement from now
+        p.set_enabled("scalping", True)
+        assert p.is_allowed("scalping")[0] and bot_state.is_agent_enabled("scalping")
+        assert p.strategy_stats()["scalping"]["trades"] == 0, "old trades no longer count"
+        p.record_trade("scalping", "X", "BUY", 10, 1000.0, -60.0)
+        assert "scalping" not in p.pruned, "one trade after re-enable is not a judgement"
+        prev = _ai_settings.prune_enabled
+        _ai_settings.prune_enabled = False
+        try:
+            for i in range(_ai_settings.prune_min_trades):
+                p.record_trade("fno", "Z", "BUY", 10, 1000.0, -60.0)
+            assert "fno" not in p.pruned, "pruning off → nothing disabled"
+        finally:
+            _ai_settings.prune_enabled = prev
+            bot_state.set_agent_enabled("fno", True)
+    _with_perf(body)
+
+def t_perf_pruned_strategy_cannot_trade():
+    def body(p, path):
+        p.set_enabled("ai", False, "test")
+        ai = _rt_ai(); _ai_tick("PRN1", 1000.0)
+        try:
+            asyncio.run(ai._place_trade(_trade_args("PRN1"))); raise AssertionError("pruned strategy traded")
+        except ToolRejected as e:
+            assert "disabled automatically" in str(e)
+        p.set_enabled("ai", True)
+        asyncio.run(ai._place_trade(_trade_args("PRN1")))
+        asyncio.run(ai.close_all("t"))
+        # the closed trade landed in the ledger with its cost
+        assert p.trades and p.trades[-1]["strategy"] == "ai" and p.trades[-1]["cost"] > 0
+        # rule-based agent: _try_enter returns before placing anything when pruned
+        p.set_enabled("intraday", False, "test")
+        agent = IntradayAgent()
+        n = len(_te_kite_client._paper_orders)
+        asyncio.run(agent._try_enter(_make_snap(symbol="PRN2", ltp=1000.0), "BUY", {"stop_loss": 990, "target": 1020}))
+        assert len(_te_kite_client._paper_orders) == n
+        p.set_enabled("intraday", True)
+    _with_ai_env(lambda: _with_perf(body))
+
+def t_perf_scoreboard_vs_index():
+    def body(p, path):
+        p.days = {
+            "2026-01-12": {"date": "2026-01-12", "net": 1000.0, "nifty50": 24000.0, "nasdaq100": 20000.0},
+            "2026-01-13": {"date": "2026-01-13", "net": -500.0, "nifty50": 24240.0, "nasdaq100": 20100.0},
+            "2026-01-14": {"date": "2026-01-14", "net": 2000.0, "nifty50": 24120.0, "nasdaq100": 20300.0},
+        }
+        closes = [("2026-01-09", 23800.0), ("2026-01-12", 24000.0), ("2026-01-13", 24240.0),
+                  ("2026-01-14", 24120.0), ("2026-01-15", 24360.0)]
+        with _patch.object(p, "_benchmark_closes", side_effect=lambda n: closes if n == "NIFTY50" else []), \
+             _patch.object(p, "_nifty_today_pct", return_value=None), \
+             _patch.object(_perf_mod, "now_ist", return_value=_MKT_NOW):
+            prev = _ai_settings.total_capital; _ai_settings.total_capital = 500000.0
+            try:
+                sb = p.scoreboard(live_day_pnl=1500.0, ai_cost_today_usd=2.0)
+            finally:
+                _ai_settings.total_capital = prev
+        t = sb["periods"]["today"]
+        assert t["net_pnl"] == round(1500.0 - 2.0 * _ai_settings.usd_inr, 2)
+        assert t["nifty50_pct"] == round((24360 / 24120 - 1) * 100, 2)
+        w = sb["periods"]["week"]                     # Mon 12 → Thu 15: 1000 − 500 + 2000 + today
+        assert w["net_pnl"] == round(2500.0 + t["net_pnl"], 2)
+        assert w["nifty50_pct"] == round((24360 / 23800 - 1) * 100, 2)
+        assert w["vs_nifty50"] == round(w["account_pct"] - w["nifty50_pct"], 3)
+        assert w["nasdaq100_pct"] is None and sb["days_tracked"] == 3
+        assert "Too early" in sb["verdict"]
+        p.days = {f"2026-01-{d:02d}": {"date": f"2026-01-{d:02d}", "net": 3000.0, "nifty50": 24000.0} for d in range(1, 15)}
+        with _patch.object(p, "_benchmark_closes", return_value=[("2025-12-31", 24000.0), ("2026-01-15", 24240.0)]), \
+             _patch.object(p, "_nifty_today_pct", return_value=None), \
+             _patch.object(_perf_mod, "now_ist", return_value=_MKT_NOW):
+            sb = p.scoreboard()
+        assert "Ahead of NIFTY 50" in sb["verdict"], sb["verdict"]        # +8.4% vs +1%
+        curve = p.equity_curve()
+        assert curve[-1]["cum_net"] == 3000.0 * 14
+    _with_perf(body)
+
+def t_perf_snapshot_today():
+    def body(p, path):
+        with _patch.object(_perf_mod, "now_ist", return_value=_MKT_NOW), \
+             _patch.object(p, "_benchmark_closes", side_effect=lambda n: [("2026-01-15", 24100.0)] if n == "NIFTY50" else []):
+            p.record_trade("ai", "A", "BUY", 10, 1000.0, 100.0)
+            snap = p.snapshot_today(ai_cost_usd=1.0)
+        assert snap["trades"] == 1 and snap["gross"] == 100.0 and snap["nifty50"] == 24100.0
+        assert snap["net"] == round(100.0 - snap["costs"] - _ai_settings.usd_inr, 2)
+        assert p.days["2026-01-15"] == snap
+    _with_perf(body)
+
+def t_trend_filter_states():
+    closes = [(datetime(2025, 1, 1).date(), 100.0 + i * 0.1) for i in range(260)]   # rising → above EMA
+    with _patch("daily_data.daily_closes", return_value=closes), _patch.dict(_mf_mod._cache, {}, clear=True):
+        _ai_tick("NIFTY 50", 130.0)
+        st = _mf_mod.state(refresh=True)
+        assert st["state"] == "RISK_ON" and st["size_factor"] == 1.0 and st["ema"] < 130.0
+        _ai_tick("NIFTY 50", 100.0)
+        st = _mf_mod.state(refresh=True)
+        assert st["state"] == "RISK_OFF" and st["size_factor"] == _ai_settings.trend_filter_risk_off_size
+        assert _mf_mod.blocks_new_longs() and _mf_mod.risk_off()
+    prev = _ai_settings.trend_filter_enabled; _ai_settings.trend_filter_enabled = False
+    try:
+        with _patch.dict(_mf_mod._cache, {}, clear=True):
+            assert _mf_mod.state(refresh=True)["state"] == "DISABLED" and not _mf_mod.blocks_new_longs()
+    finally:
+        _ai_settings.trend_filter_enabled = prev
+
+def t_trend_filter_shrinks_intraday_and_blocks_swing():
+    def body():
+        ai = _rt_ai(); _ai_tick("TFX", 1000.0)
+        with _patch.object(_mf_mod, "state", return_value={"state": "RISK_OFF", "size_factor": 0.5}):
+            try:    # ₹30k would be fine normally (limit ₹50k); halved limit is ₹25k
+                asyncio.run(ai._place_trade(_trade_args("TFX", qty=30))); raise AssertionError("size not halved")
+            except ToolRejected as e:
+                assert "halved" in str(e) and "25,000" in str(e)
+            asyncio.run(ai._place_trade(_trade_args("TFX", qty=20)))
+            _ai_tick("TFX2", 1000.0)
+            try:
+                asyncio.run(ai._place_swing_trade(_swing_args("TFX2"))); raise AssertionError("swing buy allowed")
+            except ToolRejected as e:
+                assert "200-day EMA" in str(e)
+            # bearish trades are unaffected: shorts and puts
+            _ai_tick("TFX3", 1000.0)
+            asyncio.run(ai._place_trade(_trade_args("TFX3", side="SELL", qty=10, sl=1010.0, tgt=980.0)))
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(lambda path: body()))
+
+def _mom_series(sym_returns: dict[str, float], n=300):
+    """Synthetic closes: each symbol drifts by its given total return over n sessions."""
+    base = datetime(2025, 1, 1).date()
+    out = {}
+    for sym, ret in sym_returns.items():
+        rows = []
+        d = base
+        for i in range(n):
+            while d.weekday() >= 5: d += timedelta(days=1)
+            rows.append((d, 100.0 * (1 + ret) ** (i / (n - 1))))
+            d += timedelta(days=1)
+        out[sym] = rows
+    return out
+
+def t_momentum_rankings_and_plan():
+    series = _mom_series({"WIN1": 0.80, "WIN2": 0.50, "FLAT": 0.02, "LOSER": -0.30, "NIFTY 50": 0.10})
+    with _patch("daily_data.daily_closes", side_effect=lambda s, fallback_price=1000.0: series.get(s, [])), \
+         _patch.object(_mom, "universe", return_value=["WIN1", "WIN2", "FLAT", "LOSER"]):
+        r = _mom.rankings()
+        assert [x["symbol"] for x in r] == ["WIN1", "WIN2", "FLAT", "LOSER"]
+        assert r[0]["ret_12_1"] > r[1]["ret_12_1"] > 0 > r[3]["ret_12_1"] and r[3]["above_200dma"] is False
+        sel = _mom.selection(top_n=3)
+        assert [x["symbol"] for x in sel] == ["WIN1", "WIN2", "FLAT"], "losers never selected"
+        with _patch.object(_mom, "trend_state", return_value={"state": "RISK_ON"}, create=True), \
+             _patch("market_filter.state", return_value={"state": "RISK_ON"}):
+            plan = _mom.rebalance_plan({"WIN2": 95.0, "LOSER": 120.0}, top_n=2)
+        assert plan["sell"] == ["LOSER"] and [b["symbol"] for b in plan["buy"]] == ["WIN1"] and plan["keep"] == ["WIN2"]
+        with _patch("market_filter.state", return_value={"state": "RISK_OFF"}):
+            plan = _mom.rebalance_plan({"LOSER": 120.0}, top_n=2)
+        assert plan["sell"] == ["LOSER"] and plan["buy"] == [], "risk-off: sell losers, buy nothing"
+
+def t_momentum_rebalance_executes_cnc():
+    series = _mom_series({"MOM1": 0.80, "MOM2": 0.50, "MOM3": -0.30, "NIFTY 50": 0.10})
+    def body(path):
+        ai = _rt_ai()
+        for s in ("MOM1", "MOM2", "MOM3"): _ai_tick(s, 100.0)
+        with _patch("daily_data.daily_closes", side_effect=lambda s, fallback_price=1000.0: series.get(s, [])), \
+             _patch.object(_mom, "universe", return_value=["MOM1", "MOM2", "MOM3"]), \
+             _patch("market_filter.state", return_value={"state": "RISK_ON", "size_factor": 1.0}):
+            prev = _ai_settings.momentum_top_n; _ai_settings.momentum_top_n = 2
+            try:
+                res = asyncio.run(ai.run_momentum_rebalance())
+                assert res["executed"] and sorted(res["done"]["bought"]) == ["MOM1", "MOM2"], res
+                held = ai._momentum_entries()
+                assert len(held) == 2 and not ai._swing_entries(), "momentum names are not swing slots"
+                assert ai.trades_today == 0, "rotation does not use the AI's daily trade budget"
+                for oid, e in held.items():
+                    pos = _tsl_eng._positions[oid]
+                    assert pos.strategy == "momentum" and e["product"] == "CNC" and e["gtt_id"] and not pos.external_trail
+                    assert abs(pos.current_sl - 100.0 * (1 - _ai_settings.momentum_stop_pct / 100)) < 0.01
+                    assert _order(oid)["quantity"] == int(_ai_settings.momentum_capital / 2 // 100.0)
+                # next month: MOM2 falls out, MOM3 cannot enter (negative momentum) → sold, nothing bought
+                series["MOM2"] = _mom_series({"MOM2": -0.40})["MOM2"]
+                res = asyncio.run(ai.run_momentum_rebalance())
+                assert res["done"]["sold"] == ["MOM2"] and res["done"]["bought"] == [] and res["done"]["kept"] == ["MOM1"]
+                assert list(ai._momentum_entries().values())[0]["symbol"] == "MOM1"
+                assert len(json.loads(path.read_text())["positions"]) == 1, "momentum positions persist like swing"
+                assert _perf_mod.performance.trades[-1]["strategy"] == "momentum"
+            finally:
+                _ai_settings.momentum_top_n = prev
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_momentum_backtest_vs_nifty():
+    series = _mom_series({"A": 1.20, "B": 0.60, "C": -0.20, "D": 0.10, "NIFTY 50": 0.15}, n=560)
+    with _patch("daily_data.daily_closes", side_effect=lambda s, fallback_price=1000.0: series.get(s, [])), \
+         _patch.object(_mom, "universe", return_value=["A", "B", "C", "D"]):
+        bt = _mom.backtest(months=6, top_n=2)
+    assert "error" not in bt, bt
+    assert bt["months"] == 6 and bt["top_n"] == 2 and bt["universe_size"] == 4
+    assert bt["strategy_return_pct"] > bt["nifty_return_pct"] and bt["beats_index"], bt
+    assert all(set(c["held"]) <= {"A", "B", "D"} for c in bt["curve"]) and bt["max_drawdown_pct"] >= 0
+    assert "nifty" in bt["curve"][-1] and bt["curve"][-1]["nifty"] > 1.0
+
+def t_backtest_gate_requires_beating_nifty():
+    from backtest_engine import BacktestEngine, BacktestResult
+    eng = BacktestEngine()
+    import pandas as _pd
+    idx = _pd.date_range("2026-01-01", periods=40, freq="h")
+    first = {"close": 100.0, "date": idx[0]}
+    last = {"close": 104.0, "date": idx[-1]}
+    r = BacktestResult(symbol="GATE", strategy="intraday", passed=False, total_trades=25, win_rate=60, sharpe_ratio=1.5,
+                       profit_factor=1.5, total_pnl=10.0, walk_forward_used=True, oos_trades=6, oos_win_rate=60)
+    r.oos_return_pct = 2.0
+    with _patch.object(_perf_mod.performance, "benchmark_return", return_value=5.0):
+        eng._attach_benchmarks(r, [(first, last)])
+    assert r.oos_hold_return_pct == 4.0 and r.oos_nifty_return_pct == 5.0 and r.beats_index is False
+    r = eng._apply_gate(r)
+    assert not r.passed and any("Does not beat NIFTY" in x for x in r.fail_reasons), r.fail_reasons
+    r.oos_return_pct, r.beats_index = 7.0, True
+    assert eng._apply_gate(r).passed
+    r2 = BacktestResult(symbol="NOIDX", strategy="intraday", passed=False, total_trades=25, win_rate=60, sharpe_ratio=1.5,
+                        profit_factor=1.5, total_pnl=10.0, walk_forward_used=True, oos_trades=6, oos_win_rate=60)
+    with _patch.object(_perf_mod.performance, "benchmark_return", return_value=None):
+        eng._attach_benchmarks(r2, [(first, last)])
+    assert r2.beats_index is None and eng._apply_gate(r2).passed, "no benchmark data → gate not applied, reported as unknown"
+
+def t_performance_endpoints():
+    import main as _main
+    def body(p, path):
+        c = TestClient(_main.app)
+        prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+        try:
+            p.record_trade("ai", "EP", "BUY", 10, 1000.0, 50.0)
+            sb = c.get("/performance/scoreboard", headers=H).json()
+            assert "periods" in sb and "verdict" in sb and "trend_filter" in sb
+            st = c.get("/performance/strategies", headers=H).json()["strategies"]
+            assert any(s["strategy"] == "ai" and s["trades"] == 1 for s in st)
+            assert c.post("/performance/strategies/ai/disable", headers=H).json()["pruned"]
+            assert c.post("/performance/strategies/ai/enable", headers=H).json()["enabled"]
+            d = c.get("/dashboard/summary", headers=H).json()
+            assert d["scoreboard"]["verdict"] and isinstance(d["strategy_stats"], list)
+            r = c.get("/momentum/rankings?top=3", headers=H).json()
+            assert "rankings" in r and "selection" in r
+            assert c.get("/market/trend-filter", headers=H).json()["state"]
+        finally:
+            _ai_settings.api_key = prev
+    _with_ai_env(lambda: _with_perf(body))
+
+run("Costs: realistic Zerodha round-trip estimates",      t_costs_realistic)
+run("Ledger: net-of-cost stats, persisted",               t_perf_ledger_and_stats)
+run("Pruning: losers disabled, winners kept, re-enable",  t_perf_pruning_disables_losers_and_reenable)
+run("Pruning: pruned strategies cannot trade",            t_perf_pruned_strategy_cannot_trade)
+run("Scoreboard: account vs NIFTY per period + verdict",  t_perf_scoreboard_vs_index)
+run("Scoreboard: daily snapshot stores net + index close", t_perf_snapshot_today)
+run("Trend filter: RISK_ON / RISK_OFF / DISABLED",        t_trend_filter_states)
+run("Trend filter: halves intraday size, blocks swing buys", t_trend_filter_shrinks_intraday_and_blocks_swing)
+run("Momentum: 12-1 rankings, selection, rebalance plan", t_momentum_rankings_and_plan)
+run("Momentum: rebalance buys/sells CNC with GTT stops",  t_momentum_rebalance_executes_cnc)
+run("Momentum: backtest beats/compares NIFTY",            t_momentum_backtest_vs_nifty)
+run("Backtest gate: must beat NIFTY out of sample",       t_backtest_gate_requires_beating_nifty)
+run("Performance endpoints + dashboard fields",           t_performance_endpoints)
 
 
 # ══════════════════════════════════════════════════════════════════════════

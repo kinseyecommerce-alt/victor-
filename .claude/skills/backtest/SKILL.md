@@ -36,6 +36,12 @@ post() { curl -sS -m 600 -H "$H" -H "Content-Type: application/json" -X POST "$A
 | What is approved now | `j /backtest/approved/intraday` |
 | Trades / equity curve (after a `/backtest/run` for that pair, else 404) | `curl -sS -H "$H" -o trades.csv "$ALGO_URL/backtest/trades/RELIANCE/intraday"` (CSV) · same with `/backtest/equity/...` `-o equity.png` (PNG chart) |
 | Full weekly re-qualification | `post /backtest/weekly '{}'` — slow; ask before running |
+| Momentum rotation vs NIFTY | `j "/backtest/momentum?months=24"` — monthly 12-1 rotation of Nifty 100, equal weight, 200-DMA filter; report `strategy_return_pct` vs `nifty_return_pct`, CAGR, drawdown, `beats_index` |
+| Live scoreboard (not a backtest) | `j /performance/scoreboard` — the account vs NIFTY after costs; `j /performance/strategies` — which strategies are pruned |
+
+Every result also carries `oos_return_pct`, `oos_hold_return_pct` (buy-and-hold of the symbol)
+and `oos_nifty_return_pct` over the same out-of-sample windows, and `beats_index`. A symbol
+that does not beat NIFTY out of sample fails the gate (`BT_REQUIRE_BEATS_INDEX`).
 
 `walk_forward` defaults to `true` (in-sample fit + out-of-sample check). Keep it on
 unless the user asks otherwise. `lookback_days` defaults to `BT_LOOKBACK_DAYS` (180).

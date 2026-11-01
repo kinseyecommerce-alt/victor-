@@ -115,6 +115,16 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.ATR_TRAIL,
         atr_multiplier  = 1.2,
     ),
+    "momentum": TrailConfig(  # monthly momentum rotation (CNC); wide, position-level trend stop
+        initial_sl_pct  = 12.0,
+        trail_pct       = 8.0,
+        breakeven_pct   = 8.0,
+        activation_pct  = 12.0,
+        target1_pct     = 25.0,
+        target2_pct     = 50.0,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 2.0,
+    ),
     "ai_swing_opt": TrailConfig(  # AI bearish swing: long put held for days (premium %)
         initial_sl_pct  = 40.0,
         trail_pct       = 25.0,

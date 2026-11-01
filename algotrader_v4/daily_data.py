@@ -52,7 +52,7 @@ def _synthetic(symbol: str, last_price: float, today: date) -> list[dict]:
     drift = rng.uniform(-0.0006, 0.0012)        # most symbols mildly up, some down
     vol = rng.uniform(0.010, 0.020)
     days, d = [], today - timedelta(days=1)
-    while len(days) < 260:
+    while len(days) < 520:                      # ~2 years, enough for a 12-month momentum backtest
         if d.weekday() < 5:
             days.append(d)
         d -= timedelta(days=1)
@@ -92,6 +92,15 @@ def _completed_days(symbol: str, last_price: float) -> list[dict]:
     if rows:
         _cache[key] = rows
     return rows
+
+
+def daily_closes(symbol: str, fallback_price: float = 1000.0) -> list[tuple[date, float]]:
+    """Completed daily closes, oldest first (~2 years of sessions). For the paper simulator a symbol
+    that is not streaming gets its synthetic history scaled to fallback_price."""
+    from tick_engine import tick_engine
+    tick, _ = tick_engine.latest(symbol)
+    ltp = float(tick.ltp) if tick and tick.ltp > 0 else fallback_price
+    return [(b["date"], b["close"]) for b in _completed_days(symbol, ltp)]
 
 
 def _ema(values: list[float], n: int) -> Optional[float]:

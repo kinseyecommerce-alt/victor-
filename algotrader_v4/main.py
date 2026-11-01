@@ -1272,7 +1272,78 @@ def dashboard_summary():
         "watch": watch,
         "activity": activity[:50],
         "pnl_history": [{"t": t, "pnl": v} for t, v in _pnl_history],
+        "scoreboard": performance.scoreboard(_day_pnl(), ai_trader.cost_today_usd),
+        "trend_filter": market_filter.state(),
+        "strategy_stats": [{k: v[k] for k in ("strategy", "label", "trades", "win_rate", "net_pnl",
+                                               "profit_factor", "enabled", "pruned", "trades_until_judgement")}
+                           for v in performance.strategy_stats().values() if v["trades"] or v["pruned"]],
     }
+
+
+# ── Performance scoreboard, pruning, trend filter, momentum ──────────────────
+from performance import performance
+import market_filter
+import momentum_rotation
+
+
+@app.get("/performance/scoreboard", tags=["Performance"])
+def performance_scoreboard():
+    """Account return vs NIFTY 50 (and Nasdaq-100 for reference), after costs, per period."""
+    return {**performance.scoreboard(_day_pnl(), ai_trader.cost_today_usd),
+            "trend_filter": market_filter.state(), "equity_curve": performance.equity_curve()}
+
+
+@app.get("/performance/strategies", tags=["Performance"])
+def performance_strategies():
+    """Per-strategy win rate, net P&L after costs, profit factor, drawdown and pruning status."""
+    return {"strategies": list(performance.strategy_stats().values()),
+            "rule": {"min_trades": settings.prune_min_trades, "lookback_trades": settings.prune_lookback_trades,
+                     "enabled": settings.prune_enabled}}
+
+
+@app.get("/performance/trades", tags=["Performance"])
+def performance_trades(n: int = 100, strategy: str | None = None):
+    rows = [t for t in performance.trades if not strategy or t["strategy"] == strategy]
+    return {"trades": rows[-max(1, min(n, 1000)):]}
+
+
+@app.post("/performance/strategies/{name}/enable", tags=["Performance"])
+def performance_enable(name: str):
+    return performance.set_enabled(name, True)
+
+
+@app.post("/performance/strategies/{name}/disable", tags=["Performance"])
+def performance_disable(name: str):
+    return performance.set_enabled(name, False, "disabled from the dashboard")
+
+
+@app.post("/performance/snapshot", tags=["Performance"])
+def performance_snapshot():
+    """Store today's result now (the scheduler does this at 15:35)."""
+    return performance.snapshot_today(ai_trader.cost_today_usd)
+
+
+@app.get("/market/trend-filter", tags=["Market Regime"])
+def trend_filter(refresh: bool = False):
+    return market_filter.state(refresh=refresh)
+
+
+@app.get("/momentum/rankings", tags=["Momentum"])
+def momentum_rankings(top: int = 20):
+    return {"rankings": momentum_rotation.rankings()[:top], "selection": momentum_rotation.selection(),
+            "universe": settings.momentum_universe, "top_n": settings.momentum_top_n}
+
+
+@app.post("/momentum/rebalance", tags=["Momentum"])
+async def momentum_rebalance(execute: bool = True):
+    """Run the monthly rotation now (execute=false shows the plan only)."""
+    return await ai_trader.run_momentum_rebalance(execute=execute)
+
+
+@app.get("/backtest/momentum", tags=["Backtest"])
+def backtest_momentum(months: int = 12, top_n: int | None = None):
+    """Monthly momentum rotation vs buy-and-hold NIFTY 50 over the same dates."""
+    return momentum_rotation.backtest(months=months, top_n=top_n)
 
 
 # ── n8n Inbound Webhook ───────────────────────────────────────────────────────

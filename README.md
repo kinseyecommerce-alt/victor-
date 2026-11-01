@@ -10,7 +10,10 @@ Algorithmic trading system for NSE/BSE Indian equity markets.
 - Adaptive learning engine (auto-tunes parameters from live trades)
 - Market regime detection (6 regimes, auto strategy selection)
 - SEBI compliance module (10 regulations implemented)
-- Backtest gate (every symbol must pass before live trading)
+- Backtest gate (every symbol must pass before live trading, and beat NIFTY out of sample)
+- Scoreboard vs NIFTY 50 / Nasdaq-100 after costs; losing strategies pruned automatically
+- Claude AI trader: intraday equity, index options (buy + credit spreads), index futures,
+  swing (delivery) and momentum rotation, with a 200-day trend filter
 
 ## Try it in 2 minutes
 ```bash

@@ -31,7 +31,17 @@ export interface DashSummary {
   watch: { symbol: string; ltp: number; change_pct: number; trend: string; rsi: number }[]
   activity: { t: string; kind: string; text: string; source: string }[]
   pnl_history?: { t: string; pnl: number }[]
+  scoreboard?: Scoreboard
+  trend_filter?: { state: string; nifty: number | null; ema: number | null; pct_from_ema: number | null; size_factor: number }
+  strategy_stats?: StrategyStat[]
 }
+export interface ScoreRow { net_pnl: number; account_pct: number; nifty50_pct: number | null; vs_nifty50: number | null
+  nasdaq100_pct: number | null; vs_nasdaq100: number | null }
+export interface Scoreboard { capital: number; as_of: string; days_tracked: number; verdict: string
+  periods: Record<'today' | 'week' | 'month' | 'year' | 'since_start', ScoreRow> }
+export interface StrategyStat { strategy: string; label: string; trades: number; win_rate: number | null
+  net_pnl: number; profit_factor: number | null; enabled: boolean
+  pruned: { since: string; reason: string } | null; trades_until_judgement: number }
 
 export const inr = (v: number, digits = 0) =>
   `${v < 0 ? '-' : ''}₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: digits, minimumFractionDigits: digits })}`
@@ -328,5 +338,89 @@ export function ActivityFeed({ items }: { items: DashSummary['activity'] }) {
         ))}
       </AnimatePresence>
     </ul>
+  )
+}
+
+
+// ── Scoreboard: the account against the index it could have simply bought ──
+const PERIOD_LABEL: Record<string, string> = { today: 'Today', week: 'Week', month: 'Month', year: 'Year', since_start: 'Since start' }
+const pct = (v: number | null | undefined) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`)
+const toneCls = (v: number | null | undefined) => (v == null ? 'text-slate-400' : v > 0 ? 'text-emerald-300' : v < 0 ? 'text-rose-300' : 'text-slate-200')
+
+export function ScoreboardPanel({ sb, trend }: { sb?: Scoreboard; trend?: DashSummary['trend_filter'] }) {
+  if (!sb) return <div className="text-sm text-slate-500 py-6 text-center">Collecting data…</div>
+  const ahead = sb.periods.since_start.vs_nifty50
+  return (
+    <div className="space-y-3" data-testid="scoreboard">
+      <div className={clsx('rounded-xl px-3 py-2 text-sm border',
+        ahead == null ? 'border-white/10 bg-white/5 text-slate-300'
+          : ahead > 0 ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+            : 'border-rose-400/30 bg-rose-500/10 text-rose-200')}>
+        {sb.verdict}
+      </div>
+      <table className="w-full text-xs">
+        <thead className="text-slate-500">
+          <tr><th className="text-left font-medium py-1">Period</th><th className="text-right font-medium">You (net)</th>
+            <th className="text-right font-medium">NIFTY 50</th><th className="text-right font-medium">vs NIFTY</th>
+            <th className="text-right font-medium hidden sm:table-cell">Nasdaq-100</th></tr>
+        </thead>
+        <tbody className="tabular-nums">
+          {(Object.keys(sb.periods) as (keyof Scoreboard['periods'])[]).map(k => {
+            const r = sb.periods[k]
+            return (
+              <tr key={k} className="border-t border-white/5">
+                <td className="py-1.5 text-slate-300">{PERIOD_LABEL[k]}</td>
+                <td className={clsx('text-right', toneCls(r.account_pct))}>{pct(r.account_pct)}
+                  <span className="text-slate-500 ml-1 hidden md:inline">({inr(r.net_pnl)})</span></td>
+                <td className={clsx('text-right', toneCls(r.nifty50_pct))}>{pct(r.nifty50_pct)}</td>
+                <td className={clsx('text-right font-semibold', toneCls(r.vs_nifty50))}>
+                  {r.vs_nifty50 == null ? '—' : `${r.vs_nifty50 >= 0 ? '+' : ''}${r.vs_nifty50.toFixed(2)} pts`}</td>
+                <td className={clsx('text-right hidden sm:table-cell', toneCls(r.nasdaq100_pct))}>{pct(r.nasdaq100_pct)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+        <span>After brokerage, taxes and AI API cost · capital {inr(sb.capital)} · {sb.days_tracked} days tracked</span>
+        {trend && trend.state !== 'DISABLED' && (
+          <span className={clsx('ml-auto px-2 py-0.5 rounded-md border',
+            trend.state === 'RISK_ON' ? 'border-emerald-400/30 text-emerald-300' : trend.state === 'RISK_OFF' ? 'border-rose-400/30 text-rose-300' : 'border-white/10')}>
+            Trend filter: {trend.state.replace('_', ' ')}{trend.pct_from_ema != null ? ` (NIFTY ${pct(trend.pct_from_ema)} vs 200-day EMA)` : ''}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export function StrategyTable({ rows, onToggle }: { rows?: StrategyStat[]; onToggle: (s: StrategyStat) => void }) {
+  if (!rows?.length) return <div className="text-sm text-slate-500 py-6 text-center">No closed trades yet — each strategy is judged after its first 30.</div>
+  return (
+    <table className="w-full text-xs" data-testid="strategy-table">
+      <thead className="text-slate-500">
+        <tr><th className="text-left font-medium py-1">Strategy</th><th className="text-right font-medium">Trades</th>
+          <th className="text-right font-medium">Win</th><th className="text-right font-medium">Net P&L</th>
+          <th className="text-right font-medium hidden sm:table-cell">PF</th><th className="text-right font-medium">Status</th></tr>
+      </thead>
+      <tbody className="tabular-nums">
+        {rows.map(r => (
+          <tr key={r.strategy} className="border-t border-white/5" title={r.pruned?.reason}>
+            <td className="py-1.5 text-slate-200">{r.label}</td>
+            <td className="text-right text-slate-300">{r.trades}</td>
+            <td className="text-right text-slate-300">{r.win_rate == null ? '—' : `${r.win_rate.toFixed(0)}%`}</td>
+            <td className={clsx('text-right', toneCls(r.net_pnl))}>{inr(r.net_pnl)}</td>
+            <td className="text-right text-slate-300 hidden sm:table-cell">{r.profit_factor == null ? '—' : r.profit_factor.toFixed(2)}</td>
+            <td className="text-right">
+              <button onClick={() => onToggle(r)} className={clsx('px-2 py-0.5 rounded-md border text-[11px]',
+                r.pruned ? 'border-rose-400/40 text-rose-300 hover:bg-rose-500/15'
+                  : r.enabled ? 'border-emerald-400/30 text-emerald-300 hover:bg-emerald-500/15' : 'border-white/15 text-slate-300')}>
+                {r.pruned ? 'Pruned · enable' : r.enabled ? (r.trades_until_judgement ? `${r.trades_until_judgement} to judge` : 'Active') : 'Off'}
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }

@@ -53,6 +53,8 @@ from order_guard import order_guard
 from risk_manager import risk_manager
 from tick_engine import tick_engine
 from trailing_sl_engine import trailing_sl_engine
+from performance import performance
+import market_filter
 from options_resolver import (
     INDEX_QUOTE, OptionContract, estimate_premium, normalize_underlying, resolve, resolve_future,
     round_tick,
@@ -74,6 +76,8 @@ FUT_STRATEGY   = "ai_fut"      # AI index futures (intraday)
 SWING_STRATEGY = "ai_swing"    # AI swing / delivery
 SWING_OPT_STRATEGY = "ai_swing_opt"  # AI bearish swing: long put held for days (NRML)
 SPREAD_STRATEGY = "ai_spread"  # AI credit spreads (option selling, defined risk, intraday)
+MOMENTUM_STRATEGY = "momentum" # monthly momentum rotation (CNC), executed by code
+MOMENTUM_HOLD_SESSIONS = 45    # time exit well past the next monthly rebalance
 SWING_ENTRY_END = time(15, 15) # swing buys may use the last part of the session (daily close)
 SWING_TIME_EXIT = time(15, 10) # code exits swing positions whose holding period ends today
 SWING_REVIEW_S  = 1800         # swing trail reviews at most every 30 min (daily timeframe)
@@ -662,6 +666,8 @@ class AITrader:
             "risk":           risk_manager.status(),
             "sebi_state":     sebi_compliance.status().get("state"),
             "limits":         self._limits(),
+            "trend_filter":   market_filter.state(),
+            "pruned_strategies": {k: v["reason"] for k, v in performance.pruned.items()},
             "recent_ai_actions": [{"t": e["t"], "kind": e["kind"], "text": e["text"][:200]} for e in recent],
         }
 
@@ -753,6 +759,9 @@ class AITrader:
         allowed, blocked = self._trading_allowed()
         if not allowed:
             reject(blocked)
+        ok, why_pruned = performance.is_allowed(AGENT)
+        if not ok:
+            reject(why_pruned)
         if sym in INDEX_QUOTE.values() or tick_engine._exchange.get(sym, "NSE") != "NSE":
             reject(f"{sym} is not an NSE equity — use place_option_trade for index options")
         if side not in ("BUY", "SELL"):
@@ -769,9 +778,11 @@ class AITrader:
                    f"(₹{ref:.2f} → ₹{ltp:.2f}); the setup is stale")
         if qty <= 0:
             reject("quantity must be positive")
-        if qty * ltp > settings.ai_agent_max_position_value:
-            reject(f"value ₹{qty * ltp:,.0f} exceeds per-trade limit "
-                   f"₹{settings.ai_agent_max_position_value:,.0f} (max qty {int(settings.ai_agent_max_position_value // ltp)})")
+        max_value = settings.ai_agent_max_position_value * market_filter.size_factor()
+        if qty * ltp > max_value:
+            reject(f"value ₹{qty * ltp:,.0f} exceeds per-trade limit ₹{max_value:,.0f}"
+                   f"{' (halved: NIFTY below its 200-day EMA)' if max_value < settings.ai_agent_max_position_value else ''}"
+                   f" (max qty {int(max_value // ltp)})")
         risk_dist = (ltp - sl) if side == "BUY" else (sl - ltp)
         if risk_dist <= 0:
             reject(f"stop_loss {sl} is on the wrong side of price {ltp}")
@@ -941,6 +952,9 @@ class AITrader:
         allowed, blocked = self._trading_allowed()
         if not allowed:
             reject(blocked)
+        ok, why_pruned = performance.is_allowed(OPT_STRATEGY)
+        if not ok:
+            reject(why_pruned)
         if not (OPT_ENTRY_START <= now_ist().time() <= OPT_ENTRY_END):
             reject(f"outside the option entry window {OPT_ENTRY_START:%H:%M}-{OPT_ENTRY_END:%H:%M} IST")
         if und not in self._option_underlyings():
@@ -1064,7 +1078,9 @@ class AITrader:
             raise ToolRejected(f"no daily history for {symbol} (is it streaming?)")
         return v
 
-    async def _place_swing_trade(self, a: dict) -> dict:
+    async def _place_swing_trade(self, a: dict, _strategy: str = SWING_STRATEGY) -> dict:
+        """_strategy=MOMENTUM_STRATEGY: same CNC + GTT plumbing for the monthly rotation (its own
+        slot limit, hold period and stop width; counted as a momentum trade, not a swing one)."""
         from agents.base_agent import flatten_unprotected, _setup_tsl_callbacks, _tsl_sl_orders, sl_limit_price
         from sebi_compliance import sebi_compliance
         from market_regime import regime_detector
@@ -1080,11 +1096,17 @@ class AITrader:
             self._record("rejected", f"SWING BUY {qty} {sym}: {msg}")
             raise ToolRejected(msg)
 
-        if not settings.ai_agent_swing_enabled:
+        momentum = _strategy == MOMENTUM_STRATEGY
+        if not momentum and not settings.ai_agent_swing_enabled:
             reject("swing trading is disabled (AI_AGENT_SWING_ENABLED=false)")
+        if momentum and not settings.momentum_enabled:
+            reject("momentum rotation is disabled (MOMENTUM_ENABLED=false)")
         allowed, blocked = self._trading_allowed(swing=True)
         if not allowed:
             reject(blocked)
+        ok, why_pruned = performance.is_allowed(_strategy)
+        if not ok:
+            reject(why_pruned)
         if sym in INDEX_QUOTE.values() or tick_engine._exchange.get(sym, "NSE") != "NSE":
             reject(f"{sym} is not an NSE equity")
         tick, _ = tick_engine.latest(sym)
@@ -1095,6 +1117,11 @@ class AITrader:
         ltp = float(tick.ltp)
         if qty <= 0:
             reject("quantity must be positive")
+        if market_filter.blocks_new_longs():
+            reject("NIFTY 50 is below its 200-day EMA — no new swing buys while the trend filter is RISK_OFF")
+        max_sl_pct = max(settings.ai_agent_swing_max_sl_pct, settings.momentum_stop_pct) if momentum \
+            else settings.ai_agent_swing_max_sl_pct
+        max_hold = MOMENTUM_HOLD_SESSIONS if momentum else settings.ai_agent_swing_max_hold_days
         if qty * ltp > settings.ai_agent_max_swing_value:
             reject(f"value ₹{qty * ltp:,.0f} exceeds the swing per-trade limit "
                    f"₹{settings.ai_agent_max_swing_value:,.0f} (max qty {int(settings.ai_agent_max_swing_value // ltp)})")
@@ -1102,19 +1129,22 @@ class AITrader:
         if risk_dist <= 0:
             reject(f"stop_loss {sl} must be below price {ltp}")
         sl_pct = risk_dist / ltp * 100
-        if not (settings.ai_agent_swing_min_sl_pct <= sl_pct <= settings.ai_agent_swing_max_sl_pct):
-            reject(f"stop is {sl_pct:.2f}% away; swing allows {settings.ai_agent_swing_min_sl_pct}-"
-                   f"{settings.ai_agent_swing_max_sl_pct}%")
+        if not (settings.ai_agent_swing_min_sl_pct <= sl_pct <= max_sl_pct):
+            reject(f"stop is {sl_pct:.2f}% away; allowed {settings.ai_agent_swing_min_sl_pct}-{max_sl_pct}%")
         if tgt - ltp < settings.ai_agent_swing_min_rr * risk_dist:
             reject(f"target {tgt} gives {(tgt - ltp) / risk_dist:.2f}x risk; swing needs >= "
                    f"{settings.ai_agent_swing_min_rr}x")
-        if not 1 <= hold <= settings.ai_agent_swing_max_hold_days:
-            reject(f"max_hold_days must be 1-{settings.ai_agent_swing_max_hold_days}")
-        if self.trades_today >= settings.ai_agent_max_trades_per_day:
-            reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
-        if len(self._swing_entries()) >= settings.ai_agent_max_swing_positions:
-            reject(f"max swing positions ({settings.ai_agent_max_swing_positions}) reached")
-        ok, msg = order_guard.can_place(sym, SWING_STRATEGY, "BUY")
+        if not 1 <= hold <= max_hold:
+            reject(f"max_hold_days must be 1-{max_hold}")
+        if momentum:
+            if len(self._momentum_entries()) >= settings.momentum_top_n:
+                reject(f"momentum rotation already holds {settings.momentum_top_n} names")
+        else:
+            if self.trades_today >= settings.ai_agent_max_trades_per_day:
+                reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
+            if len(self._swing_entries()) >= settings.ai_agent_max_swing_positions:
+                reject(f"max swing positions ({settings.ai_agent_max_swing_positions}) reached")
+        ok, msg = order_guard.can_place(sym, _strategy, "BUY")
         if not ok:
             reject(msg)
         if order_guard.is_symbol_active_anywhere(sym):
@@ -1132,7 +1162,7 @@ class AITrader:
 
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange="NSE", transaction_type="BUY", quantity=qty,
-            order_type="MARKET", product="CNC", tag="Agent-ai-swing",
+            order_type="MARKET", product="CNC", tag="Agent-ai-mom" if momentum else "Agent-ai-swing",
         )
         sebi_compliance.record_order_id(AGENT, sym, order_id)
 
@@ -1152,7 +1182,7 @@ class AITrader:
             reject("the GTT stop-loss was rejected by the broker; the purchase was sold again")
 
         today = now_ist().date()
-        order_guard.register_order(sym, SWING_STRATEGY, "BUY", order_id)
+        order_guard.register_order(sym, _strategy, "BUY", order_id)
         risk_manager.position_opened()
         _setup_tsl_callbacks()
         _tsl_sl_orders[order_id] = {
@@ -1160,20 +1190,23 @@ class AITrader:
             "gtt_trigger_offset_pct": GTT_TRIGGER_OFFSET_PCT, "product": "CNC", "exchange": "NSE",
             "symbol": sym, "guard_symbol": sym, "agent": AGENT, "side": "BUY", "kind": "swing",
         }
-        pos = trailing_sl_engine.register(symbol=sym, strategy=SWING_STRATEGY, side="BUY",
+        pos = trailing_sl_engine.register(symbol=sym, strategy=_strategy, side="BUY",
                                           entry_price=ltp, quantity=qty, order_id=order_id)
         pos.current_sl = sl
         self._start_trail(order_id, pos)
+        if momentum:
+            pos.external_trail = False          # mechanical wide trail; Claude is not involved
         self._targets[order_id] = round_tick(tgt)
         self._open[order_id] = sym
         hold_until = self._add_sessions(today, hold)
         self._swing_meta[order_id] = {"opened": today.isoformat(), "hold_until": hold_until.isoformat(),
                                       "reason": why, "initial_risk": risk_dist}
         self._save_swing()
-        self.trades_today += 1
+        if not momentum:
+            self.trades_today += 1
         self._ensure_tick_monitor()
 
-        text = (f"SWING BUY {qty} {sym} @ ~₹{ltp:.2f} SL ₹{sl:.2f} (GTT) TGT ₹{tgt:.2f}, "
+        text = (f"{'MOMENTUM' if momentum else 'SWING'} BUY {qty} {sym} @ ~₹{ltp:.2f} SL ₹{sl:.2f} (GTT) TGT ₹{tgt:.2f}, "
                 f"hold until {hold_until:%d %b} — {why}")
         self._record("trade", text)
         await self._notify(f"🧠 <b>[AI]</b> {text}")
@@ -1218,6 +1251,10 @@ class AITrader:
         risk_manager.record_trade(pnl)
         risk_manager.position_closed()
         trailing_sl_engine.deregister(oid)
+        if pos:
+            from performance import performance
+            performance.record_trade(pos.strategy, e["symbol"], "BUY", pos.quantity, pos.entry_price, pnl,
+                                     e.get("exchange", "NSE"), e.get("product", "CNC"), note=note)
         self._open.pop(oid, None)
         self._targets.pop(oid, None)
         self._trail.pop(oid, None)
@@ -1275,9 +1312,9 @@ class AITrader:
         return reply
 
     def _save_swing(self) -> None:
-        """Persist open swing positions (atomic write) so a restart can pick them up."""
+        """Persist open swing and momentum positions (atomic write) so a restart can pick them up."""
         rows = []
-        for oid, e in self._swing_entries().items():
+        for oid, e in self._overnight_entries().items():
             pos = trailing_sl_engine._positions.get(oid)
             meta = self._swing_meta.get(oid)
             if not pos or not meta:
@@ -1357,7 +1394,7 @@ class AITrader:
 
     def reapply_overnight(self) -> None:
         """After the daily counter reset: positions held from earlier days still exist."""
-        for oid, e in self._swing_entries().items():
+        for oid, e in self._overnight_entries().items():
             pos = trailing_sl_engine._positions.get(oid)
             order_guard.restore_active(e["guard_symbol"], pos.strategy if pos else SWING_STRATEGY, "BUY", oid)
             risk_manager.position_opened()
@@ -1425,6 +1462,9 @@ class AITrader:
         allowed, blocked = self._trading_allowed()
         if not allowed:
             reject(blocked)
+        ok, why_pruned = performance.is_allowed(FUT_STRATEGY)
+        if not ok:
+            reject(why_pruned)
         if not (OPT_ENTRY_START <= now_ist().time() <= OPT_ENTRY_END):
             reject(f"outside the futures entry window {OPT_ENTRY_START:%H:%M}-{OPT_ENTRY_END:%H:%M} IST")
         if und not in self._future_underlyings():
@@ -1568,6 +1608,9 @@ class AITrader:
         allowed, blocked = self._trading_allowed(swing=True)
         if not allowed:
             reject(blocked)
+        ok, why_pruned = performance.is_allowed(SWING_OPT_STRATEGY)
+        if not ok:
+            reject(why_pruned)
         if off not in (-1, 0, 1, 2):
             reject("strike_offset must be between -1 and 2")
         if not 1 <= lots <= settings.ai_agent_max_option_lots:
@@ -1751,6 +1794,9 @@ class AITrader:
         allowed, blocked = self._trading_allowed()
         if not allowed:
             reject(blocked)
+        ok, why_pruned = performance.is_allowed(SPREAD_STRATEGY)
+        if not ok:
+            reject(why_pruned)
         if not (OPT_ENTRY_START <= now_ist().time() <= OPT_ENTRY_END):
             reject(f"outside the option entry window {OPT_ENTRY_START:%H:%M}-{OPT_ENTRY_END:%H:%M} IST")
         if und not in self._option_underlyings():
@@ -1938,6 +1984,10 @@ class AITrader:
         order_guard.release_order(sp["underlying"], SPREAD_STRATEGY, "SELL", pnl)
         risk_manager.record_trade(pnl)
         risk_manager.position_closed()
+        from performance import performance
+        # two legs ≈ twice the option round-trip costs: record as one trade with double quantity
+        performance.record_trade(SPREAD_STRATEGY, sid, "SELL", sp["qty"] * 2, sp["credit"], pnl, "NFO", "MIS",
+                                 exit_price=value, note=reason)
         text = (f"CLOSE spread {sp['underlying']} {sp['short']['strike']:g}/{sp['long']['strike']:g} "
                 f"{sp['option_type']} at ₹{value:.2f} (sold ₹{sp['credit']:.2f}) P&L ₹{pnl:,.0f} — {reason[:200]}")
         self._record("close", f"[auto] {text}" if by_code else text)
@@ -2416,7 +2466,72 @@ class AITrader:
         return len(self._intraday_entries()) + len(self._spreads)
 
     def _swing_entries(self) -> dict:
+        """Swing positions the AI manages (momentum rotation positions are tracked separately)."""
+        return {o: e for o, e in self._ai_entries().items()
+                if self._kind(e) == "swing" and not self._is_momentum(o)}
+
+    def _overnight_entries(self) -> dict:
+        """Everything held past the close: swing buys, swing puts and momentum names."""
         return {o: e for o, e in self._ai_entries().items() if self._kind(e) == "swing"}
+
+    def _momentum_entries(self) -> dict:
+        return {o: e for o, e in self._ai_entries().items() if self._is_momentum(o)}
+
+    @staticmethod
+    def _is_momentum(oid: str) -> bool:
+        pos = trailing_sl_engine._positions.get(oid)
+        return bool(pos and pos.strategy == MOMENTUM_STRATEGY)
+
+    async def run_momentum_rebalance(self, execute: bool = True) -> dict:
+        """Monthly: sell momentum names that dropped out of the top N, buy the new ones (CNC,
+        GTT stop). Pure code — no Claude call. Returns the plan and what was done."""
+        import momentum_rotation
+        held = {}
+        for oid, e in self._momentum_entries().items():
+            pos = trailing_sl_engine._positions.get(oid)
+            held[e["symbol"]] = pos.entry_price if pos else 0.0
+        plan = await asyncio.to_thread(momentum_rotation.rebalance_plan, held)
+        done = {"sold": [], "bought": [], "kept": plan["keep"], "rejected": {}}
+        if not execute or not settings.momentum_enabled:
+            return {"plan": plan, "executed": False, "done": done}
+        ok, why = performance.is_allowed(MOMENTUM_STRATEGY)
+        if not ok:
+            return {"plan": plan, "executed": False, "done": done, "blocked": why}
+        for sym in plan["sell"]:
+            async with self._action_lock:
+                try:
+                    await self._close_position(sym, "momentum rebalance: dropped out of the top list", by_code=True)
+                    done["sold"].append(sym)
+                except ToolRejected as exc:
+                    done["rejected"][sym] = str(exc)
+        for oid, e in self._momentum_entries().items():              # kept names: extend the hold
+            meta = self._swing_meta.get(oid)
+            if meta and e["symbol"] in plan["keep"]:
+                meta["hold_until"] = self._add_sessions(now_ist().date(), MOMENTUM_HOLD_SESSIONS).isoformat()
+        for r in plan["buy"]:
+            sym, px = r["symbol"], r["last"]
+            tick, _ = tick_engine.latest(sym)
+            if not tick or tick.ltp <= 0:
+                tick_engine.subscribe([{"symbol": sym, "exchange": "NSE", "seed_price": px}])
+                tick, _ = tick_engine.latest(sym)
+            ltp = float(tick.ltp) if tick and tick.ltp > 0 else px
+            qty = int(plan["capital_per_name"] // ltp)
+            if qty < 1:
+                done["rejected"][sym] = f"₹{plan['capital_per_name']:,.0f} buys less than one share at ₹{ltp:.2f}"
+                continue
+            args = {"symbol": sym, "quantity": qty, "stop_loss": round(ltp * (1 - settings.momentum_stop_pct / 100), 2),
+                    "target": round(ltp * 1.5, 2), "max_hold_days": MOMENTUM_HOLD_SESSIONS,
+                    "reasoning": f"momentum rank {r['rank']}: 12-1 return {r['ret_12_1']:+.1f}%, 6-1 {r['ret_6_1']:+.1f}%"}
+            async with self._action_lock:
+                try:
+                    await self._place_swing_trade(args, _strategy=MOMENTUM_STRATEGY)
+                    done["bought"].append(sym)
+                except ToolRejected as exc:
+                    done["rejected"][sym] = str(exc)
+        self._save_swing()
+        self._record("cycle", f"momentum rebalance: sold {done['sold'] or '-'}, bought {done['bought'] or '-'}, "
+                              f"kept {done['kept'] or '-'}" + (f", rejected {done['rejected']}" if done["rejected"] else ""))
+        return {"plan": plan, "executed": True, "done": done}
 
     @staticmethod
     def _sessions_between(a: date, b: date) -> int:

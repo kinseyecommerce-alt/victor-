@@ -163,6 +163,21 @@ class Settings(BaseSettings):
     ai_agent_max_spread_loss:     float = 10000.0  # ₹ worst case: (width − credit) × quantity
     ai_agent_max_spread_margin:   float = 150000.0 # ₹ margin blocked per spread
     ai_agent_spread_min_credit_pct: float = 20.0   # credit must be at least this % of the strike width
+    # ── Performance scoreboard, pruning, trend filter, momentum rotation ─────
+    usd_inr:                      float = 84.0     # converts the Claude API spend into ₹ on the scoreboard
+    prune_enabled:                bool  = True     # auto-disable a strategy that is losing money
+    prune_min_trades:             int   = 30       # judged only after this many closed trades
+    prune_lookback_trades:        int   = 50       # rolling window of trades used for the judgement
+    trend_filter_enabled:         bool  = True     # NIFTY 50 vs its 200-day EMA
+    trend_filter_ema_days:        int   = 200
+    trend_filter_risk_off_size:   float = 0.5      # intraday AI size multiplier when NIFTY is below the EMA
+    trend_filter_block_swing_longs: bool = True    # no new swing / momentum buys when NIFTY is below the EMA
+    momentum_enabled:             bool  = True     # monthly momentum rotation (CNC, long only)
+    momentum_top_n:               int   = 5
+    momentum_capital:             float = 100000.0 # ₹ spread equally over the top N
+    momentum_stop_pct:            float = 12.0     # GTT stop below the buy price
+    momentum_universe:            Literal["NIFTY50", "NIFTY100"] = "NIFTY100"
+    bt_require_beats_index:       bool  = True     # a strategy passes only if its out-of-sample return beats NIFTY
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

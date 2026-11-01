@@ -62,6 +62,10 @@ export const api = {
 
   // Overview dashboard (one aggregate call per refresh)
   dashboardSummary: () => ax().get('/dashboard/summary'),
+  scoreboard: () => ax().get('/performance/scoreboard'),
+  strategyStats: () => ax().get('/performance/strategies'),
+  strategyEnable: (name: string) => ax().post(`/performance/strategies/${name}/enable`),
+  strategyDisable: (name: string) => ax().post(`/performance/strategies/${name}/disable`),
 
   // AI trader (Claude)
   aiStatus: () => ax().get('/agent/status'),

@@ -106,6 +106,12 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     risk_manager.record_trade(pnl)
     risk_manager.position_closed()
     trailing_sl_engine.deregister(entry_oid)
+    try:
+        from performance import performance
+        performance.record_trade(strategy, symbol, side, quantity, fallback_px, pnl,
+                                 entry.get("exchange", "NSE"), entry.get("product", "MIS"), note=tag)
+    except Exception as exc:
+        logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
 
 
 def _setup_tsl_callbacks() -> None:
@@ -435,6 +441,10 @@ class BaseAgent(ABC):
         if settings.use_kelly_sizing and size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
 
+        from performance import performance
+        allowed, reason = performance.is_allowed(self.name)
+        if not allowed:
+            return                                   # auto-pruned: losing after costs
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
             return

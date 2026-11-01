@@ -150,6 +150,32 @@ Move on only after 2–4 weeks that are profitable **after brokerage and taxes**
 
 ---
 
+### Is it beating the index?
+
+The Overview dashboard has an **"Are we beating the index?"** panel (`GET /performance/scoreboard`).
+It compares the account's return **after brokerage, taxes and the Claude API bill** with
+NIFTY 50 (what a Zerodha account could simply hold instead) and, for reference, Nasdaq-100,
+for today, the week, the month, the year and since tracking began. A snapshot is stored every
+day at 15:35 (`data/performance.json`). After 20+ trading days the verdict line tells you
+plainly whether an index fund would have done better.
+
+**Strategy health** (`GET /performance/strategies`) shows each strategy's trades, win rate, net
+P&L and profit factor. Once a strategy has 30 closed trades, if its last 50 are net losers
+(negative P&L after costs and profit factor < 1) it is **switched off automatically** and you
+are told on Telegram. The dashboard button re-enables it; the judgement then restarts.
+
+**Trend filter:** when NIFTY 50 is below its 200-day EMA the AI halves its intraday size and
+makes no new swing or momentum buys (bearish trades are unaffected). Shown on the scoreboard.
+
+**Momentum rotation** (`MOMENTUM_ENABLED`): on the first trading day of each month the top 5
+Nifty 100 stocks by 12-month momentum (skipping the latest month, 12-1) are bought as delivery
+with a 12% GTT stop and names that dropped out are sold — code only, no Claude call. Check the
+plan first: `POST /momentum/rebalance?execute=false`; backtest it against NIFTY with
+`GET /backtest/momentum?months=24` (real data only once the server has Kite/yfinance access).
+
+**Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
+with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
+
 ## 4. Small live trading
 
 ```
