@@ -42,7 +42,7 @@ Using a domain instead of the bare IP? Point an `A` record at the Elastic IP fir
 certificate. With the bare IP the certificate is self-signed: the browser warns once, accept it.
 
 Already have a server? Skip user data and run:
-`curl -fsSL https://raw.githubusercontent.com/kinseyecommerce-alt/victor-/main/algotrader_v4/deploy/setup-ec2.sh | sudo bash -s -- <ip-or-domain>`
+`curl -fsSL https://raw.githubusercontent.com/kinseyecommerce-alt/victor-/HEAD/algotrader_v4/deploy/setup-ec2.sh | sudo bash -s -- <ip-or-domain>`
 
 ## 2. Connect Zerodha (once)
 
