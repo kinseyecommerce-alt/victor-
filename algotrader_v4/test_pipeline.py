@@ -1942,6 +1942,9 @@ def _ai_env():
             _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW),
             _patch.object(_mf, "state", return_value={"state": "RISK_ON", "size_factor": 1.0}),   # tests set it explicitly
             _patch.object(_ai_mod.performance, "pruned", {}),
+            # portfolio rules have their own tests (section 19); the per-trade AI limits stay real here
+            _patch.object(_ai_mod.portfolio_risk, "pre_entry",
+                          lambda symbol, side, quantity, price, stop=None, **k: {"ok": True, "reason": "", "max_quantity": quantity, "size_factor": 1.0}),
             _patch.object(_rm_x, "check_before_order", return_value=(True, "")),
             _patch.object(_ba, "send_telegram", _noop_async)]
 
@@ -1964,7 +1967,7 @@ def _trade_args(sym, side="BUY", qty=10, sl=990.0, tgt=1020.0):
 def t_ai_tool_schemas_strict():
     names = [t["name"] for t in _AI_TOOLS]
     assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
-                     "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
+                     "get_market_context", "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
                      "place_swing_put", "place_option_spread",
                      "get_future_quote", "place_future_trade", "get_option_chain",
                      "place_option_trade", "adjust_stop", "close_position"], names
@@ -4525,6 +4528,131 @@ run("Momentum: rebalance buys/sells CNC with GTT stops",  t_momentum_rebalance_e
 run("Momentum: backtest beats/compares NIFTY",            t_momentum_backtest_vs_nifty)
 run("Backtest gate: must beat NIFTY out of sample",       t_backtest_gate_requires_beating_nifty)
 run("Performance endpoints + dashboard fields",           t_performance_endpoints)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("19. PORTFOLIO RISK AND MARKET CONTEXT")
+# ══════════════════════════════════════════════════════════════════════════
+import portfolio_risk as _pr
+import market_context as _mc
+import correlation_guard as _cg
+import event_calendar as _ec
+
+def _no_corr(fn):
+    """Correlation unknown → the guard scales by 0.75; these tests pin it to 'low' unless stated."""
+    with _patch.object(_cg, "check", return_value={"allowed": True, "reason": "low correlation", "size_factor": 1.0}), \
+         _patch.object(_cg, "portfolio_heat", return_value=0.0), \
+         _patch.object(_pr, "daily_vol", return_value=0.015):
+        return fn()
+
+def t_risk_vol_targeted_size():
+    def body():
+        prev = _ai_settings.total_capital; _ai_settings.total_capital = 500000.0
+        try:
+            assert _pr.size_for_stop(1000.0, 990.0) == 250          # ₹2,500 risk / ₹10 per share
+            r = _pr.pre_entry("RISK1", "BUY", 400, 1000.0, 990.0)
+            assert r["ok"] and r["max_quantity"] == 250 and "risk per trade" in r["reason"]
+            r = _pr.pre_entry("RISK1", "BUY", 100, 1000.0, 990.0)
+            assert r["ok"] and r["max_quantity"] == 100 and r["reason"] == ""
+            r = _pr.pre_entry("RISK1", "BUY", 10, 1000.0, 500.0)
+            assert r["ok"] and r["max_quantity"] == 5, "wide stop → small size"
+        finally:
+            _ai_settings.total_capital = prev
+    _no_corr(body)
+
+def t_risk_event_and_correlation_blocks():
+    with _patch.object(_ec, "get_event_risk", return_value={"risk_level": "CRITICAL", "event_type": "RESULTS",
+                                                            "hours_until": 0.5, "size_factor": 0.0, "description": "Q2 results"}):
+        r = _pr.pre_entry("EVT1", "BUY", 10, 1000.0, 990.0)
+        assert not r["ok"] and "event block" in r["reason"] and "results" in r["reason"].lower()
+    with _patch.object(_ec, "get_event_risk", return_value={"risk_level": "HIGH", "event_type": "RBI",
+                                                            "hours_until": 3.0, "size_factor": 0.5, "description": "RBI policy"}), \
+         _patch.object(_cg, "check", return_value={"allowed": True, "reason": "low correlation", "size_factor": 1.0}), \
+         _patch.object(_pr, "daily_vol", return_value=0.015):
+        r = _pr.pre_entry("EVT2", "BUY", 100, 1000.0, 990.0)
+        assert r["ok"] and r["max_quantity"] == 50 and "event risk" in r["reason"]
+    with _patch.object(_cg, "check", return_value={"allowed": False, "reason": "highly correlated with HDFCBANK (r=0.91)", "size_factor": 0.0}), \
+         _patch.object(_mc, "open_symbols", return_value=["HDFCBANK"]):
+        r = _pr.pre_entry("ICICIBANK", "BUY", 10, 1000.0, 990.0)
+        assert not r["ok"] and "correlation block" in r["reason"]
+    with _patch.object(_cg, "check", return_value={"allowed": True, "reason": "low", "size_factor": 1.0}), \
+         _patch.object(_cg, "portfolio_heat", return_value=0.9), _patch.object(_mc, "open_symbols", return_value=["A", "B"]):
+        r = _pr.pre_entry("C", "BUY", 10, 1000.0, 990.0)
+        assert not r["ok"] and "heat" in r["reason"]
+
+def t_risk_daily_var_cap():
+    def body():
+        prev = (_ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct)
+        _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct = 500000.0, 2.0     # cap ₹10,000
+        try:
+            book = [{"symbol": "X", "kind": "equity", "notional": 300000.0, "max_loss": None, "underlying": "X"}]
+            with _patch.object(_pr, "_open_book", return_value=book):            # VaR = 3e5 × 0.015 × 1.65 = ₹7,425
+                pv = _pr.portfolio_var()
+                assert abs(pv["var_1d_95"] - 7425.0) < 1 and pv["cap"] == 10000.0
+                r = _pr.pre_entry("Y", "BUY", 200, 1000.0, 995.0)                 # wants 200 × 1000 × .02475 = ₹4,950
+                assert r["ok"] and r["max_quantity"] == 104 and "VaR cap" in r["reason"], r   # room ₹2,575 / ₹24.75
+                r = _pr.pre_entry("OPT", "BUY", 75, 100.0, kind="option", max_loss=4000.0, unit_size=75)
+                assert not r["ok"] and "less than one lot" in r["reason"], "option max loss over the remaining room"
+                r = _pr.pre_entry("OPT", "BUY", 150, 100.0, kind="option", max_loss=3000.0, unit_size=75)
+                assert r["ok"] and r["max_quantity"] == 75, "two lots asked, room for one"
+            with _patch.object(_pr, "_open_book", return_value=[{"symbol": "S", "kind": "spread", "notional": 9000.0,
+                                                                "max_loss": 9000.0, "underlying": "NIFTY"}]):
+                r = _pr.pre_entry("Z", "BUY", 1, 1000.0, 995.0)
+                assert r["ok"] and r["max_quantity"] == 1
+                r = _pr.pre_entry("Z", "BUY", 100, 1000.0, 995.0)
+                assert r["max_quantity"] == 40
+        finally:
+            _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct = prev
+    _no_corr(body)
+
+def t_risk_applied_to_ai_and_agents():
+    def body():
+        ai = _rt_ai(); _ai_tick("PRA1", 1000.0)
+        with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
+                           return_value={"ok": True, "reason": "risk per trade 0.5% → max qty 7", "max_quantity": 7, "size_factor": 1.0}):
+            try:
+                asyncio.run(ai._place_trade(_trade_args("PRA1", qty=10))); raise AssertionError("oversize accepted")
+            except ToolRejected as e:
+                assert "use at most 7" in str(e)
+            asyncio.run(ai._place_trade(_trade_args("PRA1", qty=7)))
+        with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
+                           return_value={"ok": False, "reason": "event block: results in 0.5h", "max_quantity": 0, "size_factor": 0.0}):
+            _ai_tick("PRA2", 1000.0)
+            try:
+                asyncio.run(ai._place_trade(_trade_args("PRA2"))); raise AssertionError("blocked trade accepted")
+            except ToolRejected as e:
+                assert "event block" in str(e)
+        asyncio.run(ai.close_all("t"))
+        # rule agent: size scaled down, not rejected
+        agent = IntradayAgent()
+        n = len(_te_kite_client._paper_orders)
+        with _patch("portfolio_risk.pre_entry", return_value={"ok": True, "reason": "VaR", "max_quantity": 3, "size_factor": 1.0}), \
+             _patch.object(_rm_x, "calculate_quantity", return_value=20):
+            asyncio.run(agent._try_enter(_make_snap(symbol="PRA3", ltp=1000.0), "BUY", {"stop_loss": 990, "target": 1020}))
+        placed = [o for o in _te_kite_client._paper_orders[n:] if o["tradingsymbol"] == "PRA3"]
+        assert placed and placed[0]["quantity"] == 3, placed
+        asyncio.run(agent._close_all_positions("t")) if hasattr(agent, "_close_all_positions") else None
+    _with_ai_env(body)
+
+def t_market_context_shape():
+    _ai_tick("CTX1", 1000.0)
+    c = _mc.context_for("CTX1")
+    for k in ("market", "trend_filter", "event_risk", "key_levels", "institutional", "options",
+              "multi_timeframe", "correlation", "recent_lessons"):
+        assert k in c, k
+    assert c["event_risk"]["risk_level"] in ("NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN")
+    assert c["key_levels"]["available"] is False, "no daily levels loaded in tests → reported, not invented"
+    a = _mc.compact_for_alert("CTX1")
+    assert set(a) >= {"regime", "event_risk", "correlation", "mtf"} and "recent_lessons" not in a
+    ai = _rt_ai()
+    out = ai._market_context("CTX1")
+    assert out["symbol"] == "CTX1" and "portfolio_risk" in out and "max_loss_per_trade" in out["portfolio_risk"]
+
+run("Risk: volatility-targeted size from the stop distance",  t_risk_vol_targeted_size)
+run("Risk: event block / scale, correlation block, heat cap", t_risk_event_and_correlation_blocks)
+run("Risk: daily VaR cap limits new entries",                 t_risk_daily_var_cap)
+run("Risk: AI rejects oversize with the max; agents scale",   t_risk_applied_to_ai_and_agents)
+run("Market context: every block present, nothing invented",  t_market_context_shape)
 
 
 # ══════════════════════════════════════════════════════════════════════════

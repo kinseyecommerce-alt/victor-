@@ -173,6 +173,16 @@ with a 12% GTT stop and names that dropped out are sold — code only, no Claude
 plan first: `POST /momentum/rebalance?execute=false`; backtest it against NIFTY with
 `GET /backtest/momentum?months=24` (real data only once the server has Kite/yfinance access).
 
+**Portfolio risk** (`GET /risk/portfolio`): every entry, AI or rule agent, is sized so a stop
+hit costs at most `RISK_PER_TRADE_PCT` of capital, is blocked or scaled when correlated with
+open positions or ahead of a results/RBI event, and must fit under the book's one-day VaR cap.
+The AI is told the maximum size and why; agents are scaled down silently (see the log).
+
+**What the AI sees** (`GET /market/context/{symbol}`, tool `get_market_context`): regime and
+India VIX, event risk, support/resistance, institutional flow, option-chain data, multi-timeframe
+alignment, correlation with the book, the trend filter and recent trade lessons. A compact form
+rides on every real-time alert.
+
 **Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
 with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
 

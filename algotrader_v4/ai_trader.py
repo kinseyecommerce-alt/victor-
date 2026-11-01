@@ -55,6 +55,8 @@ from tick_engine import tick_engine
 from trailing_sl_engine import trailing_sl_engine
 from performance import performance
 import market_filter
+import market_context
+import portfolio_risk
 from options_resolver import (
     INDEX_QUOTE, OptionContract, estimate_premium, normalize_underlying, resolve, resolve_future,
     round_tick,
@@ -103,7 +105,16 @@ account owner, so capital preservation comes first: a skipped trade costs nothin
 
 How you work
 - Use your tools to look before you act: get_market_overview first, then get_watchlist_quotes, \
-then get_symbol_detail for anything you are considering, and get_ai_positions for what you hold.
+then get_symbol_detail and get_market_context for anything you are considering, and \
+get_ai_positions for what you hold.
+- get_market_context gives what price alone does not: upcoming results / RBI / ex-dates \
+(never trade into a results announcement), support and resistance levels (stops go beyond \
+them, targets stop short of them), institutional flow, option-chain data (IV rank, PCR, OI \
+walls), multi-timeframe alignment, correlation with what you already hold, India VIX and the \
+lessons from recent trades. Use it.
+- Position sizing is risk-based: the code caps every trade so that a stop hit costs at most a \
+fixed share of capital, limits correlated positions, and caps the book's one-day loss. When a \
+tool rejects a size it tells you the maximum; propose that or smaller.
 - Only trade a clear setup: trend and momentum agreeing across several indicators (VWAP side, \
 EMA9/21/50 stack, ADX with the matching DI line, MACD histogram, volume ratio), or a clean \
 mean-reversion with a defined level. Prefer no trade over a marginal one. Most cycles should end \
@@ -211,6 +222,13 @@ TOOLS: list[dict] = [
     _tool("get_symbol_detail",
           "All live indicators for one symbol plus its last 30 one-minute candles.",
           {"symbol": {"type": "string", "description": "NSE trading symbol, e.g. RELIANCE"}},
+          ["symbol"]),
+    _tool("get_market_context",
+          "Everything beyond price for a symbol or index: regime + India VIX, event risk (results, "
+          "RBI, ex-dates), key support/resistance with nearest levels, institutional flow, option-chain "
+          "intelligence (IV rank, PCR, max pain, OI), multi-timeframe alignment, correlation with open "
+          "positions and portfolio heat, trend filter, recent trade lessons, and the portfolio risk budget.",
+          {"symbol": {"type": "string", "description": "NSE symbol, or NIFTY / BANKNIFTY"}},
           ["symbol"]),
     _tool("get_ai_positions",
           "Open positions this AI holds (intraday, option, future, swing): entry, live price, "
@@ -614,6 +632,8 @@ class AITrader:
             return self._quotes()
         if name == "get_symbol_detail":
             return self._detail(str(args.get("symbol", "")).upper())
+        if name == "get_market_context":
+            return self._market_context(str(args.get("symbol", "")).upper().strip())
         if name == "get_ai_positions":
             return self._positions()
         if name == "place_trade":
@@ -667,6 +687,7 @@ class AITrader:
             "sebi_state":     sebi_compliance.status().get("state"),
             "limits":         self._limits(),
             "trend_filter":   market_filter.state(),
+            "portfolio_risk": portfolio_risk.status(),
             "pruned_strategies": {k: v["reason"] for k, v in performance.pruned.items()},
             "recent_ai_actions": [{"t": e["t"], "kind": e["kind"], "text": e["text"][:200]} for e in recent],
         }
@@ -697,6 +718,15 @@ class AITrader:
                 "age_s": self._tick_age(symbol), "indicators": indicators,
                 "candles_1m": {"columns": ["time", "open", "high", "low", "close", "volume"],
                                "rows": candles}}
+
+    def _market_context(self, symbol: str) -> dict:
+        und = normalize_underlying(symbol)
+        sym = INDEX_QUOTE[und] if und else symbol
+        if not sym:
+            raise ToolRejected("symbol is required")
+        out = market_context.context_for(sym)
+        out["portfolio_risk"] = portfolio_risk.status()
+        return out
 
     def _positions(self) -> dict:
         out = []
@@ -797,6 +827,11 @@ class AITrader:
             reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
         if self._intraday_count() >= settings.ai_agent_max_open_positions:
             reject(f"max open intraday AI positions ({settings.ai_agent_max_open_positions}) reached")
+        pr = portfolio_risk.pre_entry(sym, side, qty, ltp, sl, kind="equity")
+        if not pr["ok"]:
+            reject(pr["reason"])
+        if qty > pr["max_quantity"]:
+            reject(f"quantity {qty} too large: {pr['reason']} → use at most {pr['max_quantity']}")
         ok, msg = order_guard.can_place(sym, AGENT, side)
         if not ok:
             reject(msg)
@@ -1006,6 +1041,12 @@ class AITrader:
             per_lot = entry_px * c.lot_size
             reject(f"premium ₹{entry_px * qty:,.0f} exceeds ₹{settings.ai_agent_max_option_premium:,.0f} "
                    f"(₹{per_lot:,.0f}/lot → max {int(settings.ai_agent_max_option_premium // per_lot)} lots)")
+        pr = portfolio_risk.pre_entry(c.tradingsymbol, "BUY", qty, entry_px, kind="option", unit_size=c.lot_size,
+                                      max_loss=(entry_px - round_tick(entry_px * (1 - slp / 100))) * qty, underlying=und)
+        if not pr["ok"]:
+            reject(pr["reason"])
+        if qty > pr["max_quantity"]:
+            reject(f"{lots} lots too many: {pr['reason']} → at most {pr['max_quantity'] // c.lot_size} lot(s)")
         ok, msg = order_guard.can_place(c.tradingsymbol, OPT_STRATEGY, "BUY")
         if not ok:
             reject(msg)
@@ -1144,6 +1185,11 @@ class AITrader:
                 reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
             if len(self._swing_entries()) >= settings.ai_agent_max_swing_positions:
                 reject(f"max swing positions ({settings.ai_agent_max_swing_positions}) reached")
+        pr = portfolio_risk.pre_entry(sym, "BUY", qty, ltp, sl, kind="equity")
+        if not pr["ok"]:
+            reject(pr["reason"])
+        if qty > pr["max_quantity"]:
+            reject(f"quantity {qty} too large: {pr['reason']} → use at most {pr['max_quantity']}")
         ok, msg = order_guard.can_place(sym, _strategy, "BUY")
         if not ok:
             reject(msg)
@@ -1513,6 +1559,12 @@ class AITrader:
             reject(f"max open intraday AI positions ({settings.ai_agent_max_open_positions}) reached")
         if order_guard.is_symbol_active_anywhere(und):
             reject(f"{und} already has an open option or future position")
+        pr = portfolio_risk.pre_entry(c.tradingsymbol, side, qty, entry_px, sl, kind="future", underlying=und,
+                                      unit_size=c.lot_size)
+        if not pr["ok"]:
+            reject(pr["reason"])
+        if qty > pr["max_quantity"]:
+            reject(f"{lots} lot(s) too many: {pr['reason']} → at most {pr['max_quantity'] // c.lot_size} lot(s)")
         ok, msg = order_guard.can_place(und, FUT_STRATEGY, side)
         if not ok:
             reject(msg)
@@ -1655,6 +1707,12 @@ class AITrader:
             per_lot = entry_px * c.lot_size
             reject(f"premium ₹{entry_px * qty:,.0f} exceeds ₹{settings.ai_agent_max_swing_put_premium:,.0f} "
                    f"(₹{per_lot:,.0f}/lot)")
+        pr = portfolio_risk.pre_entry(c.tradingsymbol, "BUY", qty, entry_px, kind="option", unit_size=c.lot_size,
+                                      max_loss=entry_px * slp / 100 * qty, underlying=und)
+        if not pr["ok"]:
+            reject(pr["reason"])
+        if qty > pr["max_quantity"]:
+            reject(f"{lots} lots too many: {pr['reason']} → at most {pr['max_quantity'] // c.lot_size} lot(s)")
         ok, msg = order_guard.can_place(und, SWING_OPT_STRATEGY, "BUY")
         if not ok:
             reject(msg)
@@ -1868,6 +1926,10 @@ class AITrader:
         margin = margin or max_loss * 1.25 + buy_px * qty
         if margin > settings.ai_agent_max_spread_margin:
             reject(f"margin ₹{margin:,.0f} exceeds ₹{settings.ai_agent_max_spread_margin:,.0f}")
+        pr = portfolio_risk.pre_entry(short.tradingsymbol, "SELL", qty, credit, kind="spread", max_loss=max_loss,
+                                      underlying=und, unit_size=short.lot_size)
+        if not pr["ok"]:
+            reject(pr["reason"])
         ok, msg = order_guard.can_place(und, SPREAD_STRATEGY, "SELL")
         if not ok:
             reject(msg)
@@ -2409,6 +2471,7 @@ class AITrader:
         data = {
             "alert": {k: ev[k] for k in ev if k != "mono"},
             "quote": quote,
+            "context": market_context.compact_for_alert(sym),
             "candles_1m_last10": {"columns": ["time", "open", "high", "low", "close", "volume"],
                                   "rows": candles},
             "your_positions": self._positions()["open"],

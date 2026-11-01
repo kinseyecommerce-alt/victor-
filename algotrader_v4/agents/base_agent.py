@@ -445,6 +445,18 @@ class BaseAgent(ABC):
         allowed, reason = performance.is_allowed(self.name)
         if not allowed:
             return                                   # auto-pruned: losing after costs
+        import portfolio_risk
+        stop_px = signal.get("stop_loss") or (ltp * (1 - signal.get("stop_loss_pct", settings.stop_loss_pct) / 100)
+                                              if action == "BUY" else ltp * (1 + signal.get("stop_loss_pct", settings.stop_loss_pct) / 100))
+        pr = portfolio_risk.pre_entry(sym, action, qty, ltp, stop_px,
+                                      kind="option" if exch == "NFO" else "equity",
+                                      underlying=signal.get("underlying"))
+        if not pr["ok"]:
+            logger.info("[{}] {} skipped by portfolio risk: {}", self.name, sym, pr["reason"])
+            return
+        if qty > pr["max_quantity"]:
+            logger.info("[{}] {} size {} → {} ({})", self.name, sym, qty, pr["max_quantity"], pr["reason"])
+            qty = pr["max_quantity"]
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
             return

@@ -1338,6 +1338,22 @@ def performance_snapshot():
     return performance.snapshot_today(ai_trader.cost_today_usd)
 
 
+@app.get("/risk/portfolio", tags=["Risk"])
+def risk_portfolio():
+    """Open-book VaR vs cap, portfolio heat, rupee risk per trade."""
+    import portfolio_risk
+    return portfolio_risk.status()
+
+
+@app.get("/market/context/{symbol}", tags=["Market Regime"])
+def market_context_view(symbol: str):
+    """Everything known about a symbol beyond its price (cache reads only)."""
+    import market_context
+    from options_resolver import normalize_underlying, INDEX_QUOTE
+    und = normalize_underlying(symbol)
+    return market_context.context_for(INDEX_QUOTE[und] if und else symbol.upper())
+
+
 @app.get("/market/trend-filter", tags=["Market Regime"])
 def trend_filter(refresh: bool = False):
     return market_filter.state(refresh=refresh)
