@@ -10,6 +10,8 @@ import BracketsTab from './components/tabs/BracketsTab'
 import RiskTab from './components/tabs/RiskTab'
 import AgentsTab from './components/tabs/AgentsTab'
 import SebiTab from './components/tabs/SebiTab'
+import AITab from './components/tabs/AITab'
+import Overview from './components/Overview'
 import { connectWS } from './ws/websocket'
 import { useStore } from './store'
 import type { TabId } from './types'
@@ -20,6 +22,7 @@ const TABS: { id: TabId; label: string; emoji: string }[] = [
   { id: 'brackets', label: 'Brackets',  emoji: '🎯' },
   { id: 'risk',     label: 'Risk',      emoji: '⚠️' },
   { id: 'agents',   label: 'Agents',    emoji: '🤖' },
+  { id: 'ai',       label: 'AI Trader', emoji: '🧠' },
   { id: 'sebi',     label: 'SEBI',      emoji: '🛡️' },
 ]
 
@@ -29,6 +32,7 @@ const TAB_COMPONENTS: Record<TabId, React.ComponentType> = {
   brackets:  BracketsTab,
   risk:      RiskTab,
   agents:    AgentsTab,
+  ai:        AITab,
   sebi:      SebiTab,
 }
 
@@ -55,7 +59,16 @@ function Toasts() {
   )
 }
 
+type View = 'overview' | 'trading'
+
 export default function App() {
+  const [view, setViewState] = useState<View>(() => {
+    try { return (localStorage.getItem('view') as View) || 'overview' } catch { return 'overview' }
+  })
+  const setView = (v: View) => {
+    setViewState(v)
+    try { localStorage.setItem('view', v) } catch { /* private mode */ }
+  }
   const [activeTab, setActiveTab] = useState<TabId>('positions')
   const { riskStatus, positions } = useStore()
   const TabComponent = TAB_COMPONENTS[activeTab]
@@ -71,9 +84,25 @@ export default function App() {
   const openPositionCount = positions.filter(p => p.quantity !== 0).length
   const isHalted = riskStatus?.is_halted
 
+  if (view === 'overview') {
+    return (
+      <div className="h-screen overflow-y-auto bg-[#070b16]">
+        <Overview onOpenTrading={() => setView('trading')} />
+        <Toasts />
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-screen bg-slate-50 overflow-hidden">
       <Header />
+      <button
+        onClick={() => setView('overview')}
+        data-testid="open-overview"
+        className="fixed bottom-4 left-4 z-40 rounded-full bg-slate-900 text-white text-xs font-medium px-4 py-2 shadow-lg hover:bg-slate-800"
+      >
+        ✨ Overview
+      </button>
 
       {isHalted && (
         <div className="bg-red-600 text-white text-xs text-center py-1.5 font-medium shrink-0">

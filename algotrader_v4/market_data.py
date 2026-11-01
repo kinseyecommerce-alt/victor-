@@ -285,22 +285,43 @@ from ist_clock import is_market_open  # noqa: E402  (IST-aware; replaces datetim
 class PaperTickSimulator:
     def __init__(self) -> None:
         self._prices: dict[str, float] = {}
+        self._regime: dict[str, tuple[float, int]] = {}     # demo: symbol → (drift, ticks left)
         self._yf = YFinanceClient()
 
     def seed(self, symbols: list[str], exchanges: dict[str, str]) -> None:
+        from config import settings
         for sym in symbols:
             exch = exchanges.get(sym, "NSE")
             price = self._yf.current_price(sym, exch)
+            if price <= 0 and settings.demo_active:
+                price = 200.0 + (sum(map(ord, sym)) * 37) % 3800     # varied, stable per symbol
             self._prices[sym] = price if price > 0 else 1000.0
+            self._prices[sym + "__base__"] = self._prices[sym]     # reference for change %
             logger.info("Paper seed {} @ ₹{:.2f}", sym, self._prices[sym])
 
+    def set_price(self, symbol: str, price: float) -> None:
+        """Seed a symbol at a known price (e.g. an option leg yfinance can't quote)."""
+        self._prices[symbol] = max(price, 1.0)
+        self._prices[symbol + "__base__"] = self._prices[symbol]
+
     def next_tick(self, symbol: str) -> Quote:
+        from config import settings
         price = self._prices.get(symbol, 1000.0)
-        shock = random.gauss(0, 0.00008)
+        if settings.demo_active:
+            # Trending bursts: each symbol drifts one way for a while, then re-rolls,
+            # with volume surging on the bigger moves — enough for patterns to fire
+            drift, left = self._regime.get(symbol, (0.0, 0))
+            if left <= 0:
+                drift, left = random.choice((-1, 0, 0, 1)) * random.uniform(0.0001, 0.0004), random.randint(60, 240)
+            self._regime[symbol] = (drift, left - 1)
+            shock = drift + random.gauss(0, 0.0005)
+            vol_tick = int(random.randint(300, 2500) * (1 + 40 * abs(shock)))
+        else:
+            shock = random.gauss(0, 0.00008)
+            vol_tick = random.randint(100, 2000)
         price = max(price * math.exp(shock), 1.0)
         self._prices[symbol] = price
         spread   = round(price * 0.0002, 2)
-        vol_tick = random.randint(100, 2000)
         pct      = round((price / self._prices.get(symbol + "__base__", price) - 1) * 100, 2)
         return Quote(
             symbol=symbol, ltp=round(price, 2),

@@ -25,9 +25,93 @@ from atomic_bracket import atomic_bracket_engine
 
 
 # ── TSL callback registry ────────────────────────────────────────────────────
-# Maps main order_id → {sl_order_id, product, exchange}
+# Maps entry order_id → {sl_order_id, product, exchange, symbol, guard_symbol, agent, side}
+#   symbol       — the traded instrument (equity, or the option leg for F&O)
+#   guard_symbol — the key order_guard tracks (the underlying for F&O)
+# Options add:  sl_type="SL" + sl_buffer_pct (stop-loss LIMIT, not SL-M, which
+#   brokers reject on options) and exit_limit_buffer_pct (exits as marketable LIMIT)
+# Delivery (CNC) swing positions add: gtt_id + gtt_buffer_pct — the stop is a GTT at
+#   Zerodha instead of a day SL order, so it survives the close and server restarts
 _tsl_sl_orders: dict[str, dict] = {}
 _tsl_callbacks_installed: bool = False
+
+
+def sl_limit_price(trigger: float, side: str, buffer_pct: float) -> float:
+    """Limit price for a stop-loss LIMIT order protecting a `side` position: worse than the
+    trigger by buffer_pct so it still fills on a fast move."""
+    from options_resolver import round_tick
+    return round_tick(trigger * (1 - buffer_pct / 100) if side == "BUY" else trigger * (1 + buffer_pct / 100))
+
+
+def _exit_order(entry: dict, symbol: str, side: str, fallback_px: float = 0.0) -> dict:
+    """MARKET exit, or a marketable LIMIT for instruments that need one (options).
+    Reference price: last tick → live Kite quote → fallback_px (the position's own price)."""
+    buf = entry.get("exit_limit_buffer_pct")
+    if not buf:
+        return {"order_type": "MARKET"}
+    from tick_engine import tick_engine
+    from options_resolver import round_tick
+    ref = 0.0
+    tick, _ = tick_engine.latest(symbol)
+    if tick and tick.ltp > 0:
+        ref = (tick.bid or tick.ltp) if side == "BUY" else (tick.ask or tick.ltp)
+    if ref <= 0:
+        try:
+            q = kite_client.quote_kite([f"{entry.get('exchange', 'NFO')}:{symbol}"])
+            ref = float(next(iter(q.values()), {}).get("last_price") or 0)
+        except Exception:
+            ref = 0.0
+    ref = ref or fallback_px
+    if ref <= 0:
+        return {"order_type": "MARKET"}
+    px = ref * (1 - buf / 100) if side == "BUY" else ref * (1 + buf / 100)
+    return {"order_type": "LIMIT", "price": round_tick(max(px, 0.05))}
+
+
+def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
+                   pnl: float, tag: str, strategy: str) -> None:
+    """Fully close a tracked position: cancel its resting SL-M, exit at market,
+    and release every piece of bookkeeping. Safe to call once per position."""
+    entry = _tsl_sl_orders.pop(entry_oid, None) or {}
+    tracked = trailing_sl_engine._positions.get(entry_oid)
+    fallback_px = tracked.entry_price if tracked else 0.0
+    gtt_id = entry.get("gtt_id")
+    if gtt_id:
+        # Same reason as the SL-M below: a GTT left behind would sell holdings later
+        try:
+            kite_client.delete_gtt(gtt_id)
+        except Exception as exc:
+            logger.error("[{}] could not delete GTT {} for {}: {}", strategy, gtt_id, symbol, exc)
+    sl_oid = entry.get("sl_order_id")
+    if sl_oid:
+        # Must go before the exit: a leftover SL-M would later fire on a flat
+        # position and open an unintended reverse position
+        try:
+            kite_client.cancel_order(sl_oid)
+        except Exception as exc:
+            logger.error("[{}] could not cancel SL-M {} for {}: {}", strategy, sl_oid, symbol, exc)
+    try:
+        kite_client.place_order(
+            tradingsymbol=symbol,
+            exchange=entry.get("exchange", "NSE"),
+            transaction_type="SELL" if side == "BUY" else "BUY",
+            quantity=quantity,
+            product=entry.get("product", "MIS"),
+            tag=tag,
+            **_exit_order(entry, symbol, side, fallback_px),
+        )
+    except Exception as exc:
+        logger.critical("[{}] exit order for {} qty={} FAILED: {}", strategy, symbol, quantity, exc)
+    order_guard.release_order(entry.get("guard_symbol", symbol), strategy, side, pnl)
+    risk_manager.record_trade(pnl)
+    risk_manager.position_closed()
+    trailing_sl_engine.deregister(entry_oid)
+    try:
+        from performance import performance
+        performance.record_trade(strategy, symbol, side, quantity, fallback_px, pnl,
+                                 entry.get("exchange", "NSE"), entry.get("product", "MIS"), note=tag)
+    except Exception as exc:
+        logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
 
 
 def _setup_tsl_callbacks() -> None:
@@ -39,11 +123,26 @@ def _setup_tsl_callbacks() -> None:
 
     async def _on_sl_moved(pos, old_sl: float, move_type: str) -> None:
         entry = _tsl_sl_orders.get(pos.order_id)
-        if not entry:
+        if entry and entry.get("gtt_id"):
+            off = entry.get("gtt_trigger_offset_pct", 0.0) / 100
+            trigger = round(pos.current_sl * (1 - off if pos.side == "BUY" else 1 + off), 2)
+            try:
+                kite_client.modify_gtt_stop(
+                    entry["gtt_id"], pos.symbol, entry.get("exchange", "NSE"), pos.quantity,
+                    trigger, sl_limit_price(trigger, pos.side, entry.get("gtt_buffer_pct", 1.0)),
+                    pos.best_price or pos.entry_price, product=entry.get("product", "CNC"))
+            except Exception as exc:
+                logger.error("[{}] GTT {} update for {} failed: {} — software stop still active",
+                             pos.strategy, entry["gtt_id"], pos.symbol, exc)
+            return
+        if not entry or not entry.get("sl_order_id"):
             return
         sl_oid = entry["sl_order_id"]
+        sl_type = entry.get("sl_type", "SL-M")
+        limit = (sl_limit_price(pos.current_sl, pos.side, entry.get("sl_buffer_pct", 5.0))
+                 if sl_type == "SL" else 0.0)
         try:
-            kite_client.modify_order(order_id=sl_oid, trigger_price=pos.current_sl)
+            kite_client.modify_order(order_id=sl_oid, trigger_price=pos.current_sl, price=limit)
         except Exception:
             try:
                 kite_client.cancel_order(sl_oid)
@@ -53,48 +152,82 @@ def _setup_tsl_callbacks() -> None:
                 tradingsymbol=pos.symbol,
                 exchange=entry.get("exchange", "NSE"),
                 transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                quantity=pos.quantity, order_type="SL-M",
+                quantity=pos.quantity, order_type=sl_type,
                 product=entry.get("product", "MIS"),
-                trigger_price=pos.current_sl,
+                trigger_price=pos.current_sl, price=limit,
                 tag=f"TSL-{pos.strategy}",
             )
             entry["sl_order_id"] = new_sl_oid
 
     async def _on_sl_hit(pos, ltp: float, pnl: float) -> None:
-        entry = _tsl_sl_orders.pop(pos.order_id, None)
-        if entry and entry.get("sl_order_id"):
-            try:
-                kite_client.cancel_order(entry["sl_order_id"])
-            except Exception:
-                pass
-        kite_client.place_order(
-            tradingsymbol=pos.symbol,
-            exchange=entry.get("exchange", "NSE") if entry else "NSE",
-            transaction_type="SELL" if pos.side == "BUY" else "BUY",
-            quantity=pos.quantity, order_type="MARKET",
-            product=entry.get("product", "MIS") if entry else "MIS",
-            tag=f"TSL-HIT-{pos.strategy}",
-        )
-        order_guard.release_order(pos.symbol, pos.strategy, pos.side, pnl)
-        risk_manager.record_trade(pnl)
-        risk_manager.position_closed()
-        trailing_sl_engine.deregister(pos.order_id)
+        _close_tracked(pos.order_id, pos.symbol, pos.side, pos.quantity, pnl,
+                       f"TSL-HIT-{pos.strategy}", pos.strategy)
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
         if level == 2:
-            entry = _tsl_sl_orders.pop(pos.order_id, None)
-            kite_client.place_order(
-                tradingsymbol=pos.symbol,
-                exchange=entry.get("exchange", "NSE") if entry else "NSE",
-                transaction_type="SELL" if pos.side == "BUY" else "BUY",
-                quantity=pos.quantity, order_type="MARKET",
-                product=entry.get("product", "MIS") if entry else "MIS",
-                tag=f"TSL-T{level}-{pos.strategy}",
-            )
+            pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+            _close_tracked(pos.order_id, pos.symbol, pos.side, pos.quantity, pnl,
+                           f"TSL-T{level}-{pos.strategy}", pos.strategy)
 
     trailing_sl_engine.on_sl_moved   = _on_sl_moved
     trailing_sl_engine.on_sl_hit     = _on_sl_hit
     trailing_sl_engine.on_target_hit = _on_target_hit
+
+
+# ── Entry protection ─────────────────────────────────────────────────────────
+SL_PLACE_RETRIES = 3
+SL_RETRY_DELAY_S = 0.2
+
+
+async def place_sl_with_retry(
+    agent: str, symbol: str, exchange: str, side: str,
+    quantity: int, product: str, trigger_price: float,
+    order_type: str = "SL-M", limit_buffer_pct: float = 5.0,
+) -> Optional[str]:
+    """Place the stop for a just-entered position — SL-M, or a stop-loss LIMIT ("SL") for
+    options. Returns the SL order id, or None if every attempt failed."""
+    price = sl_limit_price(trigger_price, side, limit_buffer_pct) if order_type == "SL" else 0.0
+    for attempt in range(1, SL_PLACE_RETRIES + 1):
+        try:
+            return kite_client.place_order(
+                tradingsymbol=symbol, exchange=exchange,
+                transaction_type="SELL" if side == "BUY" else "BUY",
+                quantity=quantity, order_type=order_type, product=product,
+                trigger_price=trigger_price, price=price, tag=f"Agent-{agent}-SL",
+            )
+        except Exception as exc:
+            logger.error("[{}] SL-M for {} failed (attempt {}/{}): {}",
+                         agent, symbol, attempt, SL_PLACE_RETRIES, exc)
+            if attempt < SL_PLACE_RETRIES:
+                await asyncio.sleep(SL_RETRY_DELAY_S)
+    return None
+
+
+async def flatten_unprotected(
+    agent: str, symbol: str, exchange: str, side: str,
+    quantity: int, product: str, exit_limit_price: float = 0.0,
+) -> bool:
+    """Close a position whose SL-M could not be placed. Returns True if the exit order went through.
+    exit_limit_price > 0 exits with a LIMIT order (options) instead of MARKET."""
+    try:
+        kite_client.place_order(
+            tradingsymbol=symbol, exchange=exchange,
+            transaction_type="SELL" if side == "BUY" else "BUY",
+            quantity=quantity, product=product,
+            order_type="LIMIT" if exit_limit_price > 0 else "MARKET", price=exit_limit_price,
+            tag=f"Agent-{agent}-NOSL-EXIT",
+        )
+        logger.critical("[{}] SL-M rejected for {} — position closed at market", agent, symbol)
+        await send_telegram(f"⚠️ <b>[{agent.upper()}]</b> SL-M rejected for {symbol} — "
+                            f"entry closed at market")
+        return True
+    except Exception as exc:
+        logger.critical("[{}] SL-M AND exit both failed for {} qty={}: {} — "
+                        "position is OPEN without exchange SL, software TSL only",
+                        agent, symbol, quantity, exc)
+        await send_telegram(f"🚨 <b>[{agent.upper()}]</b> {symbol} qty={quantity} is OPEN "
+                            f"with NO exchange stop-loss. Check Kite now.")
+        return False
 
 
 @dataclass
@@ -136,6 +269,9 @@ class BaseAgent(ABC):
         self._queue: Optional[asyncio.Queue] = None
         self._task:  Optional[asyncio.Task]  = None
         self._approved: set[str] = set()
+        # Instruments this agent holds but doesn't trade signals on (F&O option legs):
+        # their ticks only drive exits
+        self._exit_only: set[str] = set()
 
     @abstractmethod
     def evaluate_tick(self, snap: MarketSnapshot) -> tuple[str, Optional[dict]]:
@@ -213,6 +349,14 @@ class BaseAgent(ABC):
             except asyncio.CancelledError:
                 break
 
+            if snap.symbol in self._exit_only:
+                try:
+                    await trailing_sl_engine.on_tick(
+                        snap.symbol, snap.tick.ltp, snap.indicators.atr_14)
+                    await self._check_exits_on_tick(snap)
+                except Exception as exc:
+                    logger.error("[{}] exit tick error {}: {}", self.name, snap.symbol, exc)
+                continue
             if snap.symbol not in self._approved:
                 continue
             if len(snap.candles_1min) < self.min_candles_1min:
@@ -297,6 +441,10 @@ class BaseAgent(ABC):
         if settings.use_kelly_sizing and size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
 
+        from performance import performance
+        allowed, reason = performance.is_allowed(self.name)
+        if not allowed:
+            return                                   # auto-pruned: losing after costs
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
             return
@@ -320,13 +468,23 @@ class BaseAgent(ABC):
             logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
             return
 
+        product = signal.get("product", self.product)
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange=exch,
             transaction_type=action, quantity=qty,
-            order_type="MARKET", product=signal.get("product", self.product),
+            order_type="MARKET", product=product,
             tag=f"Agent-{self.name}",
         )
         sebi_compliance.record_order_id(self.name, sym, order_id)
+
+        # Protective SL-M goes in immediately; no position is kept without one
+        sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
+        sl_order_id = await place_sl_with_retry(
+            self.name, sym, exch, action, qty, product, sl)
+        if sl_order_id is None and await flatten_unprotected(
+                self.name, sym, exch, action, qty, product):
+            return
+
         order_guard.register_order(sym, self.name, action, order_id)
         risk_manager.position_opened()
         self.state.trades_today  += 1
@@ -337,27 +495,24 @@ class BaseAgent(ABC):
         _setup_tsl_callbacks()
 
         # Register with trailing SL engine (monitors every tick)
-        trailing_sl_engine.register(
+        tsl_pos = trailing_sl_engine.register(
             symbol=sym, strategy=self.name, side=action,
             entry_price=ltp, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
         )
+        # Start the software stop where the exchange stop actually is. Otherwise the engine
+        # tracks its own default % stop, and its first trail move could LOOSEN the real stop.
+        tsl_pos.current_sl = round(sl, 2)
 
-        sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
-        product = signal.get("product", self.product)
-        sl_order_id = kite_client.place_order(
-            tradingsymbol=sym, exchange=exch,
-            transaction_type="SELL" if action == "BUY" else "BUY",
-            quantity=qty, order_type="SL-M",
-            product=product,
-            trigger_price=sl, tag=f"Agent-{self.name}-SL",
-        )
-
-        # Register SL-M order so TSL callbacks can modify/cancel it
+        # Track the position so every exit path can cancel its SL-M and release it
         _tsl_sl_orders[order_id] = {
-            "sl_order_id": sl_order_id,
-            "product":     product,
-            "exchange":    exch,
+            "sl_order_id":  sl_order_id,
+            "product":      product,
+            "exchange":     exch,
+            "symbol":       sym,
+            "guard_symbol": sym,
+            "agent":        self.name,
+            "side":         action,
         }
 
         ind = snap.indicators
@@ -386,10 +541,14 @@ class BaseAgent(ABC):
     # ── Exit ──────────────────────────────────────────────────────────
 
     async def _check_exits_on_tick(self, snap: MarketSnapshot) -> None:
-        # Symbols managed by atomic bracket are handled by TSL engine callbacks
-        # Only handle exits for positions NOT in atomic bracket
+        """Strategy-rule exits (should_exit_position) for positions this agent opened."""
         sym = snap.symbol
         ind = snap.indicators
+        tracked = next(((oid, e) for oid, e in _tsl_sl_orders.items()
+                        if e.get("symbol") == sym and e.get("agent") == self.name), None)
+        if tracked is None:
+            return   # not ours — another agent's or a manual position
+        entry_oid, entry = tracked
         for pos in kite_client.positions().get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
                 continue
@@ -398,17 +557,13 @@ class BaseAgent(ABC):
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
             qty  = abs(pos["quantity"])
-            pnl  = pos.get("pnl", 0)
-            oid  = kite_client.place_order(
-                tradingsymbol=sym, exchange=pos.get("exchange", "NSE"),
-                transaction_type=side, quantity=qty, order_type="MARKET",
-                product=pos.get("product", self.product), tag=f"Agent-{self.name}-EXIT",
-            )
-            order_guard.release_order(sym, self.name, "BUY" if side == "SELL" else "SELL", pnl)
-            risk_manager.record_trade(pnl)
-            risk_manager.position_closed()
+            if settings.trading_mode == "LIVE" and "pnl" in pos:
+                pnl = pos["pnl"]
+            else:
+                pnl = (snap.tick.ltp - pos.get("average_price", 0.0)) * pos["quantity"]
+            _close_tracked(entry_oid, sym, entry.get("side", "BUY" if side == "SELL" else "SELL"),
+                           qty, pnl, f"Agent-{self.name}-EXIT", self.name)
             self.state.pnl_today += pnl
-            trailing_sl_engine.deregister(oid)
             _dot = "\U0001f534" if pnl < 0 else "\U0001f7e2"
             await send_telegram(
                 f"{_dot} <b>[{self.name.upper()}]</b> EXIT {sym}\n"

@@ -1,94 +1,106 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────────────
-# AlgoTrader Pro — one-shot bootstrap for a fresh Ubuntu 22.04 EC2 instance
+# AlgoTrader Pro — one-shot setup for a fresh Ubuntu 22.04 / 24.04 server (EC2, any VPS)
 #
-# Usage (run as ubuntu / root after SSH):
-#   curl -sO https://raw.githubusercontent.com/.../deploy/setup-ec2.sh
-#   chmod +x setup-ec2.sh
-#   sudo ./setup-ec2.sh yourdomain.com git@github.com:spbtextile/JAG.git
+#   sudo bash setup-ec2.sh <domain-or-public-ip> [repo-url] [branch]
 #
-# Or after cloning the repo:
-#   sudo bash algotrader_v4/deploy/setup-ec2.sh yourdomain.com
+# What it does: system packages, Python venv, Node + dashboard build, a .env with freshly
+# generated secrets (PAPER mode on real Kite prices), systemd service (auto-restart),
+# nginx with HTTPS (Let's Encrypt for a domain, self-signed for a bare IP), firewall,
+# log rotation. Idempotent: run it again to update.
 #
-# Args:
-#   $1 — domain (or EC2 public IP if no domain — TLS will be skipped)
-#   $2 — git repo URL (optional, only needed for fresh clone)
+# It never asks for your Kite / Anthropic keys: enter them in the dashboard
+# (Settings → API Keys); they are stored encrypted on this server.
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-DOMAIN="${1:-}"
-REPO_URL="${2:-}"
+HOST="${1:-}"
+REPO_URL="${2:-https://github.com/kinseyecommerce-alt/victor-.git}"
+BRANCH="${3:-}"
 APP_USER="algotrader"
-APP_DIR="/opt/algotrader"
-BRANCH="main"
-PYTHON="python3.11"
+APP_DIR="/opt/algotrader"          # the algotrader_v4 folder of the repo
+REPO_DIR="/opt/algotrader-repo"
+LOG_DIR="/var/log/algotrader"
 
-# ── 0. Sanity ─────────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || { echo "Run as root (sudo)."; exit 1; }
-[[ -n "$DOMAIN" ]] || { echo "Usage: $0 <domain-or-ip> [repo-url]"; exit 1; }
-
+[[ -n "$HOST" ]] || { echo "Usage: $0 <domain-or-ip> [repo-url] [branch]"; exit 1; }
 IS_DOMAIN=false
-[[ "$DOMAIN" =~ ^[a-zA-Z].*\.[a-zA-Z]{2,}$ ]] && IS_DOMAIN=true
+[[ "$HOST" =~ ^[a-zA-Z].*\.[a-zA-Z]{2,}$ ]] && IS_DOMAIN=true
+export DEBIAN_FRONTEND=noninteractive
 
-echo "▶ Domain/IP : $DOMAIN"
-echo "▶ TLS       : $IS_DOMAIN"
-echo "▶ App dir   : $APP_DIR"
+echo "▶ Host: $HOST  (TLS: $($IS_DOMAIN && echo "Let's Encrypt" || echo "self-signed"))"
 
-# ── 1. System packages ────────────────────────────────────────────────────────
+# ── 1. Packages ───────────────────────────────────────────────────────────────
 apt-get update -qq
-apt-get install -y --no-install-recommends \
-    git python3.11 python3.11-venv python3-pip \
-    nginx ufw logrotate curl wget gnupg2 ca-certificates \
-    build-essential libssl-dev libffi-dev python3.11-dev
-
+apt-get install -y --no-install-recommends git python3 python3-venv python3-dev python3-pip \
+    build-essential libssl-dev libffi-dev nginx ufw logrotate curl ca-certificates gnupg openssl
+if ! command -v node >/dev/null || [[ "$(node -v | cut -c2-3)" -lt 20 ]]; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
+    apt-get install -y nodejs
+fi
 $IS_DOMAIN && apt-get install -y --no-install-recommends certbot python3-certbot-nginx
 
-# ── 2. App user ───────────────────────────────────────────────────────────────
+# ── 2. App user + code ────────────────────────────────────────────────────────
 id -u "$APP_USER" &>/dev/null || useradd -m -s /bin/bash "$APP_USER"
-
-# ── 3. Clone / update repo ────────────────────────────────────────────────────
-if [[ -d "$APP_DIR/.git" ]]; then
-    echo "▶ Pulling latest…"
-    sudo -u "$APP_USER" git -C "$APP_DIR" pull origin "$BRANCH"
-elif [[ -n "$REPO_URL" ]]; then
-    echo "▶ Cloning repo…"
-    git clone --depth=1 -b "$BRANCH" "$REPO_URL" "$APP_DIR"
-    chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
+if [[ -d "$REPO_DIR/.git" ]]; then
+    sudo -u "$APP_USER" git -C "$REPO_DIR" fetch --quiet origin
+    [[ -n "$BRANCH" ]] || BRANCH="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)"
+    sudo -u "$APP_USER" git -C "$REPO_DIR" checkout --quiet "$BRANCH"
+    sudo -u "$APP_USER" git -C "$REPO_DIR" pull --quiet --ff-only origin "$BRANCH"
 else
-    # Running from inside the repo — symlink to /opt
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    SRC_DIR="$(dirname "$SCRIPT_DIR")"
-    echo "▶ Linking $SRC_DIR → $APP_DIR"
-    ln -sfn "$SRC_DIR" "$APP_DIR"
-    chown -R "$APP_USER":"$APP_USER" "$(readlink -f "$APP_DIR")"
+    if [[ -z "$BRANCH" ]]; then       # the repository's default branch
+        BRANCH="$(git ls-remote --symref "$REPO_URL" HEAD | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2}')"
+    fi
+    sudo -u "$APP_USER" git clone --quiet --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
 fi
+ln -sfn "$REPO_DIR/algotrader_v4" "$APP_DIR"
+echo "▶ Code: $REPO_DIR @ $BRANCH"
 
-# ── 4. Python venv + deps ─────────────────────────────────────────────────────
+# ── 3. Python ─────────────────────────────────────────────────────────────────
 VENV="$APP_DIR/venv"
-sudo -u "$APP_USER" $PYTHON -m venv "$VENV"
+[[ -d "$VENV" ]] || sudo -u "$APP_USER" python3 -m venv "$VENV"
 sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet --upgrade pip wheel
 sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
+sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet uvloop httptools
 
-# ── 5. .env ───────────────────────────────────────────────────────────────────
+# ── 4. Dashboard build ────────────────────────────────────────────────────────
+sudo -u "$APP_USER" bash -c "cd '$APP_DIR/frontend' && npm ci --silent --no-audit --no-fund && npm run build --silent"
+
+# ── 5. .env with generated secrets (first run only) ──────────────────────────
 ENV_FILE="$APP_DIR/.env"
 if [[ ! -f "$ENV_FILE" ]]; then
-    cp "$APP_DIR/.env.example" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
-    chown "$APP_USER":"$APP_USER" "$ENV_FILE"
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ACTION REQUIRED: fill in secrets"
-    echo "  sudo nano $ENV_FILE"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    gen() { python3 -c "import secrets; print(secrets.token_urlsafe(32))"; }
+    ADMIN_PW="$(python3 -c "import secrets; print(secrets.token_urlsafe(12))")"
+    ADMIN_HASH="$(sudo -u "$APP_USER" "$VENV/bin/python" -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('$ADMIN_PW'))")"
+    cat > "$ENV_FILE" <<ENV
+# Generated by setup-ec2.sh on $(date -u +%F). Kite/Anthropic keys go in the dashboard, not here.
+TRADING_MODE=PAPER
+PAPER_DATA_SOURCE=KITE
+DEMO_MODE=false
+API_KEY=$(gen)
+JWT_SECRET_KEY=$(gen)
+KILL_SWITCH_RESET_SECRET=$(gen)
+SECRETS_MASTER_KEY=$(sudo -u "$APP_USER" "$VENV/bin/python" -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD_HASH=$ADMIN_HASH
+AI_AGENT_ALLOW_LIVE=false
+AI_AGENT_FUTURES_ENABLED=false
+AI_AGENT_OPTION_SELLING_ENABLED=false
+ENV
+    chmod 600 "$ENV_FILE"; chown "$APP_USER":"$APP_USER" "$ENV_FILE"
+    install -m 600 -o root -g root /dev/null /root/algotrader-first-login.txt
+    cat > /root/algotrader-first-login.txt <<CREDS
+Dashboard: https://$HOST/
+Admin login (Trading view → ⚙ Settings → App Login to change):  admin / $ADMIN_PW
+API key (Settings → Connection → X-API-Key):  $(grep ^API_KEY= "$ENV_FILE" | cut -d= -f2)
+CREDS
+    FIRST_RUN=true
 else
-    echo "▶ .env already present — skipping"
+    FIRST_RUN=false
 fi
+mkdir -p "$LOG_DIR" "$APP_DIR/data"; chown -R "$APP_USER":"$APP_USER" "$LOG_DIR" "$APP_DIR/data"
 
-# ── 6. Log directory ──────────────────────────────────────────────────────────
-mkdir -p /var/log/algotrader
-chown "$APP_USER":"$APP_USER" /var/log/algotrader
-
-# ── 7. systemd service ────────────────────────────────────────────────────────
+# ── 6. systemd ────────────────────────────────────────────────────────────────
 cat > /etc/systemd/system/algotrader.service <<EOF
 [Unit]
 Description=AlgoTrader Pro
@@ -100,39 +112,50 @@ Type=simple
 User=$APP_USER
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$VENV/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --loop uvloop --http httptools --log-level warning --access-log --use-colors
+# One worker only: positions, kill switch and the tick engine live in memory.
+ExecStart=$VENV/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --loop uvloop --http httptools --log-level warning --access-log --no-use-colors
 Restart=always
 RestartSec=5
-StandardOutput=append:/var/log/algotrader/app.log
-StandardError=append:/var/log/algotrader/app.log
-# Give extra time for market-open startup
-TimeoutStartSec=60
-# Ensure clean shutdown (square-off triggers on SIGTERM)
+StandardOutput=append:$LOG_DIR/app.log
+StandardError=append:$LOG_DIR/app.log
+TimeoutStartSec=90
 TimeoutStopSec=30
 KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
 EOF
+systemctl daemon-reload && systemctl enable --quiet algotrader
 
-systemctl daemon-reload
-systemctl enable algotrader
-
-# ── 8. nginx ──────────────────────────────────────────────────────────────────
+# ── 7. nginx (HTTPS) ──────────────────────────────────────────────────────────
+CERT=/etc/ssl/algotrader
+if ! $IS_DOMAIN; then
+    mkdir -p "$CERT"
+    [[ -f "$CERT/cert.pem" ]] || openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -subj "/CN=$HOST" \
+        -keyout "$CERT/key.pem" -out "$CERT/cert.pem" 2>/dev/null
+    SSL_LINES="ssl_certificate $CERT/cert.pem;
+    ssl_certificate_key $CERT/key.pem;"
+else
+    SSL_LINES="# certbot fills these in"
+fi
 cat > /etc/nginx/sites-available/algotrader <<NGINX
-upstream algotrader_app {
-    server 127.0.0.1:8000;
-    keepalive 32;
-}
+upstream algotrader_app { server 127.0.0.1:8000; keepalive 32; }
 
 server {
     listen 80;
-    server_name $DOMAIN;
+    server_name $HOST;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://\$host\$request_uri; }
+}
 
-    # Health check bypasses auth (for load balancers / uptime monitors)
-    location /health {
-        proxy_pass http://algotrader_app;
-    }
+server {
+    listen 443 ssl http2;
+    server_name $HOST;
+    $SSL_LINES
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+    gzip on; gzip_types text/plain application/json application/javascript text/css;
+    client_max_body_size 2m;
 
     location / {
         proxy_pass         http://algotrader_app;
@@ -143,65 +166,51 @@ server {
         proxy_set_header   X-Real-IP \$remote_addr;
         proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 300s;  # long-poll / WebSocket
+        proxy_read_timeout 300s;
+        proxy_buffering    off;
     }
 }
 NGINX
-
 ln -sfn /etc/nginx/sites-available/algotrader /etc/nginx/sites-enabled/algotrader
 rm -f /etc/nginx/sites-enabled/default
-nginx -t && systemctl reload nginx
-
-# ── 9. TLS with Let's Encrypt ─────────────────────────────────────────────────
-if $IS_DOMAIN; then
-    echo "▶ Requesting TLS certificate for $DOMAIN…"
-    certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos \
-        --email "admin@$DOMAIN" --redirect
-    systemctl enable certbot.timer
+if $IS_DOMAIN && [[ ! -d /etc/letsencrypt/live/$HOST ]]; then
+    # serve HTTP first so certbot can answer the challenge
+    sed -i '/listen 443/,$d' /etc/nginx/sites-available/algotrader
+    nginx -t -q && systemctl reload nginx
+    certbot --nginx -d "$HOST" --non-interactive --agree-tos --register-unsafely-without-email --redirect
+    systemctl enable --quiet certbot.timer
 fi
+nginx -t -q && systemctl reload nginx
 
-# ── 10. UFW firewall ──────────────────────────────────────────────────────────
-ufw --force reset
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow ssh
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
-echo "▶ UFW rules applied"
-
-# ── 11. Log rotation ──────────────────────────────────────────────────────────
+# ── 8. Firewall + logs ────────────────────────────────────────────────────────
+ufw --force reset >/dev/null; ufw default deny incoming >/dev/null; ufw default allow outgoing >/dev/null
+ufw allow ssh >/dev/null; ufw allow 80/tcp >/dev/null; ufw allow 443/tcp >/dev/null; ufw --force enable >/dev/null
 cat > /etc/logrotate.d/algotrader <<LR
-/var/log/algotrader/*.log {
-    daily
-    rotate 14
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-}
+$LOG_DIR/*.log { daily
+ rotate 14
+ compress
+ delaycompress
+ missingok
+ notifempty
+ copytruncate }
 LR
 
-# ── 12. Install uvloop + httptools for faster event loop ──────────────────────
-sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet uvloop httptools 2>/dev/null || true
+# ── 9. Start ──────────────────────────────────────────────────────────────────
+systemctl restart algotrader
+for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8000/health >/dev/null && break; sleep 2; done
+curl -sf http://127.0.0.1:8000/health >/dev/null || { echo "✗ app did not start — tail $LOG_DIR/app.log"; tail -40 "$LOG_DIR/app.log"; exit 1; }
 
-# ── 13. Start ─────────────────────────────────────────────────────────────────
-systemctl start algotrader
-sleep 3
-systemctl is-active algotrader && echo "▶ algotrader.service is RUNNING" \
-                                || { echo "✗ Service failed — check logs:"; journalctl -u algotrader -n 30; exit 1; }
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  AlgoTrader Pro is live!"
-$IS_DOMAIN && echo "  URL  : https://$DOMAIN" || echo "  URL  : http://$DOMAIN"
-echo "  Login: https://$DOMAIN/login"
-echo "  Logs : sudo journalctl -fu algotrader"
-echo "         tail -f /var/log/algotrader/app.log"
-echo ""
-echo "  Next steps:"
-echo "  1. Edit $ENV_FILE — set TRADING_MODE=LIVE and all secrets"
-echo "  2. Set Kite redirect URL → https://$DOMAIN/auth/kite/callback"
-echo "  3. sudo systemctl restart algotrader"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  AlgoTrader Pro is running:  https://$HOST/"
+$IS_DOMAIN || echo "  (self-signed certificate: the browser will warn once — accept it)"
+$FIRST_RUN && echo "  First login details:  sudo cat /root/algotrader-first-login.txt"
+echo
+echo "  Next:"
+echo "  1. Kite developer console → redirect URL:  https://$HOST/auth/kite/callback"
+echo "     and whitelist this server's IP."
+echo "  2. Dashboard → Trading view → ⚙ Settings → API Keys: enter Kite + Anthropic keys,"
+echo "     then 'Log in with Zerodha'."
+echo "  3. Mode is PAPER on real prices. Run 2–4 weeks before touching TRADING_MODE."
+echo "  Logs: tail -f $LOG_DIR/app.log     Update: sudo bash $APP_DIR/deploy/update.sh"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

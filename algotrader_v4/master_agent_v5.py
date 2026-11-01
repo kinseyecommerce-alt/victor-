@@ -160,6 +160,8 @@ class MasterAgent:
             }
 
         tick_engine.subscribe(watchlist)
+        # stop() halts the tick loop; restart it so a Stop → Start cycle gets ticks again
+        tick_engine.start_loop()
 
         for strat in strategies:
             agent = ALL_AGENTS.get(strat)
@@ -181,6 +183,10 @@ class MasterAgent:
                                  day_of_week="mon-fri", id="nightly_adaptive")
         self._scheduler.add_job(self._weekly_backtest, "cron", hour=20, minute=0,
                                  day_of_week="sun", id="weekly_backtest")
+        self._scheduler.add_job(self._daily_scoreboard, "cron", hour=15, minute=35,
+                                 day_of_week="mon-fri", id="daily_scoreboard")
+        self._scheduler.add_job(self._monthly_momentum, "cron", hour=14, minute=55,
+                                 day_of_week="mon-fri", id="monthly_momentum")
         self._scheduler.add_job(self._weekly_memory_synthesis, "cron", hour=21, minute=0,
                                  day_of_week="sun", id="weekly_memory")
         self._scheduler.start()
@@ -324,9 +330,43 @@ class MasterAgent:
         order_guard.reset_daily()
         for a in ALL_AGENTS.values():
             a.reset_daily()
+        from ai_trader import ai_trader
+        ai_trader.reapply_overnight()        # swing positions held from earlier days still count
         await send_telegram("<b>New trading day</b> — counters reset")
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("system", {"type": "daily_reset"}))
+
+    async def _daily_scoreboard(self) -> None:
+        """After the close: store today's net P&L next to the index closes, tell the owner."""
+        from performance import performance
+        from ai_trader import ai_trader
+        snap = performance.snapshot_today(ai_trader.cost_today_usd)
+        sb = performance.scoreboard()
+        p = sb["periods"]
+        await send_telegram(
+            f"<b>Scoreboard</b> {snap['date']}\n"
+            f"Today: ₹{snap['net']:,.0f} net ({p['today']['account_pct']:+.2f}% vs NIFTY "
+            f"{p['today'].get('nifty50_pct') if p['today'].get('nifty50_pct') is not None else '?'}%)\n"
+            f"Month: {p['month']['account_pct']:+.2f}% vs NIFTY {p['month'].get('nifty50_pct')}%\n"
+            f"{sb['verdict']}")
+
+    async def _monthly_momentum(self) -> None:
+        """First trading day of each month: rotate the momentum portfolio."""
+        from ist_clock import now_ist
+        from datetime import timedelta
+        today = now_ist().date()
+        d = today.replace(day=1)
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        if today != d or not settings.momentum_enabled:
+            return
+        from ai_trader import ai_trader
+        res = await ai_trader.run_momentum_rebalance()
+        done = res.get("done", {})
+        await send_telegram(f"<b>Momentum rebalance</b> ({res['plan']['trend']})\n"
+                            f"Bought: {', '.join(done.get('bought') or []) or '-'}\n"
+                            f"Sold: {', '.join(done.get('sold') or []) or '-'}\n"
+                            f"Kept: {', '.join(done.get('kept') or []) or '-'}")
 
     async def _nightly_adaptive(self) -> None:
         try:

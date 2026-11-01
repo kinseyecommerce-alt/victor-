@@ -43,6 +43,10 @@ class RiskManager:
         self.daily_realised_pnl: float = 0.0
         self.open_position_count: int  = 0
         self.trades_today: int         = 0
+        self.wins_today: int           = 0
+        self.losses_today: int         = 0
+        self.gross_profit: float       = 0.0
+        self.gross_loss: float         = 0.0
         self.is_trading_halted: bool   = False
 
     def check_before_order(
@@ -51,7 +55,10 @@ class RiskManager:
         quantity: int,
         price: float,
         transaction_type: str,
+        check_size: bool = True,
     ) -> tuple[bool, str]:
+        """check_size=False for leveraged instruments (futures), whose notional value is not
+        the money at risk; their callers cap margin and loss-at-stop instead."""
         if self.is_trading_halted:
             return False, "Trading halted for the day (daily loss limit hit)"
 
@@ -69,9 +76,10 @@ class RiskManager:
             if not ok:
                 return False, msg
 
-        ok, msg = self._check_position_size(quantity, price)
-        if not ok:
-            return False, msg
+        if check_size:
+            ok, msg = self._check_position_size(quantity, price)
+            if not ok:
+                return False, msg
 
         return True, "OK"
 
@@ -151,6 +159,12 @@ class RiskManager:
     def record_trade(self, pnl: float) -> None:
         self.daily_realised_pnl += pnl
         self.trades_today += 1
+        if pnl > 0:
+            self.wins_today += 1
+            self.gross_profit += pnl
+        elif pnl < 0:
+            self.losses_today += 1
+            self.gross_loss += -pnl
         logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, self.daily_realised_pnl)
 
     def position_opened(self) -> None:
@@ -163,6 +177,10 @@ class RiskManager:
         self.daily_realised_pnl  = 0.0
         self.open_position_count = 0
         self.trades_today        = 0
+        self.wins_today          = 0
+        self.losses_today        = 0
+        self.gross_profit        = 0.0
+        self.gross_loss          = 0.0
         self.is_trading_halted   = False
         logger.info("Risk manager reset for new trading day")
 

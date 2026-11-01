@@ -54,6 +54,18 @@ app = FastAPI(
 app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# The React dashboard (frontend/dist, built by `npm run build`) is served by this process, so a
+# single uvicorn behind nginx is a complete deployment. The build calls the API at /api/... and
+# the WebSocket at /ws-proxy/ws (same paths the Vite dev proxy uses); strip those prefixes here.
+_FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
+if (_FRONTEND_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
+
+
+@app.websocket("/ws-proxy/ws")
+async def ws_endpoint_prefixed(ws: WebSocket):
+    await ws_endpoint(ws)
+
 # MED-1: restrict CORS to explicit methods and headers (no wildcard)
 app.add_middleware(
     CORSMiddleware,
@@ -81,7 +93,8 @@ app.openapi = _custom_openapi
 _EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/config/validate"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({
-    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
+    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log", "/agent/log",
+    "/dashboard/summary", "/settings/credentials/status",
     "/docs", "/redoc",
 })
 
@@ -124,7 +137,7 @@ async def _ip_whitelist_gate(request: Request, call_next):
 # ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW = 60.0
-_RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10}
+_RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10, "/agent/chat": 10, "/agent/cycle": 4}
 
 @app.middleware("http")
 async def _rate_limiter(request: Request, call_next):
@@ -277,6 +290,11 @@ class CredentialsUpdateRequest(BaseModel):
     anthropic_api_key: str | None = Field(default=None, min_length=1)
     truedata_username: str | None = Field(default=None, min_length=1)
     truedata_password: str | None = Field(default=None, min_length=1)
+    persist:           bool = True     # save encrypted to .secrets/ so they survive a restart
+
+class CredentialsDeleteRequest(BaseModel):
+    fields: list[Literal["kite_api_key", "kite_api_secret", "kite_access_token", "anthropic_api_key",
+                         "truedata_username", "truedata_password"]] = Field(min_length=1)
 
 class AppPasswordRequest(BaseModel):
     username:     str | None = Field(default=None, min_length=1, max_length=50)
@@ -292,23 +310,19 @@ def login_page():
 
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_page():
-    """Serve the main trading dashboard."""
+    """Serve the React dashboard build, or the legacy static page if it hasn't been built."""
+    built = _FRONTEND_DIST / "index.html"
+    if built.exists():
+        return HTMLResponse(built.read_text())
     p = Path("static/dashboard.html")
     if not p.exists():
-        return HTMLResponse("<h2>Dashboard not found — run deploy to build static assets.</h2>", status_code=404)
+        return HTMLResponse("<h2>Dashboard not found — run `npm run build` in frontend/.</h2>", status_code=404)
     return HTMLResponse(p.read_text())
 
 @app.get("/", include_in_schema=False)
 def root_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/dashboard")
-
-@app.get("/gate/log", tags=["Intelligence"])
-def gate_log(n: int = 50):
-    """Last N Claude trade gate decisions (newest first)."""
-    from claude_trade_gate import get_gate_log
-    return {"decisions": get_gate_log(n), "total": n}
-
 
 # ── App auth (JWT) ──────────────────────────────────────────────────────────
 @app.post("/auth/login", tags=["Auth"])
@@ -353,6 +367,7 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
         )
     try:
         token = kite_client.set_access_token(request_token=request_token)
+        _remember_kite_token(token)
         return HTMLResponse(f"""
         <html><head><title>Kite Connected</title></head>
         <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
@@ -396,6 +411,7 @@ def login_url(): return {"login_url": kite_client.login_url()}
 @app.post("/auth/token", tags=["Auth"])
 def set_token(req: TokenRequest):
     t = kite_client.set_access_token(req.request_token, req.access_token)
+    _remember_kite_token(t)
     return {"status": "ok", "access_token": t[:6] + "…"}
 
 
@@ -744,18 +760,90 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
     return get_capital_allocation()
 
 
-@app.post("/settings/credentials", tags=["Settings"])
-def update_credentials(req: CredentialsUpdateRequest):
-    """Update API credentials in-memory. Restart reverts to env values."""
-    if req.kite_api_key      is not None: settings.kite_api_key      = req.kite_api_key
-    if req.kite_api_secret   is not None: settings.kite_api_secret   = req.kite_api_secret
-    if req.anthropic_api_key is not None: settings.anthropic_api_key = req.anthropic_api_key
-    if req.truedata_username is not None: settings.truedata_username = req.truedata_username
-    if req.truedata_password is not None: settings.truedata_password = req.truedata_password
+_CRED_FIELDS = ("kite_api_key", "kite_api_secret", "anthropic_api_key",
+                "truedata_username", "truedata_password")
+
+
+def _is_loopback(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _refresh_after_credential_change(changed: set[str]) -> None:
+    """Make running components pick up new keys without a restart."""
+    if "anthropic_api_key" in changed:
+        import anthropic, claude_trade_gate, trade_memory
+        from signal_engine import signal_engine
+        ai_trader._client = None
+        claude_trade_gate._client = None
+        trade_memory._client = None
+        master_agent._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        if getattr(signal_engine, "_client", None) is not None:
+            signal_engine._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    if changed & {"kite_api_key", "kite_api_secret"}:
+        kite_client._kite = None          # reopened with the new app key on next use
+
+
+def _credential_view() -> dict:
     creds = kite_client.validate_credentials()
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
-    return {"status": "updated", "credentials": creds}
+    return creds
+
+
+@app.post("/settings/credentials", tags=["Settings"])
+def update_credentials(req: CredentialsUpdateRequest, request: Request):
+    """Set API credentials. With persist=true (default) they are also saved encrypted in .secrets/
+    and reloaded at startup. Values are never returned by any endpoint."""
+    from secret_store import secret_store
+    values = {f: v.strip() for f in _CRED_FIELDS if (v := getattr(req, f)) is not None and v.strip()}
+    if not values:
+        raise HTTPException(422, "No credentials given")
+    if req.persist and not settings.api_key and not _is_loopback(request):
+        raise HTTPException(403, "Set API_KEY in .env before saving keys from another machine")
+    if req.persist:
+        try:
+            secret_store.save(values)
+        except Exception as e:
+            logger.error("Credential vault write failed: {}", e)
+            raise HTTPException(500, "Could not save to the encrypted vault — see server log")
+    for f, v in values.items():
+        setattr(settings, f, v)
+    _refresh_after_credential_change(set(values))
+    logger.info("Credentials updated: {} (persisted={})", sorted(values), req.persist)
+    return {"status": "saved" if req.persist else "updated", "persisted": req.persist,
+            "credentials": _credential_view(), "vault": secret_store.status()}
+
+
+@app.get("/settings/credentials/status", tags=["Settings"])
+def credentials_status():
+    """Which credentials are set, and which are stored in the encrypted vault (no values)."""
+    from secret_store import secret_store
+    return {"credentials": _credential_view(), "vault": secret_store.status()}
+
+
+@app.delete("/settings/credentials", tags=["Settings"])
+def delete_credentials(req: CredentialsDeleteRequest):
+    """Remove credentials from the vault and from the running server."""
+    from secret_store import secret_store
+    secret_store.delete(req.fields)
+    for f in req.fields:
+        setattr(settings, f, "")
+    if "kite_access_token" in req.fields:
+        kite_client._kite = None
+    _refresh_after_credential_change(set(req.fields))
+    logger.info("Credentials deleted: {}", sorted(req.fields))
+    return {"status": "deleted", "credentials": _credential_view(), "vault": secret_store.status()}
+
+
+def _remember_kite_token(token: str) -> None:
+    """Keep today's Kite access token so a restart doesn't need a fresh login (expires next morning)."""
+    from secret_store import secret_store
+    settings.kite_access_token = token
+    try:
+        secret_store.save({"kite_access_token": token})
+    except Exception as e:
+        logger.warning("Kite token not saved to vault: {}", e)
 
 
 @app.post("/settings/app-password", tags=["Settings"])
@@ -993,7 +1081,7 @@ def whitelist_ip(req: WhitelistIPRequest):
 def health():
     return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
             "architecture": "tick-driven 1s",
-            "market_data_source": "KiteConnect (WebSocket + REST quote; orders + market data)",
+            "market_data_source": tick_engine.data_source(),
             "market_open": is_market_open(),
             "master": "running" if master_agent.running else "stopped",
             "tick_engine": "running" if tick_engine._running else "stopped",
@@ -1009,10 +1097,11 @@ def config_validate():
     """Validate all required credentials and show current tick data source."""
     creds = kite_client.validate_credentials()
     use_ws = getattr(tick_engine, "_use_ws", False)
-    if settings.trading_mode == "LIVE":
+    if settings.uses_kite_market_data:
         ticker_source = "KITE_WS" if use_ws else "KITE_REST"
     else:
         ticker_source = "PAPER"
+    creds["paper_data_source"] = settings.paper_data_source
     creds["ticker_source"] = ticker_source
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
@@ -1023,6 +1112,253 @@ def config_validate():
         and creds.get("kite_initialised")
     )
     return creds
+
+
+# ── Autonomous AI trader (Claude) ─────────────────────────────────────────────
+from ai_trader import ai_trader
+
+class AgentStartRequest(BaseModel):
+    watchlist: list[dict] | None = None
+
+class AgentChatRequest(BaseModel):
+    message:         str = Field(min_length=1, max_length=4000)
+    conversation_id: str | None = Field(default=None, max_length=40)
+
+@app.get("/agent/status", tags=["AI Trader"])
+def agent_status():
+    return ai_trader.status()
+
+@app.post("/agent/start", tags=["AI Trader"])
+async def agent_start(req: AgentStartRequest):
+    """Turn on autonomous AI decision cycles (every AI_AGENT_INTERVAL_MIN minutes)."""
+    if not settings.anthropic_api_key:
+        raise HTTPException(400, "ANTHROPIC_API_KEY is not set")
+    watchlist = None
+    if req.watchlist:
+        watchlist = [{"symbol": _clean_symbol(w.get("symbol", "")), "exchange": "NSE"}
+                     for w in req.watchlist]
+    return ai_trader.start(watchlist)
+
+@app.post("/agent/stop", tags=["AI Trader"])
+async def agent_stop():
+    """Turn off autonomous cycles. Open AI positions keep their stops and close at 15:00."""
+    return ai_trader.stop()
+
+@app.post("/agent/cycle", tags=["AI Trader"])
+async def agent_cycle():
+    """Run one decision cycle now (same limits as the scheduled ones)."""
+    summary = await ai_trader.run_cycle()
+    return {"ran": summary is not None, "summary": summary, "status": ai_trader.status()}
+
+@app.post("/agent/close-all", tags=["AI Trader"])
+async def agent_close_all():
+    """Close every open AI position at market."""
+    return {"closed": await ai_trader.close_all("closed from dashboard")}
+
+@app.get("/agent/log", tags=["AI Trader"])
+def agent_log(n: int = 100):
+    return {"log": list(ai_trader.log)[-max(1, min(n, 300)):]}
+
+@app.post("/agent/chat", tags=["AI Trader"])
+async def agent_chat(req: AgentChatRequest):
+    """Chat with the AI trader. It uses the same tools and limits as its autonomous cycles."""
+    return await ai_trader.chat(req.message, req.conversation_id)
+
+
+# ── Dashboard overview (one call per refresh for the animated Overview page) ──
+from collections import deque as _deque
+_pnl_history: _deque = _deque(maxlen=5000)       # (IST hh:mm:ss, day P&L) every 5 s — survives reloads
+
+
+def _day_pnl() -> float:
+    from trailing_sl_engine import SLStatus
+    live = tick_engine.all_latest()
+    unreal = 0.0
+    for pos in list(trailing_sl_engine._positions.values()):
+        if pos.status == SLStatus.ACTIVE:
+            ltp = (live.get(pos.symbol) or {}).get("ltp") or pos.entry_price
+            unreal += (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+    return round(risk_manager.daily_realised_pnl + unreal, 2)
+
+
+async def _pnl_sampler() -> None:
+    while True:
+        try:
+            if is_market_open():
+                _pnl_history.append((now_ist().strftime("%H:%M:%S"), _day_pnl()))
+        except Exception as exc:
+            logger.debug("pnl sampler: {}", exc)
+        await asyncio.sleep(5)
+
+
+@app.get("/dashboard/summary", tags=["Dashboard"])
+def dashboard_summary():
+    from trailing_sl_engine import SLStatus
+    from agents.base_agent import _tsl_sl_orders
+    live = tick_engine.all_latest()
+
+    positions, unrealised = [], 0.0
+    for oid, pos in list(trailing_sl_engine._positions.items()):
+        if pos.status != SLStatus.ACTIVE:
+            continue
+        ltp = (live.get(pos.symbol) or {}).get("ltp") or pos.entry_price
+        sign = 1 if pos.side == "BUY" else -1
+        pnl = (ltp - pos.entry_price) * pos.quantity * sign
+        unrealised += pnl
+        cfg = pos.cfg
+        target = ai_trader._targets.get(oid) or round(
+            pos.entry_price * (1 + sign * cfg.target2_pct / 100), 2)
+        trail = ai_trader._trail.get(oid)
+        r_mult = None
+        if trail and trail.get("risk"):
+            r_mult = round((ltp - pos.entry_price) * sign / trail["risk"], 2)
+        entry = _tsl_sl_orders.get(oid, {})
+        positions.append({
+            "id": oid, "symbol": pos.symbol, "strategy": pos.strategy, "side": pos.side,
+            "quantity": pos.quantity, "entry": round(pos.entry_price, 2), "ltp": round(ltp, 2),
+            "stop": round(pos.current_sl, 2), "target": round(target, 2),
+            "pnl": round(pnl, 2), "pnl_pct": round((ltp / pos.entry_price - 1) * 100 * sign, 2),
+            "r_multiple": r_mult, "exchange": entry.get("exchange", "NSE"),
+            "trailing": "AI" if pos.external_trail else ("ON" if pos.trail_active else "WAIT"),
+            "sl_moves": pos.sl_moves, "product": entry.get("product", "MIS"),
+            "hold_until": (ai_trader._swing_meta.get(oid) or {}).get("hold_until"),
+        })
+    for sid, sp in list(ai_trader._spreads.items()):        # AI credit spreads (two legs)
+        pnl = (sp["credit"] - sp["value"]) * sp["qty"]
+        unrealised += pnl
+        positions.append({
+            "id": sid, "symbol": f"{sp['underlying']} {sp['short']['strike']:g}/{sp['long']['strike']:g} {sp['option_type']}",
+            "strategy": "ai_spread", "side": "SELL", "quantity": sp["qty"], "entry": sp["credit"],
+            "ltp": sp["value"], "stop": sp["stop_value"], "target": sp["target_value"], "pnl": round(pnl, 2),
+            "pnl_pct": round((sp["credit"] - sp["value"]) / sp["credit"] * 100, 2) if sp["credit"] else 0.0,
+            "r_multiple": None, "exchange": "NFO", "trailing": "WAIT", "sl_moves": 0, "product": "MIS",
+            "hold_until": None,
+        })
+
+    realised = risk_manager.daily_realised_pnl
+    closed = risk_manager.wins_today + risk_manager.losses_today
+    ai = ai_trader.status()
+
+    activity = [{"t": e["t"], "kind": e["kind"], "text": e["text"], "source": "ai"}
+                for e in list(ai_trader.log)[-40:]]
+    for o in kite_client.orders()[-25:] if settings.trading_mode == "PAPER" else []:
+        activity.append({"t": str(o.get("placed_at", ""))[11:19], "kind": "order",
+                         "source": str(o.get("tag", "")),
+                         "text": f'{o.get("transaction_type")} {o.get("quantity")} {o.get("tradingsymbol")} '
+                                 f'{o.get("order_type")} @ ₹{o.get("price") or o.get("trigger_price") or 0} '
+                                 f'· {o.get("status")}'})
+    activity.sort(key=lambda a: a["t"], reverse=True)
+
+    agents = [{"name": n, "running": a.state.running, "enabled": bot_state.is_agent_enabled(n),
+               "trades_today": a.state.trades_today} for n, a in ALL_AGENTS.items()]
+    agents.append({"name": "ai", "running": ai["enabled"], "enabled": True,
+                   "trades_today": ai["trades_today"]})
+
+    watch = [{"symbol": sym, "ltp": d.get("ltp"), "change_pct": d.get("change_pct"),
+              "trend": d.get("trend"), "rsi": d.get("rsi_14")} for sym, d in list(live.items())[:40]]
+
+    return {
+        "time_ist": now_ist().strftime("%H:%M:%S"),
+        "date": now_ist().strftime("%a %d %b %Y"),
+        "demo": settings.demo_active,
+        "mode": ai["mode"],
+        "market_open": is_market_open(),
+        "bot_running": master_agent.running,
+        "regime": regime_detector.current_regime.value if regime_detector.current_regime else "UNKNOWN",
+        "sebi_state": sebi_compliance.status().get("state"),
+        "kpis": {
+            "day_pnl": round(realised + unrealised, 2), "realised": round(realised, 2),
+            "unrealised": round(unrealised, 2), "trades_closed": closed,
+            "wins": risk_manager.wins_today, "losses": risk_manager.losses_today,
+            "win_rate": round(risk_manager.wins_today / closed * 100, 1) if closed else None,
+            "profit_factor": round(risk_manager.gross_profit / risk_manager.gross_loss, 2)
+                             if risk_manager.gross_loss else None,
+            "open_positions": len(positions),
+            "max_daily_loss": settings.max_daily_loss,
+            "loss_used_pct": round(min(100.0, max(0.0, -realised) / settings.max_daily_loss * 100), 1)
+                             if settings.max_daily_loss else 0.0,
+            "is_halted": risk_manager.is_trading_halted,
+            "ai_cost_usd": ai["cost_today_usd"],
+        },
+        "positions": positions,
+        "agents": agents,
+        "ai": {k: ai[k] for k in ("enabled", "alerts_today", "decisions_today", "avg_decision_ms",
+                                  "last_alert", "api_key_set", "trades_today")},
+        "watch": watch,
+        "activity": activity[:50],
+        "pnl_history": [{"t": t, "pnl": v} for t, v in _pnl_history],
+        "scoreboard": performance.scoreboard(_day_pnl(), ai_trader.cost_today_usd),
+        "trend_filter": market_filter.state(),
+        "strategy_stats": [{k: v[k] for k in ("strategy", "label", "trades", "win_rate", "net_pnl",
+                                               "profit_factor", "enabled", "pruned", "trades_until_judgement")}
+                           for v in performance.strategy_stats().values() if v["trades"] or v["pruned"]],
+    }
+
+
+# ── Performance scoreboard, pruning, trend filter, momentum ──────────────────
+from performance import performance
+import market_filter
+import momentum_rotation
+
+
+@app.get("/performance/scoreboard", tags=["Performance"])
+def performance_scoreboard():
+    """Account return vs NIFTY 50 (and Nasdaq-100 for reference), after costs, per period."""
+    return {**performance.scoreboard(_day_pnl(), ai_trader.cost_today_usd),
+            "trend_filter": market_filter.state(), "equity_curve": performance.equity_curve()}
+
+
+@app.get("/performance/strategies", tags=["Performance"])
+def performance_strategies():
+    """Per-strategy win rate, net P&L after costs, profit factor, drawdown and pruning status."""
+    return {"strategies": list(performance.strategy_stats().values()),
+            "rule": {"min_trades": settings.prune_min_trades, "lookback_trades": settings.prune_lookback_trades,
+                     "enabled": settings.prune_enabled}}
+
+
+@app.get("/performance/trades", tags=["Performance"])
+def performance_trades(n: int = 100, strategy: str | None = None):
+    rows = [t for t in performance.trades if not strategy or t["strategy"] == strategy]
+    return {"trades": rows[-max(1, min(n, 1000)):]}
+
+
+@app.post("/performance/strategies/{name}/enable", tags=["Performance"])
+def performance_enable(name: str):
+    return performance.set_enabled(name, True)
+
+
+@app.post("/performance/strategies/{name}/disable", tags=["Performance"])
+def performance_disable(name: str):
+    return performance.set_enabled(name, False, "disabled from the dashboard")
+
+
+@app.post("/performance/snapshot", tags=["Performance"])
+def performance_snapshot():
+    """Store today's result now (the scheduler does this at 15:35)."""
+    return performance.snapshot_today(ai_trader.cost_today_usd)
+
+
+@app.get("/market/trend-filter", tags=["Market Regime"])
+def trend_filter(refresh: bool = False):
+    return market_filter.state(refresh=refresh)
+
+
+@app.get("/momentum/rankings", tags=["Momentum"])
+def momentum_rankings(top: int = 20):
+    return {"rankings": momentum_rotation.rankings()[:top], "selection": momentum_rotation.selection(),
+            "universe": settings.momentum_universe, "top_n": settings.momentum_top_n}
+
+
+@app.post("/momentum/rebalance", tags=["Momentum"])
+async def momentum_rebalance(execute: bool = True):
+    """Run the monthly rotation now (execute=false shows the plan only)."""
+    return await ai_trader.run_momentum_rebalance(execute=execute)
+
+
+@app.get("/backtest/momentum", tags=["Backtest"])
+def backtest_momentum(months: int = 12, top_n: int | None = None):
+    """Monthly momentum rotation vs buy-and-hold NIFTY 50 over the same dates."""
+    return momentum_rotation.backtest(months=months, top_n=top_n)
 
 
 # ── n8n Inbound Webhook ───────────────────────────────────────────────────────
@@ -1134,6 +1470,11 @@ async def on_startup():
     atomic_bracket_engine.ws_broadcast = broadcast
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
+    asyncio.create_task(_pnl_sampler())
+    try:
+        ai_trader.restore_swing()           # AI swing (delivery) positions from earlier runs
+    except Exception as exc:
+        logger.error("Swing restore failed: {}", exc)
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
 
@@ -1142,3 +1483,14 @@ async def on_startup():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)
+
+
+# Outermost middleware (added last): strips the /api prefix the built dashboard uses BEFORE the
+# API-key gate looks at the path, so /api/dashboard/summary is protected like /dashboard/summary.
+@app.middleware("http")
+async def _strip_frontend_prefixes(request: Request, call_next):
+    path = request.scope.get("path", "")
+    if path.startswith("/api/"):
+        request.scope["path"] = path[4:]
+        request.scope["raw_path"] = request.scope["path"].encode()
+    return await call_next(request)

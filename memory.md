@@ -81,6 +81,11 @@ KiteConnect WebSocket (LIVE) or GBM simulator (PAPER)
 | `vwap_upper2/3`, `vwap_lower2/3` | VWAP Bands (2σ/3σ) |
 | `stoch_rsi_k`, `stoch_rsi_d` | Stochastic RSI (14,3,3) |
 | `williams_r` | Williams %R (14) — added run-3 |
+| `adx_14`, `plus_di`, `minus_di` | ADX (14) + directional lines |
+| `keltner_upper/mid/lower` | Keltner Channel (EMA20 ± 2×ATR10) |
+| `cci_20` | Commodity Channel Index (20) |
+| `mfi_14` | Money Flow Index (14) |
+| `ichimoku_tenkan/kijun`, `ichimoku_cloud_top/bot` | Ichimoku (9,26,52); cloud needs 78 bars |
 | `trend`, `momentum`, `volatility` | Derived labels |
 
 ### IndicatorCalc API
@@ -99,10 +104,58 @@ candles = buf.candles()
 ## Strategy Agents
 
 ### IntradayAgent patterns
-`VWAP_TREND`, `EMA_PULLBACK`, `ORB_BREAK`, `BREAKOUT`, `VWAP_RECLAIM`, `TTM_SQUEEZE`, `VWAP_BAND_REVERT`
+`VWAP_TREND`, `EMA_PULLBACK`, `ORB_BREAK`, `BREAKOUT`, `VWAP_RECLAIM`, `TTM_SQUEEZE`, `VWAP_BAND_REVERT`, `VWAP_REVERSION`, `KELTNER_BREAKOUT`, `CCI_MFI_DIP`
 
 ### ScalpingAgent patterns
-`EMA9X`, `EMA921X`, `VWAP_BOUNCE`, `SURGE`, `ORB`, `SUPERTREND_FLIP`
+`EMA9X`, `EMA921X`, `VWAP_BOUNCE`, `SURGE`, `ORB`, `SUPERTREND_FLIP` (in `_detect_pattern`)
+
+### FnOAgent patterns
+`EMA_CROSS`, `TREND_PULL`, `ORB`, `VWAP_RECLAIM`, `BB_SQUEEZE`, `RSI_EXTREME`, `SURGE`, `TREND_BREAKOUT`
+
+### SwingAgent patterns
+`EMA50-BOUNCE`, `ICHIMOKU-TREND`
+
+### Autonomous AI trader (`ai_trader.py`)
+Claude (`AI_AGENT_MODEL`, default `claude-opus-5-5`) trades in **real time**: code watches every tick
+(`_detect`: intraday pattern engine as a scout, 1-min momentum bursts, AI positions ≥60% to their stop
+or Supertrend flipping against them) and the moment one fires, `_handle_event` calls Claude with the
+live data in the prompt (effort `AI_AGENT_REALTIME_EFFORT`, default `low`). Alerts: per symbol+type
+cooldown, exit alerts first, stale alerts (>20 s) dropped, entry rejected if price drifted >0.3%.
+A full review also runs every `AI_AGENT_INTERVAL_MIN` (15; 0 = off). Chat in the **AI Trader** tab.
+- Tools: `get_market_overview`, `get_watchlist_quotes`, `get_symbol_detail`, `get_ai_positions`,
+  `place_trade`, `close_position` (strict schemas, fixed order → prompt-cached prefix).
+- Hard limits in code (`_place_trade`): `AI_AGENT_*` value cap, trades/day, open positions,
+  SL distance 0.2–2%, reward ≥ 1.5× risk, fresh tick, entry window 09:20–14:45, then
+  order_guard → risk_manager → SEBI (`ai` = `ALGO-AI-006`) → entry + SL-M (flatten on SL failure).
+- PAPER only unless `AI_AGENT_ALLOW_LIVE=true`. Daily API cost cap stops cycles. Code closes all AI
+  positions at 15:00. Stops (TSL) and targets are enforced from the tick feed between cycles.
+- **Index options (buy only):** `get_option_chain` + `place_option_trade` (CE/PE on
+  `AI_AGENT_OPTION_UNDERLYINGS`, ATM±2). Contracts come from Kite's NFO instrument list via
+  `options_resolver.resolve` (real expiry + lot size, same-day expiry skipped; paper-sim uses
+  synthetic `…SIM…` symbols). Entry = marketable LIMIT, stop = SL (stop-loss LIMIT, not SL-M),
+  exits = LIMIT. Limits: premium cap, max lots, stop 15–40% of premium, target ≥1.5×, spread ≤3%,
+  IV rank ≤72, 09:30–14:30. order_guard/TSL key `ai_opt` (premium-based trail). Index ticks feed
+  the F&O pattern engine → `option_setup` alerts. The rule-based FnOAgent uses the same resolver
+  and SL-limit orders.
+- **AI-managed trailing stops:** AI positions get `PositionSL.external_trail=True`, so the TSL
+  engine only watches for stop hits. `trail_review` alerts fire at +1R/1.5R/2R/3R/4R/5R and every
+  `AI_AGENT_TRAIL_REVIEW_S` while price makes new highs; Claude calls `adjust_stop` (tighten-only,
+  min gap 0.15% equity / 5% options, updates the exchange SL-M or SL-limit). If the AI is unavailable
+  (stopped, 3 API errors in a row, cost cap) `_handover_if_ai_unavailable` flips the position back
+  to the mechanical trail. Alert priority: position_risk/trend_flip > trail_review > entries.
+- API: `GET /agent/status`, `POST /agent/start|stop|cycle|close-all|chat`, `GET /agent/log`.
+- Tests use a fake client (`_FakeClient` in `test_pipeline.py`) — no API spend.
+
+### Overview dashboard + demo
+- `frontend/src/components/Overview/` — animated landing page (framer-motion + recharts) fed by
+  `GET /dashboard/summary` every 1.5 s. Toggle to the original Trading view and back.
+- `DEMO_MODE=true` (PAPER + SIM only): `ist_clock.now_ist()` starts at 10:00 IST on a weekday,
+  the simulator trends, new symbols get 90 min of backfilled candles. `./run_demo.sh` starts it all.
+- Browser test: `python3 dashboard_e2e.py` (needs the demo running). Guide: `TESTING.md`.
+
+### Claude skills (`.claude/skills/`)
+`/preflight` (read-only GO/NO-GO), `/paper-session` (PAPER only), `/trade-review`, `/backtest`, `/abi`.
+Skills read `ALGO_URL` (default `http://127.0.0.1:8000`) and `ALGO_API_KEY` from the environment.
 
 Pattern scoring: base_score + context bonus ≥ MIN_SCORE (4) to fire. Base scores: 3=weak, 4=solid, 5=strong, 6+=very strong.
 

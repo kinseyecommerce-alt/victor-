@@ -13,7 +13,8 @@ export default function Watchlist() {
     api.marketLive().then(r => {
       const data = r.data as Record<string, any>
       Object.entries(data).forEach(([sym, info]: [string, any]) => {
-        setTick({ symbol: sym, ...info } as any)
+        // /market/live names RSI `rsi_14`; WebSocket ticks (TickData) call it `rsi`
+        setTick({ symbol: sym, ...info, rsi: info.rsi ?? info.rsi_14 } as any)
       })
       if (!selectedSymbol && Object.keys(data).length > 0) {
         setSelectedSymbol(Object.keys(data)[0])

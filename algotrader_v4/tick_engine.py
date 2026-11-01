@@ -22,7 +22,7 @@ import asyncio
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from typing import Callable, Optional
 
@@ -126,6 +126,23 @@ class LiveIndicators:
     stoch_rsi_d: float = 50.0
     # Williams %R (14) — range -100 to 0; >-20 overbought, <-80 oversold
     williams_r:  float = -50.0
+    # ADX (14) — trend strength, 0-100; >20 means a trend is present
+    adx_14:      float = 0.0
+    plus_di:     float = 0.0    # +DI (14) — bullish directional pressure
+    minus_di:    float = 0.0    # -DI (14) — bearish directional pressure
+    # Keltner Channel (EMA20 ± 2×ATR10)
+    keltner_upper: float = 0.0
+    keltner_mid:   float = 0.0
+    keltner_lower: float = 0.0
+    # CCI (20) — >+100 overbought / strong up, <-100 oversold / strong down
+    cci_20:      float = 0.0
+    # Money Flow Index (14) — volume-weighted RSI, 0-100
+    mfi_14:      float = 50.0
+    # Ichimoku (9, 26, 52): conversion/base lines and the cloud under the current bar
+    ichimoku_tenkan:     float = 0.0
+    ichimoku_kijun:      float = 0.0
+    ichimoku_cloud_top:  float = 0.0
+    ichimoku_cloud_bot:  float = 0.0
     computed_at: float = 0.0
 
 
@@ -149,8 +166,12 @@ class TickBuffer:
         self._lock = Lock()
 
     def push(self, ltp: float, volume: int, ts: datetime) -> Optional[Candle]:
-        bar_ts = datetime(ts.year, ts.month, ts.day, ts.hour, ts.minute,
-                          (ts.second // self.resolution) * self.resolution)
+        # Floor to the bar size within the day (the old seconds-only floor made every
+        # bar one minute long, so the "5-minute" buffer held 1-minute candles)
+        day_s = ts.hour * 3600 + ts.minute * 60 + ts.second
+        b = day_s // self.resolution * self.resolution
+        bar_ts = datetime(ts.year, ts.month, ts.day, b // 3600, (b % 3600) // 60, b % 60,
+                          tzinfo=ts.tzinfo)
         completed = None
         with self._lock:
             if self._current is None or bar_ts != self._current_ts:
@@ -286,6 +307,51 @@ def _williams_r(close: pd.Series, high: pd.Series, low: pd.Series, period: int =
         return -50.0
 
 
+def _num(series: pd.Series, idx: int = -1, default: float = 0.0) -> float:
+    """Float value at idx, or default when missing/NaN."""
+    try:
+        val = float(series.iloc[idx])
+        return default if pd.isna(val) else round(val, 2)
+    except Exception:
+        return default
+
+
+def _adx(close: pd.Series, high: pd.Series, low: pd.Series,
+         period: int = 14) -> tuple[float, float, float]:
+    """(ADX, +DI, -DI). ADX = trend strength (0-100); DI lines give its direction."""
+    try:
+        adx = ta.trend.ADXIndicator(high, low, close, window=period)
+        return _num(adx.adx()), _num(adx.adx_pos()), _num(adx.adx_neg())
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
+def _keltner(close: pd.Series, high: pd.Series, low: pd.Series) -> tuple[float, float, float]:
+    """Keltner Channel (EMA20 ± 2×ATR10) → (upper, mid, lower)."""
+    try:
+        kc = ta.volatility.KeltnerChannel(high, low, close, window=20, window_atr=10,
+                                          original_version=False, multiplier=2)
+        return _num(kc.keltner_channel_hband()), _num(kc.keltner_channel_mband()), \
+               _num(kc.keltner_channel_lband())
+    except Exception:
+        return 0.0, 0.0, 0.0
+
+
+def _ichimoku(high: pd.Series, low: pd.Series) -> tuple[float, float, float, float]:
+    """Ichimoku → (tenkan, kijun, cloud_top, cloud_bottom).
+    The cloud under today's bar is the span pair computed 26 bars ago."""
+    try:
+        ich = ta.trend.IchimokuIndicator(high, low, 9, 26, 52, visual=False)
+        tenkan, kijun = _num(ich.ichimoku_conversion_line()), _num(ich.ichimoku_base_line())
+        top = bot = 0.0
+        if len(high) >= 52 + 26:
+            a, b = _num(ich.ichimoku_a(), -27), _num(ich.ichimoku_b(), -27)
+            top, bot = max(a, b), min(a, b)
+        return tenkan, kijun, top, bot
+    except Exception:
+        return 0.0, 0.0, 0.0, 0.0
+
+
 # ── Indicator calculator ──────────────────────────────────────────────────────
 
 class IndicatorCalc:
@@ -368,6 +434,21 @@ class IndicatorCalc:
             if n >= 14:
                 ind.williams_r = _williams_r(close, high, low)
 
+            if n >= 28:   # ADX smoothing needs ~2× the window
+                ind.adx_14, ind.plus_di, ind.minus_di = _adx(close, high, low)
+
+            if n >= 20:
+                ind.keltner_upper, ind.keltner_mid, ind.keltner_lower = _keltner(close, high, low)
+                ind.cci_20 = _num(ta.trend.CCIIndicator(high, low, close, 20).cci())
+
+            if n >= 15:
+                ind.mfi_14 = _num(ta.volume.MFIIndicator(
+                    high, low, close, volume, 14).money_flow_index(), default=50.0)
+
+            if n >= 52:
+                (ind.ichimoku_tenkan, ind.ichimoku_kijun,
+                 ind.ichimoku_cloud_top, ind.ichimoku_cloud_bot) = _ichimoku(high, low)
+
         except Exception as exc:
             logger.debug("Indicator compute error {}: {}", sym, exc)
 
@@ -419,7 +500,8 @@ class TickEngine:
     """
     In LIVE mode: KiteConnect WebSocket (true real-time sub-second ticks) with
     NSE India API fallback for symbols not yet received via WebSocket.
-    In PAPER mode: GBM simulator seeded from yfinance last price.
+    In PAPER mode: GBM simulator seeded from yfinance last price, or real Kite
+    REST quotes when PAPER_DATA_SOURCE=KITE (orders stay simulated either way).
     """
 
     def __init__(self) -> None:
@@ -443,68 +525,125 @@ class TickEngine:
         self._kite_ticker = None
         self._use_ws: bool = False
         self._ws_received: set[str] = set()
+        self._last_quote_warn: float = 0.0
 
     # ── Setup ─────────────────────────────────────────────────────────
 
     def subscribe(self, watchlist: list[dict]) -> None:
+        added: list[str] = []
+        seeded: dict[str, float] = {}
         for item in watchlist:
             sym  = item["symbol"]
             exch = item.get("exchange", "NSE")
+            if sym in self._bufs_1min:   # already subscribed (e.g. bot restarted)
+                continue
+            added.append(sym)
+            if item.get("seed_price"):
+                seeded[sym] = float(item["seed_price"])
             self._symbols.append(sym)
             self._exchange[sym]  = exch
             self._bufs_1min[sym] = TickBuffer(60,  maxlen=400)
             self._bufs_5min[sym] = TickBuffer(300, maxlen=200)
 
-        if settings.trading_mode == "PAPER":
-            exchanges = {s: self._exchange[s] for s in self._symbols}
-            paper_sim.seed(self._symbols, exchanges)
+        if not settings.uses_kite_market_data:
+            for sym, px in seeded.items():           # e.g. option legs — yfinance can't price them
+                paper_sim.set_price(sym, px)
+            to_seed = [s for s in added if s not in seeded]
+            if to_seed:
+                paper_sim.seed(to_seed, {s: self._exchange[s] for s in to_seed})
+            if settings.demo_active:
+                self._demo_backfill(added)
 
         logger.info("TickEngine: subscribed {} symbols via {}",
-                    len(self._symbols),
-                    "KiteConnect REST+WS" if settings.trading_mode == "LIVE" else "Paper simulator")
+                    len(self._symbols), self.data_source())
+
+        # The WebSocket needs the symbol list, so (re)start it once symbols exist
+        # Only equities ride the WebSocket (it resolves NSE tokens); option legs use REST
+        if self._running and any(self._exchange[s] in ("NSE", "BSE") for s in added):
+            self._start_ws()
+
+    def _demo_backfill(self, symbols: list[str], minutes: int = 90) -> None:
+        """DEMO_MODE only: give new symbols 90 minutes of simulated history so strategies
+        that need 10-200 candles can trade straight away instead of after 20+ minutes."""
+        import random
+        now = datetime.now()
+        for sym in symbols:
+            px = paper_sim._prices.get(sym)
+            if not px:
+                continue
+            path = [px]
+            for _ in range(minutes * 4):
+                path.append(path[-1] * (1 + random.gauss(0, 0.0012)))
+            scale = px / path[-1]                       # end the history at the current price
+            for i, p in enumerate(path[:-1]):
+                ts = now - timedelta(seconds=15 * (len(path) - 1 - i))
+                vol = random.randint(800, 4000)
+                self._bufs_1min[sym].push(p * scale, vol, ts)
+                self._bufs_5min[sym].push(p * scale, vol, ts)
+
+    def data_source(self) -> str:
+        """Human-readable label for where ticks come from."""
+        if settings.trading_mode == "LIVE":
+            return "KiteConnect REST+WS"
+        if settings.paper_data_source == "KITE":
+            return "KiteConnect REST+WS (paper orders)"
+        return "Paper simulator"
 
     def start_loop(self) -> None:
-        """Called once FastAPI is running — starts the async polling loop and WebSocket."""
+        """Starts the async polling loop and WebSocket. Called at FastAPI startup and on bot restart."""
+        if self._running:
+            return
         self._running = True
+        self._use_ws = False
+        self._ws_received.clear()
         self._loop = asyncio.get_event_loop()
         self._task = asyncio.create_task(self._poll_loop())
 
-        # Start tick WebSocket in LIVE mode — TrueData preferred, Kite as fallback
-        if settings.trading_mode == "LIVE":
-            if settings.use_truedata_websocket and settings.truedata_username:
-                try:
-                    from truedata_client import truedata_ticker
-                    self._kite_ticker = truedata_ticker  # reuse slot; same interface
-                    truedata_ticker.start(
-                        self._symbols,
-                        self._ingest_kite_tick,
-                        self._loop,
-                    )
-                    self._use_ws = True
-                    logger.info("TickEngine: TrueData WebSocket started for {} symbols",
-                                len(self._symbols))
-                except Exception as exc:
-                    logger.error("TickEngine: TrueData WebSocket failed: {} — "
-                                 "falling back to Kite REST", exc)
-                    self._use_ws = False
-            elif settings.use_kite_websocket and settings.kite_access_token:
-                try:
-                    from kite_ticker import KiteTicker
-                    self._kite_ticker = KiteTicker()
-                    self._kite_ticker.start(
-                        self._symbols,
-                        self._ingest_kite_tick,
-                        self._loop,
-                    )
-                    self._use_ws = True
+        self._start_ws()
+        logger.info("TickEngine poll loop started (ws={})", self._use_ws)
+
+    def _start_ws(self) -> None:
+        """(Re)start the tick WebSocket for all subscribed symbols — TrueData preferred, Kite as fallback.
+        Needs symbols, so it runs from subscribe() (or start_loop() on a restart), not at server startup."""
+        if not settings.uses_kite_market_data or not self._symbols or not self._loop:
+            return
+        if self._kite_ticker:
+            self._kite_ticker.stop()
+            self._kite_ticker = None
+        self._use_ws = False
+        self._ws_received.clear()
+
+        if settings.use_truedata_websocket and settings.truedata_username:
+            try:
+                from truedata_client import truedata_ticker
+                self._kite_ticker = truedata_ticker  # reuse slot; same interface
+                truedata_ticker.start(
+                    self._symbols,
+                    self._ingest_kite_tick,
+                    self._loop,
+                )
+                self._use_ws = True
+                logger.info("TickEngine: TrueData WebSocket started for {} symbols",
+                            len(self._symbols))
+            except Exception as exc:
+                logger.error("TickEngine: TrueData WebSocket failed: {} — "
+                             "falling back to Kite REST", exc)
+        elif settings.use_kite_websocket and kite_client.has_session():
+            try:
+                from kite_ticker import KiteTicker
+                self._kite_ticker = KiteTicker()
+                self._use_ws = self._kite_ticker.start(
+                    self._symbols,
+                    self._ingest_kite_tick,
+                    self._loop,
+                )
+                if self._use_ws:
                     logger.info("TickEngine: KiteConnect WebSocket started for {} symbols",
                                 len(self._symbols))
-                except Exception as exc:
-                    logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
-                                 "falling back to Kite REST", exc)
-                    self._use_ws = False
-
-        logger.info("TickEngine poll loop started (ws={})", self._use_ws)
+            except Exception as exc:
+                logger.error("TickEngine: KiteConnect WebSocket failed to start: {} — "
+                             "falling back to Kite REST", exc)
+                self._use_ws = False
 
     def stop(self) -> None:
         self._running = False
@@ -512,6 +651,8 @@ class TickEngine:
             self._task.cancel()
         if self._kite_ticker:
             self._kite_ticker.stop()
+            self._kite_ticker = None
+        self._use_ws = False
         logger.info("TickEngine stopped")
 
     # ── Subscriber management ─────────────────────────────────────────
@@ -599,15 +740,15 @@ class TickEngine:
         while self._running:
             t_start = time.monotonic()
 
-            if not is_market_open() and settings.trading_mode == "LIVE":
+            if not is_market_open() and settings.uses_kite_market_data:
                 await asyncio.sleep(30)
                 continue
 
-            if settings.trading_mode == "PAPER":
+            if settings.uses_kite_market_data:
+                await self._fetch_kite_batch()
+            else:
                 tasks = [self._fetch_and_process(sym) for sym in self._symbols]
                 await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                await self._fetch_kite_batch()
 
             # Sleep the remainder of 1 second
             elapsed = time.monotonic() - t_start
@@ -620,9 +761,12 @@ class TickEngine:
         await self._process_tick(symbol, tick, source="PAPER")
 
     async def _fetch_kite_batch(self) -> None:
-        """Single Kite quote() call for all non-WebSocket symbols in LIVE mode."""
+        """Single Kite quote() call for all non-WebSocket symbols (LIVE, or PAPER with Kite data)."""
+        # Poll over REST for symbols the WebSocket isn't covering — including all of
+        # them while the socket is disconnected (otherwise they'd go stale)
+        ws_live = self._use_ws and getattr(self._kite_ticker, "is_connected", True)
         pending = [s for s in self._symbols
-                   if not (self._use_ws and s in self._ws_received)]
+                   if not (ws_live and s in self._ws_received)]
         if not pending:
             return
         instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
@@ -631,7 +775,10 @@ class TickEngine:
                 None, lambda: kite_client.quote_kite(instruments)
             )
         except Exception as exc:
-            logger.warning("[tick] Kite batch quote failed: {}", exc)
+            # Throttle: a missing/expired token would otherwise log every second
+            if time.monotonic() - self._last_quote_warn > 60:
+                self._last_quote_warn = time.monotonic()
+                logger.warning("[tick] Kite batch quote failed: {}", exc)
             return
         for sym in pending:
             exch = self._exchange.get(sym, "NSE")
@@ -652,7 +799,7 @@ class TickEngine:
         result = {}
         for sym in self._latest_tick:
             tick = self._latest_tick[sym]
-            ind  = self._latest_ind[sym]
+            ind  = self._latest_ind.get(sym)
             if tick and ind:
                 result[sym] = {
                     "ltp":        tick.ltp,
@@ -670,7 +817,7 @@ class TickEngine:
                     "ema21":      round(ind.ema21, 2),
                     "macd_hist":      round(ind.macd_hist, 4),
                     "vol_ratio":      round(ind.volume_ratio, 2),
-                    "source":         "NSE" if settings.trading_mode == "LIVE" else "PAPER",
+                    "source":         "NSE" if settings.uses_kite_market_data else "PAPER",
                     "supertrend":     round(ind.supertrend, 2),
                     "supertrend_dir": ind.supertrend_dir,
                     "hma":            round(ind.hma, 2),
@@ -683,6 +830,17 @@ class TickEngine:
                     "stoch_rsi_k":    ind.stoch_rsi_k,
                     "stoch_rsi_d":    ind.stoch_rsi_d,
                     "williams_r":     ind.williams_r,
+                    "adx_14":         ind.adx_14,
+                    "plus_di":        ind.plus_di,
+                    "minus_di":       ind.minus_di,
+                    "keltner_u":      ind.keltner_upper,
+                    "keltner_l":      ind.keltner_lower,
+                    "cci_20":         ind.cci_20,
+                    "mfi_14":         ind.mfi_14,
+                    "ichimoku_tenkan":    ind.ichimoku_tenkan,
+                    "ichimoku_kijun":     ind.ichimoku_kijun,
+                    "ichimoku_cloud_top": ind.ichimoku_cloud_top,
+                    "ichimoku_cloud_bot": ind.ichimoku_cloud_bot,
                     "ts":             tick.timestamp.isoformat(),
                 }
         return result

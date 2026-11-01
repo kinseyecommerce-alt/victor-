@@ -25,3 +25,11 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+e2e_screenshots/
+
+# Encrypted key vault (secret_store.py) — never commit
+.secrets/
+
+# AI swing positions (runtime state)
+data/ai_swing_positions.json
+data/performance.json

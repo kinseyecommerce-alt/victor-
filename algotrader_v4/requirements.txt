@@ -24,7 +24,7 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 
 # ── AI ────────────────────────────────────────────────────────────
-anthropic>=0.50.0
+anthropic>=2.3.0   # ai_trader.py needs output_config + server-side fallbacks
 
 # ── Data / Technical analysis / Charting ─────────────────────────
 pandas==2.2.2

@@ -6,6 +6,10 @@ Run: cd algotrader_v4 && python test_pipeline.py
 from __future__ import annotations
 
 import asyncio
+import os as _os, tempfile as _tmp0
+# The ledger must never write into the repo's data/ during tests, and pruning must not
+# switch agents off mid-suite because of synthetic losing trades (its own tests enable it).
+_os.environ.setdefault("PERFORMANCE_FILE", _os.path.join(_tmp0.mkdtemp(), "performance.json"))
 import sys
 import time as _time_mod
 import uuid
@@ -564,7 +568,7 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 5
+    assert len(APPROVED_ALGO_IDS) == 6   # intraday, fno, swing, scalping, manual, ai
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -649,7 +653,7 @@ def t_sebi_strategy_disclosure():
 def t_sebi_full_disclosure():
     sc = SEBICompliance()
     doc = sc.get_disclosure_document()
-    assert len(doc["algo_strategies"]) == 5
+    assert len(doc["algo_strategies"]) == 6
 
 def t_sebi_ip_empty_allows_all():
     sc = SEBICompliance()
@@ -666,7 +670,7 @@ def t_sebi_otr_tracking():
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
     assert sc.status()["orders_placed_today"] == 1
 
-run("5 approved algo IDs registered",          t_sebi_5_algos)
+run("6 approved algo IDs registered",          t_sebi_5_algos)
 run("algo IDs have ALGO- prefix",              t_sebi_algo_id_format)
 run("pre_order_check approves valid order",    t_sebi_approves_valid)
 run("rejects unregistered strategy",           t_sebi_rejects_unknown_strategy)
@@ -680,7 +684,7 @@ run("record_order_id increments executed",     t_sebi_record_executed)
 run("audit log records today's orders",        t_sebi_audit_log_today)
 run("audit log filters by strategy",           t_sebi_audit_filter_strategy)
 run("strategy disclosure returns algo_id",     t_sebi_strategy_disclosure)
-run("full disclosure has 5 strategies",        t_sebi_full_disclosure)
+run("full disclosure has 6 strategies",        t_sebi_full_disclosure)
 run("empty whitelist allows all IPs",          t_sebi_ip_empty_allows_all)
 run("whitelist blocks non-whitelisted IPs",    t_sebi_ip_whitelist)
 run("OTR counter increments per check",        t_sebi_otr_tracking)
@@ -906,7 +910,8 @@ def t_intraday_buy_signal():
     snap = _make_snap(rsi=55.0, trend="UP", vwap=2790.0,
                       macd_hist=1.5, volume_ratio=1.8,
                       ema9=2810.0, ema21=2795.0)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
+    with patch("agents.strategy_agents.datetime") as mock_dt, \
+         patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent reads IST via now_ist()
         mock_dt.now.return_value = _mkt_dt
         action, _ = agent.evaluate_tick(snap)
     assert action == "BUY", f"Expected BUY, got {action}"
@@ -916,7 +921,8 @@ def t_intraday_hold_overbought():
     _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
     agent = IntradayAgent()
     snap = _make_snap(rsi=82.0, macd_hist=0.5, volume_ratio=1.5)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
+    with patch("agents.strategy_agents.datetime") as mock_dt, \
+         patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent reads IST via now_ist()
         mock_dt.now.return_value = _mkt_dt
         action, _ = agent.evaluate_tick(snap)
     assert action in ("HOLD","SELL"), f"Expected HOLD/SELL for RSI=82, got {action}"
@@ -928,7 +934,8 @@ def t_intraday_sell_signal():
     snap = _make_snap(rsi=35.0, trend="DOWN", vwap=2815.0,
                       macd_hist=-1.0, volume_ratio=1.5,
                       ema9=2790.0, ema21=2800.0)
-    with patch("agents.strategy_agents.datetime") as mock_dt:
+    with patch("agents.strategy_agents.datetime") as mock_dt, \
+         patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent reads IST via now_ist()
         mock_dt.now.return_value = _mkt_dt
         action, _ = agent.evaluate_tick(snap)
     assert action == "SELL", f"Expected SELL, got {action}"
@@ -1005,17 +1012,20 @@ def t_scalping_win_resets_streak():
 
 def t_scalping_dedup_90s():
     """Same symbol+direction within 90s should be deduplicated."""
-    agent = ScalpingAgent()
-    sym = "TESTDEDUP"
-    agent._last_signal_ts[sym]  = datetime.now()
-    agent._last_signal_dir[sym] = "BUY"
-    # Force an EMA9 cross setup
-    agent._prev_ema9[sym] = 2810.0
-    agent._prev_ltp[sym]  = 2808.0
-    snap = _make_snap(symbol=sym, ltp=2812.0, ema9=2809.0, n_candles=15,
-                      rsi=56.0, volume_ratio=1.5, macd_hist=0.5, vwap=2800.0)
-    action, _ = agent.evaluate_tick(snap)
-    assert action == "HOLD", "Dedup should suppress signal within 90s"
+    from unittest.mock import patch
+    _mkt_dt = datetime(2026, 1, 15, 10, 30, 0)
+    def setup(last_ts):
+        agent = ScalpingAgent()
+        agent._last_signal_ts = {"TESTDEDUP": last_ts}
+        agent._last_signal_dir = {"TESTDEDUP": "BUY"}
+        # Force an EMA9 cross setup
+        agent._prev_ema9["TESTDEDUP"] = 2810.0
+        agent._prev_ltp["TESTDEDUP"]  = 2808.0
+        snap = _make_snap(symbol="TESTDEDUP", ltp=2812.0, ema9=2809.0, n_candles=15,
+                          rsi=56.0, volume_ratio=1.5, macd_hist=0.5, vwap=2800.0)
+        with patch("agents.strategy_agents.now_ist", return_value=_mkt_dt):   # agent's clock is IST
+            return agent.evaluate_tick(snap)[0]
+    assert setup(_mkt_dt.replace(tzinfo=None)) == "HOLD", "Dedup should suppress signal within 90s"
 
 def t_scalping_5_patterns_exist():
     """The agent must define all 5 pattern types in _detect_pattern."""
@@ -1380,6 +1390,1391 @@ run("RSI in [0,100]",                          t_te_indicator_calc)
 run("EMA values are positive",                 t_te_indicator_ema)
 run("TickBuffer stores ticks",                 t_te_tick_buffer)
 run("add_subscriber() returns asyncio.Queue",  t_te_add_subscriber)
+
+# PAPER mode with real Kite prices (PAPER_DATA_SOURCE=KITE)
+from config import settings as _te_settings
+from kite_client import kite_client as _te_kite_client
+
+class _FakeKite:
+    def quote(self, instruments):
+        return {i: {"last_price": 2500.0, "ohlc": {"open": 2490.0, "high": 2510.0,
+                                                    "low": 2480.0, "close": 2495.0},
+                    "volume_traded": 1000, "depth": {}} for i in instruments}
+    def place_order(self, **kw):
+        raise AssertionError("real Kite order placed in PAPER mode")
+
+def _with_paper_kite(fn):
+    prev_mode, prev_src, prev_kite = (_te_settings.trading_mode,
+                                      _te_settings.paper_data_source, _te_kite_client._kite)
+    _te_settings.trading_mode, _te_settings.paper_data_source = "PAPER", "KITE"
+    _te_kite_client._kite = _FakeKite()
+    try:
+        fn()
+    finally:
+        _te_settings.trading_mode, _te_settings.paper_data_source = prev_mode, prev_src
+        _te_kite_client._kite = prev_kite
+
+def t_paper_sim_quote_empty():
+    prev = _te_settings.paper_data_source
+    _te_settings.paper_data_source = "SIM"
+    try:
+        assert _te_settings.trading_mode != "PAPER" or _te_kite_client.quote_kite(["NSE:RELIANCE"]) == {}
+    finally:
+        _te_settings.paper_data_source = prev
+
+def t_paper_kite_ticks():
+    def body():
+        te = TickEngine()
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        asyncio.run(te._fetch_kite_batch())
+        tick, _ = te.latest("RELIANCE")
+        assert tick is not None and tick.ltp == 2500.0, f"tick={tick}"
+        assert te.data_source() == "KiteConnect REST+WS (paper orders)"
+    _with_paper_kite(body)
+
+def t_paper_kite_orders_simulated():
+    def body():
+        oid = _te_kite_client.place_order("RELIANCE", "NSE", "BUY", 1, tag="Test")
+        assert oid.startswith("PAPER-"), f"Got: {oid}"
+    _with_paper_kite(body)
+
+run("PAPER+SIM: quote_kite() returns empty",       t_paper_sim_quote_empty)
+run("PAPER+KITE: ticks come from Kite quotes",     t_paper_kite_ticks)
+run("PAPER+KITE: orders stay simulated",           t_paper_kite_orders_simulated)
+
+# Bot Stop → Start must resume ticks
+def t_te_restart_after_stop():
+    async def body():
+        te = TickEngine()
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        te.start_loop()
+        first = te._task
+        te.stop()
+        assert not te._running
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        te.start_loop()
+        assert te._running and te._task is not first and not te._task.done()
+        assert te.symbols() == ["RELIANCE"], te.symbols()
+        te.stop()
+    asyncio.run(body())
+
+def t_te_start_loop_idempotent():
+    async def body():
+        te = TickEngine()
+        te.start_loop()
+        first = te._task
+        te.start_loop()
+        assert te._task is first
+        te.stop()
+    asyncio.run(body())
+
+run("TickEngine restarts after stop() (bot Stop → Start)", t_te_restart_after_stop)
+run("start_loop() is a no-op while already running",       t_te_start_loop_idempotent)
+
+# Entry must never be left without an exchange SL-M
+def _run_entry_with_failing_sl(exit_fails: bool):
+    from unittest.mock import patch
+    from order_guard import order_guard as _og
+    from risk_manager import risk_manager as _rm
+    from sebi_compliance import sebi_compliance as _sebi
+    import agents.base_agent as _ba
+
+    placed = []
+    def fake_place(**kw):
+        placed.append(kw)
+        if kw["order_type"] == "SL-M":
+            raise RuntimeError("SL-M rejected")
+        if exit_fails and len(placed) > 1:
+            raise RuntimeError("exit rejected")
+        return f"OID-{len(placed)}"
+
+    async def _noop(*a, **k): return None
+
+    agent = IntradayAgent()
+    snap  = _make_snap(symbol="SLFAILTEST")
+    before = _rm.open_position_count
+    with patch.object(_ba.kite_client, "place_order", side_effect=fake_place), \
+         patch.object(_rm, "check_before_order", return_value=(True, "")), \
+         patch.object(_sebi, "pre_order_check", return_value=(True, "ALGO", "")), \
+         patch.object(_ba, "send_telegram", _noop), \
+         patch.object(_ba, "SL_RETRY_DELAY_S", 0):
+        asyncio.run(agent._try_enter(snap, "BUY", {"stop_loss": 2790.0}))
+    return placed, _og.is_symbol_active_anywhere("SLFAILTEST"), before, _rm.open_position_count
+
+def t_sl_fail_flattens_position():
+    placed, active, before, after = _run_entry_with_failing_sl(exit_fails=False)
+    types = [(p["order_type"], p["transaction_type"]) for p in placed]
+    assert types == [("MARKET", "BUY"), ("SL-M", "SELL"), ("SL-M", "SELL"),
+                     ("SL-M", "SELL"), ("MARKET", "SELL")], types
+    assert not active, "flattened entry must not stay registered in order_guard"
+    assert before == after, "flattened entry must not count as an open position"
+
+def t_sl_and_exit_fail_still_tracked():
+    from order_guard import order_guard as _og
+    from trailing_sl_engine import trailing_sl_engine as _tsl
+    placed, active, _, _ = _run_entry_with_failing_sl(exit_fails=True)
+    try:
+        assert active, "unexitable position must stay tracked so TSL can manage it"
+    finally:
+        _og.release_order("SLFAILTEST", "intraday", "BUY", 0.0)
+        _tsl.deregister("OID-1")
+
+run("SL-M rejected → entry closed at market, nothing registered", t_sl_fail_flattens_position)
+run("SL-M and exit both rejected → position stays tracked",      t_sl_and_exit_fail_still_tracked)
+
+# Tick WebSocket must start once symbols exist (not at empty server startup)
+class _FakeTicker:
+    instances: list = []
+    def __init__(self):
+        self.started_with, self.stopped, self.is_connected = None, False, True
+        _FakeTicker.instances.append(self)
+    def start(self, symbols, cb, loop):
+        self.started_with = list(symbols); return True
+    def stop(self):
+        self.stopped = True
+
+def t_ws_starts_after_subscribe():
+    from unittest.mock import patch
+    import kite_ticker as _kt
+    def body():
+        async def inner():
+            _FakeTicker.instances.clear()
+            te = TickEngine()
+            with patch.object(_kt, "KiteTicker", _FakeTicker):
+                te.start_loop()                       # server startup — no symbols yet
+                assert not _FakeTicker.instances, "WS must not start with no symbols"
+                te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+                assert te._use_ws and _FakeTicker.instances[-1].started_with == ["RELIANCE"]
+                te.subscribe([{"symbol": "TCS", "exchange": "NSE"}])
+                first, latest = _FakeTicker.instances[0], _FakeTicker.instances[-1]
+                assert first.stopped and latest.started_with == ["RELIANCE", "TCS"]
+                te.stop()
+                assert latest.stopped and not te._use_ws
+                te.start_loop()                       # bot restart
+                assert _FakeTicker.instances[-1].started_with == ["RELIANCE", "TCS"]
+                te.stop()
+        asyncio.run(inner())
+    _with_paper_kite(body)
+
+def t_rest_covers_disconnected_ws():
+    def body():
+        te = TickEngine()
+        te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+        fake = _FakeTicker(); fake.is_connected = False
+        te._kite_ticker, te._use_ws = fake, True
+        te._ws_received.add("RELIANCE")
+        asyncio.run(te._fetch_kite_batch())
+        tick, _ = te.latest("RELIANCE")
+        assert tick is not None, "REST must poll symbols while the WebSocket is down"
+    _with_paper_kite(body)
+
+def t_kite_ticker_stop_keeps_reactor():
+    from kite_ticker import KiteTicker as _RealKT
+    class _Kws:
+        closed = halted = False
+        def close(self, *a): self.closed = True
+        def stop(self):      self.halted = True
+    kt = _RealKT(); kws = _Kws(); kt._kws = kws
+    kt.stop()
+    assert kws.closed and not kws.halted, "stop() must close(), not halt the Twisted reactor"
+
+run("Kite WebSocket starts once symbols are subscribed",  t_ws_starts_after_subscribe)
+run("REST polling covers symbols while WS is disconnected", t_rest_covers_disconnected_ws)
+run("KiteTicker.stop() closes socket, keeps reactor",     t_kite_ticker_stop_keeps_reactor)
+
+# No method may be silently overridden by a later duplicate in the same class
+def t_no_duplicate_methods():
+    import ast, collections
+    for path in ("agents/strategy_agents.py", "agents/base_agent.py"):
+        tree = ast.parse(open(path).read())
+        for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
+            names = [f.name for f in cls.body
+                     if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            dups = [n for n, c in collections.Counter(names).items() if c > 1]
+            assert not dups, f"{path} {cls.name} defines twice: {dups}"
+
+def t_scalping_uses_pattern_detector():
+    import inspect
+    assert "_detect_pattern" in inspect.getsource(ScalpingAgent.evaluate_tick)
+
+def t_no_duplicate_routes():
+    import ast, collections
+    tree = ast.parse(open("main.py").read())
+    routes = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for d in node.decorator_list:
+                if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                        and getattr(d.func.value, "id", "") == "app" and d.args
+                        and d.func.attr != "middleware"
+                        and isinstance(d.args[0], ast.Constant)):
+                    routes.append((d.func.attr, d.args[0].value))
+    dups = [r for r, c in collections.Counter(routes).items() if c > 1]
+    assert not dups, f"duplicate routes (later ones never run): {dups}"
+
+def t_adx_computed():
+    n = 40
+    dates = pd.date_range(end=datetime.now(), periods=n, freq="1min")
+    close = [100.0 + i * 0.5 for i in range(n)]          # steady uptrend
+    df = pd.DataFrame({"open": close, "high": [c + 0.6 for c in close],
+                       "low": [c - 0.4 for c in close], "close": close,
+                       "volume": [50000] * n}, index=dates)
+    tick = Tick(symbol="ADXT", ltp=close[-1], bid=close[-1]-0.1, ask=close[-1]+0.1,
+                volume=50000, change=0.0, change_pct=0.0, high=close[-1]+1,
+                low=close[-1]-1, open=close[0], timestamp=datetime.now())
+    ind = IndicatorCalc.compute("ADXT", tick, df)
+    assert ind.adx_14 > 20, f"ADX in a steady trend should be >20, got {ind.adx_14}"
+
+run("IndicatorCalc computes ADX(14)",           t_adx_computed)
+run("No class defines the same method twice",  t_no_duplicate_methods)
+run("ScalpingAgent uses the 5-pattern detector", t_scalping_uses_pattern_detector)
+run("main.py has no duplicate routes",          t_no_duplicate_routes)
+
+# ── Exits: no leftover SL-M, full bookkeeping release; F&O tracked on the option ──
+import agents.base_agent as _ba
+from trailing_sl_engine import trailing_sl_engine as _tsl_eng
+from order_guard import order_guard as _og_x
+from risk_manager import risk_manager as _rm_x
+from sebi_compliance import sebi_compliance as _sebi_x
+
+def _paper_entry(agent, sym, ltp):
+    """Open a real paper position through agent._try_enter; returns its entry order id."""
+    from unittest.mock import patch
+    import tick_engine as _te_mod
+    async def _noop(*a, **k): return None
+    fake_tick = Tick(symbol=sym, ltp=ltp, bid=ltp, ask=ltp, volume=1, change=0.0,
+                     change_pct=0.0, high=ltp, low=ltp, open=ltp, timestamp=datetime.now())
+    _te_mod.tick_engine._latest_tick[sym] = fake_tick          # paper fill price
+    with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+         patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+         patch.object(_ba, "send_telegram", _noop):
+        asyncio.run(agent._try_enter(_make_snap(symbol=sym, ltp=ltp), "BUY",
+                                     {"stop_loss": round(ltp * 0.99, 2)}))
+    return next(oid for oid, e in _ba._tsl_sl_orders.items() if e["symbol"] == sym)
+
+def _paper_pos(sym):
+    return next((p for p in _te_kite_client._paper_positions if p["tradingsymbol"] == sym), None)
+
+def _order(oid):
+    return next(o for o in _te_kite_client._paper_orders if o["order_id"] == oid)
+
+def t_paper_sl_rests_and_fills_at_ltp():
+    agent = IntradayAgent()
+    oid = _paper_entry(agent, "PFILL", 500.0)
+    entry = _ba._tsl_sl_orders[oid]
+    assert _order(oid)["price"] == 500.0, "paper MARKET must fill at the live LTP, not ₹0"
+    assert _order(entry["sl_order_id"])["status"] == "TRIGGER PENDING"
+    assert _paper_pos("PFILL")["quantity"] > 0, "placing the SL-M must not flatten the position"
+    _ba._close_tracked(oid, "PFILL", "BUY", _paper_pos("PFILL")["quantity"], 0.0, "T", "intraday")
+
+def t_target2_cancels_sl_and_releases():
+    agent = IntradayAgent()
+    before = _rm_x.open_position_count
+    oid = _paper_entry(agent, "TGT2", 1000.0)
+    sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+    pos = _tsl_eng._positions[oid]
+    asyncio.run(_tsl_eng.on_target_hit(pos, 1100.0, 2))
+    assert _order(sl_oid)["status"] == "CANCELLED", "SL-M must be cancelled on target exit"
+    assert _paper_pos("TGT2")["quantity"] == 0
+    assert not _og_x.is_symbol_active_anywhere("TGT2"), "order_guard slot must be released"
+    assert _rm_x.open_position_count == before, "risk position count must drop back"
+    assert oid not in _tsl_eng._positions and oid not in _ba._tsl_sl_orders
+
+def t_strategy_exit_cancels_sl():
+    from unittest.mock import patch
+    agent = IntradayAgent()
+    oid = _paper_entry(agent, "STRX", 800.0)
+    sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+    async def _noop(*a, **k): return None
+    with patch.object(IntradayAgent, "should_exit_position", return_value=(True, "test")), \
+         patch.object(_ba, "send_telegram", _noop):
+        asyncio.run(agent._check_exits_on_tick(_make_snap(symbol="STRX", ltp=810.0)))
+    assert _order(sl_oid)["status"] == "CANCELLED"
+    assert _paper_pos("STRX")["quantity"] == 0
+    assert oid not in _tsl_eng._positions, "must deregister the ENTRY id, not the exit id"
+    assert not _og_x.is_symbol_active_anywhere("STRX")
+
+def t_exit_ignores_other_agents_positions():
+    from unittest.mock import patch
+    owner, other = IntradayAgent(), ScalpingAgent()
+    oid = _paper_entry(owner, "OWNX", 600.0)
+    with patch.object(ScalpingAgent, "should_exit_position", return_value=(True, "x")):
+        asyncio.run(other._check_exits_on_tick(_make_snap(symbol="OWNX", ltp=600.0)))
+    assert _paper_pos("OWNX")["quantity"] > 0, "an agent must not close another agent's position"
+    _ba._close_tracked(oid, "OWNX", "BUY", _paper_pos("OWNX")["quantity"], 0.0, "T", "intraday")
+
+def t_fno_tracked_on_option_premium():
+    from unittest.mock import patch
+    import tick_engine as _te_mod
+    opt = "NIFTYTEST24000CE"
+    class _OptKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 120.0} for i in instruments}
+    async def _noop(*a, **k): return None
+    def body():
+        _te_kite_client._kite = _OptKite()
+        agent = FnOAgent()
+        import options_resolver as _or
+        listed = [{"name": "NIFTY", "instrument_type": "CE", "segment": "NFO-OPT", "strike": 24000.0,
+                   "expiry": datetime.now().date() + timedelta(days=6), "tradingsymbol": opt,
+                   "lot_size": 75}]
+        with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+             patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+             patch.object(_ba, "send_telegram", _noop), \
+             patch.object(_or, "_instruments", return_value=listed):
+            asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
+                        {"option_symbol": "NIFTY-BUILT-SYMBOL", "exchange": "NFO", "lot_size": 75,
+                         "strike": 24000, "option_type": "CE"}))
+        oid = next(o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == opt)
+        try:
+            pos = _tsl_eng._positions[oid]
+            assert pos.symbol == opt and pos.entry_price == 120.0, (pos.symbol, pos.entry_price)
+            sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
+            assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING", sl
+            entry_order = _order(oid)
+            assert entry_order["order_type"] == "LIMIT" and entry_order["tradingsymbol"] == opt
+            assert opt in agent._exit_only and opt in _te_mod.tick_engine.symbols()
+            # An index tick must not touch the option position (this used to fire target 2)
+            asyncio.run(_tsl_eng.on_tick("NIFTY", 24000.0, 15.0))
+            assert oid in _tsl_eng._positions and not pos.target2_hit
+            assert _og_x.is_symbol_active_anywhere("NIFTY") == ["fno"]
+        finally:
+            _ba._close_tracked(oid, opt, "BUY", 75, 0.0, "T", "fno")
+        assert not _og_x.is_symbol_active_anywhere("NIFTY"), "guard keyed on the underlying"
+    _with_paper_kite(body)
+
+def t_fno_skips_without_live_premium():
+    from unittest.mock import patch
+    class _NoQuote(_FakeKite):
+        def quote(self, instruments): return {}
+    def body():
+        _te_kite_client._kite = _NoQuote()
+        n = len(_te_kite_client._paper_orders)
+        with patch.object(_rm_x, "check_before_order", return_value=(True, "")):
+            asyncio.run(FnOAgent()._try_enter(_make_snap(symbol="BANKNIFTY", ltp=50000.0), "BUY",
+                        {"option_symbol": "BNTEST50000CE", "exchange": "NFO", "lot_size": 15}))
+        assert len(_te_kite_client._paper_orders) == n, "no order without a real premium"
+    _with_paper_kite(body)
+
+def t_bracket_callbacks_chain_to_agents():
+    from atomic_bracket import atomic_bracket_engine as _abe
+    _ba._setup_tsl_callbacks()
+    agent_hit = _tsl_eng.on_target_hit
+    _abe._install_tsl_callbacks()
+    try:
+        oid = _paper_entry(IntradayAgent(), "CHAIN", 300.0)
+        asyncio.run(_tsl_eng.on_target_hit(_tsl_eng._positions[oid], 330.0, 2))
+        assert oid not in _tsl_eng._positions, "agent position must still exit after a bracket"
+    finally:
+        _tsl_eng.on_target_hit = agent_hit
+        _tsl_eng.on_sl_hit     = _abe._prev_sl_hit
+        _tsl_eng.on_sl_moved   = _abe._prev_sl_moved
+
+run("Paper: MARKET fills at LTP, SL-M rests, position kept",  t_paper_sl_rests_and_fills_at_ltp)
+run("Target 2 exit cancels SL-M and releases bookkeeping",   t_target2_cancels_sl_and_releases)
+run("Strategy exit cancels SL-M, deregisters entry",         t_strategy_exit_cancels_sl)
+run("Agent never closes another agent's position",           t_exit_ignores_other_agents_positions)
+run("F&O tracked on option premium, not the index",          t_fno_tracked_on_option_premium)
+run("F&O skips entry when no live premium",                  t_fno_skips_without_live_premium)
+run("Bracket TSL callbacks hand agent positions back",       t_bracket_callbacks_chain_to_agents)
+
+# ── New indicators ────────────────────────────────────────────────────────
+def _trend_df(n=120, step=0.05, seed=1):
+    rng   = np.random.default_rng(seed)
+    close = 100 + np.cumsum(rng.normal(step, 0.3, n))
+    return pd.DataFrame({"open": close - 0.1, "high": close + 0.4, "low": close - 0.4,
+                         "close": close, "volume": rng.integers(1000, 5000, n)},
+                        index=pd.date_range(end=datetime.now(), periods=n, freq="1min"))
+
+def _compute(df):
+    c = float(df["close"].iloc[-1])
+    tick = Tick(symbol="IND", ltp=c, bid=c, ask=c, volume=1, change=0.0, change_pct=0.0,
+                high=c, low=c, open=float(df["open"].iloc[0]), timestamp=datetime.now())
+    return IndicatorCalc.compute("IND", tick, df)
+
+def t_new_indicators_computed():
+    ind = _compute(_trend_df())
+    assert ind.keltner_lower < ind.keltner_mid < ind.keltner_upper
+    assert 0 <= ind.mfi_14 <= 100 and ind.cci_20 != 0
+    assert ind.plus_di > ind.minus_di, "uptrend: +DI must lead"
+    assert ind.ichimoku_tenkan > 0 and ind.ichimoku_kijun > 0
+    assert 0 < ind.ichimoku_cloud_bot <= ind.ichimoku_cloud_top
+
+def t_ichimoku_cloud_needs_history():
+    ind = _compute(_trend_df(n=60))      # < 52+26 bars: no cloud yet
+    assert ind.ichimoku_tenkan > 0 and ind.ichimoku_cloud_top == 0.0
+
+def t_new_indicators_in_live_feed():
+    te = TickEngine()
+    te.subscribe([{"symbol": "IND", "exchange": "NSE"}])
+    df = _trend_df()
+    te._latest_tick["IND"] = Tick(symbol="IND", ltp=1.0, bid=1.0, ask=1.0, volume=1, change=0.0,
+                                  change_pct=0.0, high=1.0, low=1.0, open=1.0,
+                                  timestamp=datetime.now())
+    te._latest_ind["IND"] = _compute(df)
+    row = te.all_latest()["IND"]
+    for k in ("adx_14", "keltner_u", "cci_20", "mfi_14", "ichimoku_cloud_top"):
+        assert k in row, k
+
+run("Keltner/CCI/MFI/Ichimoku/DI computed",     t_new_indicators_computed)
+run("Ichimoku cloud waits for 78 bars",          t_ichimoku_cloud_needs_history)
+run("New indicators exposed in all_latest()",    t_new_indicators_in_live_feed)
+
+# ── New strategy patterns ─────────────────────────────────────────────────
+import dataclasses as _dc
+
+def _ind(**kw):
+    return _dc.replace(_make_snap().indicators, **kw)
+
+def t_pat_vwap_reversion():
+    a = IntradayAgent()
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=15.0, rsi_14=35.0),
+                                 990.0, None)[0] == "BUY"
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=15.0, rsi_14=65.0),
+                                 1010.0, None)[0] == "SELL"
+    # trending (ADX ≥ 22) → no fade
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=30.0, rsi_14=35.0),
+                                 990.0, None)[0] == ""
+    # stretch too small (0.2%)
+    assert a._pat_vwap_reversion("S", None, _ind(vwap=1000.0, adx_14=15.0, rsi_14=35.0),
+                                 998.0, None)[0] == ""
+
+def t_pat_keltner_breakout():
+    a = IntradayAgent()
+    up = _ind(keltner_upper=1000.0, keltner_lower=980.0, adx_14=25.0,
+              plus_di=30.0, minus_di=15.0, volume_ratio=2.0)
+    a._prev_ltp["S"] = 999.0
+    assert a._pat_keltner_breakout("S", None, up, 1001.0, None)[0] == "BUY"
+    a._prev_ltp["S"] = 1001.5                       # already above — not a fresh break
+    assert a._pat_keltner_breakout("S", None, up, 1002.0, None)[0] == ""
+    a._prev_ltp["S"] = 999.0                        # -DI in control → no long
+    assert a._pat_keltner_breakout("S", None, _dc.replace(up, plus_di=10.0), 1001.0, None)[0] == ""
+    dn = _ind(keltner_upper=1000.0, keltner_lower=980.0, adx_14=25.0,
+              plus_di=10.0, minus_di=30.0, volume_ratio=2.0)
+    a._prev_ltp["S"] = 981.0
+    assert a._pat_keltner_breakout("S", None, dn, 979.0, None)[0] == "SELL"
+
+def t_pat_cci_mfi_dip():
+    a = IntradayAgent()
+    a._prev_cci["S"] = -130.0
+    assert a._pat_cci_mfi_dip("S", None, _ind(ema50=900.0, cci_20=-90.0, mfi_14=30.0),
+                              1000.0, None)[0] == "BUY"
+    a._prev_cci["S"] = -130.0                       # below EMA50 → not a dip in an uptrend
+    assert a._pat_cci_mfi_dip("S", None, _ind(ema50=1100.0, cci_20=-90.0, mfi_14=30.0),
+                              1000.0, None)[0] == ""
+    a._prev_cci["S"] = 130.0
+    assert a._pat_cci_mfi_dip("S", None, _ind(ema50=1100.0, cci_20=90.0, mfi_14=70.0),
+                              1000.0, None)[0] == "SELL"
+
+def t_pat_fno_trend_breakout():
+    a = FnOAgent()
+    i = _ind(bb_upper=1000.0, bb_lower=950.0, adx_14=30.0, rsi_14=65.0, macd_hist=1.0)
+    assert a._pat_trend_breakout("S", None, i, 1005.0, None)[0] == "CE"
+    assert a._pat_trend_breakout("S", None, _dc.replace(i, adx_14=20.0), 1005.0, None)[0] == ""
+    j = _ind(bb_upper=1000.0, bb_lower=950.0, adx_14=30.0, rsi_14=35.0, macd_hist=-1.0)
+    assert a._pat_trend_breakout("S", None, j, 945.0, None)[0] == "PE"
+
+def t_pat_swing_ichimoku():
+    a = SwingAgent()
+    i = _ind(ichimoku_tenkan=1010.0, ichimoku_kijun=1000.0, ichimoku_cloud_top=980.0,
+             ema200=900.0, plus_di=25.0, minus_di=10.0, rsi_14=60.0)
+    a._prev_tk_above["S"] = False                   # fresh Tenkan/Kijun cross
+    assert a._pat_ichimoku_trend("S", i, 1020.0) == "ICHIMOKU-TREND"
+    a._prev_tk_above["S"] = True                    # no new cross
+    assert a._pat_ichimoku_trend("S", i, 1020.0) == ""
+    a._prev_tk_above["S"] = False                   # price inside the cloud
+    assert a._pat_ichimoku_trend("S", i, 975.0) == ""
+
+def t_intraday_new_patterns_wired():
+    import inspect
+    src = inspect.getsource(IntradayAgent.evaluate_tick)
+    for p in ("_pat_vwap_reversion", "_pat_keltner_breakout", "_pat_cci_mfi_dip"):
+        assert p in src, p
+    assert "_pat_trend_breakout" in inspect.getsource(FnOAgent.evaluate_tick)
+    assert "_pat_ichimoku_trend" in inspect.getsource(SwingAgent.evaluate_tick)
+
+def t_intraday_fires_keltner_end_to_end():
+    from unittest.mock import patch
+    a = IntradayAgent()
+    snap = _make_snap(symbol="KEL", ltp=1001.0, vwap=990.0, rsi=60.0, volume_ratio=2.0)
+    snap.indicators.keltner_upper, snap.indicators.keltner_lower = 1000.0, 980.0
+    snap.indicators.adx_14, snap.indicators.plus_di, snap.indicators.minus_di = 25.0, 30.0, 15.0
+    a._prev_ltp["KEL"] = 999.0
+    with patch("agents.strategy_agents.now_ist",
+               return_value=datetime(2026, 1, 15, 11, 0, 0)):
+        action, sig = a.evaluate_tick(snap)
+    assert action == "BUY" and sig and sig["stop_loss"] < 1001.0 < sig["target"], (action, sig)
+    assert "KELTNER_BREAKOUT" in sig["trigger"], sig["trigger"]
+
+run("VWAP_REVERSION fades range stretches only",     t_pat_vwap_reversion)
+run("KELTNER_BREAKOUT needs fresh break + DI",       t_pat_keltner_breakout)
+run("CCI_MFI_DIP buys dips in uptrend only",         t_pat_cci_mfi_dip)
+run("F&O TREND_BREAKOUT needs ADX > 26",             t_pat_fno_trend_breakout)
+run("Swing ICHIMOKU_TREND needs fresh cross > cloud", t_pat_swing_ichimoku)
+run("New patterns wired into agents",                t_intraday_new_patterns_wired)
+run("Intraday fires on a Keltner breakout tick",     t_intraday_fires_keltner_end_to_end)
+
+# ══════════════════════════════════════════════════════════════════════════
+# AI TRADER — agent loop with a fake Claude client; limits enforced in code
+# ══════════════════════════════════════════════════════════════════════════
+section("AI TRADER")
+import ai_trader as _ai_mod
+from ai_trader import AITrader, ToolRejected, TOOLS as _AI_TOOLS
+from types import SimpleNamespace as _NS
+from unittest.mock import patch as _patch
+from config import settings as _ai_settings
+_ai_settings.prune_enabled = False          # see the top of this file; section 18 turns it on explicitly
+
+_MKT_NOW = datetime(2026, 1, 15, 11, 0, 0)
+
+def _ai_tick(sym, ltp, age_s=0):
+    import tick_engine as _te_mod
+    _te_mod.tick_engine.subscribe([{"symbol": sym, "exchange": "NSE"}])
+    _te_mod.tick_engine._latest_tick[sym] = Tick(
+        symbol=sym, ltp=ltp, bid=ltp - 0.05, ask=ltp + 0.05, volume=1000, change=0.0,
+        change_pct=0.0, high=ltp, low=ltp, open=ltp, timestamp=datetime.now() - timedelta(seconds=age_s))
+    _te_mod.tick_engine._latest_ind[sym] = _make_snap(symbol=sym, ltp=ltp).indicators
+
+def _ai_env():
+    """Market open, risk check passing — the AI's own limits stay real."""
+    import market_filter as _mf
+    return [_patch.object(_ai_mod, "is_market_open", return_value=True),
+            _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW),
+            _patch.object(_mf, "state", return_value={"state": "RISK_ON", "size_factor": 1.0}),   # tests set it explicitly
+            _patch.object(_ai_mod.performance, "pruned", {}),
+            _patch.object(_rm_x, "check_before_order", return_value=(True, "")),
+            _patch.object(_ba, "send_telegram", _noop_async)]
+
+async def _noop_async(*a, **k): return None
+
+def _with_ai_env(fn):
+    _og_x._cooldown_until.clear()          # earlier losing tests leave a post-loss cooldown
+    _og_x._trade_count.clear()             # …and count toward the per-strategy daily trade cap
+    ps = _ai_env()
+    for p in ps: p.start()
+    try:
+        return fn()
+    finally:
+        for p in ps: p.stop()
+
+def _trade_args(sym, side="BUY", qty=10, sl=990.0, tgt=1020.0):
+    return {"symbol": sym, "side": side, "quantity": qty, "stop_loss": sl, "target": tgt,
+            "reasoning": "test"}
+
+def t_ai_tool_schemas_strict():
+    names = [t["name"] for t in _AI_TOOLS]
+    assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
+                     "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
+                     "place_swing_put", "place_option_spread",
+                     "get_future_quote", "place_future_trade", "get_option_chain",
+                     "place_option_trade", "adjust_stop", "close_position"], names
+    for t in _AI_TOOLS:
+        sch = t["input_schema"]
+        assert t["strict"] is True and sch["additionalProperties"] is False
+        assert set(sch["required"]) == set(sch["properties"]), t["name"]
+
+def t_ai_trade_lifecycle_paper():
+    def body():
+        ai = AITrader()
+        _ai_tick("AITEST", 1000.0)
+        out = asyncio.run(ai._place_trade(_trade_args("AITEST")))
+        assert out["status"] == "placed" and out["order_id"].startswith("PAPER-")
+        oid = out["order_id"]
+        entry = _ba._tsl_sl_orders[oid]
+        assert entry["agent"] == "ai" and _order(entry["sl_order_id"])["status"] == "TRIGGER PENDING"
+        assert _tsl_eng._positions[oid].current_sl == 990.0, "software stop must equal the AI's stop"
+        assert ai.trades_today == 1 and len(ai._ai_entries()) == 1
+        assert ai._positions()["open"][0]["target"] == 1020.0
+        res = asyncio.run(ai._close_position("AITEST", "test exit"))
+        assert res["status"] == "closed"
+        assert _order(entry["sl_order_id"])["status"] == "CANCELLED"
+        assert not ai._ai_entries() and not _og_x.is_symbol_active_anywhere("AITEST")
+    _with_ai_env(body)
+
+def t_ai_hard_limits():
+    def body():
+        ai = AITrader()
+        _ai_tick("AILIM", 1000.0)
+        cases = [
+            (_trade_args("AILIM", qty=100), "per-trade limit"),           # ₹1,00,000 > ₹50,000
+            (_trade_args("AILIM", sl=1005.0), "wrong side"),
+            (_trade_args("AILIM", sl=950.0, tgt=1100.0), "allowed"),       # 5% stop
+            (_trade_args("AILIM", sl=999.5, tgt=1001.0), "allowed"),       # 0.05% stop
+            (_trade_args("AILIM", tgt=1005.0), "need >= 1.5x"),            # 0.5x reward
+            (_trade_args("AILIM", side="HOLD"), "BUY or SELL"),
+            (_trade_args("NOTSTREAMING"), "not streaming"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_trade(args))
+                raise AssertionError(f"accepted: {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        _ai_tick("AISTALE", 1000.0, age_s=600)
+        try:
+            asyncio.run(ai._place_trade(_trade_args("AISTALE")))
+            raise AssertionError("stale quote accepted")
+        except ToolRejected as e:
+            assert "stale" in str(e)
+        assert ai.trades_today == 0 and not ai._ai_entries()
+        assert sum(1 for e in ai.log if e["kind"] == "rejected") == len(cases) + 1
+    _with_ai_env(body)
+
+def t_ai_trade_count_and_position_limits():
+    def body():
+        ai = AITrader()
+        syms = ["AIP1", "AIP2", "AIP3"]
+        for s in syms: _ai_tick(s, 1000.0)
+        asyncio.run(ai._place_trade(_trade_args("AIP1")))
+        asyncio.run(ai._place_trade(_trade_args("AIP2")))
+        try:
+            asyncio.run(ai._place_trade(_trade_args("AIP3")))
+            raise AssertionError("3rd open position accepted")
+        except ToolRejected as e:
+            assert "max open intraday AI positions" in str(e)
+        asyncio.run(ai.close_all("test"))
+        ai.trades_today = _ai_settings.ai_agent_max_trades_per_day
+        try:
+            asyncio.run(ai._place_trade(_trade_args("AIP3")))
+            raise AssertionError("trade over daily limit accepted")
+        except ToolRejected as e:
+            assert "daily AI trade limit" in str(e)
+    _with_ai_env(body)
+
+def t_ai_live_blocked_by_default():
+    def body():
+        ai = AITrader()
+        _ai_tick("AILIVE", 1000.0)
+        prev = _ai_settings.trading_mode
+        _ai_settings.trading_mode = "LIVE"
+        try:
+            assert _ai_settings.ai_agent_allow_live is False
+            assert ai._mode_label() == "LIVE-BLOCKED"
+            try:
+                asyncio.run(ai._place_trade(_trade_args("AILIVE")))
+                raise AssertionError("LIVE trade accepted without AI_AGENT_ALLOW_LIVE")
+            except ToolRejected as e:
+                assert "AI_AGENT_ALLOW_LIVE" in str(e)
+        finally:
+            _ai_settings.trading_mode = prev
+    _with_ai_env(body)
+
+def t_ai_entry_window():
+    ai = AITrader()
+    with _patch.object(_ai_mod, "is_market_open", return_value=True), \
+         _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 14, 50)):
+        ok, why = ai._trading_allowed()
+    assert not ok and "entry window" in why
+
+def t_ai_target_hit_closes():
+    def body():
+        ai = AITrader()
+        _ai_tick("AITGT", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("AITGT")))["order_id"]
+        _ai_tick("AITGT", 1021.0)
+        asyncio.run(ai._on_snap(_make_snap(symbol="AITGT", ltp=1021.0)))
+        assert oid not in ai._ai_entries(), "target hit must close the AI position"
+        assert any(e["kind"] == "close" and "target" in e["text"] for e in ai.log)
+    _with_ai_env(body)
+
+def t_ai_stop_exit_logged():
+    def body():
+        ai = AITrader()
+        _ai_tick("AISTOP", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("AISTOP")))["order_id"]
+        _ai_tick("AISTOP", 985.0)
+        asyncio.run(ai._on_snap(_make_snap(symbol="AISTOP", ltp=985.0)))   # below the 990 stop
+        assert oid not in ai._ai_entries(), "stop must close the AI position"
+        assert any("stop-loss" in e["text"] for e in ai.log if e["kind"] == "close")
+    _with_ai_env(body)
+
+# ── Fake Claude client for the agent loop ─────────────────────────────────
+def _resp(content, stop, inp=1000, out=200):
+    return _NS(content=content, stop_reason=stop, stop_details=None,
+               usage=_NS(input_tokens=inp, output_tokens=out,
+                         cache_read_input_tokens=0, cache_creation_input_tokens=0))
+
+def _tu(id_, name, inp):
+    return _NS(type="tool_use", id=id_, name=name, input=inp)
+
+def _txt(t):
+    return _NS(type="text", text=t)
+
+class _FakeMessages:
+    def __init__(self, script):
+        self.script, self.calls = list(script), []
+    async def create(self, **kw):
+        kw = dict(kw, messages=list(kw["messages"]))   # snapshot: the loop keeps appending
+        self.calls.append(kw)
+        return self.script.pop(0)
+
+class _FakeClient:
+    def __init__(self, script):
+        self.messages = _FakeMessages(script)
+        self.beta = _NS(messages=self.messages)
+
+def t_ai_agent_loop_places_trade():
+    def body():
+        ai = AITrader()
+        ai._day = _MKT_NOW.date()
+        _ai_tick("AILOOP", 1000.0)
+        fake = _FakeClient([
+            _resp([_tu("t1", "get_market_overview", {}), _tu("t2", "get_ai_positions", {})], "tool_use"),
+            _resp([_tu("t3", "place_trade", _trade_args("AILOOP"))], "tool_use"),
+            _resp([_txt("Bought AILOOP on a VWAP trend setup.")], "end_turn"),
+        ])
+        ai._client = fake
+        prev = _ai_settings.anthropic_api_key
+        _ai_settings.anthropic_api_key = "test"
+        try:
+            summary = asyncio.run(ai.run_cycle())
+        finally:
+            _ai_settings.anthropic_api_key = prev
+        assert summary == "Bought AILOOP on a VWAP trend setup.", summary
+        assert ai.trades_today == 1 and ai.cycles_today == 1
+        calls = fake.messages.calls
+        assert len(calls) == 3
+        first = calls[0]
+        assert first["model"] == _ai_settings.ai_agent_model and first["tools"] == _AI_TOOLS
+        assert first["cache_control"] == {"type": "ephemeral"}
+        assert first["output_config"] == {"effort": _ai_settings.ai_agent_effort}
+        if _ai_settings.ai_agent_model in _ai_mod._FALLBACK_MODELS:
+            assert first["fallbacks"] == "default"
+        # both parallel tool results go back in ONE user message, ids matching
+        results = calls[1]["messages"][-1]["content"]
+        assert [r["tool_use_id"] for r in results] == ["t1", "t2"]
+        assert ai.cost_today_usd > 0
+        asyncio.run(ai.close_all("test"))
+    _with_ai_env(body)
+
+def t_ai_rejection_goes_back_as_error():
+    def body():
+        ai = AITrader()
+        _ai_tick("AIREJ", 1000.0)
+        fake = _FakeClient([
+            _resp([_tu("t1", "place_trade", _trade_args("AIREJ", qty=1000))], "tool_use"),
+            _resp([_txt("Too large; skipped.")], "end_turn"),
+        ])
+        ai._client = fake
+        msgs = [{"role": "user", "content": "go"}]
+        asyncio.run(ai._run_agent(msgs, "test"))
+        res = fake.messages.calls[1]["messages"][-1]["content"][0]
+        assert res["is_error"] is True and res["content"].startswith("REJECTED:")
+        assert ai.trades_today == 0
+    _with_ai_env(body)
+
+def t_ai_refusal_and_step_limit():
+    ai = AITrader()
+    ai._client = _FakeClient([_resp([], "refusal")])
+    assert "declined" in asyncio.run(ai._run_agent([{"role": "user", "content": "x"}], "t"))
+    ai2 = AITrader()
+    loop = [_resp([_tu(f"s{i}", "get_market_overview", {})], "tool_use")
+            for i in range(_ai_settings.ai_agent_max_steps)]
+    ai2._client = _FakeClient(loop)
+    with _patch.object(_ai_mod, "is_market_open", return_value=True), \
+         _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW):
+        out = asyncio.run(ai2._run_agent([{"role": "user", "content": "x"}], "t"))
+    assert "step limit" in out and len(ai2._client.messages.calls) == _ai_settings.ai_agent_max_steps
+
+def t_ai_cost_cap_stops_cycles():
+    ai = AITrader()
+    ai._day = _MKT_NOW.date()             # same day as the patched clock, so no daily reset
+    ai.cost_today_usd = _ai_settings.ai_agent_max_daily_cost_usd
+    ai._client = _FakeClient([])          # any API call would fail the test
+    prev = _ai_settings.anthropic_api_key
+    _ai_settings.anthropic_api_key = "test"
+    try:
+        with _patch.object(_ai_mod, "is_market_open", return_value=True), \
+             _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW):
+            assert asyncio.run(ai.run_cycle()) is None
+    finally:
+        _ai_settings.anthropic_api_key = prev
+    assert ai._client.messages.calls == []
+
+def t_ai_force_exit_at_1500():
+    def body():
+        ai = AITrader()
+        _ai_tick("AIEOD", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("AIEOD")))["order_id"]
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai.run_cycle())
+        assert oid not in ai._ai_entries(), "15:00 must close every AI position"
+    _with_ai_env(body)
+
+def t_ai_sebi_registered():
+    from sebi_compliance import APPROVED_ALGO_IDS
+    assert APPROVED_ALGO_IDS.get("ai") == "ALGO-AI-006"
+
+run("AI tools: strict schemas, fixed order",          t_ai_tool_schemas_strict)
+run("AI paper trade: entry, resting SL-M, close",     t_ai_trade_lifecycle_paper)
+run("AI hard limits reject bad trades",               t_ai_hard_limits)
+run("AI open-position and daily trade limits",        t_ai_trade_count_and_position_limits)
+run("AI cannot trade LIVE unless allowed",            t_ai_live_blocked_by_default)
+run("AI entry window closes at 14:45",                t_ai_entry_window)
+run("AI target hit closes position on tick",          t_ai_target_hit_closes)
+run("AI stop-loss exit closes and is logged",         t_ai_stop_exit_logged)
+run("AI agent loop: tools → trade → summary",         t_ai_agent_loop_places_trade)
+run("AI rejected action returned as tool error",      t_ai_rejection_goes_back_as_error)
+run("AI refusal handled; step limit enforced",        t_ai_refusal_and_step_limit)
+run("AI daily cost cap stops API calls",              t_ai_cost_cap_stops_cycles)
+run("AI positions force-closed at 15:00",             t_ai_force_exit_at_1500)
+run("AI algo registered for SEBI checks",             t_ai_sebi_registered)
+
+# ── Real-time alerts ──────────────────────────────────────────────────────
+class _FakeScout:
+    min_candles_1min = 0
+    def __init__(self, action="BUY"):
+        self.action = action
+    def evaluate_tick(self, snap):
+        if self.action == "HOLD":
+            return "HOLD", None
+        return self.action, {"trigger": "INTRA-BUY [KELTNER_BREAKOUT] score=6",
+                             "stop_loss": 990.0, "target": 1020.0}
+
+def _rt_ai(action="BUY"):
+    ai = AITrader()
+    ai._day = _MKT_NOW.date()
+    ai._scout = _FakeScout(action)
+    return ai
+
+def _with_key(fn):
+    prev = _ai_settings.anthropic_api_key
+    _ai_settings.anthropic_api_key = "test"
+    try:
+        return fn()
+    finally:
+        _ai_settings.anthropic_api_key = prev
+
+def t_rt_setup_alert_and_cooldown():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTSET", 1000.0)
+        ai._detect(_make_snap(symbol="RTSET", ltp=1000.0))
+        ev = ai._events.get("RTSET")
+        assert ev and ev["kind"] == "setup" and ev["side"] == "BUY" and ev["ltp"] == 1000.0, ev
+        assert "KELTNER_BREAKOUT" in ev["reason"]
+        del ai._events["RTSET"]
+        ai._detect(_make_snap(symbol="RTSET", ltp=1001.0))       # same setup again, within cooldown
+        assert "RTSET" not in ai._events, "cooldown must suppress a repeat alert"
+        assert ai.events_today == 1
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_no_entry_alert_when_blocked():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTBLK", 1000.0)
+        ai.trades_today = _ai_settings.ai_agent_max_trades_per_day
+        ai._detect(_make_snap(symbol="RTBLK", ltp=1000.0))
+        assert not ai._events, "no entry alerts once the daily trade limit is used"
+    _with_ai_env(lambda: _with_key(body))
+    ai = _rt_ai()
+    with _patch.object(_ai_mod, "is_market_open", return_value=False):
+        _with_key(lambda: ai._detect(_make_snap(symbol="RTBLK2", ltp=1000.0)))
+    assert not ai._events, "no entry alerts while the market is closed"
+
+def t_rt_momentum_burst():
+    def body():
+        ai = _rt_ai("HOLD")
+        snap = _make_snap(symbol="RTBURST", ltp=1010.0, volume_ratio=2.5)
+        snap.candles_1min[-1] = Candle(1000.0, 1010.0, 999.0, 1010.0, 9000, datetime.now())
+        ai._detect(snap)                                      # +1.0% inside the minute
+        assert ai._events.get("RTBURST", {}).get("kind") == "momentum_burst"
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_position_risk_alert_has_priority():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTPOS", 1000.0)
+        asyncio.run(ai._place_trade(_trade_args("RTPOS")))    # stop 990
+        ai._detect(_make_snap(symbol="RTPOS", ltp=993.0))     # 70% of the way to the stop
+        ev = ai._events.get("RTPOS")
+        assert ev and ev["kind"] == "position_risk", ev
+        ai._raise(_make_snap(symbol="RTPOS", ltp=993.0), "setup", "x")
+        assert ai._events["RTPOS"]["kind"] == "position_risk", "entry alert must not replace an exit alert"
+        asyncio.run(ai.close_all("test"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_decision_places_trade_in_one_step():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTGO", 1000.0)
+        ai._detect(_make_snap(symbol="RTGO", ltp=1000.0))
+        ev = ai._events.pop("RTGO")
+        ai._client = _FakeClient([
+            _resp([_tu("a1", "place_trade", _trade_args("RTGO"))], "tool_use"),
+            _resp([_txt("Entered on the Keltner breakout.")], "end_turn"),
+        ])
+        reply = asyncio.run(ai._handle_event(ev))
+        assert reply == "Entered on the Keltner breakout." and ai.trades_today == 1
+        first = ai._client.messages.calls[0]
+        prompt = first["messages"][0]["content"]
+        assert prompt.startswith("REAL-TIME ALERT") and '"quote"' in prompt and "RTGO" in prompt
+        assert first["output_config"] == {"effort": _ai_settings.ai_agent_realtime_effort}
+        assert ai.decisions_today == 1 and ai._latencies
+        asyncio.run(ai.close_all("test"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_drift_guard():
+    def body():
+        ai = _rt_ai()
+        _ai_tick("RTDRIFT", 1005.0)                           # price now 0.5% above the alert
+        ai._event_ltp["RTDRIFT"] = 1000.0
+        try:
+            asyncio.run(ai._place_trade(_trade_args("RTDRIFT", sl=995.0, tgt=1025.0)))
+            raise AssertionError("entry accepted after price drifted past the limit")
+        except ToolRejected as e:
+            assert "since the alert" in str(e)
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_stale_alert_dropped():
+    import time as _t
+    def body():
+        ai = _rt_ai()
+        ai._client = _FakeClient([])                          # any API call fails the test
+        ev = {"symbol": "RTOLD", "kind": "setup", "reason": "x", "ltp": 1000.0, "at": "11:00:00",
+              "mono": _t.monotonic() - _ai_settings.ai_agent_event_max_age_s - 5}
+        assert asyncio.run(ai._handle_event(ev)) is None
+        assert ai._client.messages.calls == [] and ai.decisions_today == 0
+    _with_ai_env(lambda: _with_key(body))
+
+def t_rt_worker_exits_first():
+    import time as _t
+    async def body():
+        ai = _rt_ai()
+        ai.enabled = True
+        order = []
+        async def fake_handle(ev):
+            order.append(ev["kind"])
+            if len(order) == 2:
+                ai.enabled = False
+        ai._handle_event = fake_handle
+        now = _t.monotonic()
+        ai._events = {"A": {"symbol": "A", "kind": "setup", "mono": now - 5},
+                      "B": {"symbol": "B", "kind": "position_risk", "mono": now}}
+        ai._event_signal.set()
+        with _patch.object(_ai_settings, "ai_agent_min_call_gap_s", 0):
+            await asyncio.wait_for(ai._event_worker(), timeout=5)
+        assert order == ["position_risk", "setup"], order
+    asyncio.run(body())
+
+run("Real-time: setup alert fires; cooldown suppresses repeat", t_rt_setup_alert_and_cooldown)
+run("Real-time: no entry alerts when blocked",          t_rt_no_entry_alert_when_blocked)
+run("Real-time: momentum burst alert",                  t_rt_momentum_burst)
+run("Real-time: position-risk alert outranks entries",  t_rt_position_risk_alert_has_priority)
+run("Real-time: alert → trade in one decision",         t_rt_decision_places_trade_in_one_step)
+run("Real-time: entry rejected if price drifted",       t_rt_drift_guard)
+run("Real-time: stale alert dropped, no API call",      t_rt_stale_alert_dropped)
+run("Real-time: worker handles exit alerts first",      t_rt_worker_exits_first)
+
+# ── AI index options (buy only) ───────────────────────────────────────────
+import options_resolver as _optres
+from options_resolver import resolve as _resolve, round_tick as _rtick
+
+def _listed(today, strikes=(23900.0, 24000.0, 24100.0), expiries_in=(0, 6)):
+    rows = []
+    for d in expiries_in:
+        for k in strikes:
+            for ot in ("CE", "PE"):
+                rows.append({"name": "NIFTY", "instrument_type": ot, "segment": "NFO-OPT",
+                             "strike": k, "expiry": today + timedelta(days=d), "lot_size": 75,
+                             "tradingsymbol": f"NIFTYX{d}{int(k)}{ot}"})
+    return rows
+
+def t_opt_resolver_live():
+    today = datetime(2026, 1, 15).date()
+    with _patch.object(_optres, "_instruments", return_value=_listed(today)):
+        atm = _resolve("NIFTY 50", 24010.0, "CE", 0, today)
+        otm_ce = _resolve("NIFTY", 24010.0, "CE", 1, today)
+        otm_pe = _resolve("NIFTY", 24010.0, "PE", 1, today)
+        too_far = _resolve("NIFTY", 24010.0, "CE", 2, today)
+    assert atm.live and atm.strike == 24000.0 and atm.lot_size == 75
+    assert atm.expiry == today + timedelta(days=6), "same-day expiry must be skipped"
+    assert otm_ce.strike == 24100.0 and otm_pe.strike == 23900.0, "OTM: CE up, PE down"
+    assert too_far is None, "no strike two steps above the listed chain"
+
+def t_opt_resolver_never_guesses_live_symbol():
+    today = datetime(2026, 1, 15).date()
+    with _patch.object(_optres, "_instruments", return_value=[]):
+        sim = _resolve("NIFTY", 24010.0, "CE", 0, today)          # paper simulator
+        assert sim and not sim.live and "SIM" in sim.tradingsymbol
+        def body():
+            return _resolve("NIFTY", 24010.0, "CE", 0, today)
+        assert _with_paper_kite_ret(body) is None, "Kite feed without instrument list: no contract"
+
+def _with_paper_kite_ret(fn):
+    out = []
+    _with_paper_kite(lambda: out.append(fn()))
+    return out[0]
+
+def _opt_args(**kw):
+    a = {"underlying": "NIFTY", "option_type": "CE", "strike_offset": 0, "lots": 1,
+         "stop_loss_pct": 25.0, "target_pct": 50.0, "reasoning": "test"}
+    a.update(kw)
+    return a
+
+def _with_opt_env(fn):
+    def body():
+        _ai_tick("NIFTY 50", 24000.0)
+        return fn()
+    return _with_ai_env(body)
+
+def t_ai_option_trade_lifecycle_paper():
+    def body():
+        ai = _rt_ai()
+        out = asyncio.run(ai._place_option_trade(_opt_args()))
+        assert out["status"] == "placed" and "SIM" in out["symbol"], out
+        oid, sym = out["order_id"], out["symbol"]
+        entry = _order(oid)
+        assert entry["order_type"] == "LIMIT" and entry["exchange"] == "NFO" and entry["product"] == "MIS"
+        e = _ba._tsl_sl_orders[oid]
+        sl = _order(e["sl_order_id"])
+        assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING"
+        assert 0 < sl["price"] < sl["trigger_price"], "SL limit must sit below its trigger"
+        assert _tsl_eng._positions[oid].strategy == "ai_opt"
+        assert _og_x.is_symbol_active_anywhere("NIFTY") == ["ai_opt"]
+        assert out["max_loss"] < out["premium_paid"] <= _ai_settings.ai_agent_max_option_premium
+        # trail the stop: SL limit order must move with it
+        pos = _tsl_eng._positions[oid]
+        pos.current_sl = round(pos.current_sl + 10, 2)
+        asyncio.run(_tsl_eng.on_sl_moved(pos, pos.current_sl - 10, "trail"))
+        moved = _order(e["sl_order_id"])
+        assert moved["trigger_price"] == pos.current_sl and moved["price"] < moved["trigger_price"]
+        res = asyncio.run(ai._close_position(sym, "test"))
+        assert res["status"] == "closed"
+        assert _order(e["sl_order_id"])["status"] == "CANCELLED"
+        assert _te_kite_client._paper_orders[-1]["order_type"] == "LIMIT", "option exit uses a LIMIT order"
+        assert not _og_x.is_symbol_active_anywhere("NIFTY") and not ai._ai_entries()
+    _with_opt_env(body)
+
+def t_ai_option_hard_limits():
+    def body():
+        ai = _rt_ai()
+        cases = [
+            (_opt_args(lots=_ai_settings.ai_agent_max_option_lots + 1), "lots must be"),
+            (_opt_args(stop_loss_pct=60.0, target_pct=120.0), "stop must be"),
+            (_opt_args(stop_loss_pct=30.0, target_pct=35.0), "1.5x"),
+            (_opt_args(underlying="FINNIFTY"), "underlying must be"),
+            (_opt_args(lots=2), "exceeds"),                              # ~₹25k premium > ₹15k cap
+            (_opt_args(strike_offset=3), "strike_offset"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_option_trade(args))
+                raise AssertionError(f"accepted: {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        with _patch.object(AITrader, "_iv_rank", return_value=85.0):
+            try:
+                asyncio.run(ai._place_option_trade(_opt_args()))
+                raise AssertionError("bought options at IV rank 85")
+            except ToolRejected as e:
+                assert "IV rank" in str(e)
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 14, 40)):
+            try:
+                asyncio.run(ai._place_option_trade(_opt_args()))
+                raise AssertionError("option entry after 14:30 accepted")
+            except ToolRejected as e:
+                assert "option entry window" in str(e)
+        assert ai.trades_today == 0
+    _with_opt_env(body)
+
+def t_ai_option_wide_spread_rejected_live_quotes():
+    today = datetime(2026, 1, 15).date()
+    class _WideKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 150.0, "depth": {"buy": [{"price": 140.0}],
+                                                       "sell": [{"price": 160.0}]}} for i in instruments}
+    def body():
+        _te_kite_client._kite = _WideKite()
+        ai = _rt_ai()
+        with _patch.object(_optres, "_instruments", return_value=_listed(today)):
+            try:
+                asyncio.run(ai._place_option_trade(_opt_args()))
+                raise AssertionError("13% spread accepted")
+            except ToolRejected as e:
+                assert "spread" in str(e)
+    _with_paper_kite(lambda: _with_opt_env(body))
+
+def t_ai_equity_tool_refuses_index():
+    def body():
+        ai = _rt_ai()
+        try:
+            asyncio.run(ai._place_trade(_trade_args("NIFTY 50", qty=1, sl=23900.0, tgt=24200.0)))
+            raise AssertionError("index traded as equity")
+        except ToolRejected as e:
+            assert "place_option_trade" in str(e)
+    _with_opt_env(body)
+
+def t_ai_option_chain_tool():
+    def body():
+        ai = _rt_ai()
+        chain = ai._option_chain("NIFTY")
+        assert chain["spot"] == 24000.0 and chain["premiums_estimated"] is True
+        offsets = [r["offset"] for r in chain["strikes"]]
+        assert offsets == [-2, -1, 0, 1, 2]
+        atm = next(r for r in chain["strikes"] if r["offset"] == 0)
+        assert atm["CE"]["strike"] == atm["PE"]["strike"] == 24000.0
+    _with_opt_env(body)
+
+def t_ai_option_setup_alert_from_index_tick():
+    class _OptScout:
+        min_candles_1min = 0
+        def evaluate_tick(self, snap):
+            return "BUY", {"option_type": "PE", "pattern": "TREND_BREAKOUT", "score": 7}
+    def body():
+        ai = _rt_ai()
+        ai._opt_scout = _OptScout()
+        ai._detect(_make_snap(symbol="NIFTY 50", ltp=24000.0))
+        ev = ai._events.get("NIFTY 50")
+        assert ev and ev["kind"] == "option_setup" and ev["suggested_option_type"] == "PE", ev
+        assert "place_option_trade" in ai._alert_prompt(ev)
+    _with_opt_env(lambda: _with_key(body))
+
+run("Options: contract from Kite instrument list",          t_opt_resolver_live)
+run("Options: never guesses a live tradingsymbol",          t_opt_resolver_never_guesses_live_symbol)
+run("AI option buy: LIMIT entry, SL-limit, trail, LIMIT exit", t_ai_option_trade_lifecycle_paper)
+run("AI option hard limits reject bad trades",               t_ai_option_hard_limits)
+run("AI option rejected on wide live spread",                t_ai_option_wide_spread_rejected_live_quotes)
+run("AI equity tool refuses index symbols",                  t_ai_equity_tool_refuses_index)
+run("AI option chain tool around ATM",                       t_ai_option_chain_tool)
+run("AI option-setup alert from index tick",                 t_ai_option_setup_alert_from_index_tick)
+
+# ── AI-managed trailing stops ─────────────────────────────────────────────
+from trailing_sl_engine import TrailingSLEngine as _TSLE
+
+def t_tsl_external_trail_left_alone():
+    eng = _TSLE()
+    pos = eng.register(symbol="EXT", strategy="intraday", side="BUY", entry_price=100.0,
+                       quantity=10, order_id="EXT-1")
+    pos.current_sl, pos.external_trail = 98.0, True
+    asyncio.run(eng.on_tick("EXT", 110.0, 1.0))            # +10%: would breakeven + trail + T2
+    assert pos.current_sl == 98.0 and not pos.trail_active and not pos.target2_hit
+    hits = []
+    async def on_hit(p, ltp, pnl): hits.append(ltp)
+    eng.on_sl_hit = on_hit
+    asyncio.run(eng.on_tick("EXT", 97.5, 1.0))
+    assert hits == [97.5], "stop hits must still fire for AI-managed positions"
+
+def t_tsl_t1_tighten_syncs_exchange():
+    eng = _TSLE()
+    pos = eng.register(symbol="T1S", strategy="intraday", side="BUY", entry_price=100.0,
+                       quantity=10, order_id="T1S-1")
+    moves = []
+    async def on_moved(p, old, kind): moves.append(kind)
+    eng.on_sl_moved = on_moved
+    asyncio.run(eng.on_tick("T1S", 102.5, 1.0))            # past target 1 (2%)
+    assert "T1" in moves, f"T1 tightening must update the exchange stop, got {moves}"
+
+def _ai_with_position(sym="TRL", ltp=1000.0, **kw):
+    ai = _rt_ai()
+    ai.enabled = True
+    _ai_tick(sym, ltp)
+    oid = asyncio.run(ai._place_trade(_trade_args(sym, **kw)))["order_id"]
+    return ai, oid
+
+def t_ai_entry_uses_ai_trailing():
+    def body():
+        ai, oid = _ai_with_position("TRL0")
+        assert _tsl_eng._positions[oid].external_trail is True
+        assert ai._trail[oid]["risk"] == 10.0
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_adjust_stop_tightens_exchange_order():
+    def body():
+        ai, oid = _ai_with_position("TRL1")
+        sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+        _ai_tick("TRL1", 1015.0)
+        out = asyncio.run(ai._adjust_stop({"symbol": "TRL1", "new_stop": 1005.0, "new_target": 1040.0,
+                                           "reasoning": "lock profit above VWAP"}))
+        assert out["status"] == "adjusted" and out["new_stop"] == 1005.0
+        assert _order(sl_oid)["trigger_price"] == 1005.0, "exchange SL-M must move"
+        assert ai._targets[oid] == 1040.0 and out["locked_profit"] == 50.0
+        assert any(e["kind"] == "trail" for e in ai.log)
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_adjust_stop_rules():
+    def body():
+        ai, oid = _ai_with_position("TRL2")
+        _ai_tick("TRL2", 1015.0)
+        cases = [
+            ({"new_stop": 985.0}, "only tighten"),                 # looser than 990
+            ({"new_stop": 1014.0}, "at least"),                    # inside the 0.15% gap
+            ({"new_stop": 1000.0, "new_target": 1010.0}, "beyond the current price"),
+            ({"symbol": "NOPE", "new_stop": 1000.0}, "no open AI position"),
+        ]
+        for extra, msg in cases:
+            args = {"symbol": "TRL2", "new_target": 0, "reasoning": "t", **extra}
+            try:
+                asyncio.run(ai._adjust_stop(args))
+                raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        assert _tsl_eng._positions[oid].current_sl == 990.0
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_adjust_stop_option_sl_limit():
+    def body():
+        ai = _rt_ai()
+        out = asyncio.run(ai._place_option_trade(_opt_args()))
+        oid, sym = out["order_id"], out["symbol"]
+        sl_oid = _ba._tsl_sl_orders[oid]["sl_order_id"]
+        prem = out["limit_price"]
+        _ai_tick(sym, round(prem * 1.3, 2))
+        new = round(prem * 1.05, 2)
+        asyncio.run(ai._adjust_stop({"symbol": sym, "new_stop": new, "new_target": 0, "reasoning": "t"}))
+        o = _order(sl_oid)
+        assert o["trigger_price"] == _rtick(new) and 0 < o["price"] < o["trigger_price"], o
+        asyncio.run(ai.close_all("t"))
+    _with_opt_env(lambda: _with_key(body))
+
+def t_ai_trail_review_milestones():
+    def body():
+        ai, oid = _ai_with_position("TRL3")             # entry 1000, stop 990 → 1R = ₹10
+        pos = _tsl_eng._positions[oid]
+        _ai_tick("TRL3", 1010.5); pos.best_price = 1010.5
+        ai._detect(_make_snap(symbol="TRL3", ltp=1010.5))
+        ev = ai._events.pop("TRL3")
+        assert ev["kind"] == "trail_review" and "1R milestone" in ev["reason"], ev
+        ai._detect(_make_snap(symbol="TRL3", ltp=1011.0))     # same milestone: no repeat
+        assert "TRL3" not in ai._events
+        _ai_tick("TRL3", 1015.5); pos.best_price = 1015.5
+        ai._detect(_make_snap(symbol="TRL3", ltp=1015.5))
+        assert "1.5R milestone" in ai._events.pop("TRL3")["reason"]
+        assert "adjust_stop" in ai._alert_prompt(ev)
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_trail_review_alert_priority():
+    def body():
+        ai = _rt_ai()
+        snap = _make_snap(symbol="PRIO", ltp=1000.0)
+        ai._raise(snap, "position_risk", "x")
+        ai._raise(snap, "trail_review", "y", cooldown=0)
+        assert ai._events["PRIO"]["kind"] == "position_risk"
+        ai._events.clear()
+        ai._raise(snap, "trail_review", "y", cooldown=0)
+        ai._raise(snap, "setup", "z")
+        assert ai._events["PRIO"]["kind"] == "trail_review", "an entry alert must not replace a trail review"
+    _with_ai_env(lambda: _with_key(body))
+
+def t_ai_trailing_falls_back_when_ai_stopped():
+    def body():
+        ai, oid = _ai_with_position("TRL4")
+        pos = _tsl_eng._positions[oid]
+        assert pos.external_trail
+        ai.enabled = False                                    # user pressed Stop
+        _ai_tick("TRL4", 1030.0)
+        asyncio.run(ai._on_snap(_make_snap(symbol="TRL4", ltp=1030.0)))
+        assert pos.external_trail is False, "mechanical trail must take over"
+        assert pos.current_sl > 990.0, "mechanical breakeven/trail should now protect the profit"
+        assert any("standard trailing stop took over" in e["text"] for e in ai.log)
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+run("TSL leaves AI-managed stops alone, still fires hits",   t_tsl_external_trail_left_alone)
+run("TSL target-1 tightening updates exchange stop",          t_tsl_t1_tighten_syncs_exchange)
+run("AI entries are AI-trailed",                              t_ai_entry_uses_ai_trailing)
+run("AI adjust_stop moves the exchange stop + target",        t_ai_adjust_stop_tightens_exchange_order)
+run("AI adjust_stop: tighten-only, min gap, target side",     t_ai_adjust_stop_rules)
+run("AI adjust_stop on option moves SL-limit pair",           t_ai_adjust_stop_option_sl_limit)
+run("AI trail reviews fire at R milestones",                  t_ai_trail_review_milestones)
+run("Trail reviews rank below exits, above entries",          t_ai_trail_review_alert_priority)
+run("AI stopped → mechanical trailing takes over",            t_ai_trailing_falls_back_when_ai_stopped)
+
+# ══════════════════════════════════════════════════════════════════════════
+# DASHBOARD + DEMO MODE
+# ══════════════════════════════════════════════════════════════════════════
+section("DASHBOARD + DEMO")
+import ist_clock as _clk
+
+def t_tickbuffer_5min_bars():
+    b = TickBuffer(300)
+    t0 = datetime(2026, 1, 15, 10, 0, 0)
+    for i in range(0, 16 * 60, 30):
+        b.push(100.0 + i / 100, 10, t0 + timedelta(seconds=i))
+    stamps = [c.ts.strftime("%H:%M") for c in b.candles()]
+    assert stamps == ["10:00", "10:05", "10:10", "10:15"], stamps   # last = bar still forming
+
+def t_demo_only_in_paper_sim():
+    prev = (_ai_settings.demo_mode, _ai_settings.trading_mode, _ai_settings.paper_data_source)
+    try:
+        _ai_settings.demo_mode = True
+        _ai_settings.trading_mode, _ai_settings.paper_data_source = "PAPER", "SIM"
+        assert _ai_settings.demo_active
+        _ai_settings.paper_data_source = "KITE"
+        assert not _ai_settings.demo_active, "demo must never run on real prices"
+        _ai_settings.paper_data_source, _ai_settings.trading_mode = "SIM", "LIVE"
+        assert not _ai_settings.demo_active, "demo must never run in LIVE"
+    finally:
+        _ai_settings.demo_mode, _ai_settings.trading_mode, _ai_settings.paper_data_source = prev
+
+def t_demo_clock_starts_in_market_hours():
+    prev = (_ai_settings.demo_mode, _clk._demo_anchor)
+    try:
+        _ai_settings.demo_mode, _clk._demo_anchor = True, None
+        n = _clk.now_ist()
+        assert n.weekday() < 5 and n.hour == 10 and n.minute == 0, n
+        assert _clk.is_market_open()
+        _ai_settings.demo_mode = False
+        assert abs((_clk.now_ist() - datetime.now(_clk._IST)).total_seconds()) < 2, "real clock when off"
+    finally:
+        _ai_settings.demo_mode, _clk._demo_anchor = prev
+
+def t_dashboard_summary_shape():
+    import main as _main
+    def body():
+        ai = _ai_mod.ai_trader
+        _ai_tick("DASH1", 1000.0)
+        with _patch.object(_main, "ai_trader", ai):
+            oid = asyncio.run(ai._place_trade(_trade_args("DASH1")))["order_id"]
+            _ai_tick("DASH1", 1012.0)
+            d = _main.dashboard_summary()
+        try:
+            for key in ("kpis", "positions", "agents", "ai", "watch", "activity", "mode", "time_ist"):
+                assert key in d, key
+            p = next(x for x in d["positions"] if x["id"] == oid)
+            assert p["stop"] == 990.0 and p["target"] == 1020.0 and p["pnl"] == 120.0, p
+            assert p["trailing"] == "AI" and p["r_multiple"] == 1.2
+            assert d["kpis"]["unrealised"] >= 120.0
+            assert {a["name"] for a in d["agents"]} >= {"intraday", "scalping", "swing", "fno", "ai"}
+        finally:
+            asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_key(body))
+
+def t_risk_win_loss_counters():
+    from risk_manager import RiskManager
+    rm = RiskManager()
+    for pnl in (500, -200, 300, 0):
+        rm.record_trade(pnl)
+    assert (rm.wins_today, rm.losses_today, rm.gross_profit, rm.gross_loss) == (2, 1, 800, 200)
+    rm.reset_daily()
+    assert rm.wins_today == rm.losses_today == 0
+
+def t_scalping_uses_ist_clock():
+    import inspect
+    src = inspect.getsource(ScalpingAgent)
+    assert "datetime.now()" not in src, "Scalping must use now_ist(), not the server's local clock"
+
+run("5-minute buffer builds 5-minute bars",        t_tickbuffer_5min_bars)
+run("Demo mode only in PAPER + SIM",               t_demo_only_in_paper_sim)
+run("Demo clock starts 10:00 on a weekday",        t_demo_clock_starts_in_market_hours)
+run("/dashboard/summary positions + KPIs",         t_dashboard_summary_shape)
+run("Risk manager counts wins/losses",             t_risk_win_loss_counters)
+run("Scalping uses the IST clock",                 t_scalping_uses_ist_clock)
+
+def t_agent_tsl_starts_at_exchange_stop():
+    oid = _paper_entry(IntradayAgent(), "TSLSYNC", 1000.0)       # signal stop = 990.00
+    try:
+        sl_order = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
+        assert _tsl_eng._positions[oid].current_sl == sl_order["trigger_price"] == 990.0, \
+            "software stop must equal the exchange stop, or trailing can loosen it"
+    finally:
+        _ba._close_tracked(oid, "TSLSYNC", "BUY", _paper_pos("TSLSYNC")["quantity"], 0.0, "T", "intraday")
+
+run("Agent TSL starts at the exchange stop",       t_agent_tsl_starts_at_exchange_stop)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2236,6 +3631,976 @@ run("NFO symbol contains underlying/strike/type",           t_fno_nfo_symbol_for
 run("IV rank >72% blocks entry (no premium buying)",        t_fno_high_iv_blocks_entry)
 run("score=4 → 0.25× size factor",                          t_fno_min_score_4_size_025)
 run("CE and PE cooldown tracked independently",             t_fno_cooldown_per_direction)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("AI SWING (CNC + GTT) AND INDEX FUTURES")
+# ══════════════════════════════════════════════════════════════════════════
+import tempfile as _sftmp
+from pathlib import Path as _SFPath
+import json
+
+def _swing_args(sym, qty=20, sl=970.0, tgt=1070.0, hold=5):
+    return {"symbol": sym, "quantity": qty, "stop_loss": sl, "target": tgt,
+            "max_hold_days": hold, "reasoning": "test"}
+
+def _with_swing_file(fn):
+    path = _SFPath(_sftmp.mkdtemp()) / "swing.json"
+    with _patch.object(_ai_mod, "SWING_FILE", path):
+        return fn(path)
+
+def t_ai_swing_entry_cnc_gtt_saved():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWG1", 1000.0)
+        out = asyncio.run(ai._place_swing_trade(_swing_args("SWG1")))
+        oid = out["order_id"]
+        o = _order(oid)
+        assert o["product"] == "CNC" and o["transaction_type"] == "BUY" and o["exchange"] == "NSE"
+        e = _ba._tsl_sl_orders[oid]
+        assert e["kind"] == "swing" and e["sl_order_id"] is None and e["product"] == "CNC"
+        g = _te_kite_client._paper_gtts[e["gtt_id"]]
+        assert g["status"] == "active" and g["trigger"] < 970.0 and g["limit"] < g["trigger"], g
+        assert _tsl_eng._positions[oid].strategy == "ai_swing" and _tsl_eng._positions[oid].current_sl == 970.0
+        saved = json.loads(path.read_text())["positions"]
+        assert saved[0]["symbol"] == "SWG1" and saved[0]["hold_until"] == "2026-01-22", saved
+        asyncio.run(ai._close_position("SWG1", "test"))
+        assert g["status"] == "deleted", "closing must delete the GTT before selling"
+        assert _te_kite_client._paper_orders[-1]["product"] == "CNC"
+        assert json.loads(path.read_text())["positions"] == []
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_hard_limits():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWG2", 1000.0)
+        cases = [
+            (_swing_args("SWG2", sl=995.0, tgt=1020.0), "allowed 1.5"),        # 0.5% stop: too tight
+            (_swing_args("SWG2", sl=900.0, tgt=1300.0), "allowed 1.5"),        # 10% stop: too wide
+            (_swing_args("SWG2", tgt=1040.0), "swing needs"),                  # 1.33R < 2R
+            (_swing_args("SWG2", sl=1010.0), "below price"),
+            (_swing_args("SWG2", qty=60), "swing per-trade limit"),            # ₹60k > ₹50k
+            (_swing_args("SWG2", hold=_ai_settings.ai_agent_swing_max_hold_days + 1), "max_hold_days"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_swing_trade(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        prev = _ai_settings.ai_agent_swing_enabled
+        _ai_settings.ai_agent_swing_enabled = False
+        try:
+            asyncio.run(ai._place_swing_trade(_swing_args("SWG2"))); raise AssertionError("disabled accepted")
+        except ToolRejected as e:
+            assert "disabled" in str(e)
+        finally:
+            _ai_settings.ai_agent_swing_enabled = prev
+        assert not ai._ai_entries()
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_separate_position_limit():
+    def body(path):
+        ai = _rt_ai()
+        for s in ("SWL1", "SWL2", "SWL3", "INL1", "INL2"): _ai_tick(s, 1000.0)
+        asyncio.run(ai._place_swing_trade(_swing_args("SWL1")))
+        asyncio.run(ai._place_swing_trade(_swing_args("SWL2")))
+        try:
+            asyncio.run(ai._place_swing_trade(_swing_args("SWL3"))); raise AssertionError("3rd swing accepted")
+        except ToolRejected as e:
+            assert "max swing positions" in str(e)
+        # swing positions don't use up the intraday slots
+        asyncio.run(ai._place_trade(_trade_args("INL1")))
+        asyncio.run(ai._place_trade(_trade_args("INL2")))
+        assert len(ai._intraday_entries()) == 2 and len(ai._swing_entries()) == 2
+        asyncio.run(ai.close_all("t"))
+        assert not ai._ai_entries()
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_1500_keeps_swing_closes_intraday():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWK1", 1000.0); _ai_tick("INK1", 1000.0)
+        s_oid = asyncio.run(ai._place_swing_trade(_swing_args("SWK1")))["order_id"]
+        i_oid = asyncio.run(ai._place_trade(_trade_args("INK1")))["order_id"]
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="INK1", ltp=1000.0)))
+        assert i_oid not in ai._ai_entries(), "intraday must close at 15:00"
+        assert s_oid in ai._ai_entries(), "swing must be held overnight"
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_entry_window_extends_past_1445():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWW1", 1000.0); _ai_tick("INW1", 1000.0)
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 0)):
+            try:
+                asyncio.run(ai._place_trade(_trade_args("INW1"))); raise AssertionError("intraday at 15:00")
+            except ToolRejected as e:
+                assert "entry window" in str(e)
+            asyncio.run(ai._place_swing_trade(_swing_args("SWW1")))
+        assert len(ai._swing_entries()) == 1
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_time_exit_on_last_day():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWT1", 1000.0)
+        oid = asyncio.run(ai._place_swing_trade(_swing_args("SWT1", hold=1)))["order_id"]
+        assert ai._swing_meta[oid]["hold_until"] == "2026-01-16"
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 16, 14, 0, 0)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="SWT1", ltp=1005.0)))
+        assert oid in ai._ai_entries(), "too early on the last day"
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 16, 15, 11, 0)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="SWT1", ltp=1005.0)))
+        assert oid not in ai._ai_entries(), "holding period over → code exits"
+        assert any("maximum holding period" in e["text"] for e in ai.log)
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_adjust_stop_moves_gtt():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWA1", 1000.0)
+        oid = asyncio.run(ai._place_swing_trade(_swing_args("SWA1")))["order_id"]
+        gid = _ba._tsl_sl_orders[oid]["gtt_id"]
+        _ai_tick("SWA1", 1060.0)
+        asyncio.run(ai._adjust_stop({"symbol": "SWA1", "new_stop": 1000.0, "new_target": 0, "reasoning": "t"}))
+        g = _te_kite_client._paper_gtts[gid]
+        assert 990.0 < g["trigger"] < 1000.0, f"GTT must follow the stop (just below it): {g}"
+        assert json.loads(path.read_text())["positions"][0]["stop"] == 1000.0
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_restore_after_restart():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("SWR1", 1000.0); _ai_tick("SWR2", 1000.0)
+        o1 = asyncio.run(ai._place_swing_trade(_swing_args("SWR1")))["order_id"]
+        o2 = asyncio.run(ai._place_swing_trade(_swing_args("SWR2")))["order_id"]
+        # simulate a restart: drop all in-memory tracking
+        for o in (o1, o2):
+            _ba._tsl_sl_orders.pop(o); _tsl_eng.deregister(o)
+        _og_x.reset_daily()
+        ai2 = _rt_ai()
+        live_status = {_ba._tsl_sl_orders.get(o1, {}).get("gtt_id"): None}
+        assert ai2.restore_swing() == ["SWR1", "SWR2"]
+        assert _og_x.is_symbol_active_anywhere("SWR1") == ["ai_swing"]
+        assert _tsl_eng._positions[o1].current_sl == 970.0 and ai2._targets[o1] == 1070.0
+        assert ai2._swing_meta[o1]["hold_until"] == "2026-01-22"
+        assert ai2._trail[o1]["risk"] == 30.0
+        # restoring twice is a no-op
+        assert ai2.restore_swing() == []
+        # a new day: counters reset, held swing positions re-marked
+        _og_x.reset_daily()
+        ai2.reapply_overnight()
+        assert _og_x.is_symbol_active_anywhere("SWR2") == ["ai_swing"]
+        asyncio.run(ai2.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_restore_drops_triggered_gtt_live():
+    def body(path):
+        path.write_text(json.dumps({"positions": [{
+            "order_id": "SWX-1", "symbol": "SWX1", "quantity": 10, "entry": 1000.0, "stop": 970.0,
+            "best": 1000.0, "target": 1070.0, "gtt_id": 123, "gtt_buffer_pct": 1.0,
+            "opened": "2026-01-14", "hold_until": "2026-01-21", "reason": "t", "initial_risk": 30.0}]}))
+        ai = _rt_ai()
+        prev = _ai_settings.trading_mode
+        _ai_settings.trading_mode = "LIVE"
+        try:
+            with _patch.object(_te_kite_client, "has_session", return_value=True), \
+                 _patch.object(_te_kite_client, "gtt_status", return_value="triggered"):
+                assert ai.restore_swing() == []
+        finally:
+            _ai_settings.trading_mode = prev
+        assert "SWX-1" not in _ba._tsl_sl_orders
+        assert any("GTT stop triggered" in e["text"] for e in ai.log)
+        assert json.loads(path.read_text())["positions"] == []
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_squareoff_skips_cnc():
+    kc = _te_kite_client
+    saved = list(kc._paper_positions)
+    kc._paper_positions[:] = [
+        {"tradingsymbol": "HOLDME", "exchange": "NSE", "quantity": 10, "product": "CNC"},
+        {"tradingsymbol": "CLOSEME", "exchange": "NSE", "quantity": 5, "product": "MIS"}]
+    n = len(kc._paper_orders)
+    try:
+        with _patch.object(kc, "_paper_place", return_value="SQ-1") as pp:
+            kc.squareoff_all_positions()
+            syms = [c.args[0] for c in pp.call_args_list]
+        assert syms == ["CLOSEME"], syms
+    finally:
+        kc._paper_positions[:] = saved
+
+def t_daily_view_synthetic_and_candidates():
+    import daily_data as _dd
+    _ai_tick("DDV1", 1234.5)
+    v = _dd.daily_view("DDV1")
+    assert v and v["ltp"] == 1234.5 and len(v["candles_1d"]["rows"]) == 30
+    assert v["ema20"] and v["ema50"] and v["ema200"] and 0 <= v["rsi14"] <= 100 and v["atr14"] > 0
+    assert v["candles_1d"]["rows"][-1][4] == 1234.5, "today's bar comes from the live tick"
+    assert _dd.daily_view("DDV1")["ema200"] == v["ema200"], "history is repeatable"
+    c = _dd.swing_candidates(["DDV1"])
+    assert isinstance(c, list) and all(x["trend"] if False else True for x in c)
+
+def _fut_args(side="BUY", lots=1, sl=23960.0, tgt=24100.0, und="NIFTY"):
+    return {"underlying": und, "side": side, "lots": lots, "stop_loss": sl, "target": tgt,
+            "reasoning": "test"}
+
+def _with_fut_env(fn):
+    def body():
+        prev = _ai_settings.ai_agent_futures_enabled
+        _ai_settings.ai_agent_futures_enabled = True
+        try:
+            return fn()
+        finally:
+            _ai_settings.ai_agent_futures_enabled = prev
+    return _with_opt_env(body)
+
+def t_ai_futures_off_by_default():
+    def body():
+        assert _ai_settings.ai_agent_futures_enabled is False
+        try:
+            asyncio.run(_rt_ai()._place_future_trade(_fut_args())); raise AssertionError("accepted")
+        except ToolRejected as e:
+            assert "disabled" in str(e)
+    _with_opt_env(body)
+
+def t_ai_future_trade_lifecycle():
+    def body():
+        ai = _rt_ai()
+        q = ai._future_quote("NIFTY")
+        assert q["contract"] == "NIFTYSIMFUT" and q["lot_size"] == 75 and q["margin_per_lot"] > 0
+        out = asyncio.run(ai._place_future_trade(_fut_args()))
+        oid = out["order_id"]
+        o = _order(oid)
+        assert o["exchange"] == "NFO" and o["order_type"] == "LIMIT" and o["product"] == "MIS"
+        assert out["max_loss_at_stop"] <= _ai_settings.ai_agent_max_future_risk
+        e = _ba._tsl_sl_orders[oid]
+        sl = _order(e["sl_order_id"])
+        assert e["kind"] == "future" and sl["order_type"] == "SL" and sl["trigger_price"] == 23960.0
+        assert _tsl_eng._positions[oid].strategy == "ai_fut"
+        assert _og_x.is_symbol_active_anywhere("NIFTY") == ["ai_fut"]
+        try:   # option on the same index while the future is open
+            asyncio.run(ai._place_option_trade(_opt_args())); raise AssertionError("both on NIFTY")
+        except ToolRejected as ex:
+            assert "already has an open option or future" in str(ex)
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="NIFTYSIMFUT", ltp=24020.0)))
+        assert oid not in ai._ai_entries(), "futures are intraday: closed at 15:00"
+        assert _order(e["sl_order_id"])["status"] == "CANCELLED"
+        assert _te_kite_client._paper_orders[-1]["order_type"] == "LIMIT"
+    _with_fut_env(body)
+
+def t_ai_future_short_and_limits():
+    def body():
+        ai = _rt_ai()
+        cases = [
+            (_fut_args(sl=23900.0, tgt=24300.0), "loss at the stop"),           # 112 pts × 75 > ₹5k
+            (_fut_args(sl=23990.0, tgt=24050.0), "futures allow"),              # 0.09% stop: too tight
+            (_fut_args(tgt=24050.0), "1.5x"),
+            (_fut_args(sl=24050.0), "wrong side"),
+            (_fut_args(lots=2), "lots must be"),
+            (_fut_args(und="FINNIFTY"), "underlying must be"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_future_trade(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as ex:
+                assert msg in str(ex), (msg, str(ex))
+        prev = _ai_settings.ai_agent_max_future_margin
+        _ai_settings.ai_agent_max_future_margin = 100000.0
+        try:
+            asyncio.run(ai._place_future_trade(_fut_args())); raise AssertionError("margin over cap")
+        except ToolRejected as ex:
+            assert "margin" in str(ex)
+        finally:
+            _ai_settings.ai_agent_max_future_margin = prev
+        out = asyncio.run(ai._place_future_trade(_fut_args("SELL", sl=24040.0, tgt=23900.0)))
+        assert _order(out["order_id"])["transaction_type"] == "SELL"
+        sl = _order(_ba._tsl_sl_orders[out["order_id"]]["sl_order_id"])
+        assert sl["transaction_type"] == "BUY" and sl["price"] > sl["trigger_price"]
+        asyncio.run(ai.close_all("t"))
+        assert not ai._ai_entries()
+    _with_fut_env(body)
+
+def t_ai_index_alert_offers_futures():
+    class _OptScout:
+        min_candles_1min = 0
+        def evaluate_tick(self, snap):
+            return "BUY", {"option_type": "CE", "pattern": "TREND_BREAKOUT", "score": 7}
+    def body():
+        prev = _ai_settings.ai_agent_options_enabled
+        _ai_settings.ai_agent_options_enabled = False
+        try:
+            ai = _rt_ai()
+            ai._opt_scout = _OptScout()
+            ai._detect(_make_snap(symbol="NIFTY 50", ltp=24000.0))
+            ev = ai._events.get("NIFTY 50")
+            assert ev and ev["futures_allowed"] and not ev["options_allowed"] and ev["direction"] == "BULLISH"
+            p = ai._alert_prompt(ev)
+            assert "place_future_trade" in p and "place_option_trade" not in p
+        finally:
+            _ai_settings.ai_agent_options_enabled = prev
+    _with_fut_env(lambda: _with_key(body))
+
+def t_future_resolver_live_skips_expiry_day():
+    from options_resolver import resolve_future as _rf
+    today = datetime(2026, 1, 27).date()
+    rows = [{"name": "NIFTY", "instrument_type": "FUT", "segment": "NFO-FUT", "expiry": today,
+             "tradingsymbol": "NIFTY26JANFUT", "lot_size": 75},
+            {"name": "NIFTY", "instrument_type": "FUT", "segment": "NFO-FUT", "expiry": datetime(2026, 2, 24).date(),
+             "tradingsymbol": "NIFTY26FEBFUT", "lot_size": 75},
+            {"name": "NIFTY", "instrument_type": "CE", "segment": "NFO-OPT", "expiry": today,
+             "tradingsymbol": "NIFTY26JAN24000CE", "lot_size": 75}]
+    with _patch.object(_optres, "_instruments", return_value=rows):
+        c = _rf("NIFTY", today)
+    assert c.tradingsymbol == "NIFTY26FEBFUT" and c.live, "expiry-day contract must roll to next month"
+
+run("Swing: CNC buy + GTT stop, saved, GTT deleted on exit",  t_ai_swing_entry_cnc_gtt_saved)
+run("Swing: hard limits (stop %, 2R, value, hold days, off)", t_ai_swing_hard_limits)
+run("Swing: own position limit, intraday slots untouched",    t_ai_swing_separate_position_limit)
+run("Swing: 15:00 closes intraday, keeps swing",              t_ai_1500_keeps_swing_closes_intraday)
+run("Swing: entries allowed until 15:15",                     t_ai_swing_entry_window_extends_past_1445)
+run("Swing: code exits at end of holding period",             t_ai_swing_time_exit_on_last_day)
+run("Swing: adjust_stop moves the GTT",                       t_ai_swing_adjust_stop_moves_gtt)
+run("Swing: restored after restart + daily reset",            t_ai_swing_restore_after_restart)
+run("Swing: LIVE restore drops a triggered GTT",              t_ai_swing_restore_drops_triggered_gtt_live)
+run("Square-off skips CNC (delivery) positions",              t_squareoff_skips_cnc)
+run("Daily chart: synthetic history ends at live price",      t_daily_view_synthetic_and_candidates)
+run("Futures: off by default",                                t_ai_futures_off_by_default)
+run("Futures: LIMIT entry, SL-limit, 15:00 exit, no option",  t_ai_future_trade_lifecycle)
+run("Futures: short + rupee-risk/margin/stop limits",         t_ai_future_short_and_limits)
+run("Futures: index alert offers the future",                 t_ai_index_alert_offers_futures)
+run("Futures: resolver rolls on expiry day",                  t_future_resolver_live_skips_expiry_day)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("AI OPTION SELLING (CREDIT SPREADS) AND BEARISH SWING PUTS")
+# ══════════════════════════════════════════════════════════════════════════
+def _spread_args(view="BULLISH", off=1, width=1, lots=1, slp=100.0, tgp=50.0, und="NIFTY"):
+    return {"underlying": und, "view": view, "short_strike_offset": off, "width_strikes": width,
+            "lots": lots, "stop_loss_pct": slp, "target_pct": tgp, "reasoning": "test"}
+
+def _with_sell_env(fn):
+    def body():
+        prev = _ai_settings.ai_agent_option_selling_enabled
+        _ai_settings.ai_agent_option_selling_enabled = True
+        try:
+            return fn()
+        finally:
+            _ai_settings.ai_agent_option_selling_enabled = prev
+    return _with_opt_env(body)
+
+def _index_snap(px):
+    _ai_tick("NIFTY 50", px)
+    return _make_snap(symbol="NIFTY 50", ltp=px)
+
+def t_ai_spread_off_by_default():
+    def body():
+        assert _ai_settings.ai_agent_option_selling_enabled is False
+        try:
+            asyncio.run(_rt_ai()._place_option_spread(_spread_args())); raise AssertionError("accepted")
+        except ToolRejected as e:
+            assert "disabled" in str(e)
+    _with_opt_env(body)
+
+def t_ai_bull_put_spread_lifecycle():
+    def body():
+        ai = _rt_ai()
+        n0 = len(_te_kite_client._paper_orders)
+        out = asyncio.run(ai._place_option_spread(_spread_args()))
+        legs = _te_kite_client._paper_orders[n0:]
+        assert [o["transaction_type"] for o in legs] == ["BUY", "SELL"], "protective leg must go first"
+        buy, sell = legs
+        assert buy["tradingsymbol"].endswith("23900PE") and sell["tradingsymbol"].endswith("23950PE"), (buy, sell)
+        assert all(o["order_type"] == "LIMIT" and o["exchange"] == "NFO" and o["product"] == "MIS" for o in legs)
+        assert 0 < out["credit_per_unit"] < 50 and out["max_loss"] == round((50 - out["credit_per_unit"]) * 75, 2)
+        assert out["max_loss"] <= _ai_settings.ai_agent_max_spread_loss
+        assert _og_x.is_symbol_active_anywhere("NIFTY") == ["ai_spread"]
+        pos = [p for p in ai._positions()["open"] if p["kind"] == "spread"]
+        assert pos and pos[0]["structure"] == "bull put spread"
+        for fn, args in ((ai._place_option_trade, _opt_args()), (ai._place_option_spread, _spread_args("BEARISH"))):
+            try:
+                asyncio.run(fn(args)); raise AssertionError("second NIFTY position accepted")
+            except ToolRejected as e:
+                assert "already has an open" in str(e)
+        n1 = len(_te_kite_client._paper_orders)
+        res = asyncio.run(ai._close_position("NIFTY", "test"))
+        exits = _te_kite_client._paper_orders[n1:]
+        assert [(o["transaction_type"], o["tradingsymbol"][-7:]) for o in exits] == \
+            [("BUY", "23950PE"), ("SELL", "23900PE")], "buy back the short leg first"
+        assert res["status"] == "closed" and not ai._spreads and not _og_x.is_symbol_active_anywhere("NIFTY")
+    _with_sell_env(body)
+
+def t_ai_bear_call_spread_strikes():
+    def body():
+        ai = _rt_ai()
+        n0 = len(_te_kite_client._paper_orders)
+        asyncio.run(ai._place_option_spread(_spread_args("BEARISH")))
+        buy, sell = _te_kite_client._paper_orders[n0:]
+        assert sell["tradingsymbol"].endswith("24050CE") and buy["tradingsymbol"].endswith("24100CE"), (buy, sell)
+        asyncio.run(ai.close_all("t"))
+    _with_sell_env(body)
+
+def t_ai_spread_limits():
+    def body():
+        ai = _rt_ai()
+        cases = [
+            (_spread_args(width=4, off=0), "worst-case loss"),          # 200-pt width × 75 > ₹10k
+            (_spread_args(off=4, width=1), "credit"),                    # far OTM: too little credit
+            (_spread_args(lots=2), "lots must be"),
+            (_spread_args(slp=300.0), "stop_loss_pct"),
+            (_spread_args(tgp=95.0), "target_pct"),
+            (_spread_args(off=5), "short_strike_offset"),
+            (_spread_args(und="FINNIFTY"), "underlying must be"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_option_spread(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        assert not ai._spreads
+    _with_sell_env(body)
+
+def t_ai_spread_stop_and_take_profit():
+    def body():
+        ai = _rt_ai()
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        asyncio.run(ai._on_snap(_index_snap(24010.0)))
+        assert ai._spreads, "small move: spread stays open"
+        asyncio.run(ai._on_snap(_index_snap(23800.0)))              # index falls through the short put
+        assert not ai._spreads and any("stop: spread cost" in e["text"] for e in ai.log)
+        assert _og_x._cooldown_until["ai_spread"] > 0, "a losing spread starts the post-loss cooldown"
+        _og_x._cooldown_until.clear()
+        _index_snap(24000.0)
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        asyncio.run(ai._on_snap(_index_snap(24400.0)))              # rally: puts decay
+        assert not ai._spreads and any("take profit" in e["text"] for e in ai.log)
+        assert ai.trades_today == 2
+    _with_sell_env(body)
+
+def t_ai_spread_closed_at_1500():
+    def body():
+        ai = _rt_ai()
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_index_snap(24000.0)))
+        assert not ai._spreads, "spreads are intraday"
+    _with_sell_env(body)
+
+def _put_args(und="PUTSTK", off=0, lots=1, slp=35.0, tgp=70.0, hold=5):
+    return {"underlying": und, "strike_offset": off, "lots": lots, "stop_loss_pct": slp,
+            "target_pct": tgp, "max_hold_days": hold, "reasoning": "test"}
+
+def t_ai_swing_put_lifecycle():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("PUTSTK", 1000.0)
+        out = asyncio.run(ai._place_swing_put(_put_args()))
+        oid = out["order_id"]
+        o = _order(oid)
+        assert o["exchange"] == "NFO" and o["product"] == "NRML" and o["order_type"] == "LIMIT"
+        assert o["tradingsymbol"] == "PUTSTKSIM1000PE", o["tradingsymbol"]
+        assert out["expiry"] >= "2026-01-29", "expiry must be well after the planned exit"
+        e = _ba._tsl_sl_orders[oid]
+        g = _te_kite_client._paper_gtts[e["gtt_id"]]
+        assert e["kind"] == "swing" and e["product"] == "NRML" and g["status"] == "active"
+        assert _og_x.is_symbol_active_anywhere("PUTSTK") == ["ai_swing_opt"]
+        assert out["premium_paid"] <= _ai_settings.ai_agent_max_swing_put_premium
+        row = json.loads(path.read_text())["positions"][0]
+        assert row["exchange"] == "NFO" and row["strategy"] == "ai_swing_opt" and row["guard_symbol"] == "PUTSTK"
+        # held through 15:00
+        with _patch.object(_ai_mod, "now_ist", return_value=datetime(2026, 1, 15, 15, 0, 5)):
+            asyncio.run(ai._on_snap(_make_snap(symbol="PUTSTKSIM1000PE", ltp=12.0)))
+        assert oid in ai._ai_entries()
+        # restart → restored with its exchange/product/strategy
+        _ba._tsl_sl_orders.pop(oid); _tsl_eng.deregister(oid); _og_x.reset_daily()
+        ai2 = _rt_ai()
+        assert ai2.restore_swing() == ["PUTSTKSIM1000PE"]
+        e2 = _ba._tsl_sl_orders[oid]
+        assert e2["exchange"] == "NFO" and e2["product"] == "NRML" and _tsl_eng._positions[oid].strategy == "ai_swing_opt"
+        n = len(_te_kite_client._paper_orders)
+        asyncio.run(ai2._close_position("PUTSTKSIM1000PE", "t"))
+        ex = _te_kite_client._paper_orders[n]
+        assert ex["product"] == "NRML" and ex["order_type"] == "LIMIT" and ex["transaction_type"] == "SELL"
+        assert g["status"] == "deleted" or _te_kite_client._paper_gtts[e2["gtt_id"]]["status"] == "deleted"
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_ai_swing_put_limits():
+    def body(path):
+        ai = _rt_ai()
+        _ai_tick("PUTLIM", 1000.0)
+        cases = [
+            (_put_args("PUTLIM", slp=10.0, tgp=30.0), "stop must be"),
+            (_put_args("PUTLIM", slp=40.0, tgp=50.0), "1.5x"),
+            (_put_args("PUTLIM", off=3), "strike_offset"),
+            (_put_args("PUTLIM", lots=2, off=-1), "exceeds"),                 # ITM × 2 lots > ₹15k
+            (_put_args("PUTLIM", hold=_ai_settings.ai_agent_swing_max_hold_days + 1), "max_hold_days"),
+            (_put_args("NOTSTREAMING"), "not streaming"),
+        ]
+        for args, msg in cases:
+            try:
+                asyncio.run(ai._place_swing_put(args)); raise AssertionError(f"accepted {args}")
+            except ToolRejected as e:
+                assert msg in str(e), (msg, str(e))
+        assert not ai._ai_entries()
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_swing_candidates_bearish():
+    import daily_data as _dd
+    views = {
+        "DNX": {"trend": "DOWN", "rsi14": 38.0, "ema20": 1010.0, "ltp": 1000.0, "low_20d": 995.0,
+                "pct_from_20d_high": -8.0, "volume_vs_20d_avg": 1.5, "atr_pct": 2.0, "ema50": 1050.0,
+                "high_20d": 1090.0},
+        "UPX": {"trend": "UP", "rsi14": 60.0, "ema20": 990.0, "ltp": 1000.0, "low_20d": 950.0,
+                "pct_from_20d_high": -0.5, "volume_vs_20d_avg": 1.0, "atr_pct": 2.0, "ema50": 960.0,
+                "high_20d": 1005.0},
+        "FLAT": {"trend": "SIDEWAYS", "rsi14": 50.0, "ema20": 1000.0, "ltp": 1000.0, "low_20d": 950.0,
+                 "pct_from_20d_high": -3.0, "volume_vs_20d_avg": 1.0, "atr_pct": 2.0, "ema50": 1000.0,
+                 "high_20d": 1030.0},
+    }
+    with _patch.object(_dd, "daily_view", side_effect=lambda s, candles=0: views[s]):
+        c = {x["symbol"]: x for x in _dd.swing_candidates(list(views))}
+    assert c["DNX"]["direction"] == "BEARISH" and c["DNX"]["setup"] == "breakdown"
+    assert c["UPX"]["direction"] == "BULLISH" and "FLAT" not in c
+
+def t_ai_spread_never_naked():
+    async def never(*a, **k): return False
+    def body():
+        ai = _rt_ai()
+        n0 = len(_te_kite_client._paper_orders)
+        with _patch.object(ai, "_wait_filled", never):           # protective leg doesn't fill
+            try:
+                asyncio.run(ai._place_option_spread(_spread_args())); raise AssertionError("accepted")
+            except ToolRejected as e:
+                assert "did not fill" in str(e)
+        sent = _te_kite_client._paper_orders[n0:]
+        assert [o["transaction_type"] for o in sent] == ["BUY"] and sent[0]["status"] == "CANCELLED", \
+            "no SELL may go out before the hedge fills"
+        assert not ai._spreads and not _og_x.is_symbol_active_anywhere("NIFTY")
+        asyncio.run(ai._place_option_spread(_spread_args()))
+        n1 = len(_te_kite_client._paper_orders)
+        with _patch.object(ai, "_wait_filled", never):           # buy-back doesn't fill
+            asyncio.run(ai._close_position("NIFTY", "t"))
+        sent = _te_kite_client._paper_orders[n1:]
+        assert [o["transaction_type"] for o in sent] == ["BUY"], "the hedge must be kept until the buy-back fills"
+        assert any("was KEPT" in e["text"] for e in ai.log)
+    _with_sell_env(body)
+
+run("Spreads: option selling off by default",               t_ai_spread_off_by_default)
+run("Spreads: never naked on entry or exit",                t_ai_spread_never_naked)
+run("Spreads: bull put — hedge first, defined loss, exit",  t_ai_bull_put_spread_lifecycle)
+run("Spreads: bear call strikes above spot",                t_ai_bear_call_spread_strikes)
+run("Spreads: width/credit/lots/stop/target limits",        t_ai_spread_limits)
+run("Spreads: code stop and take-profit on index moves",    t_ai_spread_stop_and_take_profit)
+run("Spreads: closed at 15:00",                             t_ai_spread_closed_at_1500)
+run("Swing put: NRML put + GTT, held, restored, closed",    t_ai_swing_put_lifecycle)
+run("Swing put: hard limits",                               t_ai_swing_put_limits)
+run("Swing scan: bearish breakdown candidates",             t_swing_candidates_bearish)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("18. SCOREBOARD, PRUNING, TREND FILTER, MOMENTUM, INDEX GATE")
+# ══════════════════════════════════════════════════════════════════════════
+import tempfile as _pftmp
+from pathlib import Path as _PFPath
+from fastapi.testclient import TestClient
+import performance as _perf_mod
+import market_filter as _mf_mod
+import momentum_rotation as _mom
+from costs import trade_cost as _tc, round_trip_cost as _rtc
+
+def _fresh_perf():
+    path = _PFPath(_pftmp.mkdtemp()) / "perf.json"
+    with _patch.object(_perf_mod, "FILE", path):
+        p = _perf_mod.Performance()
+    p_file = path
+    return p, p_file
+
+def _with_perf(fn):
+    import main as _main
+    p, path = _fresh_perf()
+    prev = _ai_settings.prune_enabled
+    _ai_settings.prune_enabled = True
+    try:
+        with _patch.object(_perf_mod, "FILE", path), _patch.object(_perf_mod, "performance", p), \
+             _patch.object(_ai_mod, "performance", p), _patch.object(_main, "performance", p):
+            return fn(p, path)
+    finally:
+        _ai_settings.prune_enabled = prev
+
+def t_costs_realistic():
+    mis = _tc(1000.0, 1010.0, 50, "BUY", "NSE", "MIS")          # ₹50k intraday round trip
+    cnc = _tc(1000.0, 1010.0, 50, "BUY", "NSE", "CNC")
+    opt = _tc(100.0, 120.0, 75, "BUY", "NFO", "MIS", "NIFTY26JAN24000CE")
+    fut = _tc(24000.0, 24050.0, 75, "BUY", "NFO", "MIS", "NIFTY26JANFUT")
+    assert 40 <= mis <= 70, mis                                   # ~₹30 brokerage+GST, ₹12.6 STT, small exch/stamp
+    assert 100 <= cnc <= 130, cnc                                 # 0.1% STT both sides ≈ ₹100, no brokerage
+    assert 50 <= opt <= 70, opt                                   # ₹40 brokerage+GST, ₹9 STT on sell premium
+    assert 480 <= fut <= 560, fut                                 # 0.02% STT on ₹18 lakh ≈ ₹360 + exch/GST/stamp
+    assert _rtc(0, 0, "equity_mis") == 0.0
+
+def t_perf_ledger_and_stats():
+    def body(p, path):
+        p.record_trade("ai", "RELIANCE", "BUY", 10, 1000.0, 150.0)
+        p.record_trade("ai", "TCS", "SELL", 10, 1000.0, -80.0, product="MIS")
+        p.record_trade("ai_swing", "INFY", "BUY", 20, 1000.0, 400.0, product="CNC")
+        st = p.strategy_stats()
+        a = st["ai"]
+        assert a["trades"] == 2 and a["wins"] == 1 and a["gross_pnl"] == 70.0 and a["costs"] > 0
+        assert a["net_pnl"] == round(70.0 - a["costs"], 2) and a["win_rate"] == 50.0
+        assert st["ai_swing"]["net_pnl"] < 400.0 and st["ai_swing"]["enabled"]
+        assert a["trades_until_judgement"] == _ai_settings.prune_min_trades - 2
+        reloaded = _perf_mod.Performance()
+        assert len(reloaded.trades) == 3, "ledger persists"
+    _with_perf(body)
+
+def t_perf_pruning_disables_losers_and_reenable():
+    def body(p, path):
+        import bot_state
+        for i in range(_ai_settings.prune_min_trades):
+            p.record_trade("scalping", "X", "BUY", 10, 1000.0, 30.0 if i % 3 == 0 else -60.0)
+        assert "scalping" in p.pruned and not bot_state.is_agent_enabled("scalping")
+        ok, why = p.is_allowed("scalping")
+        assert not ok and "disabled automatically" in why
+        assert p.strategy_stats()["scalping"]["pruned"]["reason"].startswith("last 30 trades")
+        # winners are never pruned
+        for i in range(_ai_settings.prune_min_trades):
+            p.record_trade("intraday", "Y", "BUY", 10, 1000.0, 200.0 if i % 2 == 0 else -50.0)
+        assert "intraday" not in p.pruned and p.is_allowed("intraday")[0]
+        # manual re-enable restarts the judgement from now
+        p.set_enabled("scalping", True)
+        assert p.is_allowed("scalping")[0] and bot_state.is_agent_enabled("scalping")
+        assert p.strategy_stats()["scalping"]["trades"] == 0, "old trades no longer count"
+        p.record_trade("scalping", "X", "BUY", 10, 1000.0, -60.0)
+        assert "scalping" not in p.pruned, "one trade after re-enable is not a judgement"
+        prev = _ai_settings.prune_enabled
+        _ai_settings.prune_enabled = False
+        try:
+            for i in range(_ai_settings.prune_min_trades):
+                p.record_trade("fno", "Z", "BUY", 10, 1000.0, -60.0)
+            assert "fno" not in p.pruned, "pruning off → nothing disabled"
+        finally:
+            _ai_settings.prune_enabled = prev
+            bot_state.set_agent_enabled("fno", True)
+    _with_perf(body)
+
+def t_perf_pruned_strategy_cannot_trade():
+    def body(p, path):
+        p.set_enabled("ai", False, "test")
+        ai = _rt_ai(); _ai_tick("PRN1", 1000.0)
+        try:
+            asyncio.run(ai._place_trade(_trade_args("PRN1"))); raise AssertionError("pruned strategy traded")
+        except ToolRejected as e:
+            assert "disabled automatically" in str(e)
+        p.set_enabled("ai", True)
+        asyncio.run(ai._place_trade(_trade_args("PRN1")))
+        asyncio.run(ai.close_all("t"))
+        # the closed trade landed in the ledger with its cost
+        assert p.trades and p.trades[-1]["strategy"] == "ai" and p.trades[-1]["cost"] > 0
+        # rule-based agent: _try_enter returns before placing anything when pruned
+        p.set_enabled("intraday", False, "test")
+        agent = IntradayAgent()
+        n = len(_te_kite_client._paper_orders)
+        asyncio.run(agent._try_enter(_make_snap(symbol="PRN2", ltp=1000.0), "BUY", {"stop_loss": 990, "target": 1020}))
+        assert len(_te_kite_client._paper_orders) == n
+        p.set_enabled("intraday", True)
+    _with_ai_env(lambda: _with_perf(body))
+
+def t_perf_scoreboard_vs_index():
+    def body(p, path):
+        p.days = {
+            "2026-01-12": {"date": "2026-01-12", "net": 1000.0, "nifty50": 24000.0, "nasdaq100": 20000.0},
+            "2026-01-13": {"date": "2026-01-13", "net": -500.0, "nifty50": 24240.0, "nasdaq100": 20100.0},
+            "2026-01-14": {"date": "2026-01-14", "net": 2000.0, "nifty50": 24120.0, "nasdaq100": 20300.0},
+        }
+        closes = [("2026-01-09", 23800.0), ("2026-01-12", 24000.0), ("2026-01-13", 24240.0),
+                  ("2026-01-14", 24120.0), ("2026-01-15", 24360.0)]
+        with _patch.object(p, "_benchmark_closes", side_effect=lambda n: closes if n == "NIFTY50" else []), \
+             _patch.object(p, "_nifty_today_pct", return_value=None), \
+             _patch.object(_perf_mod, "now_ist", return_value=_MKT_NOW):
+            prev = _ai_settings.total_capital; _ai_settings.total_capital = 500000.0
+            try:
+                sb = p.scoreboard(live_day_pnl=1500.0, ai_cost_today_usd=2.0)
+            finally:
+                _ai_settings.total_capital = prev
+        t = sb["periods"]["today"]
+        assert t["net_pnl"] == round(1500.0 - 2.0 * _ai_settings.usd_inr, 2)
+        assert t["nifty50_pct"] == round((24360 / 24120 - 1) * 100, 2)
+        w = sb["periods"]["week"]                     # Mon 12 → Thu 15: 1000 − 500 + 2000 + today
+        assert w["net_pnl"] == round(2500.0 + t["net_pnl"], 2)
+        assert w["nifty50_pct"] == round((24360 / 23800 - 1) * 100, 2)
+        assert w["vs_nifty50"] == round(w["account_pct"] - w["nifty50_pct"], 3)
+        assert w["nasdaq100_pct"] is None and sb["days_tracked"] == 3
+        assert "Too early" in sb["verdict"]
+        p.days = {f"2026-01-{d:02d}": {"date": f"2026-01-{d:02d}", "net": 3000.0, "nifty50": 24000.0} for d in range(1, 15)}
+        with _patch.object(p, "_benchmark_closes", return_value=[("2025-12-31", 24000.0), ("2026-01-15", 24240.0)]), \
+             _patch.object(p, "_nifty_today_pct", return_value=None), \
+             _patch.object(_perf_mod, "now_ist", return_value=_MKT_NOW):
+            sb = p.scoreboard()
+        assert "Ahead of NIFTY 50" in sb["verdict"], sb["verdict"]        # +8.4% vs +1%
+        curve = p.equity_curve()
+        assert curve[-1]["cum_net"] == 3000.0 * 14
+    _with_perf(body)
+
+def t_perf_snapshot_today():
+    def body(p, path):
+        with _patch.object(_perf_mod, "now_ist", return_value=_MKT_NOW), \
+             _patch.object(p, "_benchmark_closes", side_effect=lambda n: [("2026-01-15", 24100.0)] if n == "NIFTY50" else []):
+            p.record_trade("ai", "A", "BUY", 10, 1000.0, 100.0)
+            snap = p.snapshot_today(ai_cost_usd=1.0)
+        assert snap["trades"] == 1 and snap["gross"] == 100.0 and snap["nifty50"] == 24100.0
+        assert snap["net"] == round(100.0 - snap["costs"] - _ai_settings.usd_inr, 2)
+        assert p.days["2026-01-15"] == snap
+    _with_perf(body)
+
+def t_trend_filter_states():
+    closes = [(datetime(2025, 1, 1).date(), 100.0 + i * 0.1) for i in range(260)]   # rising → above EMA
+    with _patch("daily_data.daily_closes", return_value=closes), _patch.dict(_mf_mod._cache, {}, clear=True):
+        _ai_tick("NIFTY 50", 130.0)
+        st = _mf_mod.state(refresh=True)
+        assert st["state"] == "RISK_ON" and st["size_factor"] == 1.0 and st["ema"] < 130.0
+        _ai_tick("NIFTY 50", 100.0)
+        st = _mf_mod.state(refresh=True)
+        assert st["state"] == "RISK_OFF" and st["size_factor"] == _ai_settings.trend_filter_risk_off_size
+        assert _mf_mod.blocks_new_longs() and _mf_mod.risk_off()
+    prev = _ai_settings.trend_filter_enabled; _ai_settings.trend_filter_enabled = False
+    try:
+        with _patch.dict(_mf_mod._cache, {}, clear=True):
+            assert _mf_mod.state(refresh=True)["state"] == "DISABLED" and not _mf_mod.blocks_new_longs()
+    finally:
+        _ai_settings.trend_filter_enabled = prev
+
+def t_trend_filter_shrinks_intraday_and_blocks_swing():
+    def body():
+        ai = _rt_ai(); _ai_tick("TFX", 1000.0)
+        with _patch.object(_mf_mod, "state", return_value={"state": "RISK_OFF", "size_factor": 0.5}):
+            try:    # ₹30k would be fine normally (limit ₹50k); halved limit is ₹25k
+                asyncio.run(ai._place_trade(_trade_args("TFX", qty=30))); raise AssertionError("size not halved")
+            except ToolRejected as e:
+                assert "halved" in str(e) and "25,000" in str(e)
+            asyncio.run(ai._place_trade(_trade_args("TFX", qty=20)))
+            _ai_tick("TFX2", 1000.0)
+            try:
+                asyncio.run(ai._place_swing_trade(_swing_args("TFX2"))); raise AssertionError("swing buy allowed")
+            except ToolRejected as e:
+                assert "200-day EMA" in str(e)
+            # bearish trades are unaffected: shorts and puts
+            _ai_tick("TFX3", 1000.0)
+            asyncio.run(ai._place_trade(_trade_args("TFX3", side="SELL", qty=10, sl=1010.0, tgt=980.0)))
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(lambda path: body()))
+
+def _mom_series(sym_returns: dict[str, float], n=300):
+    """Synthetic closes: each symbol drifts by its given total return over n sessions."""
+    base = datetime(2025, 1, 1).date()
+    out = {}
+    for sym, ret in sym_returns.items():
+        rows = []
+        d = base
+        for i in range(n):
+            while d.weekday() >= 5: d += timedelta(days=1)
+            rows.append((d, 100.0 * (1 + ret) ** (i / (n - 1))))
+            d += timedelta(days=1)
+        out[sym] = rows
+    return out
+
+def t_momentum_rankings_and_plan():
+    series = _mom_series({"WIN1": 0.80, "WIN2": 0.50, "FLAT": 0.02, "LOSER": -0.30, "NIFTY 50": 0.10})
+    with _patch("daily_data.daily_closes", side_effect=lambda s, fallback_price=1000.0: series.get(s, [])), \
+         _patch.object(_mom, "universe", return_value=["WIN1", "WIN2", "FLAT", "LOSER"]):
+        r = _mom.rankings()
+        assert [x["symbol"] for x in r] == ["WIN1", "WIN2", "FLAT", "LOSER"]
+        assert r[0]["ret_12_1"] > r[1]["ret_12_1"] > 0 > r[3]["ret_12_1"] and r[3]["above_200dma"] is False
+        sel = _mom.selection(top_n=3)
+        assert [x["symbol"] for x in sel] == ["WIN1", "WIN2", "FLAT"], "losers never selected"
+        with _patch.object(_mom, "trend_state", return_value={"state": "RISK_ON"}, create=True), \
+             _patch("market_filter.state", return_value={"state": "RISK_ON"}):
+            plan = _mom.rebalance_plan({"WIN2": 95.0, "LOSER": 120.0}, top_n=2)
+        assert plan["sell"] == ["LOSER"] and [b["symbol"] for b in plan["buy"]] == ["WIN1"] and plan["keep"] == ["WIN2"]
+        with _patch("market_filter.state", return_value={"state": "RISK_OFF"}):
+            plan = _mom.rebalance_plan({"LOSER": 120.0}, top_n=2)
+        assert plan["sell"] == ["LOSER"] and plan["buy"] == [], "risk-off: sell losers, buy nothing"
+
+def t_momentum_rebalance_executes_cnc():
+    series = _mom_series({"MOM1": 0.80, "MOM2": 0.50, "MOM3": -0.30, "NIFTY 50": 0.10})
+    def body(path):
+        ai = _rt_ai()
+        for s in ("MOM1", "MOM2", "MOM3"): _ai_tick(s, 100.0)
+        with _patch("daily_data.daily_closes", side_effect=lambda s, fallback_price=1000.0: series.get(s, [])), \
+             _patch.object(_mom, "universe", return_value=["MOM1", "MOM2", "MOM3"]), \
+             _patch("market_filter.state", return_value={"state": "RISK_ON", "size_factor": 1.0}):
+            prev = _ai_settings.momentum_top_n; _ai_settings.momentum_top_n = 2
+            try:
+                res = asyncio.run(ai.run_momentum_rebalance())
+                assert res["executed"] and sorted(res["done"]["bought"]) == ["MOM1", "MOM2"], res
+                held = ai._momentum_entries()
+                assert len(held) == 2 and not ai._swing_entries(), "momentum names are not swing slots"
+                assert ai.trades_today == 0, "rotation does not use the AI's daily trade budget"
+                for oid, e in held.items():
+                    pos = _tsl_eng._positions[oid]
+                    assert pos.strategy == "momentum" and e["product"] == "CNC" and e["gtt_id"] and not pos.external_trail
+                    assert abs(pos.current_sl - 100.0 * (1 - _ai_settings.momentum_stop_pct / 100)) < 0.01
+                    assert _order(oid)["quantity"] == int(_ai_settings.momentum_capital / 2 // 100.0)
+                # next month: MOM2 falls out, MOM3 cannot enter (negative momentum) → sold, nothing bought
+                series["MOM2"] = _mom_series({"MOM2": -0.40})["MOM2"]
+                res = asyncio.run(ai.run_momentum_rebalance())
+                assert res["done"]["sold"] == ["MOM2"] and res["done"]["bought"] == [] and res["done"]["kept"] == ["MOM1"]
+                assert list(ai._momentum_entries().values())[0]["symbol"] == "MOM1"
+                assert len(json.loads(path.read_text())["positions"]) == 1, "momentum positions persist like swing"
+                assert _perf_mod.performance.trades[-1]["strategy"] == "momentum"
+            finally:
+                _ai_settings.momentum_top_n = prev
+        asyncio.run(ai.close_all("t"))
+    _with_ai_env(lambda: _with_swing_file(body))
+
+def t_momentum_backtest_vs_nifty():
+    series = _mom_series({"A": 1.20, "B": 0.60, "C": -0.20, "D": 0.10, "NIFTY 50": 0.15}, n=560)
+    with _patch("daily_data.daily_closes", side_effect=lambda s, fallback_price=1000.0: series.get(s, [])), \
+         _patch.object(_mom, "universe", return_value=["A", "B", "C", "D"]):
+        bt = _mom.backtest(months=6, top_n=2)
+    assert "error" not in bt, bt
+    assert bt["months"] == 6 and bt["top_n"] == 2 and bt["universe_size"] == 4
+    assert bt["strategy_return_pct"] > bt["nifty_return_pct"] and bt["beats_index"], bt
+    assert all(set(c["held"]) <= {"A", "B", "D"} for c in bt["curve"]) and bt["max_drawdown_pct"] >= 0
+    assert "nifty" in bt["curve"][-1] and bt["curve"][-1]["nifty"] > 1.0
+
+def t_backtest_gate_requires_beating_nifty():
+    from backtest_engine import BacktestEngine, BacktestResult
+    eng = BacktestEngine()
+    import pandas as _pd
+    idx = _pd.date_range("2026-01-01", periods=40, freq="h")
+    first = {"close": 100.0, "date": idx[0]}
+    last = {"close": 104.0, "date": idx[-1]}
+    r = BacktestResult(symbol="GATE", strategy="intraday", passed=False, total_trades=25, win_rate=60, sharpe_ratio=1.5,
+                       profit_factor=1.5, total_pnl=10.0, walk_forward_used=True, oos_trades=6, oos_win_rate=60)
+    r.oos_return_pct = 2.0
+    with _patch.object(_perf_mod.performance, "benchmark_return", return_value=5.0):
+        eng._attach_benchmarks(r, [(first, last)])
+    assert r.oos_hold_return_pct == 4.0 and r.oos_nifty_return_pct == 5.0 and r.beats_index is False
+    r = eng._apply_gate(r)
+    assert not r.passed and any("Does not beat NIFTY" in x for x in r.fail_reasons), r.fail_reasons
+    r.oos_return_pct, r.beats_index = 7.0, True
+    assert eng._apply_gate(r).passed
+    r2 = BacktestResult(symbol="NOIDX", strategy="intraday", passed=False, total_trades=25, win_rate=60, sharpe_ratio=1.5,
+                        profit_factor=1.5, total_pnl=10.0, walk_forward_used=True, oos_trades=6, oos_win_rate=60)
+    with _patch.object(_perf_mod.performance, "benchmark_return", return_value=None):
+        eng._attach_benchmarks(r2, [(first, last)])
+    assert r2.beats_index is None and eng._apply_gate(r2).passed, "no benchmark data → gate not applied, reported as unknown"
+
+def t_performance_endpoints():
+    import main as _main
+    def body(p, path):
+        c = TestClient(_main.app)
+        prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+        try:
+            p.record_trade("ai", "EP", "BUY", 10, 1000.0, 50.0)
+            sb = c.get("/performance/scoreboard", headers=H).json()
+            assert "periods" in sb and "verdict" in sb and "trend_filter" in sb
+            st = c.get("/performance/strategies", headers=H).json()["strategies"]
+            assert any(s["strategy"] == "ai" and s["trades"] == 1 for s in st)
+            assert c.post("/performance/strategies/ai/disable", headers=H).json()["pruned"]
+            assert c.post("/performance/strategies/ai/enable", headers=H).json()["enabled"]
+            d = c.get("/dashboard/summary", headers=H).json()
+            assert d["scoreboard"]["verdict"] and isinstance(d["strategy_stats"], list)
+            r = c.get("/momentum/rankings?top=3", headers=H).json()
+            assert "rankings" in r and "selection" in r
+            assert c.get("/market/trend-filter", headers=H).json()["state"]
+        finally:
+            _ai_settings.api_key = prev
+    _with_ai_env(lambda: _with_perf(body))
+
+run("Costs: realistic Zerodha round-trip estimates",      t_costs_realistic)
+run("Ledger: net-of-cost stats, persisted",               t_perf_ledger_and_stats)
+run("Pruning: losers disabled, winners kept, re-enable",  t_perf_pruning_disables_losers_and_reenable)
+run("Pruning: pruned strategies cannot trade",            t_perf_pruned_strategy_cannot_trade)
+run("Scoreboard: account vs NIFTY per period + verdict",  t_perf_scoreboard_vs_index)
+run("Scoreboard: daily snapshot stores net + index close", t_perf_snapshot_today)
+run("Trend filter: RISK_ON / RISK_OFF / DISABLED",        t_trend_filter_states)
+run("Trend filter: halves intraday size, blocks swing buys", t_trend_filter_shrinks_intraday_and_blocks_swing)
+run("Momentum: 12-1 rankings, selection, rebalance plan", t_momentum_rankings_and_plan)
+run("Momentum: rebalance buys/sells CNC with GTT stops",  t_momentum_rebalance_executes_cnc)
+run("Momentum: backtest beats/compares NIFTY",            t_momentum_backtest_vs_nifty)
+run("Backtest gate: must beat NIFTY out of sample",       t_backtest_gate_requires_beating_nifty)
+run("Performance endpoints + dashboard fields",           t_performance_endpoints)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("17. ENCRYPTED KEY VAULT")
+# ══════════════════════════════════════════════════════════════════════════
+import tempfile as _vtmp
+from pathlib import Path
+import os
+from secret_store import SecretStore as _Vault, apply_to as _vault_apply
+
+def _vault():
+    return _Vault(Path(_vtmp.mkdtemp()) / "s")
+
+def t_vault_roundtrip_encrypted():
+    v = _vault(); v.save({"anthropic_api_key": "sk-ant-secret-1234", "kite_api_key": "kitekey9876"})
+    assert v.load() == {"anthropic_api_key": "sk-ant-secret-1234", "kite_api_key": "kitekey9876"}
+    raw = v.vault.read_bytes()
+    assert b"sk-ant" not in raw and b"kitekey" not in raw
+
+def t_vault_file_permissions():
+    v = _vault(); v.save({"kite_api_key": "abc"})
+    assert v.keyfile.stat().st_mode & 0o777 == 0o600
+    assert v.vault.stat().st_mode & 0o777 == 0o600
+    assert v.dir.stat().st_mode & 0o777 == 0o700
+
+def t_vault_status_has_no_values():
+    v = _vault(); v.save({"kite_api_secret": "verysecretvalue42"})
+    st = v.status()
+    assert st["fields"]["kite_api_secret"]["stored"] and st["fields"]["kite_api_secret"]["hint"] == "…ue42"
+    assert "verysecret" not in str(st)
+
+def t_vault_rejects_unknown_fields():
+    v = _vault()
+    try:
+        v.save({"api_key": "x"}); assert False, "should reject"
+    except ValueError:
+        pass
+
+def t_vault_kite_token_expires_next_day():
+    v = _vault(); v.save({"kite_access_token": "tok"})
+    assert v.load()["kite_access_token"] == "tok"
+    d = v._read(); d["kite_access_token"]["day"] = "2000-01-01"; v._write(d)
+    assert "kite_access_token" not in v.load()
+    assert v.status()["fields"]["kite_access_token"]["expired"] is True
+
+def t_vault_delete():
+    v = _vault(); v.save({"kite_api_key": "a", "kite_api_secret": "b"})
+    v.delete(["kite_api_key"]); assert list(v.load()) == ["kite_api_secret"]
+    v.delete(["kite_api_secret"]); assert not v.vault.exists()
+
+def t_vault_wrong_key_does_not_crash_startup():
+    from cryptography.fernet import Fernet
+    v = _vault(); v.save({"kite_api_key": "a"})
+    old = os.environ.get("SECRETS_MASTER_KEY")
+    os.environ["SECRETS_MASTER_KEY"] = Fernet.generate_key().decode()
+    try:
+        class S: pass
+        assert _vault_apply(S(), v) == []
+        assert "cannot be decrypted" in v.status()["error"]
+    finally:
+        if old is None: os.environ.pop("SECRETS_MASTER_KEY", None)
+        else: os.environ["SECRETS_MASTER_KEY"] = old
+
+def t_vault_apply_overrides_settings():
+    v = _vault(); v.save({"anthropic_api_key": "from-vault"})
+    class S: anthropic_api_key = "from-env"
+    s = S(); assert _vault_apply(s, v) == ["anthropic_api_key"] and s.anthropic_api_key == "from-vault"
+
+run("vault: round-trip, nothing stored in plain text",       t_vault_roundtrip_encrypted)
+run("vault: key 600, vault 600, dir 700",                    t_vault_file_permissions)
+run("vault: status shows last 4 chars only",                 t_vault_status_has_no_values)
+run("vault: unknown fields rejected",                        t_vault_rejects_unknown_fields)
+run("vault: Kite access token ignored the next day",         t_vault_kite_token_expires_next_day)
+run("vault: delete fields; empty vault removed",             t_vault_delete)
+run("vault: wrong master key → server still starts",         t_vault_wrong_key_does_not_crash_startup)
+run("vault: stored values override .env values",             t_vault_apply_overrides_settings)
 
 
 # ══════════════════════════════════════════════════════════════════════════

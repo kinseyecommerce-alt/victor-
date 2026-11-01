@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Activity, Wifi, WifiOff, Settings, Zap, ZapOff, Eye, EyeOff } from 'lucide-react'
+import { Activity, Wifi, WifiOff, Settings, Zap, ZapOff, Eye, EyeOff, Lock, ExternalLink } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useStore } from '../../store'
 import { api } from '../../api/client'
@@ -27,6 +27,11 @@ export default function Header() {
   const [showFields, setShowFields] = useState<Record<string, boolean>>({})
   const [credStatus, setCredStatus] = useState<Record<string, boolean>>({})
   const [credSaving, setCredSaving] = useState(false)
+  // Encrypted vault: which fields are stored (never the values) + "remember" toggle
+  const [vault, setVault] = useState<Record<string, { stored: boolean; hint?: string; expired?: boolean }>>({})
+  const [vaultError, setVaultError] = useState<string | null>(null)
+  const [remember, setRemember] = useState(true)
+  const [kite, setKite] = useState<{ connected: boolean; name?: string; account_id?: string } | null>(null)
 
   // App Login tab
   const [appLoginForm, setAppLoginForm] = useState({ username: '', new_password: '', confirm_password: '' })
@@ -48,9 +53,47 @@ export default function Header() {
     return () => clearInterval(t)
   }, [])
 
-  // Fetch /config/validate when API Keys or App Login tab opens
+  const applyCredStatus = (c: Record<string, any>, v?: any) => {
+    setCredStatus({
+      kite_api_key:      c.kite_api_key      ?? false,
+      kite_api_secret:   c.kite_api_secret   ?? false,
+      anthropic_api_key: c.anthropic_api_key ?? false,
+      truedata_username: c.truedata_username ?? false,
+      truedata_password: c.truedata_password ?? false,
+    })
+    if (v) { setVault(v.fields ?? {}); setVaultError(v.error ?? null) }
+  }
+
+  const refreshCredentials = () => {
+    api.credentialsStatus().then(r => applyCredStatus(r.data.credentials ?? {}, r.data.vault)).catch(() => {})
+    api.kiteStatus().then(r => setKite(r.data)).catch(() => setKite(null))
+  }
+
+  useEffect(() => { if (settingsTab === 'apikeys') refreshCredentials() }, [settingsTab])
+
+  const handleKiteLogin = async () => {
+    try {
+      const r = await api.kiteLoginUrl()
+      window.open(r.data.login_url, '_blank', 'noopener')
+      addToast('Log in on the Zerodha page, then come back and reopen Settings', 'info')
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Save the Kite API key first', 'error')
+    }
+  }
+
+  const handleRemoveCredential = async (field: string) => {
+    try {
+      const r = await api.deleteCredentials([field])
+      applyCredStatus(r.data.credentials ?? {}, r.data.vault)
+      addToast('Removed from the vault and the running server', 'info')
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Remove failed', 'error')
+    }
+  }
+
+  // Fetch /config/validate when App Login tab opens
   useEffect(() => {
-    if (settingsTab === 'apikeys' || settingsTab === 'applogin') {
+    if (settingsTab === 'applogin') {
       api.configValidate().then(r => {
         setCredStatus({
           kite_api_key:      r.data.kite_api_key      ?? false,
@@ -84,7 +127,7 @@ export default function Header() {
   }, [botStatus])
 
   const handleSaveCredentials = async () => {
-    const payload: Record<string, string> = {}
+    const payload: Record<string, any> = {}
     if (credForm.kite_api_key.trim())      payload.kite_api_key      = credForm.kite_api_key.trim()
     if (credForm.kite_api_secret.trim())   payload.kite_api_secret   = credForm.kite_api_secret.trim()
     if (credForm.anthropic_api_key.trim()) payload.anthropic_api_key = credForm.anthropic_api_key.trim()
@@ -93,17 +136,11 @@ export default function Header() {
     if (!Object.keys(payload).length) { addToast('No credentials entered', 'info'); return }
     setCredSaving(true)
     try {
-      const r = await api.updateCredentials(payload)
-      const c = r.data.credentials ?? {}
-      setCredStatus({
-        kite_api_key:      c.kite_api_key      ?? false,
-        kite_api_secret:   c.kite_api_secret   ?? false,
-        anthropic_api_key: c.anthropic_api_key ?? false,
-        truedata_username: c.truedata_username ?? false,
-        truedata_password: c.truedata_password ?? false,
-      })
+      const r = await api.updateCredentials({ ...payload, persist: remember })
+      applyCredStatus(r.data.credentials ?? {}, r.data.vault)
       setCredForm({ kite_api_key: '', kite_api_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
-      addToast('Credentials updated', 'buy')
+      setShowFields({})
+      addToast(remember ? 'Saved — encrypted on the server' : 'Updated until the server restarts', 'buy')
     } catch (e: any) {
       addToast(e.response?.data?.detail || 'Failed to update credentials', 'error')
     } finally { setCredSaving(false) }
@@ -135,9 +172,19 @@ export default function Header() {
     <div key={key}>
       <div className="flex items-center justify-between mb-1">
         <label className="text-sm font-medium text-slate-700">{label}</label>
-        <Badge variant={credStatus[key] ? 'buy' : 'warning'}>
-          {credStatus[key] ? 'Set ✓' : 'Not set'}
-        </Badge>
+        <span className="flex items-center gap-2">
+          {vault[key]?.stored ? (
+            <>
+              <Badge variant="buy"><Lock className="w-3 h-3 inline-block mr-1 -mt-0.5" />Saved {vault[key]?.hint}</Badge>
+              <button type="button" onClick={() => handleRemoveCredential(key)}
+                className="text-xs text-slate-400 hover:text-rose-600">Remove</button>
+            </>
+          ) : (
+            <Badge variant={credStatus[key] ? 'buy' : 'warning'}>
+              {credStatus[key] ? 'Set (.env)' : 'Not set'}
+            </Badge>
+          )}
+        </span>
       </div>
       <div className="relative">
         <Input
@@ -305,6 +352,25 @@ export default function Header() {
                 {credField('API Key', 'kite_api_key')}
                 {credField('API Secret', 'kite_api_secret')}
               </div>
+              <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2" data-testid="kite-session">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-slate-700">
+                    Today's Kite login:{' '}
+                    {kite?.connected
+                      ? <span className="font-medium text-green-700">connected{kite.account_id ? ` (${kite.account_id})` : ''}</span>
+                      : vault.kite_access_token?.stored && !vault.kite_access_token?.expired
+                        ? <span className="font-medium text-green-700">saved for today</span>
+                        : <span className="font-medium text-amber-700">not logged in</span>}
+                  </span>
+                  <Btn size="sm" variant="outline" className="shrink-0 whitespace-nowrap" onClick={handleKiteLogin} disabled={!credStatus.kite_api_key}>
+                    <ExternalLink className="w-3.5 h-3.5 mr-1 inline-block" />Log in with Zerodha
+                  </Btn>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Your Zerodha user ID, password and TOTP are typed on Zerodha's own page — this app never
+                  sees or stores them. Kite requires this login once a day; the session is kept until it expires.
+                </p>
+              </div>
             </div>
             <div>
               <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Claude AI (Anthropic)</p>
@@ -317,7 +383,18 @@ export default function Header() {
                 {credField('Password', 'truedata_password')}
               </div>
             </div>
-            <p className="text-xs text-slate-400">In-memory only — restart reverts to environment variables.</p>
+            <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer">
+              <input type="checkbox" className="mt-0.5" checked={remember} onChange={e => setRemember(e.target.checked)} />
+              <span>
+                Remember on this server (encrypted)
+                <span className="block text-xs text-slate-400">
+                  {remember
+                    ? 'Saved encrypted in .secrets/ on the server and loaded at startup. Never shown again, only the last 4 characters.'
+                    : 'Kept in memory only — a restart reverts to .env.'}
+                </span>
+              </span>
+            </label>
+            {vaultError && <p className="text-xs text-rose-600">Vault: {vaultError}</p>}
             <div className="flex gap-2 pt-1">
               <Btn onClick={handleSaveCredentials} disabled={credSaving}>
                 {credSaving ? 'Saving…' : 'Save Credentials'}

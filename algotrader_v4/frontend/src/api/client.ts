@@ -15,6 +15,16 @@ const ax = () => {
   })
 }
 
+// Agent calls run a multi-step Claude loop — allow minutes, not seconds
+const axLong = () => {
+  const { base, key } = getConfig()
+  return axios.create({
+    baseURL: base,
+    headers: key ? { 'X-API-Key': key } : {},
+    timeout: 300000,
+  })
+}
+
 export const api = {
   health: () => ax().get('/health'),
   configValidate: () => ax().get('/config/validate'),
@@ -50,6 +60,23 @@ export const api = {
   pauseAgent: (name: string) => ax().post(`/agents/${name}/pause`),
   resumeAgent: (name: string) => ax().post(`/agents/${name}/resume`),
 
+  // Overview dashboard (one aggregate call per refresh)
+  dashboardSummary: () => ax().get('/dashboard/summary'),
+  scoreboard: () => ax().get('/performance/scoreboard'),
+  strategyStats: () => ax().get('/performance/strategies'),
+  strategyEnable: (name: string) => ax().post(`/performance/strategies/${name}/enable`),
+  strategyDisable: (name: string) => ax().post(`/performance/strategies/${name}/disable`),
+
+  // AI trader (Claude)
+  aiStatus: () => ax().get('/agent/status'),
+  aiStart: () => ax().post('/agent/start', {}),
+  aiStop: () => ax().post('/agent/stop'),
+  aiCycle: () => axLong().post('/agent/cycle'),
+  aiCloseAll: () => ax().post('/agent/close-all'),
+  aiLog: (n = 100) => ax().get(`/agent/log?n=${n}`),
+  aiChat: (message: string, conversation_id?: string | null) =>
+    axLong().post('/agent/chat', { message, conversation_id }),
+
   // SEBI
   sebiStatus: () => ax().get('/sebi/status'),
   sebiKillSwitch: (reason?: string) =>
@@ -77,7 +104,12 @@ export const api = {
     anthropic_api_key?: string
     truedata_username?: string
     truedata_password?: string
+    persist?: boolean
   }) => ax().post('/settings/credentials', data),
+  credentialsStatus: () => ax().get('/settings/credentials/status'),
+  deleteCredentials: (fields: string[]) => ax().delete('/settings/credentials', { data: { fields } }),
+  kiteLoginUrl: () => ax().get('/auth/login-url'),
+  kiteStatus: () => ax().get('/auth/kite/status'),
 
   // App login
   updateAppPassword: (data: { username?: string; new_password: string }) =>

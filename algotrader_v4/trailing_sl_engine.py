@@ -95,6 +95,56 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.TRAILING,
         atr_multiplier  = 2.0,
     ),
+    "ai_opt": TrailConfig(  # AI trader option buys (premium %)
+        initial_sl_pct  = 35.0,   # % of premium
+        trail_pct       = 20.0,
+        breakeven_pct   = 15.0,
+        activation_pct  = 30.0,
+        target1_pct     = 50.0,
+        target2_pct     = 80.0,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 2.0,
+    ),
+    "ai_fut": TrailConfig(   # AI index futures (intraday, leveraged → tight)
+        initial_sl_pct  = 0.50,
+        trail_pct       = 0.30,
+        breakeven_pct   = 0.30,
+        activation_pct  = 0.50,
+        target1_pct     = 0.80,
+        target2_pct     = 1.50,
+        mode            = SLMode.ATR_TRAIL,
+        atr_multiplier  = 1.2,
+    ),
+    "momentum": TrailConfig(  # monthly momentum rotation (CNC); wide, position-level trend stop
+        initial_sl_pct  = 12.0,
+        trail_pct       = 8.0,
+        breakeven_pct   = 8.0,
+        activation_pct  = 12.0,
+        target1_pct     = 25.0,
+        target2_pct     = 50.0,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 2.0,
+    ),
+    "ai_swing_opt": TrailConfig(  # AI bearish swing: long put held for days (premium %)
+        initial_sl_pct  = 40.0,
+        trail_pct       = 25.0,
+        breakeven_pct   = 20.0,
+        activation_pct  = 40.0,
+        target1_pct     = 60.0,
+        target2_pct     = 100.0,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 2.0,
+    ),
+    "ai_swing": TrailConfig(  # AI swing (delivery), fallback when Claude can't trail it.
+        initial_sl_pct  = 5.00,   # percent trail: the tick feed's ATR is 1-minute, far too
+        trail_pct       = 3.00,   # tight for a position held for days
+        breakeven_pct   = 2.00,
+        activation_pct  = 4.00,
+        target1_pct     = 8.00,
+        target2_pct     = 15.00,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 1.5,
+    ),
     "swing": TrailConfig(
         initial_sl_pct  = 3.00,
         trail_pct       = 1.00,
@@ -134,6 +184,9 @@ class PositionSL:
     locked_profit:  float = 0.0   # profit locked by current SL level
 
     status:         SLStatus = SLStatus.ACTIVE
+    # True = an external manager (the AI trader) moves the stop; the engine only
+    # watches for the stop being hit and leaves breakeven / trailing / targets alone
+    external_trail: bool  = False
     opened_at:      float = field(default_factory=time.time)
     last_updated:   float = field(default_factory=time.time)
 
@@ -312,6 +365,9 @@ class TrailingSLEngine:
                 await self.on_sl_hit(pos, ltp, pnl)
             return
 
+        if pos.external_trail:
+            return
+
         # ── 3. Target 2 hit ────────────────────────────────────────────
         if not pos.target2_hit:
             t2 = (cfg.target2_pct / 100)
@@ -341,6 +397,9 @@ class TrailingSLEngine:
                     if tighter_sl < pos.current_sl:
                         pos.current_sl = tighter_sl
                         pos.sl_moves  += 1
+                # Keep the exchange stop order in step with the tightened software stop
+                if pos.current_sl != old_sl and self.on_sl_moved:
+                    await self.on_sl_moved(pos, old_sl, "T1")
                 logger.info(
                     "🎯 T1 hit: {} @ ₹{:.2f} → TSL tightened to ₹{:.2f}",
                     pos.symbol, ltp, pos.current_sl
