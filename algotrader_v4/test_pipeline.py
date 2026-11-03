@@ -1945,10 +1945,13 @@ def _ai_env():
             # portfolio rules have their own tests (section 19); the per-trade AI limits stay real here
             _patch.object(_ai_mod.portfolio_risk, "pre_entry",
                           lambda symbol, side, quantity, price, stop=None, **k: {"ok": True, "reason": "", "max_quantity": quantity, "size_factor": 1.0}),
+            _patch.object(_ai_mod.debate_gate, "review",
+                          _noop_debate),
             _patch.object(_rm_x, "check_before_order", return_value=(True, "")),
             _patch.object(_ba, "send_telegram", _noop_async)]
 
 async def _noop_async(*a, **k): return None
+async def _noop_debate(*a, **k): return {"proceed": True, "confidence": None, "size_factor": 1.0, "enforced": False, "reason": "disabled in tests"}
 
 def _with_ai_env(fn):
     _og_x._cooldown_until.clear()          # earlier losing tests leave a post-loss cooldown
@@ -4987,6 +4990,123 @@ def t_research_evidence_shape():
         assert k in ev, k
     assert ev["allowed_grid"] == _opt.GRIDS and set(ev["current_params"]) == set(_opt.GRIDS)
 
+# ── Bull-vs-bear debate gate ──────────────────────────────────────────────
+import debate_gate as _dg
+import kronos_forecast as _kf
+
+class _FakeDebateClient:
+    def __init__(self, verdict=None, fail=False):
+        self.verdict, self.fail, self.calls = verdict, fail, []
+        class _M:
+            def __init__(s2, o): s2.o = o
+            async def create(s2, **kw):
+                s2.o.calls.append(kw)
+                if s2.o.fail: raise RuntimeError("api down")
+                blk = _NS(type="tool_use", name="debate_verdict", input=dict(s2.o.verdict), id="d1")
+                return _NS(content=[blk], usage=_NS(input_tokens=10, output_tokens=5, cache_read_input_tokens=0, cache_creation_input_tokens=0))
+        self.messages = _M(self); self.beta = _NS(messages=_M(self))
+
+_V_OK = {"bear_case": "weak", "bull_rebuttal": "fine", "proceed": True, "confidence": 0.8, "size_factor": 1.0, "key_risk": "none"}
+
+def t_debate_verdicts():
+    prop = {"kind": "intraday equity", "symbol": "DBT", "side": "BUY", "quantity": 10, "price": 1000.0, "stop": 990.0, "target": 1020.0, "reasoning": "r"}
+    c = _FakeDebateClient(_V_OK)
+    v = asyncio.run(_dg.review(prop, {"event_risk": {}}, client=c))
+    assert v["proceed"] and v["enforced"] and v["size_factor"] == 1.0 and v["confidence"] == 0.8
+    assert c.calls[0]["tool_choice"]["name"] == "debate_verdict" and "PROPOSED TRADE" in c.calls[0]["messages"][0]["content"]
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "proceed": False, "bear_case": "results tomorrow", "key_risk": "earnings"})))
+    assert not v["proceed"] and "bear case won" in v["reason"] and "results tomorrow" in v["reason"] and v["size_factor"] == 0.0
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "confidence": 0.4})))
+    assert not v["proceed"] and "confidence 0.40" in v["reason"]
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "size_factor": 0.5})))
+    assert v["proceed"] and v["size_factor"] == 0.5
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "size_factor": 0.0})))
+    assert v["size_factor"] == 0.25, "size factor floors at 0.25 when proceeding"
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient(fail=True)))
+    assert v["proceed"] and not v["enforced"] and "unavailable" in v["reason"], "a stuck API never blocks (and never adds risk)"
+    prev = _ai_settings.ai_agent_debate_enabled; _ai_settings.ai_agent_debate_enabled = False
+    try:
+        assert asyncio.run(_dg.review(prop, {}, client=c))["enforced"] is False
+    finally:
+        _ai_settings.ai_agent_debate_enabled = prev
+
+def t_debate_gates_ai_entries():
+    """Every AI entry path consults the debate; a block rejects with the objection, a size factor shrinks."""
+    def body():
+        ai = _rt_ai(); _ai_tick("DBX", 1000.0)
+        block = {"proceed": False, "confidence": 0.3, "size_factor": 0.0, "enforced": True,
+                 "reason": "debate: bear case won — entry at resistance (key risk: level)", "key_risk": "level"}
+        n0 = len(_te_kite_client._paper_orders)
+        with _patch.object(_ai_mod.debate_gate, "review", _noop_async_returning(block)):
+            try:
+                asyncio.run(ai._place_trade(_trade_args("DBX"))); raise AssertionError("blocked entry placed")
+            except ToolRejected as e:
+                assert "bear case won" in str(e) and "resistance" in str(e)
+            for fn, args in ((ai._place_swing_trade, _swing_args("DBX")),):
+                try:
+                    asyncio.run(fn(args)); raise AssertionError("blocked swing placed")
+                except ToolRejected as e:
+                    assert "bear case won" in str(e)
+        assert len(_te_kite_client._paper_orders) == n0 and not ai._ai_entries()
+        assert any(e["kind"] == "debate" and "BLOCKED" in e["text"] for e in ai.log)
+        half = {"proceed": True, "confidence": 0.7, "size_factor": 0.5, "enforced": True, "reason": "", "key_risk": "x"}
+        with _patch.object(_ai_mod.debate_gate, "review", _noop_async_returning(half)):
+            out = asyncio.run(ai._place_trade(_trade_args("DBX", qty=10)))
+        assert out["quantity"] == 5, out
+        asyncio.run(ai.close_all("t"))
+        # momentum rebalance (code-driven) is not debated
+        calls = []
+        async def spy(*a, **k): calls.append(1); return half
+        _ai_tick("DBM", 100.0)
+        with _patch.object(_ai_mod.debate_gate, "review", spy):
+            asyncio.run(ai._place_swing_trade({"symbol": "DBM", "quantity": 10, "stop_loss": 90.0, "target": 150.0,
+                                               "max_hold_days": 45, "reasoning": "mom"}, _strategy="momentum"))
+        assert calls == [], "momentum rotation is pure code, no debate"
+        asyncio.run(ai.close_all("t"))
+    def _noop_async_returning(v):
+        async def _f(*a, **k): return v
+        return _f
+    globals()["_noop_async_returning"] = _noop_async_returning
+    _with_ai_env(lambda: _with_swing_file(lambda p: body()))
+
+# ── Kronos forecasts (fallback path; the real model is optional) ──────────
+def t_forecast_fallback_shape_and_cache():
+    bars = _trend_bars("KFC", days=2)
+    f = _kf.forecast("KFC", bars=bars, horizon=16, samples=50, use_cache=False)
+    assert f["available"] and f["source"].startswith("fallback") and f["model_available"] is False
+    assert f["horizon_bars"] == 16 and len(f["path_p50"]) == 16 and f["samples"] == 50
+    assert f["p10_pct"] <= f["p50_pct"] <= f["p90_pct"] and 0.0 <= f["p_up"] <= 1.0
+    assert f["expected_move_pct"] > 0, "an uptrending series forecasts up (shrunk drift)"
+    _ai_tick("KFC", bars[-1]["close"])
+    assert _kf.forecast("KFC", bars=bars[:20])["available"] is False
+    a = _kf.forecast("KFC", bars=bars); b = _kf.forecast("KFC", bars=bars)
+    assert a is b, "cached"
+    assert _kf.forecast("KFC", bars=bars, cached_only=True) is a
+    assert _kf.forecast("NOFC", bars=bars[-40:], cached_only=True)["available"] is True, "fallback is cheap: computed inline"
+    st = _kf.available(); assert st["kronos"] is False and st["fallback"]
+    from tick_engine import tick_engine as _tk
+    for b in bars[-60:]:
+        _tk._bufs_1min["KFC"].push(b["close"], b["volume"], b["ts"])
+    c = _kf.compact("KFC"); assert set(c) >= {"expected_move_pct", "p_up", "source"}, c
+
+def t_forecast_in_context_and_skill_check():
+    bars = _trend_bars("KFS", days=4, drift=0.002, seed=5)
+    _ai_tick("KFS", bars[-1]["close"])
+    from tick_engine import tick_engine as _tk
+    for b in bars[-90:]:
+        _tk._bufs_1min["KFS"].push(b["close"], b["volume"], b["ts"])
+    ctx = _mc.context_for("KFS")
+    assert "forecast" in ctx and ctx["forecast"].get("source", "").startswith("fallback")
+    assert "forecast" in _mc.compact_for_alert("KFS")
+    sk = _kf.skill_check("KFS", bars, horizon=16, step=25, lookback=120, samples=20)
+    assert sk["forecasts"] >= 20 and 0 <= sk["hit_rate"] <= 1 and len(sk["coin_flip_95pct_band"]) == 2
+    assert sk["verdict"] and sk["source"].startswith("fallback")
+    assert sk["hit_rate"] > 0.5, "on a strongly trending synthetic series even the drift fallback beats a coin"
+
+run("Debate: verdicts, thresholds, size floor, fail-open",     t_debate_verdicts)
+run("Debate: gates every AI entry; momentum exempt",           t_debate_gates_ai_entries)
+run("Forecast: fallback shape, cache, cached_only, status",    t_forecast_fallback_shape_and_cache)
+run("Forecast: in market context; skill check vs coin flip",   t_forecast_in_context_and_skill_check)
 run("Research: proposals validated against the grid",          t_research_validate_proposals)
 run("Research: A/B verdicts (adopt / not better / thin / DD)",  t_research_ab_test_verdicts)
 run("Research: cycle adopts a winner, rejects a loser, logs",   t_research_cycle_adopts_and_logs)

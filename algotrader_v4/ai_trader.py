@@ -57,6 +57,7 @@ from performance import performance
 import market_filter
 import market_context
 import portfolio_risk
+import debate_gate
 from options_resolver import (
     INDEX_QUOTE, OptionContract, estimate_premium, normalize_underlying, resolve, resolve_future,
     round_tick,
@@ -112,6 +113,13 @@ get_ai_positions for what you hold.
 them, targets stop short of them), institutional flow, option-chain data (IV rank, PCR, OI \
 walls), multi-timeframe alignment, correlation with what you already hold, India VIX and the \
 lessons from recent trades. Use it.
+- A "forecast" block (Kronos candlestick model, or a labelled statistical fallback) gives the \
+expected move and the share of sampled paths that end up over the next bars. It has modest skill \
+at best: treat a forecast that agrees with your setup as mild support and one that disagrees as a \
+reason to look harder, never as a signal on its own.
+- Every entry you propose is reviewed by an independent bear-case check before the order goes \
+out; if it is rejected you will see the objection. Do not resubmit the same trade with the same \
+reasoning — either answer the objection with data or pass.
 - Position sizing is risk-based: the code caps every trade so that a stop hit costs at most a \
 fixed share of capital, limits correlated positions, and caps the book's one-day loss. When a \
 tool rejects a size it tells you the maximum; propose that or smaller.
@@ -719,6 +727,17 @@ class AITrader:
                 "candles_1m": {"columns": ["time", "open", "high", "low", "close", "volume"],
                                "rows": candles}}
 
+    async def _debate(self, proposal: dict, context_symbol: str) -> dict:
+        """Independent bear-case review of an entry that passed every hard limit. Records it;
+        returns the verdict (proceed / size_factor / reason)."""
+        ctx = market_context.compact_for_alert(context_symbol)
+        v = await debate_gate.review(proposal, ctx)
+        if v.get("enforced"):
+            self._record("debate", f"{proposal.get('side')} {proposal.get('symbol')} → "
+                                   f"{'proceed' if v['proceed'] else 'BLOCKED'} (conf {v['confidence']:.2f}, size ×{v['size_factor']}) "
+                                   f"risk: {v.get('key_risk', '')}")
+        return v
+
     def _market_context(self, symbol: str) -> dict:
         und = normalize_underlying(symbol)
         sym = INDEX_QUOTE[und] if und else symbol
@@ -848,6 +867,13 @@ class AITrader:
         if not ok:
             reject(msg)
 
+        v = await self._debate({"kind": "intraday equity", "symbol": sym, "side": side, "quantity": qty, "price": ltp,
+                                "stop": sl, "target": tgt, "stop_pct": round(sl_pct, 2),
+                                "reward_to_risk": round(reward / risk_dist, 2), "reasoning": why}, sym)
+        if not v["proceed"]:
+            reject(v["reason"])
+        if v["size_factor"] < 1.0:
+            qty = max(1, int(qty * v["size_factor"]))
         from execution import entry_order, fill_after
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange="NSE", transaction_type=side, quantity=qty,
@@ -1064,6 +1090,14 @@ class AITrader:
         if not ok:
             reject(msg)
 
+        v = await self._debate({"kind": "index option buy (intraday)", "symbol": c.tradingsymbol, "underlying": und,
+                                "side": "BUY", "option_type": opt, "lots": lots, "premium": entry_px,
+                                "stop_pct_of_premium": slp, "target_pct_of_premium": tgp, "iv_rank": ivr,
+                                "spot": spot, "reasoning": why}, idx)
+        if not v["proceed"]:
+            reject(v["reason"])
+        if v["size_factor"] < 1.0 and lots > 1:
+            lots = max(1, int(lots * v["size_factor"])); qty = lots * c.lot_size
         tick_engine.subscribe([{"symbol": c.tradingsymbol, "exchange": "NFO", "seed_price": ltp}])
         order_id = kite_client.place_order(
             tradingsymbol=c.tradingsymbol, exchange="NFO", transaction_type="BUY", quantity=qty,
@@ -1210,6 +1244,14 @@ class AITrader:
         if not ok:
             reject(msg)
 
+        if not momentum:
+            v = await self._debate({"kind": "swing delivery (days)", "symbol": sym, "side": "BUY", "quantity": qty,
+                                    "price": ltp, "stop": sl, "target": tgt, "stop_pct": round(sl_pct, 2),
+                                    "max_hold_days": hold, "reasoning": why}, sym)
+            if not v["proceed"]:
+                reject(v["reason"])
+            if v["size_factor"] < 1.0:
+                qty = max(1, int(qty * v["size_factor"]))
         from execution import entry_order, fill_after
         order_id = kite_client.place_order(
             tradingsymbol=sym, exchange="NSE", transaction_type="BUY", quantity=qty,
@@ -1587,6 +1629,14 @@ class AITrader:
         if not ok:
             reject(msg)
 
+        v = await self._debate({"kind": "index future (intraday, leveraged)", "symbol": c.tradingsymbol, "underlying": und,
+                                "side": side, "lots": lots, "price": entry_px, "stop": sl, "target": tgt,
+                                "stop_pct": round(sl_pct, 3), "loss_at_stop": round(risk_dist * qty), "spot": spot,
+                                "reasoning": why}, idx)
+        if not v["proceed"]:
+            reject(v["reason"])
+        if v["size_factor"] < 1.0 and lots > 1:
+            lots = max(1, int(lots * v["size_factor"])); qty = lots * c.lot_size
         tick_engine.subscribe([{"symbol": c.tradingsymbol, "exchange": "NFO", "seed_price": entry_px}])
         order_id = kite_client.place_order(
             tradingsymbol=c.tradingsymbol, exchange="NFO", transaction_type=side, quantity=qty,
@@ -1735,6 +1785,13 @@ class AITrader:
         if not ok:
             reject(msg)
 
+        v = await self._debate({"kind": "bearish swing: long put (days)", "symbol": c.tradingsymbol, "underlying": und,
+                                "side": "BUY", "lots": lots, "premium": entry_px, "stop_pct_of_premium": slp,
+                                "target_pct_of_premium": tgp, "max_hold_days": hold, "spot": spot, "reasoning": why}, spot_sym)
+        if not v["proceed"]:
+            reject(v["reason"])
+        if v["size_factor"] < 1.0 and lots > 1:
+            lots = max(1, int(lots * v["size_factor"])); qty = lots * c.lot_size
         tick_engine.subscribe([{"symbol": c.tradingsymbol, "exchange": "NFO", "seed_price": ltp}])
         order_id = kite_client.place_order(
             tradingsymbol=c.tradingsymbol, exchange="NFO", transaction_type="BUY", quantity=qty,
@@ -1952,6 +2009,11 @@ class AITrader:
             if not ok:
                 reject(msg)
 
+        v = await self._debate({"kind": "credit spread (option selling, defined risk)", "symbol": f"{short.tradingsymbol}/{long_.tradingsymbol}",
+                                "underlying": und, "side": "SELL", "view": view, "lots": lots, "credit": credit,
+                                "width_points": width_pts, "max_loss": round(max_loss), "spot": spot, "reasoning": why}, idx)
+        if not v["proceed"]:
+            reject(v["reason"])
         tick_engine.subscribe([{"symbol": long_.tradingsymbol, "exchange": "NFO", "seed_price": ql["ltp"]},
                                {"symbol": short.tradingsymbol, "exchange": "NFO", "seed_price": qs["ltp"]}])
         # Protective leg first: the short leg must never exist without it

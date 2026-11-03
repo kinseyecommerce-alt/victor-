@@ -107,6 +107,13 @@ def correlation_block(symbol: str) -> dict:
             "reason": c["reason"], "portfolio_heat_0_1": round(portfolio_heat(held + [symbol]), 2) if held else 0.0}
 
 
+def forecast_block(symbol: str) -> dict:
+    """Kronos (or the labelled fallback) for the next bars; cached, never computes the heavy
+    model on the alert path (a background refresher does that when the model is loaded)."""
+    import kronos_forecast
+    return kronos_forecast.compact(symbol, cached_only=kronos_forecast.model_loaded())
+
+
 def memory_block(n: int = 5) -> list[dict]:
     from trade_memory import get_recent_insights
     return [{"symbol": e.get("symbol"), "strategy": e.get("strategy"), "pnl": e.get("pnl"),
@@ -136,6 +143,7 @@ def context_for(symbol: str, snap=None, include_memory: bool = True) -> dict:
         "options": _safe(lambda: options_block(symbol), {"available": False}),
         "multi_timeframe": _safe(lambda: mtf_block(snap_like), {}) if snap_like else {"available": False},
         "correlation": _safe(lambda: correlation_block(symbol), {}),
+        "forecast": _safe(lambda: forecast_block(symbol), {"available": False}),
     }
     if include_memory:
         out["recent_lessons"] = _safe(memory_block, [])
@@ -154,5 +162,6 @@ def compact_for_alert(symbol: str, snap=None) -> dict:
         "institutional_score": c["institutional"].get("score_0_100"),
         "iv_rank": c["options"].get("iv_rank"), "pcr": c["options"].get("pcr"),
         "mtf": c.get("multi_timeframe"),
+        "forecast": c.get("forecast"),
         "correlation": {k: c["correlation"].get(k) for k in ("allowed", "size_factor", "portfolio_heat_0_1")},
     }

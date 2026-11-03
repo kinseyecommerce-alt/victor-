@@ -201,6 +201,17 @@ the optimiser's report — and proposes **one** parameter change from the allowe
 proposal is A/B-replayed on the last 30 days; it is adopted only if it wins after costs.
 Every cycle is logged (`GET /research/log`). Claude proposes; the replay decides.
 
+**Bull-vs-bear review:** before any AI entry goes to the broker, a separate Claude call argues
+the bear case and rules on the trade (`AI_AGENT_DEBATE_ENABLED`). Below the confidence
+threshold the entry is rejected and the AI sees the objection; it can also halve the size.
+If the API is down the review fails open — it can shrink or stop a trade, never add one.
+
+**Kronos forecasts** (`GET /forecast/{symbol}`, `GET /forecast/status`): an optional
+open-source candlestick model forecasting the next bars; without it a labelled drift+volatility
+fallback runs. The AI sees it in `market_context` as mild evidence only. Before trusting it on a
+symbol, run `GET /backtest/forecast-skill?symbol=RELIANCE&days=20`: it walks forward through
+past bars and reports the hit-rate against a coin flip.
+
 **Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
 with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
 
