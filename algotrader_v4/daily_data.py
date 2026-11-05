@@ -24,6 +24,8 @@ from ist_clock import now_ist
 
 _LOOKBACK_DAYS = 400                     # calendar days → ~260 sessions, enough for EMA200 / 52w
 _cache: dict[tuple[str, date], list[dict]] = {}
+_miss: dict[str, datetime] = {}          # symbol → when a real-data fetch last came back empty
+_MISS_TTL = timedelta(minutes=15)
 
 
 def _from_kite(symbol: str) -> list[dict]:
@@ -77,6 +79,9 @@ def _completed_days(symbol: str, last_price: float) -> list[dict]:
         return _cache[key]
     rows: list[dict] = []
     if settings.uses_kite_market_data:
+        miss = _miss.get(symbol)
+        if miss and now_ist().replace(tzinfo=None) - miss < _MISS_TTL:
+            return []                            # source failed recently: don't hammer it again
         try:
             rows = _from_kite(symbol)
         except Exception as exc:
@@ -91,6 +96,9 @@ def _completed_days(symbol: str, last_price: float) -> list[dict]:
     rows = [r for r in rows if r["date"] < today]
     if rows:
         _cache[key] = rows
+        _miss.pop(symbol, None)
+    elif settings.uses_kite_market_data:
+        _miss[symbol] = now_ist().replace(tzinfo=None)
     return rows
 
 
