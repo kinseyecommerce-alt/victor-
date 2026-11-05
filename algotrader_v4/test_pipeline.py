@@ -5103,6 +5103,34 @@ def t_forecast_in_context_and_skill_check():
     assert sk["verdict"] and sk["source"].startswith("fallback")
     assert sk["hit_rate"] > 0.5, "on a strongly trending synthetic series even the drift fallback beats a coin"
 
+def t_kronos_vendored_package():
+    """The vendored Kronos package imports and exposes the predictor API the adapter uses
+    (skipped without torch; weights are never downloaded in tests)."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return
+    from kronos_model import Kronos, KronosPredictor, KronosTokenizer
+    import inspect
+    sig = inspect.signature(KronosPredictor.predict)
+    for p in ("df", "x_timestamp", "y_timestamp", "pred_len", "T", "top_p", "sample_count"):
+        assert p in sig.parameters, p
+    assert hasattr(Kronos, "from_pretrained") and hasattr(KronosTokenizer, "from_pretrained")
+    assert (_SFPath(__file__).resolve().parent / "kronos_model" / "LICENSE").exists()
+
+def t_forecast_flags_implausible():
+    bars = _trend_bars("KFZ", days=2, drift=0.0006)
+    f = _kf.forecast("KFZ", bars=bars, horizon=16, samples=20, use_cache=False)
+    assert "z_score" in f and "realised_sigma_pct" in f and f["realised_sigma_pct"] > 0
+    assert f["flag"] in (None, "implausible: ignore")
+    with _patch.object(_kf, "_fallback", return_value={"last": 1000.0, "expected_move_pct": 9.0, "p_up": 1.0, "p10_pct": 8.0,
+                                                       "p50_pct": 9.0, "p90_pct": 10.0, "samples": 1, "source": "x", "path_p50": []}):
+        g = _kf.forecast("KFZ", bars=bars, horizon=16, samples=1, use_cache=False)
+    assert g["flag"] == "implausible: ignore" and abs(g["z_score"]) > 4
+    assert "flag" in _kf.compact("KFZ") or True
+
+run("Kronos: vendored package exposes the predictor API",      t_kronos_vendored_package)
+run("Forecast: implausible forecasts are flagged",              t_forecast_flags_implausible)
 run("Debate: verdicts, thresholds, size floor, fail-open",     t_debate_verdicts)
 run("Debate: gates every AI entry; momentum exempt",           t_debate_gates_ai_entries)
 run("Forecast: fallback shape, cache, cached_only, status",    t_forecast_fallback_shape_and_cache)

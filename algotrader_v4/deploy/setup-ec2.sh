@@ -3,6 +3,7 @@
 # AlgoTrader Pro — one-shot setup for a fresh Ubuntu 22.04 / 24.04 server (EC2, any VPS)
 #
 #   sudo bash setup-ec2.sh <domain-or-public-ip> [repo-url] [branch]
+#   KRONOS=1 sudo -E bash setup-ec2.sh …    also installs the Kronos forecast model (CPU torch)
 #
 # What it does: system packages, Python venv, Node + dashboard build, a .env with freshly
 # generated secrets (PAPER mode on real Kite prices), systemd service (auto-restart),
@@ -62,6 +63,11 @@ VENV="$APP_DIR/venv"
 sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet --upgrade pip wheel
 sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
 sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet uvloop httptools
+if [[ "${KRONOS:-0}" == "1" ]]; then          # optional candlestick model (CPU torch, ~700 MB)
+    echo "▶ Installing Kronos dependencies (torch CPU)…"
+    sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+    sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet -r "$APP_DIR/requirements-kronos.txt"
+fi
 
 # ── 4. Dashboard build ────────────────────────────────────────────────────────
 sudo -u "$APP_USER" bash -c "cd '$APP_DIR/frontend' && npm ci --silent --no-audit --no-fund && npm run build --silent"
@@ -86,6 +92,8 @@ ADMIN_PASSWORD_HASH=$ADMIN_HASH
 AI_AGENT_ALLOW_LIVE=false
 AI_AGENT_FUTURES_ENABLED=false
 AI_AGENT_OPTION_SELLING_ENABLED=false
+KRONOS_MODEL=$([[ "${KRONOS:-0}" == "1" ]] && echo NeoQuasar/Kronos-small)
+KRONOS_DEVICE=cpu
 ENV
     chmod 600 "$ENV_FILE"; chown "$APP_USER":"$APP_USER" "$ENV_FILE"
     install -m 600 -o root -g root /dev/null /root/algotrader-first-login.txt

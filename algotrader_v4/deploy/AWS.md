@@ -84,15 +84,18 @@ MAX_DAILY_LOSS=1000
 
 ## Optional: Kronos forecasts
 
-The AI can use the open-source Kronos candlestick model as one input. On the server:
+The AI can use the open-source Kronos candlestick model as one input. The model code is
+vendored in the repo (`kronos_model/`, MIT); only its dependencies and weights are needed.
+Easiest: run the installer with `KRONOS=1` (`KRONOS=1 sudo -E bash setup-ec2.sh <ip>`). On an
+existing server:
 
 ```bash
-sudo -u algotrader git clone https://github.com/shiyu-coder/Kronos /opt/kronos
 sudo -u algotrader /opt/algotrader/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
-sudo -u algotrader /opt/algotrader/venv/bin/pip install einops huggingface_hub safetensors
+sudo -u algotrader /opt/algotrader/venv/bin/pip install -r /opt/algotrader/requirements-kronos.txt
 ```
-Add to `/opt/algotrader/.env`: `KRONOS_MODEL=NeoQuasar/Kronos-small`, `KRONOS_DIR=/opt/kronos`,
-`KRONOS_DEVICE=cpu`, then restart. The model (~100 MB) downloads on first use. A t3.small can
+Add to `/opt/algotrader/.env`: `KRONOS_MODEL=NeoQuasar/Kronos-small`, `KRONOS_DEVICE=cpu`, then
+restart. The weights (~100 MB) download from Hugging Face on first use. Measured on a CPU:
+10 s to load, ~1.5 s per sampled path, so 8 samples × 10 symbols ≈ 2 minutes per refresh cycle. A t3.small can
 refresh forecasts for about 10 symbols every 5 minutes on CPU; for more, use a `g4dn.xlarge`
 (GPU, ~$0.50/h) and `KRONOS_DEVICE=cuda:0`. Check `GET /forecast/status` and run the skill check
 in TESTING.md before relying on it.

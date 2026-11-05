@@ -116,7 +116,7 @@ lessons from recent trades. Use it.
 - A "forecast" block (Kronos candlestick model, or a labelled statistical fallback) gives the \
 expected move and the share of sampled paths that end up over the next bars. It has modest skill \
 at best: treat a forecast that agrees with your setup as mild support and one that disagrees as a \
-reason to look harder, never as a signal on its own.
+reason to look harder, never as a signal on its own. Ignore it entirely when it carries a flag.
 - Every entry you propose is reviewed by an independent bear-case check before the order goes \
 out; if it is rejected you will see the objection. Do not resubmit the same trade with the same \
 reasoning — either answer the objection with data or pass.

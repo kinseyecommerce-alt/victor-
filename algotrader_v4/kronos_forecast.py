@@ -53,10 +53,13 @@ def _load_predictor():
             _predictor_err = "KRONOS_MODEL not set"
             return None
         try:
-            kdir = settings.kronos_dir
-            if kdir and kdir not in sys.path:
-                sys.path.insert(0, kdir)
-            from model import Kronos, KronosTokenizer, KronosPredictor   # the Kronos repo's package
+            try:
+                from kronos_model import Kronos, KronosTokenizer, KronosPredictor   # vendored (MIT)
+            except ImportError:
+                kdir = settings.kronos_dir                                     # or a separate clone
+                if kdir and kdir not in sys.path:
+                    sys.path.insert(0, kdir)
+                from model import Kronos, KronosTokenizer, KronosPredictor
             tok = KronosTokenizer.from_pretrained(settings.kronos_tokenizer)
             mdl = Kronos.from_pretrained(settings.kronos_model)
             _predictor = KronosPredictor(mdl, tok, device=settings.kronos_device, max_context=512)
@@ -178,8 +181,17 @@ def forecast(symbol: str, bars: Optional[list[dict]] = None, horizon: Optional[i
     except Exception as exc:
         logger.warning("[kronos] forecast {} failed: {}", symbol, exc)
         out = _fallback(bars, horizon, samples)
+    # Scale check: a forecast many sigmas beyond the recent realised range is the model
+    # extrapolating an unusual input, not information. Flag it so the AI ignores it.
+    closes = [b["close"] for b in bars[-121:]]
+    rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
+    sd = math.sqrt(sum(r * r for r in rets) / len(rets)) if rets else 0.0
+    sigma_h = sd * math.sqrt(horizon) * 100
+    z = (out["expected_move_pct"] / sigma_h) if sigma_h > 0 else 0.0
     out.update(available=True, symbol=symbol, horizon_bars=horizon, bar_minutes=step_minutes,
-               as_of=str(bars[-1]["ts"]), model_available=_predictor is not None)
+               as_of=str(bars[-1]["ts"]), model_available=_predictor is not None,
+               realised_sigma_pct=round(sigma_h, 3), z_score=round(z, 2),
+               flag=("implausible: ignore" if abs(z) > 4 else None))
     if use_cache:
         if len(_cache) > 256:
             _cache.clear()
@@ -192,7 +204,7 @@ def compact(symbol: str, cached_only: bool = False) -> dict:
     f = forecast(symbol, cached_only=cached_only)
     if not f.get("available"):
         return {"available": False}
-    return {k: f[k] for k in ("expected_move_pct", "p_up", "p10_pct", "p90_pct", "horizon_bars", "source")}
+    return {k: f[k] for k in ("expected_move_pct", "p_up", "p10_pct", "p90_pct", "horizon_bars", "source", "z_score", "flag")}
 
 
 async def refresher() -> None:
@@ -227,7 +239,7 @@ def skill_check(symbol: str, bars: list[dict], horizon: Optional[int] = None, st
         if f.get("available"):
             exp = f["expected_move_pct"]
             real = (bars[i + horizon - 1]["close"] / bars[i - 1]["close"] - 1) * 100
-            if abs(exp) > 0.02:                       # ignore "no opinion" forecasts
+            if abs(exp) > 0.02 and not f.get("flag"):    # ignore "no opinion" and implausible forecasts
                 n += 1
                 hits += (exp > 0) == (real > 0)
                 pairs.append((exp, real))
