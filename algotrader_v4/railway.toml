@@ -1,9 +1,0 @@
-# Railway: set the service's root directory to "algotrader_v4" and mount a volume at /data.
-[build]
-builder = "DOCKERFILE"
-dockerfilePath = "deploy/Dockerfile"
-
-[deploy]
-healthcheckPath = "/health"
-healthcheckTimeout = 300
-restartPolicyType = "ALWAYS"
