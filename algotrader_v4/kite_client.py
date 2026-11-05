@@ -594,7 +594,15 @@ class KiteClient:
         # software TSL / strategy rules. Filling them instantly (as before) flattened
         # every position the moment its SL-M was placed.
         resting = order_type in ("SL", "SL-M")
-        fill = price if price > 0 else (0.0 if resting else self._paper_ltp(tradingsymbol))
+        ltp = self._paper_ltp(tradingsymbol)
+        if resting:
+            fill = price
+        elif order_type == "LIMIT" and price > 0 and ltp > 0:
+            # a marketable limit fills at the touch, not at its limit; a passive one is assumed filled at its limit
+            marketable = (price >= ltp) if transaction_type == "BUY" else (price <= ltp)
+            fill = ltp if marketable else price
+        else:
+            fill = price if price > 0 else ltp
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -617,6 +625,17 @@ class KiteClient:
                     transaction_type, tradingsymbol, order_type,
                     quantity, fill or trigger_price, order_id)
         return order_id
+
+    def fill_price(self, order_id: str) -> Optional[float]:
+        """Average fill price of an order, or None if not (yet) filled / unknown."""
+        try:
+            hist = self.order_history(order_id)
+            last = hist[-1] if hist else {}
+            if str(last.get("status", "")).upper() == "COMPLETE" and float(last.get("average_price") or 0) > 0:
+                return float(last["average_price"])
+        except Exception as exc:
+            logger.debug("[kite] fill_price {}: {}", order_id, exc)
+        return None
 
     @staticmethod
     def _paper_ltp(symbol: str) -> float:

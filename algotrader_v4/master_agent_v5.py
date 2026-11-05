@@ -183,6 +183,10 @@ class MasterAgent:
                                  day_of_week="mon-fri", id="nightly_adaptive")
         self._scheduler.add_job(self._weekly_backtest, "cron", hour=20, minute=0,
                                  day_of_week="sun", id="weekly_backtest")
+        self._scheduler.add_job(self._weekly_optimise, "cron", hour=21, minute=30,
+                                 day_of_week="sat", id="weekly_optimise")
+        self._scheduler.add_job(self._weekly_research, "cron", hour=21, minute=30,
+                                 day_of_week="sun", id="weekly_research")
         self._scheduler.add_job(self._daily_scoreboard, "cron", hour=15, minute=35,
                                  day_of_week="mon-fri", id="daily_scoreboard")
         self._scheduler.add_job(self._monthly_momentum, "cron", hour=14, minute=55,
@@ -335,6 +339,35 @@ class MasterAgent:
         await send_telegram("<b>New trading day</b> — counters reset")
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("system", {"type": "daily_reset"}))
+
+    async def _weekly_optimise(self) -> None:
+        """Saturday night: walk-forward parameter search on the week's watchlist (replay-based)."""
+        import optimizer
+        from tick_engine import tick_engine
+        syms = [s for s in tick_engine.symbols() if " " not in s][:8] or [w["symbol"] for w in self._agent_watchlists.get("intraday", [])][:8]
+        if not syms:
+            return
+        report = await optimizer.run_all_async(syms, days=45)
+        lines = []
+        for agent, r in report.items():
+            if "error" in r:
+                lines.append(f"{agent}: {r['error']}")
+            elif r.get("adopted"):
+                lines.append(f"{agent}: adopted {r['adopted']} (out-of-sample ₹{r['top'][0]['test']['net']:,.0f} "
+                             f"vs current ₹{r['current']['test']['net']:,.0f})")
+            else:
+                lines.append(f"{agent}: current parameters kept (nothing beat them out of sample)")
+        await send_telegram("<b>Weekly parameter review</b>\n" + "\n".join(lines))
+
+    async def _weekly_research(self) -> None:
+        """Sunday night: Claude proposes one parameter change; the replay backtest decides."""
+        import research_loop
+        try:
+            entry = await research_loop.run_cycle()
+            await send_telegram(research_loop.telegram_text(entry))
+        except Exception as exc:
+            logger.exception("[master] weekly research failed")
+            await send_telegram(f"<b>Research loop failed</b>: {str(exc)[:200]}")
 
     async def _daily_scoreboard(self) -> None:
         """After the close: store today's net P&L next to the index closes, tell the owner."""

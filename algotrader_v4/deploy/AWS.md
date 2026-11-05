@@ -82,6 +82,24 @@ MAX_DAILY_LOSS=1000
 `sudo systemctl restart algotrader`. Keep `AI_AGENT_FUTURES_ENABLED` and
 `AI_AGENT_OPTION_SELLING_ENABLED` off until you've watched the simpler trades for weeks.
 
+## Optional: Kronos forecasts
+
+The AI can use the open-source Kronos candlestick model as one input. The model code is
+vendored in the repo (`kronos_model/`, MIT); only its dependencies and weights are needed.
+Easiest: run the installer with `KRONOS=1` (`KRONOS=1 sudo -E bash setup-ec2.sh <ip>`). On an
+existing server:
+
+```bash
+sudo -u algotrader /opt/algotrader/venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+sudo -u algotrader /opt/algotrader/venv/bin/pip install -r /opt/algotrader/requirements-kronos.txt
+```
+Add to `/opt/algotrader/.env`: `KRONOS_MODEL=NeoQuasar/Kronos-small`, `KRONOS_DEVICE=cpu`, then
+restart. The weights (~100 MB) download from Hugging Face on first use. Measured on a CPU:
+10 s to load, ~1.5 s per sampled path, so 8 samples × 10 symbols ≈ 2 minutes per refresh cycle. A t3.small can
+refresh forecasts for about 10 symbols every 5 minutes on CPU; for more, use a `g4dn.xlarge`
+(GPU, ~$0.50/h) and `KRONOS_DEVICE=cuda:0`. Check `GET /forecast/status` and run the skill check
+in TESTING.md before relying on it.
+
 ## 5. Backups and security
 
 - Back up `/opt/algotrader/.env` (contains the vault's master key) **separately** from

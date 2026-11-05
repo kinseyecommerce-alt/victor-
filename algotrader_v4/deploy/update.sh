@@ -19,6 +19,9 @@ echo "▶ Now at $(git -C "$REPO_DIR" log --oneline -1)"
 
 echo "▶ Dependencies"
 sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
+if sudo -u "$APP_USER" "$VENV/bin/python" -c "import torch" 2>/dev/null; then
+    sudo -u "$APP_USER" "$VENV/bin/pip" install --quiet -r "$APP_DIR/requirements-kronos.txt"
+fi
 sudo -u "$APP_USER" bash -c "cd '$APP_DIR/frontend' && npm ci --silent --no-audit --no-fund && npm run build --silent"
 
 echo "▶ Tests (the service keeps running the old code meanwhile)"

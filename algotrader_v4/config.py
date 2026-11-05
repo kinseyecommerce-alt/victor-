@@ -178,6 +178,28 @@ class Settings(BaseSettings):
     momentum_stop_pct:            float = 12.0     # GTT stop below the buy price
     momentum_universe:            Literal["NIFTY50", "NIFTY100"] = "NIFTY100"
     bt_require_beats_index:       bool  = True     # a strategy passes only if its out-of-sample return beats NIFTY
+    # ── Portfolio risk (portfolio_risk.py) — applied to every entry, AI or agent ──
+    risk_per_trade_pct:           float = 0.5      # max loss at the stop as % of total capital (vol-targeted size)
+    portfolio_var_cap_pct:        float = 2.0      # 1-day 95% VaR of the open book, % of capital
+    max_portfolio_heat:           float = 0.7      # avg pairwise correlation of the book above which no new equity entry
+    # ── Bull-vs-bear debate before every AI entry (debate_gate.py) ─────────
+    ai_agent_debate_enabled:      bool  = True
+    ai_agent_debate_min_confidence: float = 0.55  # below this the entry is rejected
+    ai_agent_debate_effort:       Literal["low", "medium", "high", "xhigh", "max"] = "low"
+    # ── Kronos candlestick forecasts (kronos_forecast.py) — optional model ──
+    kronos_model:                 str   = ""       # e.g. NeoQuasar/Kronos-small; empty = statistical fallback
+    kronos_tokenizer:             str   = "NeoQuasar/Kronos-Tokenizer-base"
+    kronos_dir:                   str   = ""       # path to a clone of github.com/shiyu-coder/Kronos (its model/ package)
+    kronos_device:                str   = "cpu"    # or cuda:0
+    kronos_horizon_bars:          int   = 16       # 1-minute bars ahead
+    kronos_lookback:              int   = 400      # bars of context (model max 512)
+    kronos_samples:               int   = 8        # sampled paths per forecast
+    kronos_temperature:           float = 1.0
+    kronos_cache_s:               int   = 300      # reuse a forecast for this long per symbol/bar
+    kronos_max_symbols:           int   = 12       # background refresher covers at most this many symbols
+    # ── Execution ───────────────────────────────────────────────────────────
+    use_limit_entries:            bool  = True     # equity entries as marketable LIMIT (ask/bid ± buffer), never raw MARKET
+    entry_limit_buffer_pct:       float = 0.10     # how far past the touch the limit may fill (protects against a bad print)
 
     # Real-time tick feed
     use_kite_websocket: bool = True   # use KiteConnect WebSocket for ticks in LIVE mode

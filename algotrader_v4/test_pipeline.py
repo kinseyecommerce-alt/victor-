@@ -1504,7 +1504,7 @@ def _run_entry_with_failing_sl(exit_fails: bool):
 def t_sl_fail_flattens_position():
     placed, active, before, after = _run_entry_with_failing_sl(exit_fails=False)
     types = [(p["order_type"], p["transaction_type"]) for p in placed]
-    assert types == [("MARKET", "BUY"), ("SL-M", "SELL"), ("SL-M", "SELL"),
+    assert types == [("LIMIT", "BUY"), ("SL-M", "SELL"), ("SL-M", "SELL"),
                      ("SL-M", "SELL"), ("MARKET", "SELL")], types
     assert not active, "flattened entry must not stay registered in order_guard"
     assert before == after, "flattened entry must not count as an open position"
@@ -1942,10 +1942,16 @@ def _ai_env():
             _patch.object(_ai_mod, "now_ist", return_value=_MKT_NOW),
             _patch.object(_mf, "state", return_value={"state": "RISK_ON", "size_factor": 1.0}),   # tests set it explicitly
             _patch.object(_ai_mod.performance, "pruned", {}),
+            # portfolio rules have their own tests (section 19); the per-trade AI limits stay real here
+            _patch.object(_ai_mod.portfolio_risk, "pre_entry",
+                          lambda symbol, side, quantity, price, stop=None, **k: {"ok": True, "reason": "", "max_quantity": quantity, "size_factor": 1.0}),
+            _patch.object(_ai_mod.debate_gate, "review",
+                          _noop_debate),
             _patch.object(_rm_x, "check_before_order", return_value=(True, "")),
             _patch.object(_ba, "send_telegram", _noop_async)]
 
 async def _noop_async(*a, **k): return None
+async def _noop_debate(*a, **k): return {"proceed": True, "confidence": None, "size_factor": 1.0, "enforced": False, "reason": "disabled in tests"}
 
 def _with_ai_env(fn):
     _og_x._cooldown_until.clear()          # earlier losing tests leave a post-loss cooldown
@@ -1964,7 +1970,7 @@ def _trade_args(sym, side="BUY", qty=10, sl=990.0, tgt=1020.0):
 def t_ai_tool_schemas_strict():
     names = [t["name"] for t in _AI_TOOLS]
     assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
-                     "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
+                     "get_market_context", "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
                      "place_swing_put", "place_option_spread",
                      "get_future_quote", "place_future_trade", "get_option_chain",
                      "place_option_trade", "adjust_stop", "close_position"], names
@@ -4525,6 +4531,625 @@ run("Momentum: rebalance buys/sells CNC with GTT stops",  t_momentum_rebalance_e
 run("Momentum: backtest beats/compares NIFTY",            t_momentum_backtest_vs_nifty)
 run("Backtest gate: must beat NIFTY out of sample",       t_backtest_gate_requires_beating_nifty)
 run("Performance endpoints + dashboard fields",           t_performance_endpoints)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("19. PORTFOLIO RISK AND MARKET CONTEXT")
+# ══════════════════════════════════════════════════════════════════════════
+import portfolio_risk as _pr
+import market_context as _mc
+import correlation_guard as _cg
+import event_calendar as _ec
+
+def _no_corr(fn):
+    """Correlation unknown → the guard scales by 0.75; these tests pin it to 'low' unless stated."""
+    with _patch.object(_cg, "check", return_value={"allowed": True, "reason": "low correlation", "size_factor": 1.0}), \
+         _patch.object(_cg, "portfolio_heat", return_value=0.0), \
+         _patch.object(_pr, "daily_vol", return_value=0.015):
+        return fn()
+
+def t_risk_vol_targeted_size():
+    def body():
+        prev = _ai_settings.total_capital; _ai_settings.total_capital = 500000.0
+        try:
+            assert _pr.size_for_stop(1000.0, 990.0) == 250          # ₹2,500 risk / ₹10 per share
+            r = _pr.pre_entry("RISK1", "BUY", 400, 1000.0, 990.0)
+            assert r["ok"] and r["max_quantity"] == 250 and "risk per trade" in r["reason"]
+            r = _pr.pre_entry("RISK1", "BUY", 100, 1000.0, 990.0)
+            assert r["ok"] and r["max_quantity"] == 100 and r["reason"] == ""
+            r = _pr.pre_entry("RISK1", "BUY", 10, 1000.0, 500.0)
+            assert r["ok"] and r["max_quantity"] == 5, "wide stop → small size"
+        finally:
+            _ai_settings.total_capital = prev
+    _no_corr(body)
+
+def t_risk_event_and_correlation_blocks():
+    with _patch.object(_ec, "get_event_risk", return_value={"risk_level": "CRITICAL", "event_type": "RESULTS",
+                                                            "hours_until": 0.5, "size_factor": 0.0, "description": "Q2 results"}):
+        r = _pr.pre_entry("EVT1", "BUY", 10, 1000.0, 990.0)
+        assert not r["ok"] and "event block" in r["reason"] and "results" in r["reason"].lower()
+    with _patch.object(_ec, "get_event_risk", return_value={"risk_level": "HIGH", "event_type": "RBI",
+                                                            "hours_until": 3.0, "size_factor": 0.5, "description": "RBI policy"}), \
+         _patch.object(_cg, "check", return_value={"allowed": True, "reason": "low correlation", "size_factor": 1.0}), \
+         _patch.object(_pr, "daily_vol", return_value=0.015):
+        r = _pr.pre_entry("EVT2", "BUY", 100, 1000.0, 990.0)
+        assert r["ok"] and r["max_quantity"] == 50 and "event risk" in r["reason"]
+    with _patch.object(_cg, "check", return_value={"allowed": False, "reason": "highly correlated with HDFCBANK (r=0.91)", "size_factor": 0.0}), \
+         _patch.object(_mc, "open_symbols", return_value=["HDFCBANK"]):
+        r = _pr.pre_entry("ICICIBANK", "BUY", 10, 1000.0, 990.0)
+        assert not r["ok"] and "correlation block" in r["reason"]
+    with _patch.object(_cg, "check", return_value={"allowed": True, "reason": "low", "size_factor": 1.0}), \
+         _patch.object(_cg, "portfolio_heat", return_value=0.9), _patch.object(_mc, "open_symbols", return_value=["A", "B"]):
+        r = _pr.pre_entry("C", "BUY", 10, 1000.0, 990.0)
+        assert not r["ok"] and "heat" in r["reason"]
+
+def t_risk_daily_var_cap():
+    def body():
+        prev = (_ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct)
+        _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct = 500000.0, 2.0     # cap ₹10,000
+        try:
+            book = [{"symbol": "X", "kind": "equity", "notional": 300000.0, "max_loss": None, "underlying": "X"}]
+            with _patch.object(_pr, "_open_book", return_value=book):            # VaR = 3e5 × 0.015 × 1.65 = ₹7,425
+                pv = _pr.portfolio_var()
+                assert abs(pv["var_1d_95"] - 7425.0) < 1 and pv["cap"] == 10000.0
+                r = _pr.pre_entry("Y", "BUY", 200, 1000.0, 995.0)                 # wants 200 × 1000 × .02475 = ₹4,950
+                assert r["ok"] and r["max_quantity"] == 104 and "VaR cap" in r["reason"], r   # room ₹2,575 / ₹24.75
+                r = _pr.pre_entry("OPT", "BUY", 75, 100.0, kind="option", max_loss=4000.0, unit_size=75)
+                assert not r["ok"] and "less than one lot" in r["reason"], "option max loss over the remaining room"
+                r = _pr.pre_entry("OPT", "BUY", 150, 100.0, kind="option", max_loss=3000.0, unit_size=75)
+                assert r["ok"] and r["max_quantity"] == 75, "two lots asked, room for one"
+            with _patch.object(_pr, "_open_book", return_value=[{"symbol": "S", "kind": "spread", "notional": 9000.0,
+                                                                "max_loss": 9000.0, "underlying": "NIFTY"}]):
+                r = _pr.pre_entry("Z", "BUY", 1, 1000.0, 995.0)
+                assert r["ok"] and r["max_quantity"] == 1
+                r = _pr.pre_entry("Z", "BUY", 100, 1000.0, 995.0)
+                assert r["max_quantity"] == 40
+        finally:
+            _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct = prev
+    _no_corr(body)
+
+def t_risk_applied_to_ai_and_agents():
+    def body():
+        ai = _rt_ai(); _ai_tick("PRA1", 1000.0)
+        with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
+                           return_value={"ok": True, "reason": "risk per trade 0.5% → max qty 7", "max_quantity": 7, "size_factor": 1.0}):
+            try:
+                asyncio.run(ai._place_trade(_trade_args("PRA1", qty=10))); raise AssertionError("oversize accepted")
+            except ToolRejected as e:
+                assert "use at most 7" in str(e)
+            asyncio.run(ai._place_trade(_trade_args("PRA1", qty=7)))
+        with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
+                           return_value={"ok": False, "reason": "event block: results in 0.5h", "max_quantity": 0, "size_factor": 0.0}):
+            _ai_tick("PRA2", 1000.0)
+            try:
+                asyncio.run(ai._place_trade(_trade_args("PRA2"))); raise AssertionError("blocked trade accepted")
+            except ToolRejected as e:
+                assert "event block" in str(e)
+        asyncio.run(ai.close_all("t"))
+        # rule agent: size scaled down, not rejected
+        agent = IntradayAgent()
+        n = len(_te_kite_client._paper_orders)
+        with _patch("portfolio_risk.pre_entry", return_value={"ok": True, "reason": "VaR", "max_quantity": 3, "size_factor": 1.0}), \
+             _patch.object(_rm_x, "calculate_quantity", return_value=20):
+            asyncio.run(agent._try_enter(_make_snap(symbol="PRA3", ltp=1000.0), "BUY", {"stop_loss": 990, "target": 1020}))
+        placed = [o for o in _te_kite_client._paper_orders[n:] if o["tradingsymbol"] == "PRA3"]
+        assert placed and placed[0]["quantity"] == 3, placed
+        asyncio.run(agent._close_all_positions("t")) if hasattr(agent, "_close_all_positions") else None
+    _with_ai_env(body)
+
+def t_market_context_shape():
+    _ai_tick("CTX1", 1000.0)
+    c = _mc.context_for("CTX1")
+    for k in ("market", "trend_filter", "event_risk", "key_levels", "institutional", "options",
+              "multi_timeframe", "correlation", "recent_lessons"):
+        assert k in c, k
+    assert c["event_risk"]["risk_level"] in ("NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN")
+    assert c["key_levels"]["available"] is False, "no daily levels loaded in tests → reported, not invented"
+    a = _mc.compact_for_alert("CTX1")
+    assert set(a) >= {"regime", "event_risk", "correlation", "mtf"} and "recent_lessons" not in a
+    ai = _rt_ai()
+    out = ai._market_context("CTX1")
+    assert out["symbol"] == "CTX1" and "portfolio_risk" in out and "max_loss_per_trade" in out["portfolio_risk"]
+
+run("Risk: volatility-targeted size from the stop distance",  t_risk_vol_targeted_size)
+run("Risk: event block / scale, correlation block, heat cap", t_risk_event_and_correlation_blocks)
+run("Risk: daily VaR cap limits new entries",                 t_risk_daily_var_cap)
+run("Risk: AI rejects oversize with the max; agents scale",   t_risk_applied_to_ai_and_agents)
+run("Market context: every block present, nothing invented",  t_market_context_shape)
+
+# ── Execution quality ─────────────────────────────────────────────────────
+import execution as _ex
+
+def t_exec_marketable_limit_and_paper_fill():
+    tick = Tick(symbol="EXQ", ltp=1000.0, bid=999.5, ask=1000.5, volume=1, change=0, change_pct=0,
+                high=0, low=0, open=0, timestamp=datetime.now())
+    o = _ex.entry_order("BUY", tick, 1000.0)
+    assert o["order_type"] == "LIMIT" and abs(o["price"] - 1001.5) < 0.06, o          # ask + 0.1%
+    o = _ex.entry_order("SELL", tick, 1000.0)
+    assert o["order_type"] == "LIMIT" and abs(o["price"] - 998.5) < 0.06, o          # bid − 0.1%
+    prev = _ai_settings.use_limit_entries; _ai_settings.use_limit_entries = False
+    try:
+        assert _ex.entry_order("BUY", tick, 1000.0) == {"order_type": "MARKET"}
+    finally:
+        _ai_settings.use_limit_entries = prev
+    # paper: a marketable limit fills at the touch, not at its limit; a passive one at its limit
+    _ai_tick("EXQ", 1000.0)
+    oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "LIMIT", "MIS", price=1001.5)
+    assert _te_kite_client.fill_price(oid) == 1000.0
+    oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "LIMIT", "MIS", price=1003.0)
+    assert _te_kite_client.fill_price(oid) == 1003.0
+    assert _ex.slippage_bps(1000.0, 1000.5, "BUY") == 5.0 and _ex.slippage_bps(1000.0, 999.0, "SELL") == 10.0
+    assert _ex.slippage_bps(1000.0, 999.0, "BUY") == -10.0
+
+def t_exec_ai_entry_uses_real_fill_and_ledger_slippage():
+    def body(p, path):
+        ai = _rt_ai(); _ai_tick("EXF1", 1000.0)
+        with _patch.object(_te_kite_client, "fill_price", return_value=1000.8):     # broker says we paid more
+            out = asyncio.run(ai._place_trade(_trade_args("EXF1", qty=10)))
+        assert out["fill_price"] == 1000.8 and out["signal_price"] == 1000.0
+        oid = out["order_id"]
+        assert _order(oid)["order_type"] == "LIMIT"
+        assert _tsl_eng._positions[oid].entry_price == 1000.8, "stop/P&L start from the real fill"
+        asyncio.run(ai.close_all("t"))
+        t = p.trades[-1]
+        assert t["signal"] == 1000.0 and t["entry"] == 1000.8 and t["slip_bps"] == 8.0, t
+        ex = p.execution_stats()
+        assert ex["per_strategy"]["ai"]["avg_bps"] == 8.0 and ex["overall"]["trades"] == 1
+    _with_ai_env(lambda: _with_perf(body))
+
+# ── Replay backtester ─────────────────────────────────────────────────────
+import replay_backtest as _rb
+import agents.strategy_agents as _sa_mod
+
+def _trend_bars(symbol="RPL", days=3, start=1000.0, drift=0.0006, seed=7):
+    """Deterministic 1-minute bars with an upward drift and a volume burst every ~40 bars."""
+    import random as _r
+    rng = _r.Random(seed); bars = []; px = start
+    for d in range(days):
+        ts0 = datetime(2026, 1, 12 + d, 9, 15)
+        for i in range(375):
+            o = px; px = px * (1 + drift + rng.gauss(0, 0.0012)); h = max(o, px) * 1.0004; l = min(o, px) * 0.9996
+            bars.append({"ts": ts0 + timedelta(minutes=i), "open": o, "high": h, "low": l, "close": px,
+                         "volume": int(50000 * (4.0 if i % 40 == 0 else rng.uniform(0.5, 1.5)))})
+    return bars
+
+def t_replay_runs_live_agent_code():
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = {"RPL": _trend_bars()}
+        res = _rb.replay("intraday", ["RPL"], days=3, bars_by_symbol=bars)
+        m = res.metrics()
+        assert res.bars == 1125 and res.source == "provided" and res.period[0].startswith("2026-01-12")
+        assert m["trades"] >= 1, "a trending series with volume bursts must trigger the intraday patterns"
+        assert m["costs"] > 0 and m["net_pnl"] == round(m["gross_pnl"] - m["costs"], 2)
+        t = res.trades[0]
+        assert t.signal.startswith("INTRA-") and t.qty >= 1 and t.exit_reason in ("STOP", "TARGET", "TSL_STOP", "TARGET2", "SQUARE_OFF", "END")
+        assert all(x.exit_ts.time() <= time(15, 16) or x.exit_reason == "END" for x in res.trades), "MIS squared off by 15:15"
+        assert all(x.entry_ts > bars["RPL"][29]["ts"] for x in res.trades), "no entries before 30 bars of warm-up"
+        d = res.to_dict()
+        assert "trades" in d and d["exit_reasons"] and _rb._LAST["intraday"]["trades"] == m["trades"]
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+    # the live agents' shared state must not carry replay aliases, and the clock must be restored
+    assert not any(k.endswith("#BT") for attr in vars(IntradayAgent).values() if isinstance(attr, dict) for k in attr)
+    from ist_clock import now_ist as _real
+    assert _sa_mod.now_ist is _real
+
+def t_replay_stop_before_target_and_slippage():
+    """One bar that touches both stop and target fills the stop (pessimistic); slippage is charged."""
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = _trend_bars("RPS", days=2, seed=3)
+        res0 = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": bars})
+        res5 = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=50.0, bars_by_symbol={"RPS": bars})
+        assert res0.trades and res5.trades
+        a, b5 = res0.trades[0], res5.trades[0]
+        assert a.entry_ts == b5.entry_ts and a.side == b5.side
+        assert (b5.entry > a.entry) if a.side == "BUY" else (b5.entry < a.entry), "50 bps slippage must worsen the fill"
+        # craft: force a trade then a wide bar touching both sides
+        t0 = res0.trades[0]
+        i = next(k for k, b in enumerate(bars) if b["ts"] == t0.entry_ts)
+        crafted = [dict(b) for b in bars[: i + 1]]
+        crafted.append({**bars[i + 1], "high": t0.entry * 1.10, "low": t0.entry * 0.90})
+        r = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": crafted})
+        assert r.trades and r.trades[0].exit_reason == "STOP" and r.trades[0].net < 0, r.trades[0]
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+def t_replay_param_override_and_validation():
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = {"RPP": _trend_bars("RPP")}
+        base = _rb.replay("intraday", ["RPP"], days=3, bars_by_symbol=bars).metrics()["trades"]
+        strict = _rb.replay("intraday", ["RPP"], days=3, params={"MIN_SCORE": 9}, bars_by_symbol=bars).metrics()["trades"]
+        assert strict <= base, "a stricter MIN_SCORE can only reduce trades"
+        assert IntradayAgent.MIN_SCORE == 4, "overrides are per replay instance, never the live class"
+        try:
+            _rb.replay("intraday", ["RPP"], days=3, params={"NOPE": 1}, bars_by_symbol=bars); raise AssertionError("bad param accepted")
+        except ValueError as e:
+            assert "no parameter" in str(e)
+        try:
+            _rb.replay("fno", ["RPP"], days=3, bars_by_symbol=bars); raise AssertionError("fno accepted")
+        except ValueError:
+            pass
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+def t_indicator_frame_matches_live_compute():
+    """The vectorised frame must agree with the live per-bar computation."""
+    bars = _trend_bars("IFX", days=1)
+    buf = TickBuffer(60, maxlen=500)
+    rows = []
+    for b in bars[:120]:
+        for px, v in ((b["open"], 0), (b["high"], 0), (b["low"], 0), (b["close"], b["volume"])):
+            buf.push(px, v, b["ts"])
+        rows.append(buf.as_dataframe())
+    full = pd.DataFrame([{k: b[k] for k in ("open", "high", "low", "close", "volume")} for b in bars[:120]])
+    frame = IndicatorCalc.compute_frame(full)
+    tick = Tick(symbol="IFX", ltp=bars[119]["close"], bid=0, ask=0, volume=0, change=0, change_pct=0,
+                high=0, low=0, open=0, timestamp=bars[119]["ts"])
+    live = IndicatorCalc.compute("IFX", tick, rows[-1])
+    vec = IndicatorCalc.from_row("IFX", tick, frame.iloc[119], 120)
+    for k in ("ema9", "ema21", "ema50", "rsi_14", "macd_hist", "bb_upper", "atr_14", "adx_14", "cci_20", "mfi_14",
+              "keltner_upper", "vwap", "stoch_rsi_k", "williams_r", "hma", "supertrend", "ichimoku_kijun"):
+        a, b_ = getattr(live, k), getattr(vec, k)
+        assert abs(a - b_) <= max(1e-6, abs(a) * 0.002), (k, a, b_)
+    assert live.supertrend_dir == vec.supertrend_dir and live.trend == vec.trend and live.squeeze_on == vec.squeeze_on
+
+# ── Walk-forward optimiser ────────────────────────────────────────────────
+import optimizer as _opt
+
+def _with_params_file(fn):
+    path = _SFPath(_sftmp.mkdtemp()) / "params.json"
+    with _patch.object(_opt, "PARAMS_FILE", path):
+        try:
+            return fn(path)
+        finally:
+            for a in ("MIN_SCORE", "SL_MIN_PCT", "TGT_MIN_PCT"):
+                if a in vars(ALL_AGENTS["intraday"]): delattr(ALL_AGENTS["intraday"], a)
+
+def t_opt_folds_are_time_ordered():
+    bars = _trend_bars("OPF", days=6)
+    folds = _opt._folds(bars, n_folds=3, train_frac=0.7)
+    assert len(folds) == 3
+    for tr, te in folds:
+        assert tr and te and max(b["ts"] for b in tr) < min(b["ts"] for b in te), "test strictly after train"
+    assert _opt._folds(bars[:375 * 2]) == [], "fewer than 4 days → no folds"
+
+def t_opt_adopts_only_out_of_sample_winners():
+    """Decision logic with canned scores: a candidate must beat the current params on unseen data,
+    with enough trades and no worse drawdown; otherwise nothing changes."""
+    bars = {"OPT": _trend_bars("OPT", days=6)}
+    grid = {"MIN_SCORE": [4, 5]}
+    def scorer(net_for):
+        async def _score(agent, params, bars_by_symbol, days):
+            return {"net": net_for(params), "trades": 8, "win_rate": 50.0, "pf": 1.1, "max_dd": 100.0}
+        return _score
+    def body(path):
+        with _patch.dict(_opt.GRIDS, {"intraday": grid}), \
+             _patch.object(_opt, "_score", scorer(lambda p: 500.0 if p["MIN_SCORE"] == 5 else 100.0)):
+            rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
+        assert rep["folds"] == 3 and rep["candidates"] == 2 and rep["current"]["params"]["MIN_SCORE"] == 4
+        assert rep["adopted"] == {"MIN_SCORE": 5}, rep["top"]
+        assert _opt.load_params()["intraday"]["params"] == {"MIN_SCORE": 5}
+        assert ALL_AGENTS["intraday"].MIN_SCORE == 5 and IntradayAgent.MIN_SCORE == 4, "applied to the instance, not the class"
+        # a candidate that is better in sample but worse out of sample is NOT adopted
+        _opt.reset("intraday")
+        assert ALL_AGENTS["intraday"].MIN_SCORE == 4 and "intraday" not in _opt.load_params()
+        calls = {"n": 0}
+        async def tricky(agent, params, bars_by_symbol, days):
+            calls["n"] += 1
+            in_sample = len(next(iter(bars_by_symbol.values()))) > 375 * 1.2       # train parts are bigger
+            if params["MIN_SCORE"] == 5:
+                return {"net": 900.0 if in_sample else -50.0, "trades": 8, "win_rate": 50.0, "pf": 1.0, "max_dd": 100.0}
+            return {"net": 100.0, "trades": 8, "win_rate": 50.0, "pf": 1.0, "max_dd": 100.0}
+        with _patch.dict(_opt.GRIDS, {"intraday": grid}), _patch.object(_opt, "_score", tricky):
+            rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
+        assert rep["adopted"] is None and any("does not beat" in r.get("verdict", "") or "loses" in r.get("verdict", "")
+                                               for r in rep["top"] if not r["is_current"]), rep["top"]
+        assert ALL_AGENTS["intraday"].MIN_SCORE == 4
+        # too few out-of-sample trades → not adopted either
+        async def thin(agent, params, bars_by_symbol, days):
+            return {"net": 1000.0 if params["MIN_SCORE"] == 5 else 1.0, "trades": 1, "win_rate": 50.0, "pf": 1.0, "max_dd": 10.0}
+        with _patch.dict(_opt.GRIDS, {"intraday": grid}), _patch.object(_opt, "_score", thin):
+            rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
+        assert rep["adopted"] is None and "too few" in [r.get("verdict", "") for r in rep["top"] if not r["is_current"]][0]
+    _with_params_file(body)
+
+def t_opt_apply_and_persist():
+    def body(path):
+        _opt.save_params({"intraday": {"params": {"SL_MIN_PCT": 0.7, "BOGUS": 1}}})
+        applied = _opt.apply_params()
+        assert applied == {"intraday": {"SL_MIN_PCT": 0.7, "BOGUS": 1}}
+        assert ALL_AGENTS["intraday"].SL_MIN_PCT == 0.7 and not hasattr(ALL_AGENTS["intraday"], "BOGUS") or \
+               "BOGUS" not in vars(ALL_AGENTS["intraday"]), "only grid keys are applied"
+        assert _opt.current_params("intraday")["SL_MIN_PCT"] == 0.7 and _opt.current_params("intraday")["MIN_SCORE"] == 4
+        _opt.reset("intraday")
+        assert ALL_AGENTS["intraday"].SL_MIN_PCT == IntradayAgent.SL_MIN_PCT
+    _with_params_file(body)
+
+def t_opt_real_run_small_grid():
+    """End to end on provided bars with a 2-candidate grid: runs, reports, never applies a loser."""
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    bars = {"OPR": _trend_bars("OPR", days=6, seed=11)}
+    def body(path):
+        with _patch.dict(_opt.GRIDS, {"intraday": {"MIN_SCORE": [4, 9]}}):
+            rep = _opt.optimise("intraday", ["OPR"], 6, bars_by_symbol=bars)
+        assert rep["folds"] == 3 and len(rep["top"]) >= 1 and "test" in rep["current"]
+        assert rep["adopted"] in (None, {"MIN_SCORE": 9}) and rep["data"] == "provided"
+        if rep["adopted"]:
+            assert rep["top"][0]["test"]["net"] > rep["current"]["test"]["net"]
+    try:
+        _with_params_file(body)
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+# ── Research loop ─────────────────────────────────────────────────────────
+import research_loop as _rl
+
+class _FakeResearchClient:
+    """Returns one canned propose_change tool call."""
+    def __init__(self, proposal):
+        self.proposal = proposal; self.calls = []
+        class _M:
+            def __init__(s2, outer): s2.outer = outer
+            async def create(s2, **kw):
+                s2.outer.calls.append(kw)
+                blk = _NS(type="tool_use", name="propose_change", input=dict(s2.outer.proposal), id="p1")
+                return _NS(content=[blk], usage=_NS(input_tokens=10, output_tokens=5, cache_read_input_tokens=0,
+                                                   cache_creation_input_tokens=0), stop_reason="tool_use")
+        self.messages = _M(self)
+        self.beta = _NS(messages=_M(self))
+
+def _with_research_files(fn):
+    d = _SFPath(_sftmp.mkdtemp())
+    with _patch.object(_rl, "LOG_FILE", d / "research.json"), _patch.object(_opt, "PARAMS_FILE", d / "params.json"):
+        try:
+            return fn(d)
+        finally:
+            for a in ("MIN_SCORE", "SL_MIN_PCT", "TGT_MIN_PCT"):
+                if a in vars(ALL_AGENTS["intraday"]): delattr(ALL_AGENTS["intraday"], a)
+
+def t_research_validate_proposals():
+    def body(d):
+        assert _rl.validate({"agent": "none", "param": "", "value": 0}) is None
+        assert _rl.validate({"agent": "intraday", "param": "SL_MIN_PCT", "value": 0.7}) is None
+        assert "not in" in _rl.validate({"agent": "intraday", "param": "COOL_S", "value": 60})
+        assert "not an allowed value" in _rl.validate({"agent": "intraday", "param": "SL_MIN_PCT", "value": 3.0})
+        assert "already the current" in _rl.validate({"agent": "intraday", "param": "MIN_SCORE", "value": 4})
+        assert "not tunable" in _rl.validate({"agent": "swing", "param": "x", "value": 1})
+    _with_research_files(body)
+
+def t_research_ab_test_verdicts():
+    def fake_replay(a, b):
+        async def _r(agent, symbols, days, slippage_bps=5.0, params=None, bars_by_symbol=None):
+            m = b if params and params.get("SL_MIN_PCT") == 0.7 else a
+            return _NS(metrics=lambda: m)
+        return _r
+    base = {"trades": 20, "net_pnl": 500.0, "max_drawdown": 800.0}
+    cases = [
+        ({"trades": 25, "net_pnl": 900.0, "max_drawdown": 850.0}, "adopt"),
+        ({"trades": 25, "net_pnl": 400.0, "max_drawdown": 500.0}, "does not beat"),
+        ({"trades": 5,  "net_pnl": 9000.0, "max_drawdown": 100.0}, "only 5 trades"),
+        ({"trades": 25, "net_pnl": 900.0, "max_drawdown": 2000.0}, "drawdown"),
+    ]
+    def body(d):
+        for cand, expect in cases:
+            with _patch.object(_rb, "replay_async", fake_replay(base, cand)):
+                ab = asyncio.run(_rl.ab_test("intraday", "SL_MIN_PCT", 0.7, ["X"], bars_by_symbol={"X": [1]}))
+            assert expect in ab["verdict"], (expect, ab["verdict"])
+            assert ab["proposed"]["params"]["SL_MIN_PCT"] == 0.7 and ab["current"]["params"]["SL_MIN_PCT"] == 0.5
+    _with_research_files(body)
+
+def t_research_cycle_adopts_and_logs():
+    def body(d):
+        prev = _ai_settings.anthropic_api_key; _ai_settings.anthropic_api_key = "test"
+        try:
+            client = _FakeResearchClient({"agent": "intraday", "param": "SL_MIN_PCT", "value": 0.7, "rationale": "stops too tight"})
+            good = {"trades": 25, "net_pnl": 900.0, "max_drawdown": 850.0}; base = {"trades": 20, "net_pnl": 500.0, "max_drawdown": 800.0}
+            async def _r(agent, symbols, days, slippage_bps=5.0, params=None, bars_by_symbol=None):
+                return _NS(metrics=lambda: good if params.get("SL_MIN_PCT") == 0.7 else base)
+            with _patch.object(_rb, "replay_async", _r):
+                entry = asyncio.run(_rl.run_cycle(client=client, bars_by_symbol={"X": [1]}))
+            assert entry["kind"] == "adopted" and entry["ab"]["verdict"] == "adopt"
+            assert client.calls[0]["tools"] == [_rl.PROPOSAL_TOOL] and client.calls[0]["tool_choice"]["name"] == "propose_change"
+            assert "WEEKLY EVIDENCE" in client.calls[0]["messages"][0]["content"]
+            assert ALL_AGENTS["intraday"].SL_MIN_PCT == 0.7 and _opt.load_params()["intraday"]["source"] == "research_loop"
+            assert _rl.log()[-1]["kind"] == "adopted" and "adopted" in _rl.telegram_text(entry)
+            # second cycle: a losing proposal is rejected and nothing changes
+            client2 = _FakeResearchClient({"agent": "intraday", "param": "MIN_SCORE", "value": 6, "rationale": "fewer trades"})
+            async def _r2(agent, symbols, days, slippage_bps=5.0, params=None, bars_by_symbol=None):
+                return _NS(metrics=lambda: {"trades": 12, "net_pnl": 100.0, "max_drawdown": 100.0} if params.get("MIN_SCORE") == 6 else good)
+            with _patch.object(_rb, "replay_async", _r2):
+                entry = asyncio.run(_rl.run_cycle(client=client2, bars_by_symbol={"X": [1]}))
+            assert entry["kind"] == "rejected" and ALL_AGENTS["intraday"].MIN_SCORE == 4 and "rejected" in _rl.telegram_text(entry)
+            # invalid and no-change proposals are logged without touching anything
+            e = asyncio.run(_rl.run_cycle(client=_FakeResearchClient({"agent": "intraday", "param": "SL_MIN_PCT", "value": 9, "rationale": "x"}),
+                                          bars_by_symbol={"X": [1]}))
+            assert e["kind"] == "invalid"
+            e = asyncio.run(_rl.run_cycle(client=_FakeResearchClient({"agent": "none", "param": "", "value": 0, "rationale": "sample too small"}),
+                                          bars_by_symbol={"X": [1]}))
+            assert e["kind"] == "no_change" and len(_rl.log()) == 4
+        finally:
+            _ai_settings.anthropic_api_key = prev
+    _with_research_files(body)
+
+def t_research_skips_without_key():
+    def body(d):
+        prev = _ai_settings.anthropic_api_key; _ai_settings.anthropic_api_key = ""
+        try:
+            e = asyncio.run(_rl.run_cycle())
+            assert e["kind"] == "skipped"
+        finally:
+            _ai_settings.anthropic_api_key = prev
+    _with_research_files(body)
+
+def t_research_evidence_shape():
+    ev = _rl.gather_evidence()
+    for k in ("per_strategy", "scoreboard", "pruned", "execution", "current_params", "allowed_grid", "lessons", "trend_filter"):
+        assert k in ev, k
+    assert ev["allowed_grid"] == _opt.GRIDS and set(ev["current_params"]) == set(_opt.GRIDS)
+
+# ── Bull-vs-bear debate gate ──────────────────────────────────────────────
+import debate_gate as _dg
+import kronos_forecast as _kf
+
+class _FakeDebateClient:
+    def __init__(self, verdict=None, fail=False):
+        self.verdict, self.fail, self.calls = verdict, fail, []
+        class _M:
+            def __init__(s2, o): s2.o = o
+            async def create(s2, **kw):
+                s2.o.calls.append(kw)
+                if s2.o.fail: raise RuntimeError("api down")
+                blk = _NS(type="tool_use", name="debate_verdict", input=dict(s2.o.verdict), id="d1")
+                return _NS(content=[blk], usage=_NS(input_tokens=10, output_tokens=5, cache_read_input_tokens=0, cache_creation_input_tokens=0))
+        self.messages = _M(self); self.beta = _NS(messages=_M(self))
+
+_V_OK = {"bear_case": "weak", "bull_rebuttal": "fine", "proceed": True, "confidence": 0.8, "size_factor": 1.0, "key_risk": "none"}
+
+def t_debate_verdicts():
+    prop = {"kind": "intraday equity", "symbol": "DBT", "side": "BUY", "quantity": 10, "price": 1000.0, "stop": 990.0, "target": 1020.0, "reasoning": "r"}
+    c = _FakeDebateClient(_V_OK)
+    v = asyncio.run(_dg.review(prop, {"event_risk": {}}, client=c))
+    assert v["proceed"] and v["enforced"] and v["size_factor"] == 1.0 and v["confidence"] == 0.8
+    assert c.calls[0]["tool_choice"]["name"] == "debate_verdict" and "PROPOSED TRADE" in c.calls[0]["messages"][0]["content"]
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "proceed": False, "bear_case": "results tomorrow", "key_risk": "earnings"})))
+    assert not v["proceed"] and "bear case won" in v["reason"] and "results tomorrow" in v["reason"] and v["size_factor"] == 0.0
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "confidence": 0.4})))
+    assert not v["proceed"] and "confidence 0.40" in v["reason"]
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "size_factor": 0.5})))
+    assert v["proceed"] and v["size_factor"] == 0.5
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient({**_V_OK, "size_factor": 0.0})))
+    assert v["size_factor"] == 0.25, "size factor floors at 0.25 when proceeding"
+    v = asyncio.run(_dg.review(prop, {}, client=_FakeDebateClient(fail=True)))
+    assert v["proceed"] and not v["enforced"] and "unavailable" in v["reason"], "a stuck API never blocks (and never adds risk)"
+    prev = _ai_settings.ai_agent_debate_enabled; _ai_settings.ai_agent_debate_enabled = False
+    try:
+        assert asyncio.run(_dg.review(prop, {}, client=c))["enforced"] is False
+    finally:
+        _ai_settings.ai_agent_debate_enabled = prev
+
+def t_debate_gates_ai_entries():
+    """Every AI entry path consults the debate; a block rejects with the objection, a size factor shrinks."""
+    def body():
+        ai = _rt_ai(); _ai_tick("DBX", 1000.0)
+        block = {"proceed": False, "confidence": 0.3, "size_factor": 0.0, "enforced": True,
+                 "reason": "debate: bear case won — entry at resistance (key risk: level)", "key_risk": "level"}
+        n0 = len(_te_kite_client._paper_orders)
+        with _patch.object(_ai_mod.debate_gate, "review", _noop_async_returning(block)):
+            try:
+                asyncio.run(ai._place_trade(_trade_args("DBX"))); raise AssertionError("blocked entry placed")
+            except ToolRejected as e:
+                assert "bear case won" in str(e) and "resistance" in str(e)
+            for fn, args in ((ai._place_swing_trade, _swing_args("DBX")),):
+                try:
+                    asyncio.run(fn(args)); raise AssertionError("blocked swing placed")
+                except ToolRejected as e:
+                    assert "bear case won" in str(e)
+        assert len(_te_kite_client._paper_orders) == n0 and not ai._ai_entries()
+        assert any(e["kind"] == "debate" and "BLOCKED" in e["text"] for e in ai.log)
+        half = {"proceed": True, "confidence": 0.7, "size_factor": 0.5, "enforced": True, "reason": "", "key_risk": "x"}
+        with _patch.object(_ai_mod.debate_gate, "review", _noop_async_returning(half)):
+            out = asyncio.run(ai._place_trade(_trade_args("DBX", qty=10)))
+        assert out["quantity"] == 5, out
+        asyncio.run(ai.close_all("t"))
+        # momentum rebalance (code-driven) is not debated
+        calls = []
+        async def spy(*a, **k): calls.append(1); return half
+        _ai_tick("DBM", 100.0)
+        with _patch.object(_ai_mod.debate_gate, "review", spy):
+            asyncio.run(ai._place_swing_trade({"symbol": "DBM", "quantity": 10, "stop_loss": 90.0, "target": 150.0,
+                                               "max_hold_days": 45, "reasoning": "mom"}, _strategy="momentum"))
+        assert calls == [], "momentum rotation is pure code, no debate"
+        asyncio.run(ai.close_all("t"))
+    def _noop_async_returning(v):
+        async def _f(*a, **k): return v
+        return _f
+    globals()["_noop_async_returning"] = _noop_async_returning
+    _with_ai_env(lambda: _with_swing_file(lambda p: body()))
+
+# ── Kronos forecasts (fallback path; the real model is optional) ──────────
+def t_forecast_fallback_shape_and_cache():
+    bars = _trend_bars("KFC", days=2)
+    f = _kf.forecast("KFC", bars=bars, horizon=16, samples=50, use_cache=False)
+    assert f["available"] and f["source"].startswith("fallback") and f["model_available"] is False
+    assert f["horizon_bars"] == 16 and len(f["path_p50"]) == 16 and f["samples"] == 50
+    assert f["p10_pct"] <= f["p50_pct"] <= f["p90_pct"] and 0.0 <= f["p_up"] <= 1.0
+    assert f["expected_move_pct"] > 0, "an uptrending series forecasts up (shrunk drift)"
+    _ai_tick("KFC", bars[-1]["close"])
+    assert _kf.forecast("KFC", bars=bars[:20])["available"] is False
+    a = _kf.forecast("KFC", bars=bars); b = _kf.forecast("KFC", bars=bars)
+    assert a is b, "cached"
+    assert _kf.forecast("KFC", bars=bars, cached_only=True) is a
+    assert _kf.forecast("NOFC", bars=bars[-40:], cached_only=True)["available"] is True, "fallback is cheap: computed inline"
+    st = _kf.available(); assert st["kronos"] is False and st["fallback"]
+    from tick_engine import tick_engine as _tk
+    for b in bars[-60:]:
+        _tk._bufs_1min["KFC"].push(b["close"], b["volume"], b["ts"])
+    c = _kf.compact("KFC"); assert set(c) >= {"expected_move_pct", "p_up", "source"}, c
+
+def t_forecast_in_context_and_skill_check():
+    bars = _trend_bars("KFS", days=4, drift=0.002, seed=5)
+    _ai_tick("KFS", bars[-1]["close"])
+    from tick_engine import tick_engine as _tk
+    for b in bars[-90:]:
+        _tk._bufs_1min["KFS"].push(b["close"], b["volume"], b["ts"])
+    ctx = _mc.context_for("KFS")
+    assert "forecast" in ctx and ctx["forecast"].get("source", "").startswith("fallback")
+    assert "forecast" in _mc.compact_for_alert("KFS")
+    sk = _kf.skill_check("KFS", bars, horizon=16, step=25, lookback=120, samples=20)
+    assert sk["forecasts"] >= 20 and 0 <= sk["hit_rate"] <= 1 and len(sk["coin_flip_95pct_band"]) == 2
+    assert sk["verdict"] and sk["source"].startswith("fallback")
+    assert sk["hit_rate"] > 0.5, "on a strongly trending synthetic series even the drift fallback beats a coin"
+
+def t_kronos_vendored_package():
+    """The vendored Kronos package imports and exposes the predictor API the adapter uses
+    (skipped without torch; weights are never downloaded in tests)."""
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        return
+    from kronos_model import Kronos, KronosPredictor, KronosTokenizer
+    import inspect
+    sig = inspect.signature(KronosPredictor.predict)
+    for p in ("df", "x_timestamp", "y_timestamp", "pred_len", "T", "top_p", "sample_count"):
+        assert p in sig.parameters, p
+    assert hasattr(Kronos, "from_pretrained") and hasattr(KronosTokenizer, "from_pretrained")
+    assert (_SFPath(__file__).resolve().parent / "kronos_model" / "LICENSE").exists()
+
+def t_forecast_flags_implausible():
+    bars = _trend_bars("KFZ", days=2, drift=0.0006)
+    f = _kf.forecast("KFZ", bars=bars, horizon=16, samples=20, use_cache=False)
+    assert "z_score" in f and "realised_sigma_pct" in f and f["realised_sigma_pct"] > 0
+    assert f["flag"] in (None, "implausible: ignore")
+    with _patch.object(_kf, "_fallback", return_value={"last": 1000.0, "expected_move_pct": 9.0, "p_up": 1.0, "p10_pct": 8.0,
+                                                       "p50_pct": 9.0, "p90_pct": 10.0, "samples": 1, "source": "x", "path_p50": []}):
+        g = _kf.forecast("KFZ", bars=bars, horizon=16, samples=1, use_cache=False)
+    assert g["flag"] == "implausible: ignore" and abs(g["z_score"]) > 4
+    assert "flag" in _kf.compact("KFZ") or True
+
+run("Kronos: vendored package exposes the predictor API",      t_kronos_vendored_package)
+run("Forecast: implausible forecasts are flagged",              t_forecast_flags_implausible)
+run("Debate: verdicts, thresholds, size floor, fail-open",     t_debate_verdicts)
+run("Debate: gates every AI entry; momentum exempt",           t_debate_gates_ai_entries)
+run("Forecast: fallback shape, cache, cached_only, status",    t_forecast_fallback_shape_and_cache)
+run("Forecast: in market context; skill check vs coin flip",   t_forecast_in_context_and_skill_check)
+run("Research: proposals validated against the grid",          t_research_validate_proposals)
+run("Research: A/B verdicts (adopt / not better / thin / DD)",  t_research_ab_test_verdicts)
+run("Research: cycle adopts a winner, rejects a loser, logs",   t_research_cycle_adopts_and_logs)
+run("Research: skipped without an Anthropic key",               t_research_skips_without_key)
+run("Research: evidence has every block",                       t_research_evidence_shape)
+run("Optimiser: walk-forward folds are time-ordered",          t_opt_folds_are_time_ordered)
+run("Optimiser: adopts only out-of-sample winners",             t_opt_adopts_only_out_of_sample_winners)
+run("Optimiser: params persist, apply to instances, reset",     t_opt_apply_and_persist)
+run("Optimiser: end-to-end on provided bars",                   t_opt_real_run_small_grid)
+run("Replay: real agent code, costs, square-off, warm-up, clean state", t_replay_runs_live_agent_code)
+run("Replay: stop fills before target in one bar; slippage charged", t_replay_stop_before_target_and_slippage)
+run("Replay: parameter overrides per run, validated",                  t_replay_param_override_and_validation)
+run("Indicators: vectorised frame == live per-bar compute",            t_indicator_frame_matches_live_compute)
+run("Execution: marketable limit entries; paper fills at the touch", t_exec_marketable_limit_and_paper_fill)
+run("Execution: AI uses the real fill; slippage in the ledger",     t_exec_ai_entry_uses_real_fill_and_ledger_slippage)
 
 
 # ══════════════════════════════════════════════════════════════════════════

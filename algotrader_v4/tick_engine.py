@@ -471,6 +471,132 @@ class IndicatorCalc:
         return ind
 
 
+    # ── Vectorised twin of compute(): every bar at once (replay backtests) ───────
+    # Same formulas; the value in row i depends only on rows ≤ i, so it equals what the
+    # live path would have produced at that bar (up to ewm warm-up noise).
+
+    @staticmethod
+    def compute_frame(df: pd.DataFrame, window_cap: int = 500) -> pd.DataFrame:
+        close, high, low, volume = df["close"], df["high"], df["low"], df["volume"].astype(float)
+        n = len(df)
+        out = pd.DataFrame(index=df.index)
+        idx = np.arange(n)
+        out["n"] = idx + 1
+        out["ema9"]  = ta.trend.EMAIndicator(close, 9).ema_indicator()
+        out["ema21"] = ta.trend.EMAIndicator(close, 21).ema_indicator()
+        out["ema50"] = ta.trend.EMAIndicator(close, 50).ema_indicator()
+        out["ema200"] = ta.trend.EMAIndicator(close, 200).ema_indicator()
+        out["vwap"] = ta.volume.VolumeWeightedAveragePrice(high, low, close, volume).volume_weighted_average_price()
+        out["rsi_14"] = ta.momentum.RSIIndicator(close, 14).rsi()
+        out["rsi_7"] = ta.momentum.RSIIndicator(close, 7).rsi()
+        m = ta.trend.MACD(close)
+        out["macd"], out["macd_signal"], out["macd_hist"] = m.macd(), m.macd_signal(), m.macd_diff()
+        bb = ta.volatility.BollingerBands(close, 20, 2)
+        out["bb_upper"], out["bb_lower"], out["bb_mid"] = bb.bollinger_hband(), bb.bollinger_lband(), bb.bollinger_mavg()
+        vol_avg = volume.rolling(20).mean()
+        out["volume_ratio"] = (volume / vol_avg).where(vol_avg > 0, 1.0)
+        out["atr_14"] = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
+        out["obv"] = ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume()
+        # supertrend (one pass)
+        hl2 = (high + low) / 2
+        atr10 = ta.volatility.AverageTrueRange(high, low, close, 10).average_true_range()
+        upper = (hl2 + 3.0 * atr10).fillna(0).values; lower = (hl2 - 3.0 * atr10).fillna(0).values
+        cv = close.values
+        st_val, st_dir = np.zeros(n), np.array(["NEUTRAL"] * n, dtype=object)
+        for i in range(1, n):
+            if cv[i] > upper[i - 1]:   st_dir[i] = "UP"
+            elif cv[i] < lower[i - 1]: st_dir[i] = "DOWN"
+            else:                      st_dir[i] = st_dir[i - 1]
+            if st_dir[i] == "UP":
+                st_val[i] = max(lower[i], st_val[i - 1]) if st_val[i - 1] else lower[i]
+            else:
+                st_val[i] = min(upper[i], st_val[i - 1]) if st_val[i - 1] else upper[i]
+        out["supertrend"], out["supertrend_dir"] = st_val, st_dir
+        # HMA
+        half, sqrtp = max(int(20 / 2), 1), max(int(20 ** 0.5), 1)
+        hma = _wma(2 * _wma(close, half) - _wma(close, 20), sqrtp)
+        out["hma"] = hma
+        out["hma_dir"] = np.where(hma > hma.shift(1), "UP", np.where(hma < hma.shift(1), "DOWN", "NEUTRAL"))
+        # TTM squeeze + rolling-regression momentum (fitted value at the window end)
+        sma20 = close.rolling(20).mean()
+        atr20 = ta.volatility.AverageTrueRange(high, low, close, 20).average_true_range()
+        kc_u, kc_l = sma20 + 1.5 * atr20, sma20 - 1.5 * atr20
+        out["squeeze_on"] = (out["bb_upper"] < kc_u) & (out["bb_lower"] > kc_l)
+        delta = close - (((high.rolling(20).max() + low.rolling(20).min()) / 2) + sma20) / 2
+        w = 20; x = np.arange(w, dtype=float); xm = x.mean(); sxx = ((x - xm) ** 2).sum()
+        def _fit_end(y):
+            if np.isnan(y).any(): return y[-1]
+            slope = ((x - xm) * (y - y.mean())).sum() / sxx
+            return slope * (w - 1) + (y.mean() - slope * xm)
+        out["squeeze_momentum"] = delta.rolling(w).apply(_fit_end, raw=True).round(4)
+        # VWAP ±2/3σ bands over the trailing buffer (the live buffer holds ≤ window_cap bars)
+        tp = (high + low + close) / 3.0
+        cv_ = volume.rolling(window_cap, min_periods=1).sum()
+        pv = (tp * volume).rolling(window_cap, min_periods=1).sum()
+        vw = (pv / cv_).where(cv_ > 0, close)
+        dev = np.sqrt(((volume * (tp - vw) ** 2).rolling(window_cap, min_periods=1).sum() / cv_).where(cv_ > 0, 0.0))
+        out["vwap_upper2"], out["vwap_lower2"] = vw + 2 * dev, vw - 2 * dev
+        out["vwap_upper3"], out["vwap_lower3"] = vw + 3 * dev, vw - 3 * dev
+        out["stoch_rsi_k"] = (ta.momentum.stochrsi_k(close, window=14, smooth1=3, smooth2=3) * 100).round(2)
+        out["stoch_rsi_d"] = (ta.momentum.stochrsi_d(close, window=14, smooth1=3, smooth2=3) * 100).round(2)
+        out["williams_r"] = ta.momentum.WilliamsRIndicator(high, low, close, lbp=14).williams_r().round(2)
+        adx = ta.trend.ADXIndicator(high, low, close, window=14)
+        out["adx_14"], out["plus_di"], out["minus_di"] = adx.adx().round(2), adx.adx_pos().round(2), adx.adx_neg().round(2)
+        kc = ta.volatility.KeltnerChannel(high, low, close, window=20, window_atr=10, original_version=False, multiplier=2)
+        out["keltner_upper"], out["keltner_mid"], out["keltner_lower"] = \
+            kc.keltner_channel_hband().round(2), kc.keltner_channel_mband().round(2), kc.keltner_channel_lband().round(2)
+        out["cci_20"] = ta.trend.CCIIndicator(high, low, close, 20).cci().round(2)
+        out["mfi_14"] = ta.volume.MFIIndicator(high, low, close, volume, 14).money_flow_index().round(2)
+        ich = ta.trend.IchimokuIndicator(high, low, 9, 26, 52, visual=False)
+        out["ichimoku_tenkan"], out["ichimoku_kijun"] = ich.ichimoku_conversion_line().round(2), ich.ichimoku_base_line().round(2)
+        a, b = ich.ichimoku_a().shift(26), ich.ichimoku_b().shift(26)      # the cloud under today's bar
+        out["ichimoku_cloud_top"], out["ichimoku_cloud_bot"] = np.maximum(a, b).round(2), np.minimum(a, b).round(2)
+        return out
+
+    _MIN_BARS = {"ema9": 9, "ema21": 21, "ema50": 50, "ema200": 200, "vwap": 5, "rsi_14": 15, "rsi_7": 8,
+                 "macd": 26, "macd_signal": 26, "macd_hist": 26, "bb_upper": 20, "bb_lower": 20, "bb_mid": 20,
+                 "volume_ratio": 20, "atr_14": 14, "obv": 5, "supertrend": 11, "supertrend_dir": 11, "hma": 25,
+                 "hma_dir": 25, "squeeze_on": 20, "squeeze_momentum": 20, "vwap_upper2": 10, "vwap_lower2": 10,
+                 "vwap_upper3": 10, "vwap_lower3": 10, "stoch_rsi_k": 20, "stoch_rsi_d": 20, "williams_r": 14,
+                 "adx_14": 28, "plus_di": 28, "minus_di": 28, "keltner_upper": 20, "keltner_mid": 20,
+                 "keltner_lower": 20, "cci_20": 20, "mfi_14": 15, "ichimoku_tenkan": 52, "ichimoku_kijun": 52,
+                 "ichimoku_cloud_top": 78, "ichimoku_cloud_bot": 78}
+    _DEFAULTS = {"stoch_rsi_k": 50.0, "stoch_rsi_d": 50.0, "williams_r": -50.0, "mfi_14": 50.0, "volume_ratio": 1.0}
+
+    @classmethod
+    def from_row(cls, sym: str, tick: Tick, row, n: int) -> LiveIndicators:
+        """LiveIndicators for bar `row` (a compute_frame row) when the buffer held n bars."""
+        ind = LiveIndicators(symbol=sym, ltp=tick.ltp, bid=tick.bid, ask=tick.ask, spread=round(tick.ask - tick.bid, 2),
+                             day_high=tick.high, day_low=tick.low, day_open=tick.open, change_pct=tick.change_pct,
+                             computed_at=time.time())
+        if n < 5:
+            return ind
+        for k, need in cls._MIN_BARS.items():
+            if n < need:
+                continue
+            v = row[k]
+            if isinstance(v, str) or isinstance(v, (bool, np.bool_)):
+                setattr(ind, k, bool(v) if k == "squeeze_on" else str(v))
+            elif v is None or (isinstance(v, float) and np.isnan(v)):
+                if k in cls._DEFAULTS:
+                    setattr(ind, k, cls._DEFAULTS[k])
+            else:
+                setattr(ind, k, float(v))
+        ltp = tick.ltp
+        if ind.ema9 and ind.ema21:
+            if ltp > ind.ema9 > ind.ema21:   ind.trend = "UP"
+            elif ltp < ind.ema9 < ind.ema21: ind.trend = "DOWN"
+        if ind.rsi_14:
+            if   ind.rsi_14 > 65 and ind.macd_hist > 0: ind.momentum = "STRONG_UP"
+            elif ind.rsi_14 > 55:                        ind.momentum = "WEAK_UP"
+            elif ind.rsi_14 < 35 and ind.macd_hist < 0: ind.momentum = "STRONG_DOWN"
+            elif ind.rsi_14 < 45:                        ind.momentum = "WEAK_DOWN"
+        if ind.atr_14 and ind.bb_mid:
+            bw = (ind.bb_upper - ind.bb_lower) / ind.bb_mid if ind.bb_mid else 0
+            ind.volatility = "HIGH" if bw > 0.04 else "LOW" if bw < 0.01 else "NORMAL"
+        return ind
+
+
 # ── Kite quote converter ──────────────────────────────────────────────────────
 
 def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:

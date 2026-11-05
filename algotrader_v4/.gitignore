@@ -33,3 +33,5 @@ e2e_screenshots/
 # AI swing positions (runtime state)
 data/ai_swing_positions.json
 data/performance.json
+data/strategy_params.json
+data/research_log.json

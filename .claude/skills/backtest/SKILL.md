@@ -36,6 +36,7 @@ post() { curl -sS -m 600 -H "$H" -H "Content-Type: application/json" -X POST "$A
 | What is approved now | `j /backtest/approved/intraday` |
 | Trades / equity curve (after a `/backtest/run` for that pair, else 404) | `curl -sS -H "$H" -o trades.csv "$ALGO_URL/backtest/trades/RELIANCE/intraday"` (CSV) · same with `/backtest/equity/...` `-o equity.png` (PNG chart) |
 | Full weekly re-qualification | `post /backtest/weekly '{}'` — slow; ask before running |
+| **Replay through the live agent code** (preferred) | `post /backtest/replay '{"agent":"intraday","symbols":["RELIANCE","TCS"],"days":30}'` — real minute bars → the agent's own evaluate_tick, risk sizing, trailing stop, 5 bps slippage, Zerodha costs; `source` says kite / yfinance / synthetic; `benchmark` compares with NIFTY. Add `"params":{"MIN_SCORE":5}` to try a parameter. |
 | Momentum rotation vs NIFTY | `j "/backtest/momentum?months=24"` — monthly 12-1 rotation of Nifty 100, equal weight, 200-DMA filter; report `strategy_return_pct` vs `nifty_return_pct`, CAGR, drawdown, `beats_index` |
 | Live scoreboard (not a backtest) | `j /performance/scoreboard` — the account vs NIFTY after costs; `j /performance/strategies` — which strategies are pruned |
 
