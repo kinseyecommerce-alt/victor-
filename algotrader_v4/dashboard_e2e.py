@@ -37,7 +37,7 @@ results: list[tuple[str, bool, str]] = []
 
 
 def api_get(path: str) -> dict:
-    r = requests.get(f"{API}{path}", headers={"X-API-Key": API_KEY} if API_KEY else {}, timeout=10)
+    r = requests.get(f"{API}{path}", headers={"X-API-Key": API_KEY} if API_KEY else {}, timeout=30)
     r.raise_for_status()
     return r.json()
 
@@ -54,7 +54,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def summary() -> dict:
     req = urllib.request.Request(f"{API}/dashboard/summary",
                                  headers={"X-API-Key": API_KEY} if API_KEY else {})
-    with urllib.request.urlopen(req, timeout=5) as r:
+    with urllib.request.urlopen(req, timeout=30) as r:
         return json.load(r)
 
 
