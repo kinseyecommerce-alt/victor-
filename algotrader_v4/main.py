@@ -1402,8 +1402,10 @@ def trend_filter(refresh: bool = False):
 
 
 @app.get("/momentum/rankings", tags=["Momentum"])
-def momentum_rankings(top: int = 20):
-    return {"rankings": momentum_rotation.rankings()[:top], "selection": momentum_rotation.selection(),
+async def momentum_rankings(top: int = 20):
+    """12-1 / 6-1 momentum ranking of the universe (history fetch runs off the event loop)."""
+    ranked = await asyncio.to_thread(momentum_rotation.rankings)
+    return {"rankings": ranked[:top], "selection": momentum_rotation.selection(ranked=ranked),
             "universe": settings.momentum_universe, "top_n": settings.momentum_top_n}
 
 

@@ -61,10 +61,11 @@ def rankings(symbols: Optional[list[str]] = None) -> list[dict]:
     return out
 
 
-def selection(top_n: Optional[int] = None) -> list[dict]:
-    """Top N that are in an uptrend themselves (positive momentum, above their 200-DMA)."""
+def selection(top_n: Optional[int] = None, ranked: Optional[list[dict]] = None) -> list[dict]:
+    """Top N that are in an uptrend themselves (positive momentum, above their 200-DMA).
+    Pass `ranked` (from rankings()) to avoid recomputing it."""
     n = top_n or settings.momentum_top_n
-    return [r for r in rankings() if r["score"] > 0 and r["above_200dma"]][:n]
+    return [r for r in (ranked if ranked is not None else rankings()) if r["score"] > 0 and r["above_200dma"]][:n]
 
 
 def rebalance_plan(held: dict[str, float], top_n: Optional[int] = None) -> dict:

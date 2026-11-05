@@ -45,8 +45,11 @@ def regime_block() -> dict:
 def event_block(symbol: str) -> dict:
     from event_calendar import get_event_risk
     e = get_event_risk(symbol)
+    hours = e.get("hours_until")
+    if hours is None or hours == float("inf"):      # "no event" → null, not inf (not JSON)
+        hours = None
     return {"risk_level": e.get("risk_level", "NONE"), "event": e.get("event_type") or None,
-            "hours_until": e.get("hours_until"), "size_factor": e.get("size_factor", 1.0),
+            "hours_until": hours, "size_factor": e.get("size_factor", 1.0),
             "description": e.get("description") or None}
 
 

@@ -62,6 +62,12 @@ MKT_STATUS   = NSE_BASE + "/api/market-status"
 
 
 # ── Live quote dataclass ───────────────────────────────────────────────────
+# Yahoo blocks some cloud IP ranges and rate-limits bursts; remember each failure for a
+# while so a 100-symbol scan does not spend a second per symbol on requests that will fail.
+_YF_FAILED: dict[tuple, float] = {}
+_YF_FAIL_TTL_S = 600
+
+
 class Quote:
     __slots__ = ("symbol", "ltp", "open", "high", "low", "prev_close",
                  "change", "change_pct", "volume", "bid", "ask",
@@ -240,11 +246,17 @@ class YFinanceClient:
                 logger.debug("TrueData historical fallback to yfinance for {}: {}", symbol, exc)
 
         ticker = self._ticker(symbol, exchange)
+        fkey = (ticker, interval, period)
+        failed_at = _YF_FAILED.get(fkey)
+        if failed_at and time.time() - failed_at < _YF_FAIL_TTL_S:
+            return pd.DataFrame()                 # Yahoo refused this recently; don't retry yet
         try:
             df = yf.download(ticker, period=period, interval=interval,
                              progress=False, auto_adjust=True)
             if df.empty:
+                _YF_FAILED[fkey] = time.time()
                 return pd.DataFrame()
+            _YF_FAILED.pop(fkey, None)
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -255,6 +267,7 @@ class YFinanceClient:
             df = df[["date", "open", "high", "low", "close", "volume"]].dropna()
             return df.sort_values("date").reset_index(drop=True)
         except Exception as exc:
+            _YF_FAILED[fkey] = time.time()
             logger.warning("yfinance error {}: {}", ticker, exc)
             return pd.DataFrame()
 

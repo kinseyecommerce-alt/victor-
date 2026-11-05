@@ -25,7 +25,9 @@ const CHART_OPTS = {
 }
 
 export default function MainChart() {
-  const { selectedSymbol, ticks } = useStore()
+  const selectedSymbol = useStore(s => s.selectedSymbol)
+  // Subscribe to this symbol's tick only: a tick for any other symbol must not re-render the chart
+  const tick = useStore(s => (s.selectedSymbol ? s.ticks[s.selectedSymbol] : undefined))
   const chartRef = useRef<HTMLDivElement>(null)
   const chart    = useRef<IChartApi | null>(null)
   const candles  = useRef<ISeriesApi<'Candlestick'> | null>(null)
@@ -76,9 +78,7 @@ export default function MainChart() {
 
   // Update last price on new tick
   useEffect(() => {
-    if (!selectedSymbol) return
-    const tick = ticks[selectedSymbol]
-    if (!tick || !candles.current) return
+    if (!selectedSymbol || !tick || !candles.current) return
 
     const now = Math.floor(Date.now() / 1000)
     const barTs = Math.floor(now / 60) * 60
@@ -93,9 +93,7 @@ export default function MainChart() {
 
     if (tick.ema9) ema9Line.current?.update({ time: barTs as any, value: tick.ema9 })
     if (tick.ema21) ema21Line.current?.update({ time: barTs as any, value: tick.ema21 })
-  }, [ticks, selectedSymbol])
-
-  const tick = selectedSymbol ? ticks[selectedSymbol] : null
+  }, [tick, selectedSymbol])
 
   return (
     <div className="flex flex-col h-full bg-white">
