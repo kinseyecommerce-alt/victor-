@@ -1,0 +1,11 @@
+.env
+.env.*
+.secrets/
+data/*.json
+logs/
+frontend/node_modules/
+frontend/dist/
+e2e_screenshots/
+__pycache__/
+*.pyc
+venv/
