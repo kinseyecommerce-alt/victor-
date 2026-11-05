@@ -34,7 +34,8 @@ COPY . .
 COPY --from=web /web/dist ./frontend/dist
 RUN rm -rf .env .secrets data/*.json frontend/node_modules && chmod +x deploy/entrypoint.sh \
     && mkdir -p /data && chown -R algotrader:algotrader /app /data
-USER algotrader
+# The entrypoint starts as root only to take ownership of the mounted volume (Railway/Docker
+# mount volumes root-owned), then drops to the unprivileged user before running the app.
 ENV PYTHONUNBUFFERED=1 \
     SECRETS_DIR=/data/secrets \
     PERFORMANCE_FILE=/data/app/performance.json \
