@@ -894,11 +894,20 @@ def _remember_kite_token(token: str) -> None:
 
 @app.post("/settings/app-password", tags=["Settings"])
 def update_app_password(req: AppPasswordRequest):
-    """Update admin login credentials in-memory. Restart reverts to env values."""
+    """Change the dashboard login. Saved (bcrypt hash) in the encrypted vault, so it survives
+    restarts and redeploys and overrides ADMIN_PASSWORD_HASH from the environment."""
+    from secret_store import secret_store
     if req.username is not None:
         settings.admin_username = req.username
     settings.admin_password_hash = hash_password(req.new_password)
-    return {"status": "updated", "admin_username": settings.admin_username}
+    try:
+        secret_store.save({"admin_username": settings.admin_username,
+                           "admin_password_hash": settings.admin_password_hash})
+        persisted = True
+    except Exception as e:
+        logger.error("Admin password not saved to vault: {}", e)
+        persisted = False
+    return {"status": "updated", "admin_username": settings.admin_username, "persisted": persisted}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────────
