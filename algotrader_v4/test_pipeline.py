@@ -1352,7 +1352,7 @@ def t_te_warm_watchlist_only_with_kite_session():
         assert te.warm_watchlist() == 0, "no Kite session → no subscription"
         _tem.kite_client.has_session = lambda: True
         n = te.warm_watchlist("test")
-        assert n == 20 and "RELIANCE" in te.symbols()
+        assert n == 22 and "RELIANCE" in te.symbols() and "NIFTY 50" in te.symbols()
         assert te.warm_watchlist() == 0, "already subscribed → idempotent"
     finally:
         _st.trading_mode, _st.paper_data_source = prev_mode, prev_src

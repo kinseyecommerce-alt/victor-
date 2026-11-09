@@ -984,7 +984,10 @@ class TickEngine:
         else:
             from symbol_scanner import NIFTY_50
             syms = NIFTY_50[:20]
-        return [{"symbol": x, "exchange": "NSE"} for x in syms]
+        # the two index quotes ride along: the regime, the trend filter and the opportunity scan's
+        # relative-strength and index plays all need NIFTY's live change
+        return [{"symbol": x, "exchange": "NSE"} for x in syms] + \
+               [{"symbol": "NIFTY 50", "exchange": "NSE"}, {"symbol": "NIFTY BANK", "exchange": "NSE"}]
 
     def warm_watchlist(self, reason: str = "") -> int:
         """With Kite data and a Kite session, subscribe the default watchlist when nothing is
