@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { clsx } from 'clsx'
-import { Activity, Bot, Brain, CandlestickChart, Play, Square, ShieldCheck } from 'lucide-react'
+import { Activity, Bot, Brain, CandlestickChart, Play, Square, ShieldCheck, Crosshair } from 'lucide-react'
 import { api } from '../../api/client'
 import { useStore } from '../../store'
 import ConnectionStatus from '../ConnectionStatus'
@@ -170,6 +170,12 @@ export default function Overview({ onOpenTrading }: { onOpenTrading: () => void 
           </div>
         </section>
 
+        {/* Where the money is today — the AI's own scan */}
+        <section className="panel" data-testid="opportunities">
+          <div className="panel-title"><Crosshair size={14} /> Opportunities <span className="text-slate-500 font-normal">· the AI's scan of the NIFTY 100 + index, any direction</span></div>
+          <OpportunitiesPanel />
+        </section>
+
         {/* Agents */}
         <section className="panel">
           <div className="panel-title"><Bot size={14} /> Agents</div>
@@ -202,6 +208,54 @@ export default function Overview({ onOpenTrading }: { onOpenTrading: () => void 
           </div>
         </section>
       </main>
+    </div>
+  )
+}
+
+type Opp = { symbol: string; play: string; direction: string; instrument: string; tool: string; score: number;
+             why: string; ltp?: number; change_pct?: number; stop_idea?: number; target_idea?: number }
+type OppScan = { at: string; regime: string; trend_filter?: string; nifty_change_pct: number | null; scanned: number;
+                 universe: number; truncated: boolean; opportunities: Opp[]; total_found: number }
+
+function OpportunitiesPanel() {
+  const [scan, setScan] = useState<OppScan | null>(null)
+  useEffect(() => {
+    const poll = () => api.opportunities(8).then(r => setScan(r.data)).catch(() => {})
+    poll()
+    const t = setInterval(poll, 60000)
+    return () => clearInterval(t)
+  }, [])
+  if (!scan) return <div className="text-sm text-slate-500">Scanning…</div>
+  const dirTone = (d: string) => d.startsWith('LONG') ? 'text-emerald-300' : d.startsWith('SHORT') ? 'text-rose-300' : 'text-violet-300'
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] text-slate-500">
+        {scan.at} IST · regime {scan.regime} · NIFTY {scan.nifty_change_pct == null ? '—' : `${scan.nifty_change_pct > 0 ? '+' : ''}${scan.nifty_change_pct}%`}
+        · {scan.scanned}/{scan.universe} scanned · {scan.total_found} set-ups
+      </div>
+      {scan.opportunities.length === 0
+        ? <div className="text-sm text-slate-400">No set-up worth taking right now — the AI stays out.</div>
+        : <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {scan.opportunities.map((o, i) => (
+              <div key={o.symbol + o.play + i} className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs" data-testid="opportunity-row">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-semibold text-slate-100">{o.symbol}</span>
+                    <span className={clsx('font-medium', dirTone(o.direction))}>{o.direction}</span>
+                    <span className="text-slate-400 truncate">{o.play.replace(/_/g, ' ')}</span>
+                  </div>
+                  <span className="shrink-0 rounded-md bg-white/10 px-1.5 py-0.5 font-mono text-slate-200">score {o.score}</span>
+                </div>
+                <div className="mt-1 text-slate-400 line-clamp-2">{o.why}</div>
+                <div className="mt-1 flex flex-wrap gap-x-3 text-slate-500">
+                  <span>{o.instrument}</span>
+                  {o.ltp != null && <span>LTP {o.ltp}</span>}
+                  {o.stop_idea != null && <span>stop ≈ {o.stop_idea}</span>}
+                  {o.target_idea != null && <span>target ≈ {o.target_idea}</span>}
+                </div>
+              </div>
+            ))}
+          </div>}
     </div>
   )
 }

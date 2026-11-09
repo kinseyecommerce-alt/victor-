@@ -423,6 +423,13 @@ def redoc_ui() -> HTMLResponse:
 @app.get("/auth/login-url", tags=["Auth"])
 def login_url(): return {"login_url": kite_client.login_url()}
 
+@app.get("/market/opportunities", tags=["Market"])
+async def market_opportunities(top: int = 12, focus: str = "all", refresh: bool = False):
+    """Ranked tradeable set-ups across the NIFTY 100 and index underlyings (the AI's scan)."""
+    import opportunity_scanner
+    return await asyncio.to_thread(opportunity_scanner.scan, max(1, min(top, 30)), focus, refresh)
+
+
 @app.get("/status/connections", tags=["Status"])
 def connection_status():
     """One call for the dashboard's status icons: Kite session, Claude API, market data, WebSocket."""

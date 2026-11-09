@@ -86,6 +86,7 @@ export const api = {
 
   // Overview dashboard (one aggregate call per refresh)
   dashboardSummary: () => ax().get('/dashboard/summary'),
+  opportunities: (top = 8) => ax().get(`/market/opportunities?top=${top}`),
   scoreboard: () => ax().get('/performance/scoreboard'),
   strategyStats: () => ax().get('/performance/strategies'),
   strategyEnable: (name: string) => ax().post(`/performance/strategies/${name}/enable`),
