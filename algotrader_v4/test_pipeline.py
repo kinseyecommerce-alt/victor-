@@ -1446,6 +1446,20 @@ def t_te_nan_indicators_are_json_safe():
     _json.dumps(TickEngine._tick_payload("TCS", tick, ind, "KITE_WS"))
 
 run("TickEngine: NaN indicators never break JSON output",      t_te_nan_indicators_are_json_safe)
+
+def t_te_symbol_aliases():
+    from tick_engine import canonical_symbol
+    assert canonical_symbol("INFOSYS") == "INFY" and canonical_symbol(" infy ") == "INFY"
+    assert canonical_symbol("ADANITRANS") == "ADANIENSOL" and canonical_symbol("RELIANCE") == "RELIANCE"
+    te = TickEngine()
+    te.subscribe([{"symbol": "INFOSYS", "exchange": "NSE"}, {"symbol": "INFY", "exchange": "NSE"}])
+    assert te.symbols() == ["INFY"], te.symbols()
+    from symbol_scanner import NIFTY_50, NIFTY_NEXT_50
+    from nifty100 import NIFTY_50 as N50B, NIFTY_NEXT_50 as NN50B
+    for s_ in NIFTY_50 + NIFTY_NEXT_50 + N50B + NN50B:
+        assert canonical_symbol(s_) == s_, f"stale symbol in universe: {s_}"
+
+run("TickEngine: stale names map to Kite symbols (INFOSYS→INFY)", t_te_symbol_aliases)
 run("add_subscriber() returns asyncio.Queue",  t_te_add_subscriber)
 
 # PAPER mode with real Kite prices (PAPER_DATA_SOURCE=KITE)
@@ -3240,7 +3254,7 @@ def t_corr_unknown_unknown():
     assert "allowed" in r and "size_factor" in r
 
 def t_corr_result_keys():
-    r = corr_check("TCS", ["INFOSYS"])
+    r = corr_check("TCS", ["INFY"])
     for k in ("allowed", "reason", "size_factor"):
         assert k in r, f"Missing key: {k}"
 

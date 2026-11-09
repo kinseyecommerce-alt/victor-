@@ -451,6 +451,7 @@ def connection_status():
     # Tick timestamps are stamped with datetime.now() (container clock, naive) — compare like with like
     age = max(0.0, (datetime.now() - newest).total_seconds()) if newest else None
     data = {"source": tick_engine.data_source(), "symbols": len(tick_engine._latest_tick),
+            "unknown_symbols": sorted(tick_engine._no_quote),
             "last_tick_age_s": round(age, 1) if age is not None else None,
             "streaming": age is not None and age < 15 and is_market_open(),
             "market_open": is_market_open()}

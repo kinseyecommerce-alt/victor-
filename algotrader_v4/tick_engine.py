@@ -621,6 +621,19 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
     )
 
 
+# Names people (and old lists) use that are not the NSE trading symbol Kite expects
+SYMBOL_ALIASES = {
+    "INFOSYS": "INFY", "ADANITRANS": "ADANIENSOL", "ZOMATO": "ETERNAL", "MCDOWELL-N": "UNITDSPR",
+    "NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK",
+}
+
+
+def canonical_symbol(symbol: str) -> str:
+    """Kite's NSE trading symbol for a possibly stale or informal name."""
+    s = (symbol or "").strip().upper()
+    return SYMBOL_ALIASES.get(s, s)
+
+
 def json_safe(obj):
     """Replace NaN/±inf floats (indicators on too few candles) with None, recursively, so a
     dashboard payload or API response never fails JSON encoding."""
@@ -665,6 +678,7 @@ class TickEngine:
         self._use_ws: bool = False
         self._ws_received: set[str] = set()
         self._last_quote_warn: float = 0.0
+        self._no_quote: set[str] = set()      # subscribed symbols Kite returned no quote for (bad names)
 
     # ── Setup ─────────────────────────────────────────────────────────
 
@@ -672,7 +686,7 @@ class TickEngine:
         added: list[str] = []
         seeded: dict[str, float] = {}
         for item in watchlist:
-            sym  = item["symbol"]
+            sym  = canonical_symbol(item["symbol"]) if item.get("exchange", "NSE") in ("NSE", "BSE") else item["symbol"]
             exch = item.get("exchange", "NSE")
             if sym in self._bufs_1min:   # already subscribed (e.g. bot restarted)
                 continue
@@ -940,7 +954,11 @@ class TickEngine:
             key  = f"{exch}:{sym}"
             data = raw.get(key)
             if not data:
+                if sym not in self._no_quote:
+                    self._no_quote.add(sym)
+                    logger.warning("[tick] Kite has no quote for {} — not an NSE trading symbol? (check the watchlist)", key)
                 continue
+            self._no_quote.discard(sym)
             quote = _kite_quote_to_quote(sym, data)
             tick  = Tick.from_quote(quote)
             if idle:
