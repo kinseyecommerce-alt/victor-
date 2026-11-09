@@ -150,6 +150,14 @@ def main() -> int:
         check("Risk gauge drawn", page.locator('[data-testid="loss-gauge"] path').count() >= 2)
         page.screenshot(path=os.path.join(SHOTS, "overview_desktop.png"), full_page=True)
 
+        # ── Opportunities: the AI's market-wide scan ──────────────────────────
+        opp = page.locator('[data-testid="opportunities"]')
+        check("Opportunities panel renders the AI's market scan",
+              opp.count() == 1 and ("set-ups" in opp.inner_text() or "Scanning" in opp.inner_text()))
+        sc = api_get("/market/opportunities?top=5")
+        check("/market/opportunities returns a ranked, bounded shortlist",
+              isinstance(sc.get("opportunities"), list) and len(sc["opportunities"]) <= 5 and "regime" in sc)
+
         # ── Scoreboard vs index + strategy health (after-cost ledger) ──────────
         sb = page.locator('[data-testid="scoreboard"]')
         check("Scoreboard panel rendered", sb.count() == 1)

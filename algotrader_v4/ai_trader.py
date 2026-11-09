@@ -100,9 +100,29 @@ trading system for NSE (India): intraday equities, index options, index futures 
 (delivery) equities. You trade with real or paper money on behalf of the \
 account owner, so capital preservation comes first: a skipped trade costs nothing, a bad one costs money.
 
+Your job is to find the best risk-adjusted profit available today and take it — long or short, \
+stock, option, spread or future, intraday or swing — and to take nothing when nothing is good. \
+Being in a trade is never the goal; being right about the ones you take is.
+
+Opportunity hunting (every cycle)
+- After get_market_overview, call scan_opportunities. It ranks concrete set-ups across the whole \
+NIFTY 100 and the index underlyings, not just the watchlist. Pick the top one or two that fit the \
+regime, confirm them with get_symbol_detail (watch_symbol first if the stock is not streaming) and \
+get_market_context, and only then act. Ignore the rest.
+- Playbook by regime: BULL_TREND → longs: gap-and-go, breakouts, pullbacks, relative-strength leaders, \
+index calls/futures. BEAR_TREND → shorts: gap-downs, breakdowns, laggards, swing puts, index puts, \
+bear call spreads. RANGING → mean reversion at levels and credit spreads when IV rank is high; no \
+breakout chasing. HIGH VOLATILITY → half size, wider stops, prefer defined-risk (options, spreads) \
+over futures. UNKNOWN → smallest size, best set-up only.
+- Diversify the ways you make money: do not stack several longs on the same theme; one intraday \
+momentum trade, one swing, one index position is a healthier book than three correlated bets.
+- Take profits deliberately: trail stops under structure as a trade works, scale out at the target \
+rather than hoping, and close a trade whose reason is gone even at a small loss. A day of several \
+small wins and one small loss beats one big hopeful position.
+
 How you work
-- Use your tools to look before you act: get_market_overview first, then get_watchlist_quotes, \
-then get_symbol_detail and get_market_context for anything you are considering, and \
+- Use your tools to look before you act: get_market_overview first, then scan_opportunities, then \
+get_symbol_detail and get_market_context for anything you are considering, and \
 get_ai_positions for what you hold.
 - get_market_context gives what price alone does not: upcoming results / RBI / ex-dates \
 (never trade into a results announcement), support and resistance levels (stops go beyond \
@@ -215,6 +235,22 @@ def _tool(name: str, description: str, properties: dict, required: list[str]) ->
 
 # Fixed order and content — part of the cached prompt prefix.
 TOOLS: list[dict] = [
+    _tool("scan_opportunities",
+          "Ranked, tradeable set-ups across the NIFTY 100 and the index underlyings right now, in any "
+          "direction and instrument the account allows: gap-and-go, 20-day breakouts/breakdowns, trend "
+          "pullbacks, washed-out/stretched mean reversion, relative strength vs NIFTY, rich index premium "
+          "(credit spread), index momentum (option / future). Each row has the play, direction, the tool to "
+          "use, a score, why, and stop/target ideas; event risk, the trend filter and pruned strategies "
+          "are already applied. It is a shortlist: confirm with get_symbol_detail / get_market_context. "
+          "Call this right after get_market_overview on every cycle.",
+          {"focus": {"type": "string", "enum": ["all", "intraday", "swing", "options"],
+                     "description": "Narrow the list; use all unless you have a reason"},
+           "top": {"type": "integer", "description": "How many rows to return (10 is usual, max 20)"}},
+          ["focus", "top"]),
+    _tool("watch_symbol",
+          "Start streaming an NSE stock that is not on the watchlist (e.g. one found by scan_opportunities) "
+          "so get_symbol_detail, get_market_context and place_trade work for it. Returns its first quote.",
+          {"symbol": {"type": "string", "description": "NSE trading symbol, e.g. TATAPOWER"}}, ["symbol"]),
     _tool("get_market_overview",
           "Time, trading mode, market status, regime, account risk status, the AI's hard limits "
           "and how much of each is left today, and the AI's recent actions. Call this first.",
@@ -516,8 +552,9 @@ class AITrader:
             self.cycles_today += 1
             self.last_cycle_at = now_ist().strftime("%H:%M:%S")
             messages = [{"role": "user", "content":
-                         f"Decision cycle at {self.last_cycle_at} IST. Review the market and your "
-                         "positions with your tools and decide whether to open, close or do nothing."}]
+                         f"Decision cycle at {self.last_cycle_at} IST. Review the market with "
+                         "get_market_overview, then scan_opportunities for the best set-ups across the whole "
+                         "market, review your positions, and decide whether to open, close or do nothing."}]
             summary = await self._run_agent(messages, purpose="cycle")
             self.last_summary = summary
             self._record("cycle", summary)
@@ -648,6 +685,12 @@ class AITrader:
     # ── Tools ─────────────────────────────────────────────────────────────
 
     async def _execute(self, name: str, args: dict) -> Any:
+        if name == "scan_opportunities":
+            import opportunity_scanner
+            top = max(1, min(int(args.get("top") or 10), 20))
+            return await asyncio.to_thread(opportunity_scanner.scan, top, str(args.get("focus") or "all"))
+        if name == "watch_symbol":
+            return await self._watch_symbol(str(args.get("symbol", "")).upper().strip())
         if name == "get_market_overview":
             return self._overview()
         if name == "get_watchlist_quotes":
@@ -712,7 +755,26 @@ class AITrader:
             "portfolio_risk": portfolio_risk.status(),
             "pruned_strategies": {k: v["reason"] for k, v in performance.pruned.items()},
             "recent_ai_actions": [{"t": e["t"], "kind": e["kind"], "text": e["text"][:200]} for e in recent],
+            "next_step": "call scan_opportunities for today's ranked set-ups across the whole market",
         }
+
+    async def _watch_symbol(self, symbol: str) -> dict:
+        from tick_engine import canonical_symbol
+        symbol = canonical_symbol(symbol)
+        if not symbol or " " in symbol:
+            raise ToolRejected("give an NSE stock symbol (indices are always available)")
+        if symbol not in tick_engine.symbols():
+            if len(tick_engine.symbols()) >= 120:
+                raise ToolRejected("watchlist is full (120 symbols) — trade from what is streaming")
+            tick_engine.subscribe([{"symbol": symbol, "exchange": "NSE"}])
+            if settings.uses_kite_market_data:
+                await tick_engine._fetch_kite_batch(idle=not is_market_open())
+        tick, ind = tick_engine.latest(symbol)
+        if not tick:
+            raise ToolRejected(f"{symbol}: no quote from the data source yet — try again in a few seconds, or the symbol is wrong")
+        return {"symbol": symbol, "ltp": tick.ltp, "change_pct": round(tick.change_pct, 2), "day_high": tick.high,
+                "day_low": tick.low, "streaming": True,
+                "note": "indicators build up over the next minutes; use get_daily_chart for the daily picture now"}
 
     def _quotes(self) -> dict:
         rows = {}

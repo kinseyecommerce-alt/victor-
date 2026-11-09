@@ -105,6 +105,13 @@ class PlatformScheduler:
         except Exception as exc:
             logger.warning("[platform] Correlation matrix refresh failed: {}", exc)
 
+        try:
+            import opportunity_scanner
+            await asyncio.to_thread(opportunity_scanner.warm)
+            results.append("opportunity scan ✓")
+        except Exception as exc:
+            logger.warning("[platform] Opportunity scan warm-up failed: {}", exc)
+
         logger.info("[platform] Morning data refresh: {}", ", ".join(results) or "all failed")
 
     async def _options_cache_refresh(self) -> None:

@@ -2040,7 +2040,7 @@ def _trade_args(sym, side="BUY", qty=10, sl=990.0, tgt=1020.0):
 
 def t_ai_tool_schemas_strict():
     names = [t["name"] for t in _AI_TOOLS]
-    assert names == ["get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
+    assert names == ["scan_opportunities", "watch_symbol", "get_market_overview", "get_watchlist_quotes", "get_symbol_detail",
                      "get_market_context", "get_ai_positions", "place_trade", "get_daily_chart", "place_swing_trade",
                      "place_swing_put", "place_option_spread",
                      "get_future_quote", "place_future_trade", "get_option_chain",
@@ -5771,6 +5771,93 @@ def t_lp_model_step_down():
     _with_providers(body, anth="", oai="sk-oai")
 
 run("providers: unavailable model steps down before failing over", t_lp_model_step_down)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("23. OPPORTUNITY SCANNER — WHERE IS THE MONEY TODAY")
+# ══════════════════════════════════════════════════════════════════════════
+import opportunity_scanner as _osc
+import time as _time_mod
+
+def _dv(**kw):
+    base = {"trend": "UP", "ema20": 100.0, "rsi14": 55.0, "atr_pct": 1.5, "high_20d": 104.0, "low_20d": 95.0,
+            "volume_vs_20d_avg": 2.0}
+    base.update(kw); return base
+
+def t_osc_gap_and_go_and_breakout():
+    q = {"ltp": 106.0, "open": 103.0, "high": 106.2, "low": 102.8, "prev_close": 100.0, "volume": 1_000_000}
+    rows = _osc._stock_plays("ABC", q, _dv(), nifty_chg=0.5, risk_off=False, pruned=set(), regime="BULL_TREND")
+    plays = {r["play"]: r for r in rows}
+    assert "gap_and_go" in plays and plays["gap_and_go"]["direction"] == "LONG" and plays["gap_and_go"]["tool"].startswith("place_trade BUY")
+    assert "breakout_20d" in plays and plays["breakout_20d"]["stop_idea"] < 106.0 < plays["breakout_20d"]["target_idea"]
+    assert "relative_strength" in plays                           # +6% vs NIFTY +0.5% on a trending day
+    assert all(r["score"] >= 3 for r in rows if r["play"] in ("gap_and_go", "breakout_20d")), rows
+
+def t_osc_bearish_and_filters():
+    q = {"ltp": 94.0, "open": 97.0, "high": 97.2, "low": 93.9, "prev_close": 100.0, "volume": 1_000_000}
+    rows = _osc._stock_plays("XYZ", q, _dv(trend="DOWN", rsi14=40.0), nifty_chg=-0.8, risk_off=True, pruned=set(), regime="BEAR_TREND")
+    plays = {r["play"]: r for r in rows}
+    assert plays["gap_and_go"]["direction"] == "SHORT" and plays["breakdown_20d"]["tool"].startswith("place_trade SELL")
+    assert all(r["direction"] == "SHORT" for r in rows), rows
+    # pruned strategy → its plays disappear; a dull stock → nothing
+    rows2 = _osc._stock_plays("XYZ", q, _dv(trend="DOWN", rsi14=40.0), -0.8, True, pruned={"ai", "ai_swing_opt"}, regime="BEAR_TREND")
+    assert rows2 == [], rows2
+    assert _osc._stock_plays("DULL", q, _dv(atr_pct=0.3), -0.8, True, set(), "BEAR_TREND") == []
+    # risk-off penalises longs
+    ql = {"ltp": 106.0, "open": 103.0, "high": 106.2, "low": 102.8, "prev_close": 100.0, "volume": 1}
+    on = _osc._stock_plays("L", ql, _dv(), 0.5, False, set(), "RANGING")[0]["score"]
+    off = _osc._stock_plays("L", ql, _dv(), 0.5, True, set(), "RANGING")[0]["score"]
+    assert off == on - 2
+
+def t_osc_mean_reversion_and_pullback():
+    q = {"ltp": 94.0, "open": 95.0, "high": 95.5, "low": 93.8, "prev_close": 95.0, "volume": 10}
+    rows = _osc._stock_plays("MR", q, _dv(trend="SIDEWAYS", rsi14=24.0, ema20=100.0, atr_pct=1.5, volume_vs_20d_avg=1.0), 0.0, False, set(), "RANGING")
+    assert [r["play"] for r in rows] == ["mean_reversion"] and rows[0]["direction"] == "LONG"
+    q2 = {"ltp": 100.5, "open": 100.0, "high": 101.0, "low": 99.8, "prev_close": 100.2, "volume": 10}
+    rows = _osc._stock_plays("PB", q2, _dv(trend="UP", rsi14=50.0, ema20=100.0, high_20d=110.0, volume_vs_20d_avg=1.0), 0.0, False, set(), "BULL_TREND")
+    assert any(r["play"] == "trend_pullback" and r["tool"] == "place_swing_trade" for r in rows), rows
+
+def t_osc_index_plays_and_scan_shape():
+    import options_intelligence as _oi
+    prev = dict(_oi._cache)
+    try:
+        _oi._cache["NIFTY"] = {"iv_rank": 72.0, "pcr": 1.1, "_updated_ts": _time_mod.time()}
+        prev_sell = _ai_settings.ai_agent_option_selling_enabled; _ai_settings.ai_agent_option_selling_enabled = True
+        try:
+            rows = _osc._index_plays("RANGING", 0.1, set())
+        finally:
+            _ai_settings.ai_agent_option_selling_enabled = prev_sell
+        assert any(r["play"] == "index_premium" and r["symbol"] == "NIFTY" and "BULLISH" in r["tool"] for r in rows), rows
+        _oi._cache["NIFTY"] = {"iv_rank": 20.0, "_updated_ts": _time_mod.time()}
+        rows = _osc._index_plays("BULL_TREND", 1.2, set())
+        assert any(r["play"] == "index_momentum" and r["tool"] == "place_option_trade CE" for r in rows), rows
+    finally:
+        _oi._cache.clear(); _oi._cache.update(prev)
+    res = _osc.scan(top=5, force=True)
+    assert set(res) >= {"at", "regime", "opportunities", "scanned", "universe", "note", "total_found"}
+    assert len(res["opportunities"]) <= 5 and isinstance(res["opportunities"], list)
+    assert _osc.scan(top=3)["opportunities"] == res["opportunities"][:3]      # served from cache
+
+def t_osc_ai_tools_and_endpoint():
+    import main as _main
+    ai = AITrader()
+    out = asyncio.run(ai._execute("scan_opportunities", {"focus": "intraday", "top": 4}))
+    assert "opportunities" in out and len(out["opportunities"]) <= 4
+    assert any(t["name"] == "scan_opportunities" for t in _AI_TOOLS) and any(t["name"] == "watch_symbol" for t in _AI_TOOLS)
+    assert "scan_opportunities" in _ai_mod.SYSTEM_PROMPT and "Playbook by regime" in _ai_mod.SYSTEM_PROMPT
+    try:
+        asyncio.run(ai._execute("watch_symbol", {"symbol": "NIFTY 50"})); assert False
+    except ToolRejected:
+        pass
+    c = TestClient(_main.app)
+    r = c.get("/market/opportunities?top=3")
+    assert r.status_code == 200 and len(r.json()["opportunities"]) <= 3, r.text
+
+run("scanner: gap-and-go, 20-day breakout, relative strength (long)", t_osc_gap_and_go_and_breakout)
+run("scanner: bearish plays; pruned/dull filtered; risk-off penalty",  t_osc_bearish_and_filters)
+run("scanner: mean reversion and trend pullback",                     t_osc_mean_reversion_and_pullback)
+run("scanner: index premium / momentum plays; scan shape + cache",     t_osc_index_plays_and_scan_shape)
+run("scanner: AI tools wired, prompt playbook, /market/opportunities", t_osc_ai_tools_and_endpoint)
 
 
 # ══════════════════════════════════════════════════════════════════════════
