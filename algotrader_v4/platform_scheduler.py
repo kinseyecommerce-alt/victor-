@@ -221,6 +221,16 @@ class PlatformScheduler:
         except Exception as exc:
             logger.error("[platform] auto-start failed: {}", exc)
             await send_telegram(f"⚠️ <b>Auto-start failed</b>\n{exc}")
+            return
+        if settings.ai_agent_auto_start and (settings.anthropic_api_key or settings.openai_api_key):
+            try:
+                from ai_trader import ai_trader
+                if not ai_trader.enabled:
+                    ai_trader.start()
+                    logger.info("[platform] AI trader auto-started")
+                    await send_telegram("🧠 <b>AI trader auto-started</b>")
+            except Exception as exc:
+                logger.error("[platform] AI auto-start failed: {}", exc)
 
 
 platform_scheduler = PlatformScheduler()

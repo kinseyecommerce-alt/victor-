@@ -5861,6 +5861,79 @@ run("scanner: AI tools wired, prompt playbook, /market/opportunities", t_osc_ai_
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("24. HEAVY WORK OFF THE EVENT LOOP; SETTINGS THAT SURVIVE RESTARTS")
+# ══════════════════════════════════════════════════════════════════════════
+import bg_compute as _bg
+
+def t_bg_runs_in_another_process():
+    import os as _os
+    child = asyncio.run(_bg.run_in_process("pid_job"))
+    assert isinstance(child, int) and child != _os.getpid(), (child, _os.getpid())
+    # the event loop stays responsive while a worker job runs
+    async def both():
+        t0 = _time_mod.monotonic()
+        job = asyncio.create_task(_bg.run_in_process("sleep_job", 1.0))
+        ticks = 0
+        while not job.done():
+            await asyncio.sleep(0.05); ticks += 1
+        await job
+        return ticks, _time_mod.monotonic() - t0
+    ticks, dt = asyncio.run(both())
+    assert ticks >= 10 and dt >= 1.0, (ticks, dt)
+
+def t_bg_replay_endpoint_uses_worker():
+    import main as _main, replay_backtest as _rb
+    c = TestClient(_main.app)
+    prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+    try:
+        r = c.post("/backtest/replay", json={"agent": "intraday", "symbols": ["RELIANCE"], "days": 3}, headers=H)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert {"agent", "trades" if False else "net_pnl", "benchmark"} <= set(d) and d["agent"] == "intraday"
+        assert _rb._LAST.get("intraday", {}).get("agent") == "intraday"
+    finally:
+        _ai_settings.api_key = prev
+
+def t_optimizer_adopt_from_worker_report():
+    import optimizer as _opt
+    report = {"agent": "scalping", "adopted": {"MIN_SCORE": 5, "SL_PCT": 0.25, "TGT_PCT": 0.5}, "at": "2026-01-01T00:00:00",
+              "current": {"params": {}, "test": {"net": -100.0}}, "symbols": ["X"], "days": 45,
+              "top": [{"params": {"MIN_SCORE": 5, "SL_PCT": 0.25, "TGT_PCT": 0.5}, "test": {"net": 250.0}, "verdict": "adopted"}]}
+    try:
+        assert _opt.adopt(report) is True
+        assert _opt.current_params("scalping")["MIN_SCORE"] == 5 and _opt.load_params()["scalping"]["test_net"] == 250.0
+        assert _opt.adopt({"agent": "scalping", "adopted": None}) is False
+    finally:
+        _opt.reset("scalping")
+
+def t_agent_enables_persist():
+    import importlib, bot_state as _bs
+    prev_file = _bs._FILE
+    tmpdir = Path(_vtmp.mkdtemp())
+    try:
+        _bs._FILE = tmpdir / "agent_enables.json"
+        _bs.set_agent_enabled("scalping", False)
+        assert _bs.is_agent_enabled("scalping") is False and _bs._FILE.exists()
+        saved = _bs._load()
+        assert saved["scalping"] is False and saved["swing"] is True
+    finally:
+        _bs.set_agent_enabled("scalping", True)
+        _bs._FILE = prev_file
+
+def t_ai_auto_start_setting():
+    assert hasattr(_ai_settings, "ai_agent_auto_start") and _ai_settings.ai_agent_auto_start is False
+    import inspect, platform_scheduler as _ps
+    src = inspect.getsource(_ps.PlatformScheduler._auto_start_bot)
+    assert "ai_agent_auto_start" in src and "ai_trader.start()" in src
+
+run("bg: jobs run in a worker process and the loop stays responsive", t_bg_runs_in_another_process)
+run("bg: /backtest/replay served by the worker, result cached",     t_bg_replay_endpoint_uses_worker)
+run("optimizer: parent adopts a worker's report",                   t_optimizer_adopt_from_worker_report)
+run("agent enables persist across restarts",                        t_agent_enables_persist)
+run("AI trader auto-start follows the bot auto-start",              t_ai_auto_start_setting)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

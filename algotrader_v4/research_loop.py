@@ -171,9 +171,12 @@ def validate(p: dict) -> Optional[str]:
 
 
 async def ab_test(agent: str, param: str, value: float, symbols: list[str], days: int = REPLAY_DAYS,
-                  bars_by_symbol: Optional[dict] = None) -> dict:
+                  bars_by_symbol: Optional[dict] = None, _in_worker: bool = False) -> dict:
     import optimizer
     import replay_backtest as rb
+    if bars_by_symbol is None and not _in_worker:
+        from bg_compute import run_in_process                    # two full replays: keep them off the event loop
+        return await run_in_process("ab_test_job", agent, param, value, list(symbols), days)
     cur = optimizer.current_params(agent)
     cand = {**cur, param: value}
     if bars_by_symbol is None:

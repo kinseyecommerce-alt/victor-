@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     auto_start_strategies: str = ""
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
+    ai_agent_auto_start:  bool = False   # also start the AI trader when the bot auto-starts at 09:16
 
     # Autonomous AI trader (ai_trader.py) — every limit below is enforced in code,
     # not left to the model. It trades NSE equities intraday (MIS) only.
