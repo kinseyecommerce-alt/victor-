@@ -11,8 +11,10 @@ Completed days are cached for the day; today's bar is rebuilt from the live tick
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
+import threading
 import random
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -100,6 +102,50 @@ def _completed_days(symbol: str, last_price: float) -> list[dict]:
     elif settings.uses_kite_market_data:
         _miss[symbol] = now_ist().replace(tzinfo=None)
     return rows
+
+
+def is_cached(symbol: str) -> bool:
+    """True when today's completed-day history for `symbol` is already in memory (no I/O needed)."""
+    return (symbol, now_ist().date()) in _cache
+
+
+_inflight: set[str] = set()
+_inflight_lock = threading.Lock()
+
+
+def _prefetch_one(symbol: str) -> None:
+    try:
+        _completed_days(symbol, 0.0)
+    except Exception as exc:
+        logger.debug("[daily] prefetch {} failed: {}", symbol, exc)
+    finally:
+        with _inflight_lock:
+            _inflight.discard(symbol)
+
+
+def prefetch_in_background(symbols: list[str]) -> int:
+    """Start fetching the daily history of any uncached symbols on worker threads and return at
+    once. Agents call this from the tick loop so the first lookup of the day never blocks it."""
+    started = 0
+    for sym in symbols:
+        if is_cached(sym):
+            continue
+        with _inflight_lock:
+            if sym in _inflight:
+                continue
+            _inflight.add(sym)
+        threading.Thread(target=_prefetch_one, args=(sym,), name=f"daily-{sym}", daemon=True).start()
+        started += 1
+    return started
+
+
+async def prefetch(symbols: list[str]) -> int:
+    """Fetch (and cache) the daily history of every uncached symbol off the event loop; returns how
+    many were fetched. Used by the 09:10 morning job and at startup."""
+    todo = [s for s in symbols if not is_cached(s)]
+    for sym in todo:
+        await asyncio.to_thread(_completed_days, sym, 0.0)
+    return len(todo)
 
 
 def daily_closes(symbol: str, fallback_price: float = 1000.0) -> list[tuple[date, float]]:
