@@ -9,7 +9,9 @@ import { useStore } from '../store'
 
 type Conn = {
   kite: { connected: boolean; keys: boolean; auto_login: boolean; account?: string; detail?: string }
-  claude: { state: 'ok' | 'untested' | 'no_key' | 'bad_key' | 'billing' | 'rate_limited' | 'error'; detail: string; model: string; at?: string }
+  claude: { state: 'ok' | 'untested' | 'no_key' | 'bad_key' | 'billing' | 'rate_limited' | 'overloaded' | 'server' | 'connection' | 'not_found' | 'invalid_request' | 'error';
+            detail: string; model: string; at?: string; active?: string | null; primary?: string; failovers?: number
+            providers?: Record<string, { state: string; detail: string; model: string; role: string }> }
   data: { source: string; symbols: number; last_tick_age_s: number | null; streaming: boolean; market_open: boolean }
   ws_clients: number
   bot_running: boolean
@@ -31,9 +33,17 @@ function claudeTone(c: Conn): Tone {
     case 'ok': return 'ok'
     case 'untested': return 'warn'
     case 'rate_limited': return 'warn'
+    case 'overloaded': return 'warn'
     case 'no_key': return 'off'
     default: return 'bad'
   }
+}
+function claudeText(c: Conn): string {
+  const p = c.claude.providers
+  if (!p) return `${c.claude.detail} · ${c.claude.model}`
+  const parts = Object.entries(p).filter(([, v]) => v.role !== 'off')
+    .map(([n, v]) => `${n} (${v.role}): ${v.state === 'ok' ? 'ok' : v.state.replace('_', ' ')}`)
+  return `${c.claude.detail} · ${parts.join(' · ')}`
 }
 function dataTone(c: Conn): Tone {
   if (c.data.streaming) return 'ok'
@@ -57,7 +67,7 @@ export default function ConnectionStatus({ dark = false, onClick }: { dark?: boo
     { key: 'kite', label: 'Kite', tone: kiteTone(c), icon: <Plug size={14} />,
       text: c.kite.connected ? `Kite connected${c.kite.account ? ` (${c.kite.account})` : ''}${c.kite.auto_login ? ' · auto-login on' : ''}`
           : c.kite.detail || (c.kite.keys ? 'Not logged in to Kite today' : 'Kite API key not set') },
-    { key: 'claude', label: 'Claude', tone: claudeTone(c), icon: <Brain size={14} />, text: `${c.claude.detail} · ${c.claude.model}` },
+    { key: 'claude', label: 'AI', tone: claudeTone(c), icon: <Brain size={14} />, text: claudeText(c) },
     { key: 'data', label: 'Data', tone: dataTone(c), icon: <Radio size={14} />,
       text: c.data.streaming ? `Live prices · ${c.data.symbols} symbols · ${c.data.last_tick_age_s}s ago`
           : !c.data.market_open ? `Market closed · ${c.data.source}`

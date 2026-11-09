@@ -31,7 +31,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 FIELDS = (
     "kite_api_key", "kite_api_secret", "kite_access_token",
     "kite_user_id", "kite_password", "kite_totp_secret",     # automatic daily Kite login
-    "anthropic_api_key", "truedata_username", "truedata_password",
+    "anthropic_api_key", "openai_api_key", "truedata_username", "truedata_password",
     "admin_username", "admin_password_hash",                 # dashboard login changed from Settings
 )
 _DAILY = {"kite_access_token"}          # valid only on the IST day they were saved

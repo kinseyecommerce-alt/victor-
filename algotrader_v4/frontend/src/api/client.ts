@@ -129,6 +129,7 @@ export const api = {
     kite_password?: string
     kite_totp_secret?: string
     anthropic_api_key?: string
+    openai_api_key?: string
     truedata_username?: string
     truedata_password?: string
     persist?: boolean

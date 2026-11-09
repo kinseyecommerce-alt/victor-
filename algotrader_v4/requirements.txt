@@ -26,6 +26,7 @@ bcrypt==4.0.1
 
 # ── AI ────────────────────────────────────────────────────────────
 anthropic>=2.3.0   # ai_trader.py needs output_config + server-side fallbacks
+openai>=1.60.0     # second AI provider — automatic failover when one is unavailable
 
 # ── Data / Technical analysis / Charting ─────────────────────────
 pandas==2.2.2

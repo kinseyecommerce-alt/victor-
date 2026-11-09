@@ -299,6 +299,7 @@ class CredentialsUpdateRequest(BaseModel):
     kite_password:     str | None = Field(default=None, min_length=1)
     kite_totp_secret:  str | None = Field(default=None, min_length=1)   # base32 TOTP seed
     anthropic_api_key: str | None = Field(default=None, min_length=1)
+    openai_api_key:    str | None = Field(default=None, min_length=1)
     truedata_username: str | None = Field(default=None, min_length=1)
     truedata_password: str | None = Field(default=None, min_length=1)
     persist:           bool = True     # save encrypted to .secrets/ so they survive a restart
@@ -306,7 +307,7 @@ class CredentialsUpdateRequest(BaseModel):
 class CredentialsDeleteRequest(BaseModel):
     fields: list[Literal["kite_api_key", "kite_api_secret", "kite_access_token",
                          "kite_user_id", "kite_password", "kite_totp_secret", "anthropic_api_key",
-                         "truedata_username", "truedata_password"]] = Field(min_length=1)
+                         "openai_api_key", "truedata_username", "truedata_password"]] = Field(min_length=1)
 
 class AppPasswordRequest(BaseModel):
     username:     str | None = Field(default=None, min_length=1, max_length=50)
@@ -835,7 +836,7 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
 
 
 _CRED_FIELDS = ("kite_api_key", "kite_api_secret", "kite_user_id", "kite_password", "kite_totp_secret",
-                "anthropic_api_key", "truedata_username", "truedata_password")
+                "anthropic_api_key", "openai_api_key", "truedata_username", "truedata_password")
 
 
 def _is_loopback(request: Request) -> bool:
@@ -845,6 +846,9 @@ def _is_loopback(request: Request) -> bool:
 
 def _refresh_after_credential_change(changed: set[str]) -> None:
     """Make running components pick up new keys without a restart."""
+    if changed & {"anthropic_api_key", "openai_api_key"}:
+        from llm_provider import llm_router
+        llm_router.reset()                 # new keys on the next AI call, both providers
     if "anthropic_api_key" in changed:
         import anthropic, claude_trade_gate, trade_memory
         from signal_engine import signal_engine
@@ -863,9 +867,10 @@ def _credential_view() -> dict:
     creds = kite_client.validate_credentials()
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
-    for f in ("kite_user_id", "kite_password", "kite_totp_secret"):
+    for f in ("kite_user_id", "kite_password", "kite_totp_secret", "openai_api_key"):
         creds[f] = bool(getattr(settings, f))
     creds["auto_login"] = kite_auto_login.status()
+    creds["ai_providers"] = ai_trader.api_health()
     return creds
 
 
