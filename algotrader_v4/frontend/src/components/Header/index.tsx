@@ -80,6 +80,17 @@ export default function Header() {
 
   useEffect(() => { if (settingsTab === 'apikeys') refreshCredentials() }, [settingsTab])
 
+  // While the API Keys tab is open, poll so "Today's Kite login" flips to connected as soon as the
+  // Zerodha tab finishes (and the window regaining focus refreshes at once)
+  useEffect(() => {
+    if (!configOpen || settingsTab !== 'apikeys') return
+    refreshCredentials()
+    const t = setInterval(refreshCredentials, 4000)
+    const onFocus = () => refreshCredentials()
+    window.addEventListener('focus', onFocus)
+    return () => { clearInterval(t); window.removeEventListener('focus', onFocus) }
+  }, [configOpen, settingsTab])
+
   const handleAutoLoginNow = async () => {
     setAutoLoginBusy(true)
     try {
@@ -97,7 +108,7 @@ export default function Header() {
     try {
       const r = await api.kiteLoginUrl()
       window.open(r.data.login_url, '_blank', 'noopener')
-      addToast('Log in on the Zerodha page, then come back and reopen Settings', 'info')
+      addToast('Finish the login in the Zerodha tab — this panel updates by itself', 'info')
     } catch (e: any) {
       addToast(e.response?.data?.detail || 'Save the Kite API key first', 'error')
     }
