@@ -446,9 +446,10 @@ def connection_status():
         if ts is None:
             continue
         if ts.tzinfo is not None:
-            ts = ts.astimezone(_tz(timedelta(hours=5, minutes=30))).replace(tzinfo=None)
+            ts = ts.astimezone().replace(tzinfo=None)        # to the container's local clock
         newest = ts if newest is None or ts > newest else newest
-    age = (now_ist().replace(tzinfo=None) - newest).total_seconds() if newest else None
+    # Tick timestamps are stamped with datetime.now() (container clock, naive) — compare like with like
+    age = max(0.0, (datetime.now() - newest).total_seconds()) if newest else None
     data = {"source": tick_engine.data_source(), "symbols": len(tick_engine._latest_tick),
             "last_tick_age_s": round(age, 1) if age is not None else None,
             "streaming": age is not None and age < 15 and is_market_open(),
@@ -525,7 +526,11 @@ def live_symbol(symbol: str):
     symbol = _clean_symbol(symbol)
     tick, ind = tick_engine.latest(symbol)
     if not tick: raise HTTPException(404, f"{symbol} not subscribed")
-    return {"symbol": symbol, "ltp": tick.ltp, "bid": tick.bid, "ask": tick.ask,
+    if ind is None:                                 # market closed / first quote: price only
+        return {"symbol": symbol, "ltp": tick.ltp, "bid": tick.bid, "ask": tick.ask,
+                "spread": tick.ask - tick.bid, "volume": tick.volume, "indicators": None}
+    from tick_engine import json_safe as _json_safe
+    return _json_safe({"symbol": symbol, "ltp": tick.ltp, "bid": tick.bid, "ask": tick.ask,
             "spread": tick.ask - tick.bid, "volume": tick.volume,
             "indicators": {"ema9": round(ind.ema9,2), "ema21": round(ind.ema21,2),
                 "ema50": round(ind.ema50,2), "vwap": round(ind.vwap,2),
@@ -535,7 +540,7 @@ def live_symbol(symbol: str):
                 "bb_lower": round(ind.bb_lower,2), "atr_14": round(ind.atr_14,2),
                 "volume_ratio": round(ind.volume_ratio,2),
                 "trend": ind.trend, "momentum": ind.momentum, "volatility": ind.volatility},
-            "ts": tick.timestamp.isoformat()}
+            "ts": tick.timestamp.isoformat()})
 
 @app.get("/market/status", tags=["Market"])
 async def market_status():

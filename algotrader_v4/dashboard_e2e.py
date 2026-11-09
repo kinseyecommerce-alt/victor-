@@ -165,7 +165,7 @@ def main() -> int:
                   strat.count() == 1 and strat.locator("tbody tr").count() >= 1)
             row = strat.locator("tbody tr").first.inner_text() if strat.count() else ""
             check("Strategy row shows trades, win rate, net P&L and 'to judge' countdown",
-                  "%" in row and "₹" in row and ("judge" in row or "Active" in row), row[:120])
+                  "%" in row and "₹" in row and ("judge" in row or "Active" in row or "Pruned" in row), row[:120])
             check("Ledger has costs deducted (net ≠ gross)",
                   any(t["cost"] > 0 and t["net"] != t["gross"]
                       for t in api_get("/performance/trades?n=20")["trades"]))

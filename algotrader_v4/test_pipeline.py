@@ -1427,6 +1427,25 @@ run("EMA values are positive",                 t_te_indicator_ema)
 run("TickBuffer stores ticks",                 t_te_tick_buffer)
 run("TickEngine: warm watchlist needs Kite data + session, idempotent", t_te_warm_watchlist_only_with_kite_session)
 run("TickEngine: market-closed quote updates price, not candles", t_te_idle_tick_updates_price_but_not_candles)
+
+def t_te_nan_indicators_are_json_safe():
+    import json as _json, math as _m
+    from tick_engine import json_safe, LiveIndicators
+    assert json_safe({"a": float("nan"), "b": [1.0, float("inf")], "c": "x"}) == {"a": None, "b": [1.0, None], "c": "x"}
+    te = TickEngine()
+    te.subscribe([{"symbol": "TCS", "exchange": "NSE"}])
+    tick = Tick(symbol="TCS", ltp=3500.0, bid=3499.0, ask=3501.0, volume=10, change=0.0, change_pct=0.0,
+                high=3510.0, low=3490.0, open=3500.0, timestamp=datetime.now())
+    ind = LiveIndicators(symbol="TCS", ltp=3500.0, bid=3499.0, ask=3501.0, spread=2.0, day_high=3510.0,
+                         day_low=3490.0, day_open=3500.0, change_pct=0.0, computed_at=0.0)
+    ind.rsi_14 = float("nan"); ind.vwap = float("inf")          # what the first few real candles produce
+    te._latest_tick["TCS"] = tick; te._latest_ind["TCS"] = ind
+    out = te.all_latest()["TCS"]
+    _json.dumps(out)                                             # must not raise
+    assert out["rsi_14"] is None and out["vwap"] is None and out["ltp"] == 3500.0
+    _json.dumps(TickEngine._tick_payload("TCS", tick, ind, "KITE_WS"))
+
+run("TickEngine: NaN indicators never break JSON output",      t_te_nan_indicators_are_json_safe)
 run("add_subscriber() returns asyncio.Queue",  t_te_add_subscriber)
 
 # PAPER mode with real Kite prices (PAPER_DATA_SOURCE=KITE)
