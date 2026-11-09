@@ -177,11 +177,18 @@ class ReplayResult:
         return d
 
 
+def _trail_name(name: str) -> str:
+    return name.replace("_v2", "").replace("_legacy", "")
+
+
 def _agent(name: str, params: Optional[dict]):
     from agents.strategy_agents import IntradayAgent, ScalpingAgent, SwingAgent
-    cls = {"intraday": IntradayAgent, "scalping": ScalpingAgent, "swing": SwingAgent}.get(name)
+    from agents.intraday_v2 import IntradayV2Agent, ScalpV2Agent
+    cls = {"intraday": IntradayV2Agent, "scalping": ScalpV2Agent, "swing": SwingAgent,
+           "intraday_v2": IntradayV2Agent, "scalping_v2": ScalpV2Agent,            # aliases
+           "intraday_legacy": IntradayAgent, "scalping_legacy": ScalpingAgent}.get(name)
     if not cls:
-        raise ValueError(f"replay supports intraday, scalping, swing (not {name})")
+        raise ValueError(f"replay supports intraday, scalping, swing, intraday_legacy, scalping_legacy (not {name})")
     a = cls()
     for k, v in (params or {}).items():       # instance attrs shadow the class defaults
         if not hasattr(a, k):
@@ -321,8 +328,8 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
                 cap_q = int(settings.total_capital * settings.risk_per_trade_pct / 100 // max(abs(b["close"] - sig.get("stop_loss", b["close"] * 0.99)), 0.01))
                 qty = max(1, min(qty, cap_q))
                 pending = {"side": action, "qty": qty, "stop": float(sig.get("stop_loss") or 0) or
-                           (b["close"] * (1 - TRAIL_CONFIGS[name].initial_sl_pct / 100) if action == "BUY" else
-                            b["close"] * (1 + TRAIL_CONFIGS[name].initial_sl_pct / 100)),
+                           (b["close"] * (1 - TRAIL_CONFIGS[_trail_name(name)].initial_sl_pct / 100) if action == "BUY" else
+                            b["close"] * (1 + TRAIL_CONFIGS[_trail_name(name)].initial_sl_pct / 100)),
                            "target": float(sig.get("target") or 0) or None, "atr": ind.atr_14,
                            "signal": str(sig.get("trigger") or sig.get("pattern") or "")[:60]}
         if open_t:                                  # close whatever is left at the last bar

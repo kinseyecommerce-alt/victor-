@@ -1409,9 +1409,15 @@ class ScalpingAgent(BaseAgent):
 # Registry
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# The live intraday and scalping agents are the cost-aware rebuilds in agents/intraday_v2.py
+# (validated on real Kite 1-minute data; see that module's docstring). IntradayAgent and
+# ScalpingAgent above stay importable for the AI trader's pattern scout and for research
+# ("intraday_legacy" / "scalping_legacy" in the replay backtester).
+from agents.intraday_v2 import IntradayV2Agent, ScalpV2Agent   # noqa: E402  (imports this module lazily)
+
 ALL_AGENTS: dict[str, BaseAgent] = {
-    "intraday": IntradayAgent(),
+    "intraday": IntradayV2Agent(),
     "fno":      FnOAgent(),
     "swing":    SwingAgent(),
-    "scalping": ScalpingAgent(),
+    "scalping": ScalpV2Agent(),
 }

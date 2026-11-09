@@ -61,7 +61,8 @@ int(per_symbol_capital // ltp) = quantity
 |--------|------|
 | `config.py` | Pydantic `Settings` from `.env`; single `settings` singleton; all runtime config is mutable in-memory (no .env writes) |
 | `main.py` | FastAPI app, all REST endpoints; startup launches `tick_engine` and `symbol_scanner` |
-| `agents/strategy_agents.py` | All four strategy agents (`IntradayAgent`, `ScalpingAgent`, `SwingAgent`, `FnOAgent`); exported as `ALL_AGENTS` dict |
+| `agents/strategy_agents.py` | `SwingAgent`, `FnOAgent`, the legacy pattern agents (`IntradayAgent`, `ScalpingAgent`, research/AI-scout only) and the `ALL_AGENTS` registry |
+| `agents/intraday_v2.py` | The live `intraday` (opening-range breakout, 20-day trend filter, 2.5R) and `scalping` (opening-range retest, 1.5R) agents, validated on real Kite 1-minute bars via `replay_backtest.py` |
 | `agents/base_agent.py` | Async tick consumer base; trade lifecycle; TSL callback wiring in `_try_enter()` |
 | `master_agent_v5.py` | APScheduler jobs: 1-min Claude regime review, daily reset, nightly adaptive review, weekly backtest + memory synthesis |
 | `risk_manager.py` | Pre-order checks (daily loss, position count, size); `calculate_quantity(price, agent=)`; `max_capital_for_agent()` |

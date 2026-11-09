@@ -65,15 +65,19 @@ class TrailConfig:
 
 # Strategy trail configs
 TRAIL_CONFIGS: dict[str, TrailConfig] = {
+    # ScalpV2Agent (agents/intraday_v2.py) enters once per symbol per day with a structural stop at the
+    # opening-range midpoint and a 1.5R target, so it needs the same patient trail as the intraday
+    # agent. The old 0.8-ATR trail with breakeven at 0.15% was built for the retired tick scalper and,
+    # on 45 days of real bars, cut this strategy's gross profit to zero (+₹3,276 → ₹2).
     "scalping": TrailConfig(
-        initial_sl_pct  = 0.25,
-        trail_pct       = 0.15,
-        breakeven_pct   = 0.15,
-        activation_pct  = 0.30,
-        target1_pct     = 0.50,
-        target2_pct     = 0.80,
-        mode            = SLMode.ATR_TRAIL,
-        atr_multiplier  = 0.8,
+        initial_sl_pct  = 1.50,
+        trail_pct       = 0.50,
+        breakeven_pct   = 0.50,
+        activation_pct  = 1.00,
+        target1_pct     = 2.00,
+        target2_pct     = 3.50,
+        mode            = SLMode.TRAILING,
+        atr_multiplier  = 1.2,
     ),
     "intraday": TrailConfig(
         initial_sl_pct  = 1.50,
