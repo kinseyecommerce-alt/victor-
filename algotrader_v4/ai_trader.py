@@ -2127,6 +2127,30 @@ class AITrader:
         return {"status": "closed", "closed": [{"symbol": sid, "quantity": sp["qty"], "exit_value": round(value, 2),
                                                 "pnl": pnl}]}
 
+    @staticmethod
+    def _trail_spread(sp: dict, value: float) -> bool:
+        """Trailing stop for a credit spread. The stop is the cost to buy the spread back; as the
+        spread decays and more of the credit is earned, that stop only ever moves down:
+          earned ≥ 50% of the credit → stop at the credit received (break-even)
+          earned ≥ 70%               → stop at 60% of the credit (40% of it locked in)
+        Returns True when the stop moved."""
+        credit = sp["credit"]
+        if credit <= 0:
+            return False
+        earned = (credit - value) / credit
+        new_stop = None
+        if earned >= 0.70:
+            new_stop = round(credit * 0.60, 2)
+        elif earned >= 0.50:
+            new_stop = round(credit, 2)
+        if new_stop is not None and new_stop < sp["stop_value"]:
+            sp["stop_value"] = new_stop
+            sp["trail"] = "locked 40% of credit" if earned >= 0.70 else "break-even"
+            logger.info("[ai] spread {} stop → ₹{:.2f} ({}, spread now ₹{:.2f} of ₹{:.2f} credit)",
+                        sp["id"], new_stop, sp["trail"], value, credit)
+            return True
+        return False
+
     async def _watch_spreads(self, snap) -> None:
         """Stop, take-profit and risk alerts for open spreads, on index and leg ticks."""
         for sid, sp in list(self._spreads.items()):
@@ -2136,6 +2160,7 @@ class AITrader:
             spot = snap.tick.ltp if snap.symbol == INDEX_QUOTE[sp["underlying"]] else None
             v = self._spread_value(sp, spot)
             sp["value"] = round(v, 2)
+            self._trail_spread(sp, v)
             if v >= sp["stop_value"]:
                 async with self._action_lock:
                     if sid in self._spreads:

@@ -4087,6 +4087,36 @@ def t_ai_spread_stop_and_take_profit():
         assert ai.trades_today == 2
     _with_sell_env(body)
 
+def t_ai_spread_trailing_stop():
+    from ai_trader import AITrader as _AIT
+    sp = {"id": "T-BPS-1", "credit": 40.0, "stop_value": 80.0, "value": 40.0}
+    assert _AIT._trail_spread(sp, 30.0) is False and sp["stop_value"] == 80.0      # 25% earned: nothing
+    assert _AIT._trail_spread(sp, 20.0) is True and sp["stop_value"] == 40.0       # 50% earned: break-even
+    assert _AIT._trail_spread(sp, 25.0) is False and sp["stop_value"] == 40.0      # pullback: never loosens
+    assert _AIT._trail_spread(sp, 12.0) is True and sp["stop_value"] == 24.0       # 70% earned: 40% locked
+    assert _AIT._trail_spread(sp, 5.0) is False and sp["stop_value"] == 24.0
+    def body():
+        ai = _rt_ai()
+        try:
+            asyncio.run(ai._place_option_spread(_spread_args()))
+            sid, s0 = next(iter(ai._spreads.items()))
+            s0["target_value"] = 0.01                                 # keep the take-profit out of the way
+            stop0 = s0["stop_value"]
+            for px in (24300.0, 24400.0, 24500.0, 24600.0):           # rally: the puts decay
+                asyncio.run(ai._on_snap(_index_snap(px)))
+                if ai._spreads[sid].get("trail"):
+                    break
+            s1 = ai._spreads[sid]
+            assert s1.get("trail") and s1["stop_value"] <= s1["credit"] < stop0, s1
+            asyncio.run(ai._on_snap(_index_snap(23900.0)))            # gives it all back: trailed stop closes it
+            assert sid not in ai._spreads and any("stop: spread cost" in e["text"] for e in ai.log)
+        finally:
+            for sid in list(ai._spreads):
+                asyncio.run(ai._close_spread(sid, "test cleanup", by_code=True))
+            _og_x._cooldown_until.clear()
+            _index_snap(24000.0)
+    _with_sell_env(body)
+
 def t_ai_spread_closed_at_1500():
     def body():
         ai = _rt_ai()
@@ -4201,6 +4231,7 @@ run("Spreads: bull put — hedge first, defined loss, exit",  t_ai_bull_put_spre
 run("Spreads: bear call strikes above spot",                t_ai_bear_call_spread_strikes)
 run("Spreads: width/credit/lots/stop/target limits",        t_ai_spread_limits)
 run("Spreads: code stop and take-profit on index moves",    t_ai_spread_stop_and_take_profit)
+run("Spreads: trailing stop (break-even at 50%, lock 40% at 70%)", t_ai_spread_trailing_stop)
 run("Spreads: closed at 15:00",                             t_ai_spread_closed_at_1500)
 run("Swing put: NRML put + GTT, held, restored, closed",    t_ai_swing_put_lifecycle)
 run("Swing put: hard limits",                               t_ai_swing_put_limits)
