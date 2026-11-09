@@ -175,6 +175,13 @@ def main() -> int:
         page.click('[data-testid="open-trading"]')
         page.wait_for_selector('[data-testid="open-overview"]', timeout=10000)
         check("Switch to Trading view", True)
+        cs = page.locator('[data-testid="conn-status"]')
+        check("Connection status icons (Kite, Claude, Data, Socket) in the Trading header",
+              cs.count() == 1 and all(page.locator(f'[data-testid="conn-{k}"]').count() == 1 for k in ("kite", "claude", "data", "ws")))
+        conn = api_get("/status/connections")
+        check("/status/connections reports kite, claude and data states",
+              {"kite", "claude", "data"} <= set(conn) and conn["claude"]["state"] in
+              ("ok", "untested", "no_key", "bad_key", "billing", "rate_limited", "error"))
 
         # ── The user's path: admin login only, no API key in the browser ─────
         # ADMIN_PASSWORD (env) lets the suite sign in the way a person does and prove that this

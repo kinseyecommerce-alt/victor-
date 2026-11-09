@@ -4,6 +4,7 @@ import { clsx } from 'clsx'
 import { Activity, Bot, Brain, CandlestickChart, Play, Square, ShieldCheck } from 'lucide-react'
 import { api } from '../../api/client'
 import { useStore } from '../../store'
+import ConnectionStatus from '../ConnectionStatus'
 import {
   ActivityFeed, AgentOrb, AnimatedNumber, DashSummary, KpiCard, LossGauge, PnlChart, PositionCard,
   ScoreboardPanel, StrategyTable, TickerTape, inr,
@@ -74,6 +75,7 @@ export default function Overview({ onOpenTrading }: { onOpenTrading: () => void 
             {data?.market_open ? 'Market open' : 'Market closed'}
           </span>
           <span className="hidden md:inline px-2 py-1 rounded-lg bg-white/5 border border-white/10">Regime: {data?.regime ?? '—'}</span>
+          <ConnectionStatus dark onClick={onOpenTrading} />
         </div>
 
         <div className="ml-auto flex items-center gap-2">

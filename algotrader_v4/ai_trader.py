@@ -362,6 +362,14 @@ TOOLS: list[dict] = [
 ]
 
 
+def _api_error_detail(exc) -> str:
+    """Anthropic's own message from an APIStatusError body, or ''."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        return str((body.get("error") or {}).get("message") or "")
+    return ""
+
+
 class AITrader:
     def __init__(self) -> None:
         self.enabled: bool = False                     # autonomous cycles on/off
@@ -398,6 +406,8 @@ class AITrader:
         # AI-managed trailing: entry order id → {risk, milestone, last_review, best_at_review}
         self._trail: dict[str, dict] = {}
         self._ai_errors = 0                            # consecutive Claude API failures
+        self._last_api_error: Optional[dict] = None    # {"code", "message", "at"} of the latest failure
+        self._last_api_ok: Optional[str] = None        # IST time of the latest successful call
         # Swing (delivery) positions: entry order id → {opened, hold_until, reason, initial_risk}
         self._swing_meta: dict[str, dict] = {}
         self._swing_scan_day: Optional[date] = None
@@ -568,18 +578,27 @@ class AITrader:
                 response = await self._create(messages, effort)
             except anthropic.RateLimitError:
                 self._ai_errors += 1
+                self._note_api_error(429, "rate limit")
                 return "Claude API rate limit hit — try again shortly."
             except anthropic.AuthenticationError:
                 self._ai_errors += 1
+                self._note_api_error(401, "API key rejected")
                 return "Claude API key was rejected."
             except anthropic.APIStatusError as exc:
                 self._ai_errors += 1
                 logger.error("[ai] API error {}: {}", exc.status_code, exc.message)
-                return f"Claude API error ({exc.status_code})."
+                self._note_api_error(exc.status_code, _api_error_detail(exc) or exc.message)
+                # surface Anthropic's own explanation (e.g. "credit balance is too low") — a bare
+                # status code sends people hunting through server logs
+                detail = _api_error_detail(exc)
+                return f"Claude API error ({exc.status_code}): {detail[:200]}" if detail else f"Claude API error ({exc.status_code})."
             except anthropic.APIConnectionError:
                 self._ai_errors += 1
+                self._note_api_error(0, "could not reach the Claude API")
                 return "Could not reach the Claude API."
             self._ai_errors = 0
+            self._last_api_error = None
+            self._last_api_ok = now_ist().isoformat(timespec="seconds")
             self._track_usage(response)
 
             # Keep every block (thinking, fallback, tool_use) — required for valid history
@@ -616,6 +635,31 @@ class AITrader:
 
         self._record("error", f"{purpose}: step limit ({settings.ai_agent_max_steps}) reached")
         return "Stopped: reached the tool-step limit for this turn."
+
+    def _note_api_error(self, code: int, message: str) -> None:
+        self._last_api_error = {"code": code, "message": str(message)[:300],
+                                "at": now_ist().isoformat(timespec="seconds")}
+
+    def api_health(self) -> dict:
+        """Claude API connection state for the dashboard's status icons (no API call is made)."""
+        if not settings.anthropic_api_key:
+            return {"state": "no_key", "detail": "Anthropic API key not set", "model": settings.ai_agent_model}
+        err = self._last_api_error
+        if err:
+            msg = err["message"].lower()
+            if "credit" in msg or "billing" in msg or "balance" in msg:
+                state, detail = "billing", "No Anthropic credits — add credits under Plans & Billing"
+            elif err["code"] == 401:
+                state, detail = "bad_key", "Anthropic rejected the API key"
+            elif err["code"] == 429:
+                state, detail = "rate_limited", "Claude API rate limit — retrying"
+            else:
+                state, detail = "error", err["message"]
+            return {"state": state, "detail": detail, "model": settings.ai_agent_model, "at": err["at"],
+                    "consecutive_errors": self._ai_errors}
+        if self._last_api_ok:
+            return {"state": "ok", "detail": "Claude API working", "model": settings.ai_agent_model, "at": self._last_api_ok}
+        return {"state": "untested", "detail": "Key saved — no Claude call made yet", "model": settings.ai_agent_model}
 
     def _track_usage(self, response) -> None:
         u = response.usage

@@ -134,6 +134,7 @@ export const api = {
     persist?: boolean
   }) => ax().post('/settings/credentials', data),
   credentialsStatus: () => ax().get('/settings/credentials/status'),
+  connections: () => ax().get('/status/connections'),
   deleteCredentials: (fields: string[]) => ax().delete('/settings/credentials', { data: { fields } }),
   kiteLoginUrl: () => ax().get('/auth/login-url'),
   kiteStatus: () => ax().get('/auth/kite/status'),
