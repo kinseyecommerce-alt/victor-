@@ -168,6 +168,42 @@ def main() -> int:
         page.click('[data-testid="open-trading"]')
         page.wait_for_selector('[data-testid="open-overview"]', timeout=10000)
         check("Switch to Trading view", True)
+
+        # ── The user's path: admin login only, no API key in the browser ─────
+        # ADMIN_PASSWORD (env) lets the suite sign in the way a person does and prove that this
+        # alone authorises a credential save. Without it the check is skipped, not failed.
+        admin_pw = os.getenv("ADMIN_PASSWORD", "")
+        if admin_pw:
+            r = requests.post(f"{API}/auth/login", data={"username": os.getenv("ADMIN_USERNAME", "admin"),
+                                                         "password": admin_pw}, timeout=30)
+            check("Admin login returns a session token", r.status_code == 200 and "access_token" in r.json(), r.text[:120])
+            jwt = r.json().get("access_token", "")
+            ctx2 = browser.new_context(viewport={"width": 1280, "height": 800})
+            p2 = ctx2.new_page()
+            p2.add_init_script(f"localStorage.removeItem('api_key'); localStorage.setItem('jwtToken', {json.dumps(jwt)}); "
+                               "localStorage.setItem('username','admin')")
+            p2.goto(DASH, wait_until="networkidle")
+            p2.wait_for_selector('[data-testid="kpis"]', timeout=20000)
+            status = p2.evaluate("""async () => {
+                const r = await fetch('/api/settings/credentials/status', {headers: {Authorization: 'Bearer ' + localStorage.getItem('jwtToken')}});
+                return r.status }""")
+            check("Signed-in browser (JWT only, no API key) can read the vault status", status == 200, f"HTTP {status}")
+            p2.click('[data-testid="open-trading"]')                      # Settings lives in the Trading view header
+            p2.wait_for_selector('[data-testid="open-overview"]', timeout=10000)
+            p2.locator("header button:has(svg.lucide-settings)").first.click()
+            check("Connection tab shows 'Signed in as admin'", "Signed in as" in p2.locator('[data-testid="session-state"]').inner_text())
+            p2.get_by_role("button", name="API Keys").click()
+            p2.wait_for_timeout(800)
+            p2.locator("input[placeholder='Leave blank to keep current']").nth(5).fill("sk-ant-jwt-only-save-QQ77")
+            p2.get_by_role("button", name="Save Credentials").click()
+            p2.wait_for_timeout(1500)
+            check("Signed-in browser saves a credential with the login alone (no X-API-Key)",
+                  p2.get_by_text("Saved …QQ77").count() == 1, p2.inner_text("body")[-300:])
+            requests.delete(f"{API}/settings/credentials", json={"fields": ["anthropic_api_key"]},
+                            headers={"Authorization": f"Bearer {jwt}"}, timeout=30)
+            ctx2.close()
+        else:
+            print("     (ADMIN_PASSWORD not set — signed-in-browser checks skipped)")
         page.screenshot(path=os.path.join(SHOTS, "trading_view.png"))
 
         # ── Settings → API Keys: encrypted vault UI ──────────────────────────

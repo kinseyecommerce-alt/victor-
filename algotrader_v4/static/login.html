@@ -272,8 +272,11 @@
 
         localStorage.setItem('jwtToken', data.access_token);
         localStorage.setItem('username', username);
-        setLoginStatus('ok', `Welcome, ${username}! Expires in ${data.expires_in / 3600}h`);
+        setLoginStatus('ok', `Welcome, ${username}! Opening the dashboard…`);
         showToken(data.access_token);
+        // the dashboard reads the token from localStorage; go there (or back where we came from)
+        const next = new URLSearchParams(location.search).get('next') || '/dashboard';
+        setTimeout(() => { location.href = next.startsWith('/') ? next : '/dashboard'; }, 600);
       } catch (e) {
         setLoginStatus('err', e.message);
       } finally {

@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { Activity, Wifi, WifiOff, Settings, Zap, ZapOff, Eye, EyeOff, Lock, ExternalLink } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useStore } from '../../store'
-import { api } from '../../api/client'
+import { api, getJwt, getUsername, signOut } from '../../api/client'
 import { Badge, Btn, Modal, Input } from '../ui'
 
 type SettingsTab = 'connection' | 'apikeys' | 'applogin'
@@ -350,8 +350,14 @@ export default function Header() {
                 placeholder="http://localhost:8000"
               />
             </div>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700 flex items-center justify-between gap-2" data-testid="session-state">
+              {getJwt()
+                ? <span>Signed in as <b>{getUsername() || 'admin'}</b> — that login is all the dashboard needs.</span>
+                : <span className="text-amber-700">Not signed in. <a className="underline" href="/login?next=/dashboard">Log in</a> or enter the API key below.</span>}
+              {getJwt() && <Btn size="sm" variant="outline" onClick={signOut}>Sign out</Btn>}
+            </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">X-API-Key</label>
+              <label className="block text-sm font-medium text-slate-700 mb-1">X-API-Key <span className="font-normal text-slate-400">(optional — for scripts or a browser without the login)</span></label>
               <Input
                 type="password"
                 value={tempKey}

@@ -1,28 +1,52 @@
-import axios from 'axios'
+import axios, { AxiosInstance } from 'axios'
 import { useStore } from '../store'
 
-const getConfig = () => {
-  const { apiBase, apiKey } = useStore.getState()
-  return { base: apiBase, key: apiKey }
+// Two ways to be authorised, either is enough:
+//   • the admin login on /login, which stores a JWT in localStorage ('jwtToken') — the normal path
+//   • an X-API-Key from Settings → Connection — for a machine or a second browser
+export const getJwt = (): string => {
+  try { return localStorage.getItem('jwtToken') || '' } catch { return '' }
+}
+export const getUsername = (): string => {
+  try { return localStorage.getItem('username') || '' } catch { return '' }
+}
+export const signOut = () => {
+  try { localStorage.removeItem('jwtToken'); localStorage.removeItem('username') } catch { /* private mode */ }
+  window.location.href = '/login'
+}
+
+const authHeaders = (key: string): Record<string, string> => {
+  const h: Record<string, string> = {}
+  if (key) h['X-API-Key'] = key
+  const jwt = getJwt()
+  if (jwt) h['Authorization'] = `Bearer ${jwt}`
+  return h
+}
+
+let redirecting = false
+const withAuthHandling = (inst: AxiosInstance): AxiosInstance => {
+  inst.interceptors.response.use(undefined, (err) => {
+    // 401 with nothing valid to offer → the session expired or there never was one: go and log in.
+    // (The Kite status call returns 401-free JSON, so only real auth failures land here.)
+    if (err?.response?.status === 401 && !redirecting && !useStore.getState().apiKey) {
+      redirecting = true
+      try { localStorage.removeItem('jwtToken') } catch { /* ignore */ }
+      window.location.href = '/login?next=/dashboard'
+    }
+    return Promise.reject(err)
+  })
+  return inst
 }
 
 const ax = () => {
-  const { base, key } = getConfig()
-  return axios.create({
-    baseURL: base,
-    headers: key ? { 'X-API-Key': key } : {},
-    timeout: 10000,
-  })
+  const { apiBase, apiKey } = useStore.getState()
+  return withAuthHandling(axios.create({ baseURL: apiBase, headers: authHeaders(apiKey), timeout: 10000 }))
 }
 
 // Agent calls run a multi-step Claude loop — allow minutes, not seconds
 const axLong = () => {
-  const { base, key } = getConfig()
-  return axios.create({
-    baseURL: base,
-    headers: key ? { 'X-API-Key': key } : {},
-    timeout: 300000,
-  })
+  const { apiBase, apiKey } = useStore.getState()
+  return withAuthHandling(axios.create({ baseURL: apiBase, headers: authHeaders(apiKey), timeout: 300000 }))
 }
 
 export const api = {
