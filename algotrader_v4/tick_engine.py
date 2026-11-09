@@ -819,34 +819,40 @@ class TickEngine:
 
         if self.ws_broadcast:
             try:
-                await self.ws_broadcast({
-                    "event":      "tick",
-                    "symbol":     symbol,
-                    "ltp":        tick.ltp,
-                    "bid":        tick.bid,
-                    "ask":        tick.ask,
-                    "change_pct": round(tick.change_pct, 2),
-                    "volume":     tick.volume,
-                    "day_high":   tick.high,
-                    "day_low":    tick.low,
-                    "trend":      ind.trend,
-                    "momentum":   ind.momentum,
-                    "volatility": ind.volatility,
-                    "rsi":        round(ind.rsi_14, 1),
-                    "vwap":       round(ind.vwap, 2),
-                    "ema9":       round(ind.ema9,  2),
-                    "ema21":      round(ind.ema21, 2),
-                    "macd_hist":  round(ind.macd_hist, 4),
-                    "vol_ratio":   round(ind.volume_ratio, 2),
-                    "supertrend":  ind.supertrend_dir,
-                    "squeeze_on":  ind.squeeze_on,
-                    "stoch_rsi_k": ind.stoch_rsi_k,
-                    "williams_r":  ind.williams_r,
-                    "source":     source,
-                    "ts":         tick.timestamp.isoformat(),
-                })
+                await self.ws_broadcast(self._tick_payload(symbol, tick, ind, source))
             except Exception:
                 pass
+
+    @staticmethod
+    def _tick_payload(symbol: str, tick: Tick, ind: Optional[LiveIndicators], source: str) -> dict:
+        """The 'tick' event the dashboard consumes. Without indicators (market closed, no session
+        candles yet) the indicator fields are neutral so the UI never sees undefined."""
+        return {
+            "event":      "tick",
+            "symbol":     symbol,
+            "ltp":        tick.ltp,
+            "bid":        tick.bid,
+            "ask":        tick.ask,
+            "change_pct": round(tick.change_pct, 2),
+            "volume":     tick.volume,
+            "day_high":   tick.high,
+            "day_low":    tick.low,
+            "trend":      ind.trend if ind else "FLAT",
+            "momentum":   ind.momentum if ind else "NEUTRAL",
+            "volatility": ind.volatility if ind else "NORMAL",
+            "rsi":        round(ind.rsi_14, 1) if ind else 50.0,
+            "vwap":       round(ind.vwap, 2) if ind else tick.ltp,
+            "ema9":       round(ind.ema9,  2) if ind else tick.ltp,
+            "ema21":      round(ind.ema21, 2) if ind else tick.ltp,
+            "macd_hist":  round(ind.macd_hist, 4) if ind else 0.0,
+            "vol_ratio":   round(ind.volume_ratio, 2) if ind else 1.0,
+            "supertrend":  ind.supertrend_dir if ind else "FLAT",
+            "squeeze_on":  ind.squeeze_on if ind else False,
+            "stoch_rsi_k": ind.stoch_rsi_k if ind else 50.0,
+            "williams_r":  ind.williams_r if ind else -50.0,
+            "source":     source,
+            "ts":         tick.timestamp.isoformat(),
+        }
 
     # ── KiteConnect WebSocket ingest ──────────────────────────────────
 
@@ -867,7 +873,10 @@ class TickEngine:
             t_start = time.monotonic()
 
             if not is_market_open() and settings.uses_kite_market_data:
-                await asyncio.sleep(30)
+                # Market closed: no candles or signals, but keep the last traded prices fresh so the
+                # dashboard shows real numbers (Kite's quote() answers after hours too)
+                await self._fetch_kite_batch(idle=True)
+                await asyncio.sleep(60)
                 continue
 
             if settings.uses_kite_market_data:
@@ -886,13 +895,17 @@ class TickEngine:
         tick  = Tick.from_quote(quote)
         await self._process_tick(symbol, tick, source="PAPER")
 
-    async def _fetch_kite_batch(self) -> None:
-        """Single Kite quote() call for all non-WebSocket symbols (LIVE, or PAPER with Kite data)."""
+    async def _fetch_kite_batch(self, idle: bool = False) -> None:
+        """Single Kite quote() call for all non-WebSocket symbols (LIVE, or PAPER with Kite data).
+        idle=True (market closed): update the displayed prices only — nothing goes into the candle
+        buffers or to the strategy agents."""
         # Poll over REST for symbols the WebSocket isn't covering — including all of
         # them while the socket is disconnected (otherwise they'd go stale)
         ws_live = self._use_ws and getattr(self._kite_ticker, "is_connected", True)
         pending = [s for s in self._symbols
-                   if not (ws_live and s in self._ws_received)]
+                   if idle or not (ws_live and s in self._ws_received)]
+        if not kite_client.has_session():
+            return
         if not pending:
             return
         instruments = [f"{self._exchange.get(s, 'NSE')}:{s}" for s in pending]
@@ -914,7 +927,59 @@ class TickEngine:
                 continue
             quote = _kite_quote_to_quote(sym, data)
             tick  = Tick.from_quote(quote)
-            await self._process_tick(sym, tick, source="KITE_REST")
+            if idle:
+                await self._process_idle_tick(sym, tick)
+            else:
+                await self._process_tick(sym, tick, source="KITE_REST")
+
+    async def _process_idle_tick(self, symbol: str, tick: Tick) -> None:
+        """Market closed: remember and broadcast the last traded price without building candles
+        (flat overnight bars would poison tomorrow's indicators) and without waking the agents."""
+        self._latest_tick[symbol] = tick
+        if self.ws_broadcast:
+            try:
+                await self.ws_broadcast(self._tick_payload(symbol, tick, self._latest_ind.get(symbol), "KITE_CLOSE"))
+            except Exception:
+                pass
+
+    # ── Warm start: prices on the dashboard before the bot runs ─────────
+
+    def default_watchlist(self) -> list[dict]:
+        if settings.auto_start_watchlist:
+            syms = [x.strip() for x in settings.auto_start_watchlist.split(",") if x.strip()]
+        else:
+            from symbol_scanner import NIFTY_50
+            syms = NIFTY_50[:20]
+        return [{"symbol": x, "exchange": "NSE"} for x in syms]
+
+    def warm_watchlist(self, reason: str = "") -> int:
+        """With Kite data and a Kite session, subscribe the default watchlist when nothing is
+        subscribed yet, so the Watchlist shows real prices before the bot is started. Returns how
+        many symbols were added."""
+        if not settings.uses_kite_market_data or self._symbols or not kite_client.has_session():
+            return 0
+        wl = self.default_watchlist()
+        self.subscribe(wl)
+        logger.info("TickEngine: warm watchlist of {} symbols ({})", len(wl), reason or "startup")
+        return len(wl)
+
+    def on_kite_login(self) -> None:
+        """Called after a Kite login (manual or automatic), possibly from another thread: make sure
+        symbols are subscribed, restart the WebSocket with the fresh token and refresh prices now."""
+        def _apply() -> None:
+            try:
+                if not self._running:
+                    self.start_loop()
+                self.warm_watchlist("kite login")
+                if self._symbols:
+                    self._start_ws()
+                    asyncio.ensure_future(self._fetch_kite_batch(idle=not is_market_open()))
+            except Exception as exc:
+                logger.warning("TickEngine: post-login refresh failed: {}", exc)
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(_apply)
+        else:
+            _apply()
 
     # ── Query helpers ─────────────────────────────────────────────────
 
@@ -926,6 +991,15 @@ class TickEngine:
         for sym in self._latest_tick:
             tick = self._latest_tick[sym]
             ind  = self._latest_ind.get(sym)
+            if tick and not ind:
+                # last traded price only (market closed / first quote) — the chart tab fills in later
+                result[sym] = {"ltp": tick.ltp, "bid": tick.bid, "ask": tick.ask,
+                               "change_pct": round(tick.change_pct, 2), "day_high": tick.high, "day_low": tick.low,
+                               "trend": "FLAT", "momentum": "NEUTRAL", "volatility": "NORMAL", "rsi_14": 50.0,
+                               "vwap": tick.ltp, "ema9": tick.ltp, "ema21": tick.ltp, "macd_hist": 0.0, "vol_ratio": 1.0,
+                               "source": "NSE" if settings.uses_kite_market_data else "PAPER", "indicators": False,
+                               "ts": tick.timestamp.isoformat()}
+                continue
             if tick and ind:
                 result[sym] = {
                     "ltp":        tick.ltp,

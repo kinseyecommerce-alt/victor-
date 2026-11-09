@@ -926,6 +926,7 @@ def _remember_kite_token(token: str) -> None:
         secret_store.save({"kite_access_token": token})
     except Exception as e:
         logger.warning("Kite token not saved to vault: {}", e)
+    tick_engine.on_kite_login()
 
 
 @app.post("/settings/app-password", tags=["Settings"])
@@ -1703,6 +1704,10 @@ async def on_startup():
         asyncio.create_task(kronos_forecast.refresher())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
+    try:
+        tick_engine.warm_watchlist("startup")   # real prices on the dashboard before Start Bot
+    except Exception as exc:
+        logger.warning("Warm watchlist failed: {}", exc)
 
 
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware

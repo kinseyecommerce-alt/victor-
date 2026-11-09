@@ -135,6 +135,11 @@ def run_kite_auto_login(remember: bool = True) -> str:
                 logger.warning("[kite_login] token not saved to vault: {}", exc)
         _state.update(last_success=now_ist().isoformat(timespec="seconds"), last_error=None)
         logger.info("[kite_login] Kite access token refreshed automatically ({}…)", token[:6])
+        try:
+            from tick_engine import tick_engine
+            tick_engine.on_kite_login()           # subscribe the watchlist / restart the WebSocket
+        except Exception as exc:
+            logger.warning("[kite_login] tick engine refresh failed: {}", exc)
         return token
     except Exception as exc:
         _state["last_error"] = str(exc)

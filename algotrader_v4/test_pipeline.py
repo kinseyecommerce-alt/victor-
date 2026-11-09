@@ -1338,6 +1338,42 @@ def t_te_subscribe():
     syms = te.symbols()
     assert "RELIANCE" in syms and "TCS" in syms
 
+def t_te_warm_watchlist_only_with_kite_session():
+    import tick_engine as _tem
+    from config import settings as _st
+    te = TickEngine()
+    prev_mode, prev_src = _st.trading_mode, _st.paper_data_source
+    prev_has = _tem.kite_client.has_session
+    try:
+        _st.trading_mode, _st.paper_data_source = "PAPER", "SIM"
+        assert te.warm_watchlist() == 0 and te.symbols() == []            # simulator: nothing to warm
+        _st.paper_data_source = "KITE"
+        _tem.kite_client.has_session = lambda: False
+        assert te.warm_watchlist() == 0, "no Kite session → no subscription"
+        _tem.kite_client.has_session = lambda: True
+        n = te.warm_watchlist("test")
+        assert n == 20 and "RELIANCE" in te.symbols()
+        assert te.warm_watchlist() == 0, "already subscribed → idempotent"
+    finally:
+        _st.trading_mode, _st.paper_data_source = prev_mode, prev_src
+        _tem.kite_client.has_session = prev_has
+
+def t_te_idle_tick_updates_price_but_not_candles():
+    te = TickEngine()
+    te.subscribe([{"symbol": "RELIANCE", "exchange": "NSE"}])
+    sent = []
+    async def bc(msg): sent.append(msg)
+    te.ws_broadcast = bc
+    tick = Tick(symbol="RELIANCE", ltp=2500.0, bid=2499.5, ask=2500.5, volume=1, change=10.0, change_pct=0.4,
+                high=2510.0, low=2480.0, open=2490.0, timestamp=datetime.now())
+    asyncio.run(te._process_idle_tick("RELIANCE", tick))
+    assert te.latest("RELIANCE")[0].ltp == 2500.0
+    assert te._bufs_1min["RELIANCE"].candles() == [], "market-closed quotes must not build candles"
+    live = te.all_latest()["RELIANCE"]
+    assert live["ltp"] == 2500.0 and live["indicators"] is False and live["rsi_14"] == 50.0
+    assert sent and sent[0]["event"] == "tick" and sent[0]["ema9"] == 2500.0 and sent[0]["source"] == "KITE_CLOSE"
+    assert all(isinstance(sent[0][k], (int, float)) for k in ("rsi", "vwap", "ema9", "ema21", "macd_hist", "vol_ratio"))
+
 def t_te_indicator_calc():
     tick = Tick(symbol="TEST", ltp=101.0, bid=100.9, ask=101.1,
                 volume=50000, change=0.0, change_pct=0.0,
@@ -1389,6 +1425,8 @@ run("IndicatorCalc.compute() returns indicators",t_te_indicator_calc)
 run("RSI in [0,100]",                          t_te_indicator_calc)
 run("EMA values are positive",                 t_te_indicator_ema)
 run("TickBuffer stores ticks",                 t_te_tick_buffer)
+run("TickEngine: warm watchlist needs Kite data + session, idempotent", t_te_warm_watchlist_only_with_kite_session)
+run("TickEngine: market-closed quote updates price, not candles", t_te_idle_tick_updates_price_but_not_candles)
 run("add_subscriber() returns asyncio.Queue",  t_te_add_subscriber)
 
 # PAPER mode with real Kite prices (PAPER_DATA_SOURCE=KITE)

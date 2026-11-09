@@ -95,7 +95,7 @@ export default function Watchlist() {
       <div className="flex flex-col items-center justify-center h-full text-slate-400 p-4 text-center">
         <div className="text-4xl mb-2">📊</div>
         <div className="text-sm font-medium">No symbols</div>
-        <div className="text-xs mt-1">Start the bot to subscribe symbols</div>
+        <div className="text-xs mt-1">Connect Kite (Settings → API Keys) or start the bot</div>
       </div>
     )
   }

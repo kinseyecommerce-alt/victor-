@@ -205,7 +205,8 @@ class MasterAgent:
 
     async def stop(self) -> None:
         self.running = False
-        tick_engine.stop()
+        # the tick engine keeps running: agents are stopped below, so nothing trades, but the
+        # dashboard keeps showing live prices and the WebSocket stays warm for the next start
         for a in ALL_AGENTS.values():
             a.stop()
         try:
