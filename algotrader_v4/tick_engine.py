@@ -19,6 +19,7 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -620,6 +621,18 @@ def _kite_quote_to_quote(symbol: str, data: dict) -> Quote:
     )
 
 
+def json_safe(obj):
+    """Replace NaN/±inf floats (indicators on too few candles) with None, recursively, so a
+    dashboard payload or API response never fails JSON encoding."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
 # ── Tick Engine ───────────────────────────────────────────────────────────────
 
 class TickEngine:
@@ -827,7 +840,7 @@ class TickEngine:
     def _tick_payload(symbol: str, tick: Tick, ind: Optional[LiveIndicators], source: str) -> dict:
         """The 'tick' event the dashboard consumes. Without indicators (market closed, no session
         candles yet) the indicator fields are neutral so the UI never sees undefined."""
-        return {
+        return json_safe({
             "event":      "tick",
             "symbol":     symbol,
             "ltp":        tick.ltp,
@@ -852,13 +865,16 @@ class TickEngine:
             "williams_r":  ind.williams_r if ind else -50.0,
             "source":     source,
             "ts":         tick.timestamp.isoformat(),
-        }
+        })
 
     # ── KiteConnect WebSocket ingest ──────────────────────────────────
 
     async def _ingest_kite_tick(self, symbol: str, tick: Tick) -> None:
         """Process a tick received directly from KiteConnect WebSocket."""
         self._ws_received.add(symbol)
+        if not is_market_open():
+            await self._process_idle_tick(symbol, tick)      # after-hours snapshot: price only
+            return
         await self._process_tick(symbol, tick, source="KITE_WS")
 
     # ── Main poll loop ────────────────────────────────────────────────
@@ -1043,7 +1059,7 @@ class TickEngine:
                     "ichimoku_cloud_bot": ind.ichimoku_cloud_bot,
                     "ts":             tick.timestamp.isoformat(),
                 }
-        return result
+        return json_safe(result)
 
     def symbols(self) -> list[str]:
         return list(self._symbols)
