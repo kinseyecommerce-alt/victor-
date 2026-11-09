@@ -374,7 +374,7 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
     if status != "success" or not request_token:
         return HTMLResponse(
             "<h2 style='font-family:sans-serif;color:#f85149'>Kite login failed or cancelled.</h2>"
-            "<p><a href='/login'>← Back to login</a></p>",
+            "<p><a href='/dashboard'>← Back to the dashboard</a> (Settings → API Keys → Log in with Zerodha)</p>",
             status_code=400,
         )
     try:
@@ -388,15 +388,17 @@ def kite_callback(request_token: str = "", action: str = "", status: str = ""):
             <div style="font-size:3rem">✅</div>
             <h2 style="color:#3fb950">Kite Connected!</h2>
             <p style="color:#8b949e">Token: {token[:8]}…</p>
-            <p style="margin-top:16px"><a href="/login" style="color:#58a6ff">Back to dashboard</a></p>
+            <p style="color:#8b949e">You can close this tab — the dashboard picks the session up by itself.</p>
+            <p style="margin-top:16px"><a href="/dashboard" style="color:#58a6ff">Back to the dashboard</a></p>
           </div>
+          <script>setTimeout(function () {{ try {{ window.close(); }} catch (e) {{}} }}, 2500);</script>
         </body></html>
         """)
     except Exception as e:
         logger.error("Kite callback error: {}", e)
         return HTMLResponse(
             "<h2 style='font-family:sans-serif;color:#f85149'>Token exchange failed.</h2>"
-            "<p><a href='/login'>← Try again</a></p>",
+            "<p><a href='/dashboard'>← Back to the dashboard and try again</a></p>",
             status_code=500,
         )
 

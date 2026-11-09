@@ -182,7 +182,7 @@
         Dashboard Login
         <span class="badge badge-blue">JWT</span>
       </div>
-      <p class="card-desc">Access the trading dashboard and API</p>
+      <p class="card-desc">Sign in to open the trading dashboard. Zerodha Kite is connected from the dashboard: Settings → API Keys.</p>
 
       <label for="username">Username</label>
       <input id="username" type="text" placeholder="admin" autocomplete="username"/>
@@ -197,37 +197,6 @@
       <div class="token-row" id="token-display"></div>
     </div>
 
-    <!-- ── Panel 2: Kite OAuth ────────────────────────────────── -->
-    <div class="card">
-      <div class="card-title">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="#3fb950">
-          <path d="M2 2h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zm1 3v7h10V5H3zm2 2h6v1H5V7zm0 2h4v1H5V9z"/>
-        </svg>
-        Zerodha Kite
-        <span class="badge badge-green">Broker</span>
-      </div>
-      <p class="card-desc">Connect your Kite account to place live orders</p>
-
-      <div class="kite-status">
-        <div class="dot" id="kite-dot" style="background:#d29922"></div>
-        <span id="kite-status-text">Checking connection…</span>
-      </div>
-
-      <button class="btn btn-green" id="kite-btn" onclick="doKiteLogin()">
-        Connect Kite Account
-      </button>
-
-      <hr class="divider"/>
-
-      <label for="manual-token">Paste Access Token (optional)</label>
-      <input id="manual-token" type="text" placeholder="kite access token"/>
-      <button class="btn btn-blue" onclick="setManualToken()" style="margin-top:-6px">
-        Set Token
-      </button>
-
-      <div class="status" id="kite-msg"></div>
-    </div>
-
   </div>
 
   <script>
@@ -239,13 +208,13 @@
       if (stored) {
         const ok = await validateToken(stored);
         if (ok) {
-          setLoginStatus('ok', `Signed in as ${localStorage.getItem('username') || 'admin'}`);
-          showToken(stored);
+          setLoginStatus('ok', `Signed in as ${localStorage.getItem('username') || 'admin'} — opening the dashboard…`);
+          const next = new URLSearchParams(location.search).get('next') || '/dashboard';
+          setTimeout(() => { location.href = next.startsWith('/') ? next : '/dashboard'; }, 400);
         } else {
           localStorage.removeItem('jwtToken');
         }
       }
-      checkKiteStatus();
     });
 
     // ── App login ────────────────────────────────────────────────
@@ -300,64 +269,6 @@
       el.innerHTML = `<b>Bearer token</b> (copy for API calls):<br>${token.slice(0, 40)}…`;
     }
 
-    // ── Kite OAuth ───────────────────────────────────────────────
-    async function doKiteLogin() {
-      const btn = document.getElementById('kite-btn');
-      btn.disabled = true;
-      setKiteMsg('info', 'Fetching Kite login URL…');
-      try {
-        const headers = authHeaders();
-        const res = await fetch(`${BASE}/auth/login-url`, { headers });
-        const data = await res.json();
-        if (!data.login_url) throw new Error('No login URL returned');
-        setKiteMsg('info', 'Opening Kite login…');
-        window.open(data.login_url, '_blank');
-        setKiteMsg('ok', 'Complete login in the Kite tab. Token will auto-capture on callback.');
-      } catch (e) {
-        setKiteMsg('err', e.message);
-      } finally {
-        btn.disabled = false;
-      }
-    }
-
-    async function setManualToken() {
-      const token = document.getElementById('manual-token').value.trim();
-      if (!token) { setKiteMsg('err', 'Paste an access token first'); return; }
-      setKiteMsg('info', 'Setting token…');
-      try {
-        const res = await fetch(`${BASE}/auth/token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ access_token: token }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Failed');
-        setKiteMsg('ok', 'Kite token set — broker connected');
-        checkKiteStatus();
-      } catch (e) {
-        setKiteMsg('err', e.message);
-      }
-    }
-
-    async function checkKiteStatus() {
-      try {
-        const res = await fetch(`${BASE}/auth/kite/status`, { headers: authHeaders() });
-        const data = await res.json();
-        const dot = document.getElementById('kite-dot');
-        const txt = document.getElementById('kite-status-text');
-        if (data.connected) {
-          dot.className = 'dot dot-green';
-          txt.textContent = `Connected — ${data.account_id || 'Kite'}`;
-        } else {
-          dot.className = 'dot dot-red';
-          txt.textContent = data.message || 'Not connected';
-        }
-      } catch {
-        document.getElementById('kite-status-text').textContent = 'Unable to reach server';
-      }
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────
     function authHeaders() {
       const jwt = localStorage.getItem('jwtToken');
       const apiKey = localStorage.getItem('apiKey') || '';
@@ -369,12 +280,6 @@
 
     function setLoginStatus(type, msg) {
       const el = document.getElementById('login-status');
-      el.className = `status ${type}`;
-      el.textContent = msg;
-    }
-
-    function setKiteMsg(type, msg) {
-      const el = document.getElementById('kite-msg');
       el.className = `status ${type}`;
       el.textContent = msg;
     }
