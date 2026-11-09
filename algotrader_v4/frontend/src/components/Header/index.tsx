@@ -526,7 +526,7 @@ export default function Header() {
                 </button>
               </div>
             </div>
-            <p className="text-xs text-slate-400">In-memory only — restart reverts to environment variables.</p>
+            <p className="text-xs text-slate-400">Saved encrypted on this server (bcrypt hash) — it survives restarts and redeploys and overrides the environment value.</p>
             <div className="flex gap-2 pt-1">
               <Btn onClick={handleSaveAppPassword} disabled={appSaving}>
                 {appSaving ? 'Saving…' : 'Update Login'}

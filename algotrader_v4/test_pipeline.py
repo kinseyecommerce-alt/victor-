@@ -5452,6 +5452,30 @@ run("dashboard auth: admin JWT alone saves credentials",      t_auth_jwt_alone_i
 run("dashboard auth: a bad JWT is refused",                   t_auth_bad_jwt_rejected)
 run("dashboard auth: WebSocket accepts JWT or API key only",  t_auth_websocket_accepts_jwt_or_api_key_only)
 
+def t_auth_password_change_persists_in_vault():
+    import main as _main, secret_store as _ss
+    from auth import verify_password as _vp
+    v = _vault()
+    prev_store, prev_hash, prev_user = _ss.secret_store, _ai_settings.admin_password_hash, _ai_settings.admin_username
+    _ss.secret_store = v
+    prev_key = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+    try:
+        c = TestClient(_main.app)
+        r = c.post("/settings/app-password", json={"new_password": "brand-new-pass-1"}, headers=H)
+        assert r.status_code == 200 and r.json()["persisted"] is True, r.text
+        stored = v.load()
+        assert _vp("brand-new-pass-1", stored["admin_password_hash"]) and stored["admin_username"] == _ai_settings.admin_username
+        assert b"brand-new" not in v.vault.read_bytes()
+        # a fresh process applies the vault over the environment value
+        class S: admin_password_hash = "from-env"; admin_username = "admin"
+        s2 = S(); _vault_apply(s2, v)
+        assert _vp("brand-new-pass-1", s2.admin_password_hash)
+    finally:
+        _ss.secret_store = prev_store
+        _ai_settings.admin_password_hash, _ai_settings.admin_username, _ai_settings.api_key = prev_hash, prev_user, prev_key
+
+run("dashboard auth: password change survives a restart (vault)", t_auth_password_change_persists_in_vault)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
