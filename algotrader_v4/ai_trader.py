@@ -47,6 +47,7 @@ import anthropic
 from loguru import logger
 
 from config import settings
+from llm_provider import ProviderError
 from ist_clock import is_market_open, now_ist
 from kite_client import kite_client
 from order_guard import order_guard
@@ -90,12 +91,7 @@ SWING_FILE = Path(os.getenv("AI_SWING_FILE") or Path(__file__).resolve().parent 
 
 # Per-MTok prices for spend tracking (Anthropic first-party rates, 2026-10).
 # Unknown models are costed at Opus 5.5 rates.
-_PRICES = {
-    "claude-opus-5-5":   {"in": 4.00,  "out": 20.0, "cache_read": 0.20, "cache_write": 5.00},
-    "claude-sonnet-5-5": {"in": 2.00,  "out": 10.0, "cache_read": 0.20, "cache_write": 2.50},
-    "claude-haiku-5-5":  {"in": 0.10,  "out": 0.50, "cache_read": 0.01, "cache_write": 0.125},
-    "claude-fable-5-1":  {"in": 10.00, "out": 50.0, "cache_read": 0.25, "cache_write": 12.50},
-}
+from llm_provider import PRICES as _PRICES      # per-model USD prices live with the providers
 # Models that accept the server-side refusal fallback (`fallbacks: "default"`)
 _FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 
@@ -481,7 +477,8 @@ class AITrader:
             "avg_decision_ms":   int(sum(self._latencies) / len(self._latencies)) if self._latencies else None,
             "last_alert":        self.last_event,
             "limits":            self._limits(),
-            "api_key_set":       bool(settings.anthropic_api_key),
+            "api_key_set":       bool(settings.anthropic_api_key or settings.openai_api_key),
+            "ai_provider":       self.api_health().get("active") or settings.ai_provider_primary,
         }
 
     # ── Autonomous cycle ──────────────────────────────────────────────────
@@ -510,7 +507,7 @@ class AITrader:
             self._record("system", f"daily API cost cap ${settings.ai_agent_max_daily_cost_usd:.2f} "
                                    "reached — no more cycles today")
             return None
-        if not settings.anthropic_api_key:
+        if not (settings.anthropic_api_key or settings.openai_api_key):
             self._record("error", "ANTHROPIC_API_KEY not set — cycle skipped")
             return None
         if self._cycle_lock.locked():
@@ -529,7 +526,7 @@ class AITrader:
     # ── Chat ──────────────────────────────────────────────────────────────
 
     async def chat(self, message: str, conversation_id: Optional[str] = None) -> dict:
-        if not settings.anthropic_api_key:
+        if not (settings.anthropic_api_key or settings.openai_api_key):
             return {"conversation_id": conversation_id, "reply": "ANTHROPIC_API_KEY is not set on the server.",
                     "actions": []}
         if self.cost_today_usd >= settings.ai_agent_max_daily_cost_usd:
@@ -555,47 +552,33 @@ class AITrader:
         return self._client
 
     async def _create(self, messages: list, effort: Optional[str] = None):
-        kwargs: dict[str, Any] = dict(
-            model=settings.ai_agent_model,
-            max_tokens=16000,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
-            output_config={"effort": effort or settings.ai_agent_effort},
-            cache_control={"type": "ephemeral"},     # caches tools + system + history prefix
-        )
-        client = self._get_client()
-        if settings.ai_agent_model in _FALLBACK_MODELS:
-            # Server-side refusal fallback: a declined request is re-run on a fallback model
-            return await client.beta.messages.create(
-                betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
-        return await client.messages.create(**kwargs)
+        from llm_provider import llm_router, AnthropicProvider
+        kwargs = dict(messages=messages, system=SYSTEM_PROMPT, tools=TOOLS, max_tokens=16000,
+                      effort=effort or settings.ai_agent_effort)
+        if self._client is not None:            # an injected Anthropic client (tests) bypasses the router
+            prov = AnthropicProvider(); prov._client = self._client
+            return await prov.create(**kwargs)
+        return await llm_router.create(**kwargs)
 
     async def _run_agent(self, messages: list, purpose: str, effort: Optional[str] = None) -> str:
         """Manual tool-use loop, capped at ai_agent_max_steps model calls."""
         for _ in range(max(1, settings.ai_agent_max_steps)):
             try:
                 response = await self._create(messages, effort)
-            except anthropic.RateLimitError:
+            except ProviderError as exc:
                 self._ai_errors += 1
-                self._note_api_error(429, "rate limit")
-                return "Claude API rate limit hit — try again shortly."
-            except anthropic.AuthenticationError:
-                self._ai_errors += 1
-                self._note_api_error(401, "API key rejected")
-                return "Claude API key was rejected."
-            except anthropic.APIStatusError as exc:
-                self._ai_errors += 1
-                logger.error("[ai] API error {}: {}", exc.status_code, exc.message)
-                self._note_api_error(exc.status_code, _api_error_detail(exc) or exc.message)
-                # surface Anthropic's own explanation (e.g. "credit balance is too low") — a bare
-                # status code sends people hunting through server logs
-                detail = _api_error_detail(exc)
-                return f"Claude API error ({exc.status_code}): {detail[:200]}" if detail else f"Claude API error ({exc.status_code})."
-            except anthropic.APIConnectionError:
-                self._ai_errors += 1
-                self._note_api_error(0, "could not reach the Claude API")
-                return "Could not reach the Claude API."
+                self._note_api_error(exc.code, f"{exc.provider}: {exc.message}")
+                if exc.kind == "no_key":
+                    return "No AI provider key is set — add an Anthropic or OpenAI key under Settings → API Keys."
+                if exc.kind == "rate_limited":
+                    return "AI API rate limit hit on every provider — try again shortly."
+                if exc.kind == "bad_key":
+                    return f"The {exc.provider} API key was rejected."
+                if exc.kind == "billing":
+                    return f"{exc.provider}: {exc.message[:200]}"
+                if exc.kind == "connection":
+                    return "Could not reach any AI provider."
+                return f"AI API error ({exc.provider} {exc.code}): {exc.message[:200]}"
             self._ai_errors = 0
             self._last_api_error = None
             self._last_api_ok = now_ist().isoformat(timespec="seconds")
@@ -641,29 +624,16 @@ class AITrader:
                                 "at": now_ist().isoformat(timespec="seconds")}
 
     def api_health(self) -> dict:
-        """Claude API connection state for the dashboard's status icons (no API call is made)."""
-        if not settings.anthropic_api_key:
-            return {"state": "no_key", "detail": "Anthropic API key not set", "model": settings.ai_agent_model}
-        err = self._last_api_error
-        if err:
-            msg = err["message"].lower()
-            if "credit" in msg or "billing" in msg or "balance" in msg:
-                state, detail = "billing", "No Anthropic credits — add credits under Plans & Billing"
-            elif err["code"] == 401:
-                state, detail = "bad_key", "Anthropic rejected the API key"
-            elif err["code"] == 429:
-                state, detail = "rate_limited", "Claude API rate limit — retrying"
-            else:
-                state, detail = "error", err["message"]
-            return {"state": state, "detail": detail, "model": settings.ai_agent_model, "at": err["at"],
-                    "consecutive_errors": self._ai_errors}
-        if self._last_api_ok:
-            return {"state": "ok", "detail": "Claude API working", "model": settings.ai_agent_model, "at": self._last_api_ok}
-        return {"state": "untested", "detail": "Key saved — no Claude call made yet", "model": settings.ai_agent_model}
+        """AI provider state for the dashboard's status icons (no API call is made)."""
+        from llm_provider import llm_router
+        st = llm_router.status()
+        st["consecutive_errors"] = self._ai_errors
+        return st
 
     def _track_usage(self, response) -> None:
+        from llm_provider import price_for
         u = response.usage
-        p = _PRICES.get(settings.ai_agent_model, _PRICES["claude-opus-5-5"])
+        p = price_for(getattr(response, "model", None) or settings.ai_agent_model)
         inp   = getattr(u, "input_tokens", 0) or 0
         out   = getattr(u, "output_tokens", 0) or 0
         cr    = getattr(u, "cache_read_input_tokens", 0) or 0

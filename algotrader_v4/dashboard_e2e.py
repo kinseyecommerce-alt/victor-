@@ -230,6 +230,8 @@ def main() -> int:
         check("API Keys tab: 'Remember on this server (encrypted)' toggle",
               page.get_by_text("Remember on this server").count() == 1)
         auto = page.locator('[data-testid="kite-auto-login"]')
+        check("API Keys tab: Anthropic + OpenAI keys with automatic failover note",
+              page.get_by_text("OpenAI API Key").count() == 1 and page.locator('[data-testid="ai-provider-note"]').count() == 1)
         check("API Keys tab: automatic daily login panel (user ID, password, TOTP seed, 'Log in now')",
               auto.count() == 1 and "TOTP" in auto.inner_text() and auto.get_by_role("button", name="Log in now").count() == 1)
         al = api_get("/auth/kite/auto-login/status")

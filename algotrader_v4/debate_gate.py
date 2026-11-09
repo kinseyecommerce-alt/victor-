@@ -68,17 +68,20 @@ async def review(proposal: dict, context: Optional[dict] = None, client=None) ->
     "enforced": bool, "reason": str}. A failed call never blocks: enforced=False, proceed=True."""
     if not settings.ai_agent_debate_enabled:
         return {"proceed": True, "confidence": None, "size_factor": 1.0, "enforced": False, "reason": "debate disabled"}
-    from ai_trader import ai_trader, _FALLBACK_MODELS
+    from ai_trader import ai_trader
+    from llm_provider import llm_router
     try:
-        client = client or ai_trader._get_client()
-        kwargs = dict(model=settings.ai_agent_model, max_tokens=1200, system=SYSTEM, tools=[VERDICT_TOOL],
+        kwargs = dict(max_tokens=1200, system=SYSTEM, tools=[VERDICT_TOOL],
                       tool_choice={"type": "tool", "name": "debate_verdict"},
                       messages=[{"role": "user", "content": "PROPOSED TRADE AND EVIDENCE\n" + _summ(proposal, context)}],
+                      effort=settings.ai_agent_debate_effort)
+        if client is not None:                       # tests pass an Anthropic-style client directly
+            kw = dict(model=settings.ai_agent_model, max_tokens=1200, system=SYSTEM, tools=[VERDICT_TOOL],
+                      tool_choice=kwargs["tool_choice"], messages=kwargs["messages"],
                       output_config={"effort": settings.ai_agent_debate_effort})
-        if settings.ai_agent_model in _FALLBACK_MODELS:
-            resp = await client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
+            resp = await client.messages.create(**kw)
         else:
-            resp = await client.messages.create(**kwargs)
+            resp = await llm_router.create(**kwargs)
         try:
             ai_trader._track_usage(resp)
         except Exception:

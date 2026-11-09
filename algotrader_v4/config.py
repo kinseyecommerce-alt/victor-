@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # not left to the model. It trades NSE equities intraday (MIS) only.
     ai_agent_model:               str   = "claude-opus-5-5"
     ai_agent_effort:              Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # Two AI providers: the primary answers; if it cannot (no credits, bad key, rate limit, outage)
+    # the same request is retried on the other one. Keys live in the vault (Settings → API Keys).
+    ai_provider_primary:          Literal["anthropic", "openai"] = "anthropic"
+    ai_provider_failover:         bool  = True
+    openai_api_key:               str   = ""
+    openai_model:                 str   = "gpt-4.1"   # any chat-completions model with tool calling
     ai_agent_interval_min:        int   = 15       # minutes between full portfolio reviews (0 = off)
     ai_agent_allow_live:          bool  = False    # must be True for the AI to trade when TRADING_MODE=LIVE
     ai_agent_max_trades_per_day:  int   = 5

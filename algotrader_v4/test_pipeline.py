@@ -5557,24 +5557,190 @@ def t_connection_status_endpoint():
     assert set(d) >= {"kite", "claude", "data", "ws_clients", "bot_running", "mode"}
     assert d["claude"]["state"] in ("ok", "untested", "no_key", "bad_key", "billing", "rate_limited", "error")
     assert "source" in d["data"] and "streaming" in d["data"]
-    # Claude health reflects the last API outcome without calling the API
-    prev_key, prev_err, prev_ok = _ai_settings.anthropic_api_key, _ait._last_api_error, _ait._last_api_ok
+    # AI health reflects the providers' last outcomes without calling any API
+    from llm_provider import llm_router as _rt
+    prev_key, prev_okey = _ai_settings.anthropic_api_key, _ai_settings.openai_api_key
+    prev_health, prev_used = dict(_rt.health), _rt.last_used
     try:
-        _ai_settings.anthropic_api_key = ""
+        _ai_settings.anthropic_api_key = ""; _ai_settings.openai_api_key = ""
         assert _ait.api_health()["state"] == "no_key"
         _ai_settings.anthropic_api_key = "sk-test"
-        _ait._last_api_error = None; _ait._last_api_ok = None
+        for n in _rt.health: _rt.health[n] = {"state": "untested", "detail": "no call made yet", "at": None}
+        _rt.last_used = None
         assert _ait.api_health()["state"] == "untested"
-        _ait._note_api_error(400, "Your credit balance is too low to access the Anthropic API.")
-        h = _ait.api_health(); assert h["state"] == "billing" and "credits" in h["detail"]
-        _ait._note_api_error(401, "invalid x-api-key")
-        assert _ait.api_health()["state"] == "bad_key"
-        _ait._last_api_error = None; _ait._last_api_ok = "2026-01-01T10:00:00"
-        assert _ait.api_health()["state"] == "ok"
+        _rt._mark("anthropic", "billing", "Your credit balance is too low to access the Anthropic API.")
+        h = _ait.api_health(); assert h["state"] == "billing" and "no credits" in h["detail"], h
+        _ai_settings.openai_api_key = "sk-openai"                  # a second key → a healthy route exists
+        assert _ait.api_health()["state"] == "untested"
+        _rt._mark("openai", "ok", "gpt-4.1 responding"); _rt.last_used = "openai"
+        h = _ait.api_health(); assert h["state"] == "ok" and "fallback" in h["detail"], h
     finally:
-        _ai_settings.anthropic_api_key, _ait._last_api_error, _ait._last_api_ok = prev_key, prev_err, prev_ok
+        _ai_settings.anthropic_api_key, _ai_settings.openai_api_key = prev_key, prev_okey
+        _rt.health.update(prev_health); _rt.last_used = prev_used
 
 run("status: /status/connections + Claude health states",     t_connection_status_endpoint)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("22. TWO AI PROVIDERS: OPENAI ADAPTER + AUTOMATIC FAILOVER")
+# ══════════════════════════════════════════════════════════════════════════
+import httpx as _hx2
+import llm_provider as _lp
+
+def _openai_mock(handler):
+    """OpenAIProvider wired to a fake chat-completions server."""
+    return _lp.OpenAIProvider(http_client=_hx2.AsyncClient(transport=_hx2.MockTransport(handler)))
+
+def _oa_reply(content=None, tool_calls=None, finish="stop", model="gpt-4.1"):
+    msg = {"role": "assistant", "content": content}
+    if tool_calls: msg["tool_calls"] = tool_calls
+    return _hx2.Response(200, json={"id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": model,
+                                    "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
+                                    "usage": {"prompt_tokens": 120, "completion_tokens": 30,
+                                              "prompt_tokens_details": {"cached_tokens": 20}}})
+
+def _with_providers(fn, anth="", oai="sk-oai"):
+    prev = (_ai_settings.anthropic_api_key, _ai_settings.openai_api_key, _ai_settings.ai_provider_primary, _ai_settings.ai_provider_failover)
+    _ai_settings.anthropic_api_key, _ai_settings.openai_api_key = anth, oai
+    try:
+        fn()
+    finally:
+        (_ai_settings.anthropic_api_key, _ai_settings.openai_api_key, _ai_settings.ai_provider_primary, _ai_settings.ai_provider_failover) = prev
+
+def t_lp_history_translation():
+    hist = [{"role": "user", "content": "scan the market"},
+            {"role": "assistant", "content": [_lp.Block(type="text", text="Checking."),
+                                              _lp.Block(type="thinking", thinking="…"),
+                                              _lp.Block(type="tool_use", id="call_1", name="get_market_overview", input={})]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "{\"nifty\": 24000}"}]}]
+    out = _lp.to_openai_messages("SYS", hist)
+    assert out[0] == {"role": "system", "content": "SYS"} and out[1] == {"role": "user", "content": "scan the market"}
+    a = out[2]; assert a["role"] == "assistant" and a["content"] == "Checking." and a["tool_calls"][0]["id"] == "call_1"
+    assert a["tool_calls"][0]["function"]["name"] == "get_market_overview" and a["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert out[3] == {"role": "tool", "tool_call_id": "call_1", "content": "{\"nifty\": 24000}"}
+    tools = _lp.to_openai_tools([{"name": "place_trade", "description": "d", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}}}])
+    assert tools[0]["function"]["parameters"]["properties"]["symbol"]["type"] == "string"
+    import json as _j; _j.dumps(hist[1]["content"])            # Blocks stay JSON-serialisable for the Anthropic SDK
+
+def t_lp_openai_tool_call_round_trip():
+    seen = {}
+    def handler(req):
+        seen["body"] = _j_loads(req.content); seen["auth"] = req.headers.get("authorization")
+        return _oa_reply(content=None, finish="tool_calls", tool_calls=[{"id": "call_9", "type": "function",
+                         "function": {"name": "get_symbol_detail", "arguments": "{\"symbol\": \"TCS\"}"}}])
+    def body():
+        prov = _openai_mock(handler)
+        resp = asyncio.run(prov.create(messages=[{"role": "user", "content": "hi"}], system="S",
+                                       tools=[{"name": "get_symbol_detail", "description": "", "input_schema": {"type": "object", "properties": {}}}],
+                                       max_tokens=500, effort="low"))
+        assert resp.provider == "openai" and resp.stop_reason == "tool_use"
+        b = resp.content[0]; assert b.type == "tool_use" and b.name == "get_symbol_detail" and b.input == {"symbol": "TCS"} and b.id == "call_9"
+        assert resp.usage.input_tokens == 100 and resp.usage.cache_read_input_tokens == 20 and resp.usage.output_tokens == 30
+        assert seen["auth"] == "Bearer sk-oai" and seen["body"]["tools"][0]["function"]["name"] == "get_symbol_detail"
+        assert "reasoning_effort" not in seen["body"], "gpt-4.1 takes no reasoning_effort"
+    _with_providers(body)
+
+import json as _json_mod
+def _j_loads(b): return _json_mod.loads(b.decode() if isinstance(b, bytes) else b)
+
+def t_lp_failover_anthropic_billing_to_openai():
+    class _BrokeAnthropic(_lp.AnthropicProvider):
+        async def create(self, **kw):
+            raise _lp.ProviderError("anthropic", "billing", "Your credit balance is too low to access the Anthropic API.", 400, True)
+    def body():
+        router = _lp.LLMRouter(_BrokeAnthropic(), _openai_mock(lambda r: _oa_reply(content="All quiet, no trade.")))
+        _ai_settings.ai_provider_primary, _ai_settings.ai_provider_failover = "anthropic", True
+        resp = asyncio.run(router.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=100))
+        assert resp.provider == "openai" and resp.content[0].text == "All quiet, no trade." and resp.stop_reason == "end_turn"
+        st = router.status()
+        assert st["state"] == "ok" and "fallback" in st["detail"] and st["providers"]["anthropic"]["state"] == "billing"
+        assert router.failovers == 1 and st["active"] == "openai"
+        # failover switched off → the primary's error surfaces
+        _ai_settings.ai_provider_failover = False
+        try:
+            asyncio.run(router.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=100)); assert False
+        except _lp.ProviderError as e:
+            assert e.kind == "billing" and e.provider == "anthropic"
+    _with_providers(body, anth="sk-ant", oai="sk-oai")
+
+def t_lp_invalid_request_is_not_retried_elsewhere():
+    class _Bad(_lp.AnthropicProvider):
+        async def create(self, **kw):
+            raise _lp.ProviderError("anthropic", "invalid_request", "messages: unexpected field", 400, False)
+    calls = []
+    def body():
+        router = _lp.LLMRouter(_Bad(), _openai_mock(lambda r: (calls.append(1), _oa_reply(content="x"))[1]))
+        _ai_settings.ai_provider_primary, _ai_settings.ai_provider_failover = "anthropic", True
+        try:
+            asyncio.run(router.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=100)); assert False
+        except _lp.ProviderError as e:
+            assert e.kind == "invalid_request" and not calls, "a malformed request must not be re-sent to OpenAI"
+    _with_providers(body, anth="sk-ant", oai="sk-oai")
+
+def t_lp_no_keys_and_openai_primary():
+    def body_none():
+        router = _lp.LLMRouter()
+        try:
+            asyncio.run(router.create(messages=[], system="S", tools=[], max_tokens=10)); assert False
+        except _lp.ProviderError as e:
+            assert e.kind == "no_key"
+        assert router.status()["state"] == "no_key"
+    _with_providers(body_none, anth="", oai="")
+    def body_oai():
+        _ai_settings.ai_provider_primary = "openai"
+        router = _lp.LLMRouter(_lp.AnthropicProvider(), _openai_mock(lambda r: _oa_reply(content="ok")))
+        resp = asyncio.run(router.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=10))
+        assert resp.provider == "openai" and router.status()["providers"]["openai"]["role"] == "primary"
+        assert router.status()["providers"]["anthropic"]["role"] == "fallback"
+    _with_providers(body_oai, anth="sk-ant", oai="sk-oai")
+
+def t_lp_openai_errors_classified():
+    def handler_quota(req):
+        return _hx2.Response(429, json={"error": {"message": "You exceeded your current quota, please check your plan and billing details.", "type": "insufficient_quota", "code": "insufficient_quota"}})
+    def body():
+        prov = _openai_mock(handler_quota)
+        try:
+            asyncio.run(prov.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=10)); assert False
+        except _lp.ProviderError as e:
+            assert e.kind == "billing" and e.failover, (e.kind, e.message)
+        prov2 = _openai_mock(lambda r: _hx2.Response(401, json={"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}}))
+        try:
+            asyncio.run(prov2.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=10)); assert False
+        except _lp.ProviderError as e:
+            assert e.kind == "bad_key"
+    _with_providers(body)
+
+def t_lp_debate_gate_via_openai():
+    import debate_gate as _dg
+    def handler(req):
+        body = _j_loads(req.content)
+        assert body["tool_choice"] == {"type": "function", "function": {"name": "debate_verdict"}}
+        return _oa_reply(finish="tool_calls", tool_calls=[{"id": "c1", "type": "function", "function": {"name": "debate_verdict",
+            "arguments": _json_mod.dumps({"proceed": False, "confidence": 0.8, "size_factor": 0.5, "bear_case": "RSI 78, into resistance",
+                                          "bull_rebuttal": "momentum", "key_risk": "reversal"})}}])
+    def body():
+        prev_router = _lp.llm_router
+        _lp.llm_router = _lp.LLMRouter(_lp.AnthropicProvider(), _openai_mock(handler))
+        prev_en = _ai_settings.ai_agent_debate_enabled; _ai_settings.ai_agent_debate_enabled = True
+        try:
+            v = asyncio.run(_dg.review({"kind": "equity", "symbol": "TCS", "side": "BUY", "quantity": 5, "price": 3500.0}))
+            assert v["enforced"] and v["proceed"] is False and "bear case won" in v["reason"] and "RSI 78" in v["reason"], v
+        finally:
+            _lp.llm_router = prev_router; _ai_settings.ai_agent_debate_enabled = prev_en
+    _with_providers(body, anth="", oai="sk-oai")
+
+def t_lp_prices():
+    assert _lp.price_for("gpt-4.1")["in"] == 2.0 and _lp.price_for("gpt-4.1-2025-04-14")["in"] == 2.0
+    assert _lp.price_for("claude-opus-5-5")["out"] == 20.0 and _lp.price_for("something-new")["in"] == 2.0
+
+run("providers: Anthropic-shaped history → OpenAI messages/tools", t_lp_history_translation)
+run("providers: OpenAI tool call → tool_use block, usage, headers", t_lp_openai_tool_call_round_trip)
+run("providers: Anthropic out of credits → OpenAI answers (failover)", t_lp_failover_anthropic_billing_to_openai)
+run("providers: a malformed request is not retried on the other provider", t_lp_invalid_request_is_not_retried_elsewhere)
+run("providers: no keys → clear error; OpenAI can be primary",  t_lp_no_keys_and_openai_primary)
+run("providers: OpenAI quota/401 errors classified for failover", t_lp_openai_errors_classified)
+run("providers: debate gate verdict via OpenAI",                 t_lp_debate_gate_via_openai)
+run("providers: per-model prices incl. dated snapshots",         t_lp_prices)
 
 
 # ══════════════════════════════════════════════════════════════════════════

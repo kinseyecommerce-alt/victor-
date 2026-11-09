@@ -23,7 +23,7 @@ export default function Header() {
   const [credForm, setCredForm] = useState({
     kite_api_key: '', kite_api_secret: '',
     kite_user_id: '', kite_password: '', kite_totp_secret: '',
-    anthropic_api_key: '',
+    anthropic_api_key: '', openai_api_key: '',
     truedata_username: '', truedata_password: '',
   })
   // Automatic daily Zerodha login (user ID + password + TOTP seed in the vault)
@@ -67,6 +67,7 @@ export default function Header() {
       kite_password:     c.kite_password     ?? false,
       kite_totp_secret:  c.kite_totp_secret  ?? false,
       anthropic_api_key: c.anthropic_api_key ?? false,
+      openai_api_key:    c.openai_api_key    ?? false,
       truedata_username: c.truedata_username ?? false,
       truedata_password: c.truedata_password ?? false,
     })
@@ -133,6 +134,7 @@ export default function Header() {
           kite_api_key:      r.data.kite_api_key      ?? false,
           kite_api_secret:   r.data.kite_api_secret   ?? false,
           anthropic_api_key: r.data.anthropic_api_key ?? false,
+          openai_api_key:    r.data.openai_api_key    ?? false,
           truedata_username: r.data.truedata_username ?? false,
           truedata_password: r.data.truedata_password ?? false,
         })
@@ -168,6 +170,7 @@ export default function Header() {
     if (credForm.kite_password.trim())     payload.kite_password     = credForm.kite_password.trim()
     if (credForm.kite_totp_secret.trim())  payload.kite_totp_secret  = credForm.kite_totp_secret.trim()
     if (credForm.anthropic_api_key.trim()) payload.anthropic_api_key = credForm.anthropic_api_key.trim()
+    if (credForm.openai_api_key.trim())    payload.openai_api_key    = credForm.openai_api_key.trim()
     if (credForm.truedata_username.trim()) payload.truedata_username = credForm.truedata_username.trim()
     if (credForm.truedata_password.trim()) payload.truedata_password = credForm.truedata_password.trim()
     if (!Object.keys(payload).length) { addToast('No credentials entered', 'info'); return }
@@ -175,7 +178,7 @@ export default function Header() {
     try {
       const r = await api.updateCredentials({ ...payload, persist: remember })
       applyCredStatus(r.data.credentials ?? {}, r.data.vault)
-      setCredForm({ kite_api_key: '', kite_api_secret: '', kite_user_id: '', kite_password: '', kite_totp_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
+      setCredForm({ kite_api_key: '', kite_api_secret: '', kite_user_id: '', kite_password: '', kite_totp_secret: '', anthropic_api_key: '', openai_api_key: '', truedata_username: '', truedata_password: '' })
       setShowFields({})
       addToast(remember ? 'Saved — encrypted on the server' : 'Updated until the server restarts', 'buy')
     } catch (e: any) {
@@ -321,7 +324,7 @@ export default function Header() {
         onClick={() => {
           setTempKey(apiKey); setTempBase(apiBase)
           setSettingsTab('connection')
-          setCredForm({ kite_api_key: '', kite_api_secret: '', kite_user_id: '', kite_password: '', kite_totp_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
+          setCredForm({ kite_api_key: '', kite_api_secret: '', kite_user_id: '', kite_password: '', kite_totp_secret: '', anthropic_api_key: '', openai_api_key: '', truedata_username: '', truedata_password: '' })
           setShowFields({})
           setAppLoginForm({ username: '', new_password: '', confirm_password: '' })
           setShowAppFields({})
@@ -448,8 +451,15 @@ export default function Header() {
               </div>
             </div>
             <div>
-              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Claude AI (Anthropic)</p>
-              {credField('Anthropic API Key', 'anthropic_api_key')}
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">AI models</p>
+              <div className="space-y-3">
+                {credField('Anthropic API Key (Claude)', 'anthropic_api_key')}
+                {credField('OpenAI API Key', 'openai_api_key')}
+              </div>
+              <p className="mt-2 text-xs text-slate-500" data-testid="ai-provider-note">
+                Either key is enough. With both, Claude is primary and OpenAI takes over automatically when
+                Claude is unavailable (no credits, rate limit, outage) — and back again when it recovers.
+              </p>
             </div>
             <div>
               <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">TrueData</p>
