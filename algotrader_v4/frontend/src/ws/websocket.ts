@@ -1,12 +1,14 @@
 import { useStore } from '../store'
 import type { TickData } from '../types'
+import { getJwt } from '../api/client'
 
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
 export function connectWS() {
-  const { apiBase, apiKey, setWsConnected, setTick, addToast } = useStore.getState()
+  const { apiBase, apiKey: storedKey, setWsConnected, setTick, addToast } = useStore.getState()
   if (ws && ws.readyState === WebSocket.OPEN) return
+  const apiKey = storedKey || getJwt()          // the server accepts either as ?token=
 
   // Derive WebSocket URL — supports both absolute (http://host) and relative (/api) apiBase
   let url: string

@@ -905,8 +905,10 @@ def update_app_password(req: AppPasswordRequest):
 async def ws_endpoint(ws: WebSocket):
     token = ws.query_params.get("token", "")
     if settings.api_key and token != settings.api_key:
-        await ws.close(code=4001, reason="Unauthorized")
-        return
+        # the browser dashboard authenticates with the admin login's JWT instead of the API key
+        if not (settings.jwt_secret_key and token and decode_token(token)):
+            await ws.close(code=4001, reason="Unauthorized")
+            return
     if len(ws_clients) >= _MAX_WS_CONNECTIONS:
         await ws.close(code=4002, reason="Too many connections")
         return

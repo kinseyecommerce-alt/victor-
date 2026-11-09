@@ -5391,6 +5391,69 @@ run("auto-login: not needed without credentials",             t_kal_needed_now_f
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("21. DASHBOARD AUTH: ADMIN LOGIN (JWT) IS ENOUGH, API KEY OPTIONAL")
+# ══════════════════════════════════════════════════════════════════════════
+from auth import create_token as _mk_jwt
+
+def _auth_env(fn):
+    import main as _main
+    prev_key, prev_jwt = _ai_settings.api_key, _ai_settings.jwt_secret_key
+    _ai_settings.api_key = "server-api-key"; _ai_settings.jwt_secret_key = "x" * 40
+    try:
+        fn(TestClient(_main.app))
+    finally:
+        _ai_settings.api_key, _ai_settings.jwt_secret_key = prev_key, prev_jwt
+
+def t_auth_post_needs_credentials():
+    def body(c):
+        r = c.post("/settings/credentials", json={"anthropic_api_key": "sk-x", "persist": False})
+        assert r.status_code == 401 and "X-API-Key or Bearer" in r.json()["detail"]
+    _auth_env(body)
+
+def t_auth_jwt_alone_is_enough_for_a_save():
+    def body(c):
+        tok, _ = _mk_jwt("admin")
+        prev = _ai_settings.anthropic_api_key
+        try:
+            r = c.post("/settings/credentials", json={"anthropic_api_key": "sk-from-jwt", "persist": False},
+                       headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code == 200, r.text
+            assert _ai_settings.anthropic_api_key == "sk-from-jwt"
+            r = c.get("/settings/credentials/status", headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code == 200 and r.json()["credentials"]["anthropic_api_key"] is True
+        finally:
+            _ai_settings.anthropic_api_key = prev
+    _auth_env(body)
+
+def t_auth_bad_jwt_rejected():
+    def body(c):
+        r = c.post("/settings/credentials", json={"anthropic_api_key": "sk-x", "persist": False},
+                   headers={"Authorization": "Bearer not.a.token"})
+        assert r.status_code == 401
+    _auth_env(body)
+
+def t_auth_websocket_accepts_jwt_or_api_key_only():
+    def body(c):
+        tok, _ = _mk_jwt("admin")
+        with c.websocket_connect(f"/ws?token={tok}") as ws:
+            ws.send_text("ping")                                   # accepted: no close frame
+        with c.websocket_connect("/ws?token=server-api-key") as ws:
+            ws.send_text("ping")
+        try:
+            with c.websocket_connect("/ws?token=garbage") as ws:
+                ws.receive_text()
+            assert False, "garbage token must be refused"
+        except Exception as e:                                     # WebSocketDisconnect(4001)
+            assert "4001" in str(e) or getattr(e, "code", None) == 4001
+    _auth_env(body)
+
+run("dashboard auth: a POST without credentials is 401",      t_auth_post_needs_credentials)
+run("dashboard auth: admin JWT alone saves credentials",      t_auth_jwt_alone_is_enough_for_a_save)
+run("dashboard auth: a bad JWT is refused",                   t_auth_bad_jwt_rejected)
+run("dashboard auth: WebSocket accepts JWT or API key only",  t_auth_websocket_accepts_jwt_or_api_key_only)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

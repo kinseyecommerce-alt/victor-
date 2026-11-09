@@ -3,7 +3,6 @@ auth.py — JWT app login + Kite OAuth helpers
 """
 from __future__ import annotations
 
-import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -13,25 +12,27 @@ from jwt.exceptions import InvalidTokenError
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    from passlib.context import CryptContext
+import bcrypt as _bcrypt
 
 from config import settings
 
-_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
 ALGORITHM = "HS256"
 
 
 # ── Password helpers ──────────────────────────────────────────────
+# bcrypt is used directly (not through passlib): passlib 1.7 cannot read bcrypt ≥ 4.1's version
+# and fails every login. Hashes are standard $2b$ strings, so anything passlib produced still works.
 
 def hash_password(plain: str) -> str:
-    return _pwd.hash(plain)
+    return _bcrypt.hashpw(plain.encode("utf-8")[:72], _bcrypt.gensalt(rounds=12)).decode("ascii")
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd.verify(plain, hashed)
+    try:
+        return _bcrypt.checkpw(plain.encode("utf-8")[:72], hashed.encode("ascii"))
+    except (ValueError, TypeError):
+        return False
 
 def authenticate(username: str, password: str) -> bool:
     if username != settings.admin_username:
