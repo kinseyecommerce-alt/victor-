@@ -5637,7 +5637,13 @@ def t_lp_openai_tool_call_round_trip():
         b = resp.content[0]; assert b.type == "tool_use" and b.name == "get_symbol_detail" and b.input == {"symbol": "TCS"} and b.id == "call_9"
         assert resp.usage.input_tokens == 100 and resp.usage.cache_read_input_tokens == 20 and resp.usage.output_tokens == 30
         assert seen["auth"] == "Bearer sk-oai" and seen["body"]["tools"][0]["function"]["name"] == "get_symbol_detail"
-        assert "reasoning_effort" not in seen["body"], "gpt-4.1 takes no reasoning_effort"
+        assert seen["body"]["model"] == "gpt-5" and seen["body"]["reasoning_effort"] == "low", "gpt-5 takes reasoning_effort"
+        prev_m = _ai_settings.openai_model; _ai_settings.openai_model = "gpt-4.1"
+        try:
+            asyncio.run(prov.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=50, effort="high"))
+            assert seen["body"]["model"] == "gpt-4.1" and "reasoning_effort" not in seen["body"], "gpt-4.1 takes no reasoning_effort"
+        finally:
+            _ai_settings.openai_model = prev_m
     _with_providers(body)
 
 import json as _json_mod
@@ -5741,6 +5747,30 @@ run("providers: no keys → clear error; OpenAI can be primary",  t_lp_no_keys_a
 run("providers: OpenAI quota/401 errors classified for failover", t_lp_openai_errors_classified)
 run("providers: debate gate verdict via OpenAI",                 t_lp_debate_gate_via_openai)
 run("providers: per-model prices incl. dated snapshots",         t_lp_prices)
+
+def t_lp_model_step_down():
+    assert _lp.step_down("anthropic", "claude-fable-5-1") == "claude-opus-5-5"
+    assert _lp.step_down("openai", "gpt-5") == "gpt-4.1" and _lp.step_down("openai", "gpt-4o") is None
+    seen = []
+    def handler(req):
+        body = _j_loads(req.content); seen.append(body["model"])
+        if body["model"] == "gpt-5":
+            return _hx2.Response(404, json={"error": {"message": "The model `gpt-5` does not exist or you do not have access to it.", "type": "invalid_request_error", "code": "model_not_found"}})
+        return _oa_reply(content="from " + body["model"], model=body["model"])
+    def body():
+        prev_m = _ai_settings.openai_model; _ai_settings.openai_model = "gpt-5"
+        _ai_settings.ai_provider_primary = "openai"
+        try:
+            router = _lp.LLMRouter(_lp.AnthropicProvider(), _openai_mock(handler))
+            resp = asyncio.run(router.create(messages=[{"role": "user", "content": "hi"}], system="S", tools=[], max_tokens=10))
+            assert seen == ["gpt-5", "gpt-4.1"] and resp.content[0].text == "from gpt-4.1", seen
+            assert router.providers["openai"].model == "gpt-4.1" and router.failovers == 0
+            assert router.status()["providers"]["openai"]["model"] == "gpt-4.1"
+        finally:
+            _ai_settings.openai_model = prev_m
+    _with_providers(body, anth="", oai="sk-oai")
+
+run("providers: unavailable model steps down before failing over", t_lp_model_step_down)
 
 
 # ══════════════════════════════════════════════════════════════════════════
