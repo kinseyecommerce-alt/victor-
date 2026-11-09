@@ -1531,6 +1531,20 @@ async def backtest_replay(req: ReplayRequest):
     return out
 
 
+@app.get("/backtest/bars", tags=["Backtest"])
+async def backtest_bars(symbols: str, days: int = 45):
+    """Minute bars for research (what the replay uses): {symbol: {source, bars: [[ts, o, h, l, c, v], ...]}}.
+    Up to 12 symbols, 60 days. Loaded in a worker thread; Kite history when available."""
+    import replay_backtest as rb
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:12]
+    days = max(2, min(days, 60))
+    out = {}
+    for s in syms:
+        bars, src = await asyncio.to_thread(rb.load_bars, s, days)
+        out[s] = {"source": src, "bars": [[b["ts"].isoformat(), b["open"], b["high"], b["low"], b["close"], b["volume"]] for b in bars]}
+    return out
+
+
 @app.get("/backtest/replay/last", tags=["Backtest"])
 def backtest_replay_last():
     import replay_backtest as rb
