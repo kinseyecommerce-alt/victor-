@@ -66,6 +66,10 @@ MKT_STATUS   = NSE_BASE + "/api/market-status"
 # while so a 100-symbol scan does not spend a second per symbol on requests that will fail.
 _YF_FAILED: dict[tuple, float] = {}
 _YF_FAIL_TTL_S = 600
+# yfinance logs every refused download itself ("['X.NS']: JSONDecodeError(...)"); one line per
+# symbol per burst drowns the real log, and our own warning already records the failure.
+import logging as _logging
+_logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
 
 class Quote:

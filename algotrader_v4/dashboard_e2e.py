@@ -136,7 +136,14 @@ def main() -> int:
                       page.locator('[data-testid="activity"] li').count() > 0)
         else:
             print("     (market closed or no Kite login, and not demo mode — trading checks skipped)")
-            check("Bot reports running after Start", summary().get("bot_running", False))
+            # starting the bot scans the universe first; give it up to 30 s to report running
+            running = False
+            for _ in range(10):
+                running = bool(summary().get("bot_running"))
+                if running:
+                    break
+                page.wait_for_timeout(3000)
+            check("Bot reports running after Start", running)
 
         page.wait_for_timeout(4000)
         check("P&L chart drawn", page.locator('[data-testid="pnl-chart"] path').count() > 0)
