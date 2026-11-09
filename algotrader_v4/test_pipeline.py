@@ -1221,7 +1221,36 @@ run("v2: opening-range breakout → BUY at 2.5R, once per day",  t_v2_orb_breako
 run("v2: 20-day trend filter blocks counter-trend breakouts",  t_v2_orb_trend_filter_blocks_counter_trend)
 run("v2: breakout window and range limits enforced",           t_v2_orb_window_and_range_limits)
 run("v2: scalper retest entry at 1.5R, stops after a loss",    t_v2_scalp_retest_and_loss_stop)
+def t_v2_daily_bias_never_blocks_tick_loop():
+    """Uncached symbol → no I/O on the tick loop: a background prefetch starts and the filter is off."""
+    import daily_data as _dd
+    from unittest.mock import patch
+    prev = _iv2.BIAS_PROVIDER; _iv2.BIAS_PROVIDER = None
+    started = []
+    try:
+        _dd._cache.pop(("BIASX", _dd.now_ist().date()), None)
+        assert _dd.is_cached("BIASX") is False
+        with patch.object(_dd, "prefetch_in_background", side_effect=lambda syms: started.extend(syms) or len(syms)), \
+             patch.object(_dd, "daily_view", side_effect=AssertionError("must not be called while uncached")):
+            assert _iv2.daily_bias("BIASX#BT", _dd.now_ist().date()) is None
+        assert started == ["BIASX"]
+        # once cached, the bias comes from the daily view (close vs 20-day EMA)
+        _dd._cache[("BIASX", _dd.now_ist().date())] = [{"date": _dd.now_ist().date(), "close": 1.0}]
+        with patch.object(_dd, "daily_view", return_value={"ltp": 101.0, "ema20": 100.0}):
+            assert _iv2.daily_bias("BIASX", _dd.now_ist().date()) == "UP"
+        with patch.object(_dd, "daily_view", return_value={"ltp": 99.0, "ema20": 100.0}):
+            assert _iv2.daily_bias("BIASX", _dd.now_ist().date()) == "DOWN"
+        # the real prefetch dedupes in-flight symbols and skips cached ones
+        with patch.object(_dd, "_completed_days", side_effect=lambda s, p: _time_mod.sleep(0.2) or []):
+            n1 = _dd.prefetch_in_background(["BIASY", "BIASY", "BIASX"]); n2 = _dd.prefetch_in_background(["BIASY"])
+        assert n1 == 1 and n2 == 0
+        _time_mod.sleep(0.3)
+    finally:
+        _iv2.BIAS_PROVIDER = prev
+        _dd._cache.pop(("BIASX", _dd.now_ist().date()), None)
+
 run("v2: trade-close hook reaches the agent",                  t_v2_close_hook_reaches_agent)
+run("v2: daily trend bias never blocks the tick loop",         t_v2_daily_bias_never_blocks_tick_loop)
 
 run("ALL_AGENTS has 4 strategy agents",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)

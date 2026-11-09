@@ -61,8 +61,13 @@ def daily_bias(sym: str, day) -> Optional[str]:
         except Exception:
             return None
     try:
-        from daily_data import daily_view
-        v = daily_view(sym.split("#")[0], candles=0)
+        import daily_data
+        base = sym.split("#")[0]
+        if not daily_data.is_cached(base):
+            # first look of the day: fetch on a worker thread, trade unfiltered until it lands
+            daily_data.prefetch_in_background([base])
+            return None
+        v = daily_data.daily_view(base, candles=0)
         if not v or not v.get("ema20"):
             return None
         return "UP" if v["ltp"] > v["ema20"] else "DOWN"

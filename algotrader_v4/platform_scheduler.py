@@ -73,10 +73,17 @@ class PlatformScheduler:
         """Refresh all static daily data: levels, events, institutional flow, correlation matrix."""
         from tick_engine import tick_engine
         symbols = list(tick_engine._subscribers.keys()) if hasattr(tick_engine, "_subscribers") else []
+        symbols = sorted(set(symbols) | set(getattr(tick_engine, "_symbols", [])))   # warm watchlist too
         if not symbols:
             logger.info("[platform] Morning data refresh: no symbols yet — will retry after bot start")
             return
         results = []
+        try:
+            from daily_data import prefetch as daily_prefetch
+            n = await daily_prefetch(symbols)
+            results.append(f"daily history {n} ✓")   # the agents' 20-day trend filter reads this cache
+        except Exception as exc:
+            logger.warning("[platform] Daily history prefetch failed: {}", exc)
         try:
             from levels_engine import refresh_daily as levels_refresh
             await levels_refresh(symbols)
