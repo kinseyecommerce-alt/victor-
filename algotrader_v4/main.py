@@ -10,7 +10,7 @@ import hmac
 import re
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from ist_clock import now_ist
 from pathlib import Path
 from typing import Literal
@@ -421,6 +421,42 @@ def redoc_ui() -> HTMLResponse:
 # ── Auth ────────────────────────────────────────────────────────────────────
 @app.get("/auth/login-url", tags=["Auth"])
 def login_url(): return {"login_url": kite_client.login_url()}
+
+@app.get("/status/connections", tags=["Status"])
+def connection_status():
+    """One call for the dashboard's status icons: Kite session, Claude API, market data, WebSocket."""
+    import kite_auto_login
+    from datetime import timezone as _tz
+    # Kite
+    kite: dict = {"connected": False, "keys": bool(settings.kite_api_key and settings.kite_api_secret),
+                  "auto_login": kite_auto_login.credentials_ready()}
+    if settings.uses_kite_market_data or settings.trading_mode == "LIVE":
+        try:
+            prof = kite_client.profile()
+            kite.update(connected=True, account=prof.get("user_id", ""))
+        except Exception as exc:
+            kite["detail"] = "No Kite session for today" if settings.kite_api_key else "Kite API key not set"
+            kite["error"] = str(exc)[:120]
+    else:
+        kite.update(connected=False, detail="Paper simulator — Kite not used")
+    # market data freshness
+    newest = None
+    for t in list(tick_engine._latest_tick.values()):
+        ts = getattr(t, "timestamp", None)
+        if ts is None:
+            continue
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(_tz(timedelta(hours=5, minutes=30))).replace(tzinfo=None)
+        newest = ts if newest is None or ts > newest else newest
+    age = (now_ist().replace(tzinfo=None) - newest).total_seconds() if newest else None
+    data = {"source": tick_engine.data_source(), "symbols": len(tick_engine._latest_tick),
+            "last_tick_age_s": round(age, 1) if age is not None else None,
+            "streaming": age is not None and age < 15 and is_market_open(),
+            "market_open": is_market_open()}
+    return {"kite": kite, "claude": ai_trader.api_health(), "data": data,
+            "ws_clients": len(ws_clients), "bot_running": master_agent.running, "mode": settings.trading_mode,
+            "time_ist": now_ist().strftime("%H:%M:%S")}
+
 
 @app.post("/auth/kite/auto-login", tags=["Auth"])
 async def kite_auto_login_now():

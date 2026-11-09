@@ -5476,6 +5476,35 @@ def t_auth_password_change_persists_in_vault():
 
 run("dashboard auth: password change survives a restart (vault)", t_auth_password_change_persists_in_vault)
 
+def t_connection_status_endpoint():
+    import main as _main
+    from ai_trader import ai_trader as _ait
+    c = TestClient(_main.app)
+    r = c.get("/status/connections")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert set(d) >= {"kite", "claude", "data", "ws_clients", "bot_running", "mode"}
+    assert d["claude"]["state"] in ("ok", "untested", "no_key", "bad_key", "billing", "rate_limited", "error")
+    assert "source" in d["data"] and "streaming" in d["data"]
+    # Claude health reflects the last API outcome without calling the API
+    prev_key, prev_err, prev_ok = _ai_settings.anthropic_api_key, _ait._last_api_error, _ait._last_api_ok
+    try:
+        _ai_settings.anthropic_api_key = ""
+        assert _ait.api_health()["state"] == "no_key"
+        _ai_settings.anthropic_api_key = "sk-test"
+        _ait._last_api_error = None; _ait._last_api_ok = None
+        assert _ait.api_health()["state"] == "untested"
+        _ait._note_api_error(400, "Your credit balance is too low to access the Anthropic API.")
+        h = _ait.api_health(); assert h["state"] == "billing" and "credits" in h["detail"]
+        _ait._note_api_error(401, "invalid x-api-key")
+        assert _ait.api_health()["state"] == "bad_key"
+        _ait._last_api_error = None; _ait._last_api_ok = "2026-01-01T10:00:00"
+        assert _ait.api_health()["state"] == "ok"
+    finally:
+        _ai_settings.anthropic_api_key, _ait._last_api_error, _ait._last_api_ok = prev_key, prev_err, prev_ok
+
+run("status: /status/connections + Claude health states",     t_connection_status_endpoint)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

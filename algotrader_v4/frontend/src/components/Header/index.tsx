@@ -4,6 +4,7 @@ import { clsx } from 'clsx'
 import { useStore } from '../../store'
 import { api, getJwt, getUsername, signOut } from '../../api/client'
 import { Badge, Btn, Modal, Input } from '../ui'
+import ConnectionStatus from '../ConnectionStatus'
 
 type SettingsTab = 'connection' | 'apikeys' | 'applogin'
 
@@ -291,6 +292,7 @@ export default function Header() {
       </span>
 
       {/* WS indicator */}
+      <ConnectionStatus onClick={() => { setSettingsTab('apikeys'); setConfigOpen(true) }} />
       <div className="flex items-center gap-1">
         {wsConnected ? (
           <Wifi className="w-4 h-4 text-green-500" />
