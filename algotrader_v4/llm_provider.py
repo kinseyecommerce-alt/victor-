@@ -43,6 +43,21 @@ PRICES: dict[str, dict[str, float]] = {
 }
 _FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"}
 
+# If the configured model is not available on the account (404 / "model not found"), the provider
+# steps down this ladder before the router moves to the other provider.
+MODEL_LADDER = {
+    "anthropic": ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"],
+    "openai":    ["gpt-5", "gpt-4.1", "gpt-4o"],
+}
+
+
+def step_down(provider: str, model: str) -> Optional[str]:
+    ladder = MODEL_LADDER.get(provider, [])
+    for i, m in enumerate(ladder):
+        if model == m or model.startswith(m):
+            return ladder[i + 1] if i + 1 < len(ladder) else None
+    return ladder[0] if ladder and model not in ladder else None
+
 
 def price_for(model: str) -> dict[str, float]:
     if model in PRICES:
@@ -129,10 +144,11 @@ class AnthropicProvider:
 
     def __init__(self):
         self._client = None
+        self.model_override: Optional[str] = None     # set by the router after a step-down
 
     @property
     def model(self) -> str:
-        return settings.ai_agent_model
+        return self.model_override or settings.ai_agent_model
 
     def configured(self) -> bool:
         return bool(settings.anthropic_api_key)
@@ -240,10 +256,11 @@ class OpenAIProvider:
     def __init__(self, http_client=None):
         self._client = None
         self._http_client = http_client          # tests inject a mock transport
+        self.model_override: Optional[str] = None
 
     @property
     def model(self) -> str:
-        return settings.openai_model
+        return self.model_override or settings.openai_model
 
     def configured(self) -> bool:
         return bool(settings.openai_api_key)
@@ -348,7 +365,7 @@ class LLMRouter:
         for i, name in enumerate(candidates):
             prov = self.providers[name]
             try:
-                resp = await prov.create(**kwargs)
+                resp = await self._create_with_step_down(prov, kwargs)
             except ProviderError as exc:
                 self._mark(name, exc.kind, exc.message, code=exc.code)
                 last = exc
@@ -366,6 +383,22 @@ class LLMRouter:
             return resp
         assert last is not None
         raise last
+
+    async def _create_with_step_down(self, prov, kwargs) -> LLMResponse:
+        """Try the configured model; on 'model not found' walk down the provider's ladder."""
+        tried = []
+        while True:
+            try:
+                return await prov.create(**kwargs)
+            except ProviderError as exc:
+                if exc.kind != "not_found":
+                    raise
+                tried.append(prov.model)
+                nxt = step_down(prov.name, prov.model)
+                if not nxt or nxt in tried:
+                    raise
+                logger.warning("[llm] {} model {} not available — stepping down to {}", prov.name, prov.model, nxt)
+                prov.model_override = nxt
 
     def status(self) -> dict:
         order = self.order()
