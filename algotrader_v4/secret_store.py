@@ -30,6 +30,7 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # Only these settings fields can be stored. Anything else is rejected.
 FIELDS = (
     "kite_api_key", "kite_api_secret", "kite_access_token",
+    "kite_user_id", "kite_password", "kite_totp_secret",     # automatic daily Kite login
     "anthropic_api_key", "truedata_username", "truedata_password",
 )
 _DAILY = {"kite_access_token"}          # valid only on the IST day they were saved

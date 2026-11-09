@@ -178,6 +178,10 @@ class KiteClient:
             )
         return self._kite
 
+    def profile(self) -> dict:
+        """The logged-in Zerodha user; raises if there is no working session for today."""
+        return _with_retry(lambda: self.ensure_session().profile(), label="profile")
+
     # ── Instrument lookup ──────────────────────────────────────────────────
 
     def get_instruments(self, exchange: str = "NSE") -> list[dict]:

@@ -295,13 +295,17 @@ class CapitalAllocationRequest(BaseModel):
 class CredentialsUpdateRequest(BaseModel):
     kite_api_key:      str | None = Field(default=None, min_length=1)
     kite_api_secret:   str | None = Field(default=None, min_length=1)
+    kite_user_id:      str | None = Field(default=None, min_length=1)   # automatic daily login
+    kite_password:     str | None = Field(default=None, min_length=1)
+    kite_totp_secret:  str | None = Field(default=None, min_length=1)   # base32 TOTP seed
     anthropic_api_key: str | None = Field(default=None, min_length=1)
     truedata_username: str | None = Field(default=None, min_length=1)
     truedata_password: str | None = Field(default=None, min_length=1)
     persist:           bool = True     # save encrypted to .secrets/ so they survive a restart
 
 class CredentialsDeleteRequest(BaseModel):
-    fields: list[Literal["kite_api_key", "kite_api_secret", "kite_access_token", "anthropic_api_key",
+    fields: list[Literal["kite_api_key", "kite_api_secret", "kite_access_token",
+                         "kite_user_id", "kite_password", "kite_totp_secret", "anthropic_api_key",
                          "truedata_username", "truedata_password"]] = Field(min_length=1)
 
 class AppPasswordRequest(BaseModel):
@@ -415,6 +419,24 @@ def redoc_ui() -> HTMLResponse:
 # ── Auth ────────────────────────────────────────────────────────────────────
 @app.get("/auth/login-url", tags=["Auth"])
 def login_url(): return {"login_url": kite_client.login_url()}
+
+@app.post("/auth/kite/auto-login", tags=["Auth"])
+async def kite_auto_login_now():
+    """Run the automatic Zerodha login now (user ID + password + TOTP from the vault)."""
+    import kite_auto_login
+    if not kite_auto_login.credentials_ready():
+        raise HTTPException(422, "Automatic login needs " + ", ".join(kite_auto_login.missing_credentials())
+                                 + " — add them under Settings → API Keys")
+    try:
+        token = await kite_auto_login.refresh_kite_token_async()
+    except kite_auto_login.KiteLoginError as exc:
+        raise HTTPException(502, str(exc))
+    return {"status": "connected", "token_hint": token[:6] + "…", "auto_login": kite_auto_login.status()}
+
+@app.get("/auth/kite/auto-login/status", tags=["Auth"])
+def kite_auto_login_status():
+    import kite_auto_login
+    return kite_auto_login.status()
 
 @app.post("/auth/token", tags=["Auth"])
 def set_token(req: TokenRequest):
@@ -768,8 +790,8 @@ def patch_capital_allocation(req: CapitalAllocationRequest):
     return get_capital_allocation()
 
 
-_CRED_FIELDS = ("kite_api_key", "kite_api_secret", "anthropic_api_key",
-                "truedata_username", "truedata_password")
+_CRED_FIELDS = ("kite_api_key", "kite_api_secret", "kite_user_id", "kite_password", "kite_totp_secret",
+                "anthropic_api_key", "truedata_username", "truedata_password")
 
 
 def _is_loopback(request: Request) -> bool:
@@ -793,9 +815,13 @@ def _refresh_after_credential_change(changed: set[str]) -> None:
 
 
 def _credential_view() -> dict:
+    import kite_auto_login
     creds = kite_client.validate_credentials()
     creds["truedata_username"] = bool(settings.truedata_username)
     creds["truedata_password"] = bool(settings.truedata_password)
+    for f in ("kite_user_id", "kite_password", "kite_totp_secret"):
+        creds[f] = bool(getattr(settings, f))
+    creds["auto_login"] = kite_auto_login.status()
     return creds
 
 
@@ -807,6 +833,16 @@ def update_credentials(req: CredentialsUpdateRequest, request: Request):
     values = {f: v.strip() for f in _CRED_FIELDS if (v := getattr(req, f)) is not None and v.strip()}
     if not values:
         raise HTTPException(422, "No credentials given")
+    if "kite_totp_secret" in values:
+        seed = values["kite_totp_secret"].replace(" ", "").upper()
+        if seed.isdigit() or len(seed) < 16:
+            raise HTTPException(422, "KITE_TOTP_SECRET must be the base32 seed shown when enabling TOTP on Zerodha "
+                                     "(16+ letters/digits), not the 6-digit code")
+        try:
+            import pyotp; pyotp.TOTP(seed).now()
+        except Exception:
+            raise HTTPException(422, "KITE_TOTP_SECRET is not a valid base32 TOTP seed")
+        values["kite_totp_secret"] = seed
     if req.persist and not settings.api_key and not _is_loopback(request):
         raise HTTPException(403, "Set API_KEY in .env before saving keys from another machine")
     if req.persist:

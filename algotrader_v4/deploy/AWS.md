@@ -53,7 +53,12 @@ Already have a server? Skip user data and run:
 4. Trading view → ⚙ Settings → **Connection**: paste the API key from the same file.
 5. ⚙ Settings → **API Keys**: paste the Kite API key + secret and your Anthropic key, Save.
    They are stored encrypted on the server (`SECRETS_MASTER_KEY` lives only in `/opt/algotrader/.env`).
-6. **Log in with Zerodha** — every trading morning before 09:15.
+6. Either **Log in with Zerodha** every trading morning before 09:15, or turn on **Automatic daily
+   login** in the same tab: save your Zerodha user ID, password and the TOTP *seed* (the base32 key
+   Zerodha shows when you enable TOTP, not a 6-digit code). The server then logs in at 08:45 IST
+   (retrying 08:55 and 09:05) and at startup if the day's token is missing. These three values sit
+   encrypted in the same vault; anyone holding the server and `SECRETS_MASTER_KEY` could use them,
+   so keep both private and leave Zerodha's login alerts on.
 
 The server starts in **PAPER mode on real Kite prices**: real quotes, simulated orders.
 Run it that way for 2–4 weeks and judge it on the dashboard's "Are we beating the index?" panel.

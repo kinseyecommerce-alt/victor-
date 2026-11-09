@@ -173,8 +173,15 @@ def main() -> int:
               kite_box.count() == 1 and "Zerodha" in kite_box.inner_text())
         check("API Keys tab: 'Remember on this server (encrypted)' toggle",
               page.get_by_text("Remember on this server").count() == 1)
+        auto = page.locator('[data-testid="kite-auto-login"]')
+        check("API Keys tab: automatic daily login panel (user ID, password, TOTP seed, 'Log in now')",
+              auto.count() == 1 and "TOTP" in auto.inner_text() and auto.get_by_role("button", name="Log in now").count() == 1)
+        al = api_get("/auth/kite/auto-login/status")
+        check("Auto-login status reports enabled flag, missing fields and the 08:45 schedule",
+              "enabled" in al and isinstance(al["missing"], list) and "08:45" in al["schedule_ist"])
+        # fields, in order: API key, API secret, user ID, password, TOTP seed, Anthropic key, TrueData user/pass
         inputs = page.locator("input[placeholder='Leave blank to keep current']")
-        inputs.nth(2).fill("sk-ant-e2e-test-key-ZZ99")
+        inputs.nth(5).fill("sk-ant-e2e-test-key-ZZ99")
         page.get_by_role("button", name="Save Credentials").click()
         page.wait_for_timeout(1500)
         check("Saved key shows only its last 4 chars, never the value",
