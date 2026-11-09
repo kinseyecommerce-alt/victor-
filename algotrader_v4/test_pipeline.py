@@ -5229,6 +5229,137 @@ run("vault: stored values override .env values",             t_vault_apply_overr
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("20. AUTOMATIC DAILY KITE LOGIN (TOTP)")
+# ══════════════════════════════════════════════════════════════════════════
+import httpx as _hx
+import kite_auto_login as _kal
+from config import settings as _kal_settings
+
+class _FakeZerodha:
+    """Transport that answers like kite.zerodha.com's login endpoints."""
+    def __init__(self, password_ok=True, totp_ok=True):
+        self.password_ok, self.totp_ok, self.calls = password_ok, totp_ok, []
+    def handler(self, req: _hx.Request) -> _hx.Response:
+        self.calls.append((req.method, req.url.path, dict(req.url.params)))
+        path = req.url.path
+        if path == "/connect/login" and "sess_id" not in req.url.params:
+            return _hx.Response(302, headers={"location": f"https://kite.zerodha.com/connect/login?sess_id=SESS1&api_key={req.url.params['api_key']}"})
+        if path == "/connect/login":
+            return _hx.Response(200, text="<html>login</html>")
+        if path == "/api/login":
+            form = dict(x.split("=") for x in req.content.decode().split("&"))
+            if not self.password_ok or form.get("password") != "pw":
+                return _hx.Response(403, json={"status": "error", "message": "Invalid username or password"})
+            return _hx.Response(200, json={"status": "success", "data": {"request_id": "REQ1", "twofa_type": "totp"}})
+        if path == "/api/twofa":
+            form = dict(x.split("=") for x in req.content.decode().split("&"))
+            if not self.totp_ok or form.get("twofa_value") != "123456" or form.get("request_id") != "REQ1":
+                return _hx.Response(403, json={"status": "error", "message": "Invalid TOTP"})
+            return _hx.Response(200, json={"status": "success", "data": {}})
+        if path == "/connect/finish":
+            return _hx.Response(302, headers={"location": "https://app.example.com/auth/kite/callback?request_token=RT42&action=login&status=success"})
+        return _hx.Response(404, text="nope")
+
+def _kal_env(fn):
+    saved = {k: getattr(_kal_settings, k) for k in _kal.REQUIRED}
+    try:
+        for k, v in {"kite_api_key": "apikey", "kite_api_secret": "sec", "kite_user_id": "AB1234",
+                     "kite_password": "pw", "kite_totp_secret": "JBSWY3DPEHPK3PXP"}.items():
+            setattr(_kal_settings, k, v)
+        fn()
+    finally:
+        for k, v in saved.items(): setattr(_kal_settings, k, v)
+
+def t_kal_full_flow_returns_request_token():
+    def body():
+        z = _FakeZerodha()
+        c = _hx.Client(transport=_hx.MockTransport(z.handler), follow_redirects=True)
+        tok = _kal.fetch_request_token(client=c, totp_now=lambda: "123456")
+        assert tok == "RT42", tok
+        paths = [p for _, p, _ in z.calls]
+        assert paths[:1] == ["/connect/login"] and "/api/login" in paths and "/api/twofa" in paths and paths[-1] == "/connect/finish"
+        # the callback URL (our own server) is never requested from here
+        assert all("example.com" not in p for p in paths)
+    _kal_env(body)
+
+def t_kal_wrong_totp_is_a_clear_error():
+    def body():
+        z = _FakeZerodha(totp_ok=False)
+        c = _hx.Client(transport=_hx.MockTransport(z.handler), follow_redirects=True)
+        try:
+            _kal.fetch_request_token(client=c, totp_now=lambda: "000000"); assert False, "should fail"
+        except _kal.KiteLoginError as e:
+            assert "TOTP" in str(e) and "Invalid TOTP" in str(e)
+    _kal_env(body)
+
+def t_kal_wrong_password_is_a_clear_error():
+    def body():
+        z = _FakeZerodha(password_ok=False)
+        c = _hx.Client(transport=_hx.MockTransport(z.handler), follow_redirects=True)
+        try:
+            _kal.fetch_request_token(client=c, totp_now=lambda: "123456"); assert False, "should fail"
+        except _kal.KiteLoginError as e:
+            assert "password" in str(e)
+    _kal_env(body)
+
+def t_kal_missing_credentials_named():
+    saved = _kal_settings.kite_totp_secret; _kal_settings.kite_totp_secret = ""
+    try:
+        assert not _kal.credentials_ready() and "KITE_TOTP_SECRET" in _kal.missing_credentials()
+        assert _kal.status()["enabled"] is False
+        try:
+            _kal.fetch_request_token(client=_hx.Client(transport=_hx.MockTransport(lambda r: _hx.Response(500)))); assert False
+        except _kal.KiteLoginError as e:
+            assert "KITE_TOTP_SECRET" in str(e)
+    finally:
+        _kal_settings.kite_totp_secret = saved
+
+def t_kal_totp_seed_generates_codes():
+    import pyotp
+    code = pyotp.TOTP("JBSWY3DPEHPK3PXP").now()
+    assert len(code) == 6 and code.isdigit()
+
+def t_kal_vault_stores_login_fields():
+    v = _vault(); v.save({"kite_user_id": "AB1234", "kite_password": "pw", "kite_totp_secret": "JBSWY3DPEHPK3PXP"})
+    assert set(v.load()) == {"kite_user_id", "kite_password", "kite_totp_secret"}
+    assert b"JBSWY3DP" not in v.vault.read_bytes() and b"AB1234" not in v.vault.read_bytes()
+    st = v.status()["fields"]
+    assert st["kite_totp_secret"]["stored"] and "JBSWY3DP" not in str(st)
+
+def t_kal_endpoint_rejects_six_digit_code_as_seed():
+    import main as _main
+    c = TestClient(_main.app)
+    prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+    try:
+        r = c.post("/settings/credentials", json={"kite_totp_secret": "123456", "persist": False}, headers=H)
+        assert r.status_code == 422 and "base32" in r.json()["detail"]
+        r = c.post("/settings/credentials", json={"kite_totp_secret": "not base32 !!!!!", "persist": False}, headers=H)
+        assert r.status_code == 422
+        r = c.get("/auth/kite/auto-login/status", headers=H)
+        assert r.status_code == 200 and "enabled" in r.json() and "schedule_ist" in r.json()
+        r = c.post("/auth/kite/auto-login", headers=H)
+        assert r.status_code in (422, 502)     # no credentials in the test environment
+    finally:
+        _ai_settings.api_key = prev
+
+def t_kal_needed_now_false_without_credentials():
+    saved = _kal_settings.kite_user_id; _kal_settings.kite_user_id = ""
+    try:
+        assert _kal.needed_now() is False
+    finally:
+        _kal_settings.kite_user_id = saved
+
+run("auto-login: user id + password + TOTP → request_token",  t_kal_full_flow_returns_request_token)
+run("auto-login: wrong TOTP reported clearly",                t_kal_wrong_totp_is_a_clear_error)
+run("auto-login: wrong password reported clearly",            t_kal_wrong_password_is_a_clear_error)
+run("auto-login: missing credentials are named",              t_kal_missing_credentials_named)
+run("auto-login: TOTP seed produces 6-digit codes",           t_kal_totp_seed_generates_codes)
+run("auto-login: vault stores user id/password/seed encrypted", t_kal_vault_stores_login_fields)
+run("auto-login: endpoint rejects a 6-digit code as the seed", t_kal_endpoint_rejects_six_digit_code_as_seed)
+run("auto-login: not needed without credentials",             t_kal_needed_now_false_without_credentials)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

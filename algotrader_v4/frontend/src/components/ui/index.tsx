@@ -122,9 +122,10 @@ export const Modal = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4">
-        <h2 className="text-lg font-semibold text-slate-900 mb-4">{title}</h2>
-        {children}
+      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[90vh] flex flex-col">
+        <h2 className="text-lg font-semibold text-slate-900 px-6 pt-6 pb-4 shrink-0">{title}</h2>
+        {/* the body scrolls on short screens so the buttons at the bottom stay reachable */}
+        <div className="px-6 pb-6 overflow-y-auto min-h-0">{children}</div>
       </div>
     </div>
   )

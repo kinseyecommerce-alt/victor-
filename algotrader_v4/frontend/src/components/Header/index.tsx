@@ -21,9 +21,14 @@ export default function Header() {
   // API Keys tab
   const [credForm, setCredForm] = useState({
     kite_api_key: '', kite_api_secret: '',
+    kite_user_id: '', kite_password: '', kite_totp_secret: '',
     anthropic_api_key: '',
     truedata_username: '', truedata_password: '',
   })
+  // Automatic daily Zerodha login (user ID + password + TOTP seed in the vault)
+  const [autoLogin, setAutoLogin] = useState<{ enabled: boolean; missing: string[]; last_success?: string | null;
+    last_error?: string | null; last_attempt?: string | null; running?: boolean; schedule_ist?: string[] } | null>(null)
+  const [autoLoginBusy, setAutoLoginBusy] = useState(false)
   const [showFields, setShowFields] = useState<Record<string, boolean>>({})
   const [credStatus, setCredStatus] = useState<Record<string, boolean>>({})
   const [credSaving, setCredSaving] = useState(false)
@@ -57,11 +62,15 @@ export default function Header() {
     setCredStatus({
       kite_api_key:      c.kite_api_key      ?? false,
       kite_api_secret:   c.kite_api_secret   ?? false,
+      kite_user_id:      c.kite_user_id      ?? false,
+      kite_password:     c.kite_password     ?? false,
+      kite_totp_secret:  c.kite_totp_secret  ?? false,
       anthropic_api_key: c.anthropic_api_key ?? false,
       truedata_username: c.truedata_username ?? false,
       truedata_password: c.truedata_password ?? false,
     })
     if (v) { setVault(v.fields ?? {}); setVaultError(v.error ?? null) }
+    if (c.auto_login) setAutoLogin(c.auto_login)
   }
 
   const refreshCredentials = () => {
@@ -70,6 +79,19 @@ export default function Header() {
   }
 
   useEffect(() => { if (settingsTab === 'apikeys') refreshCredentials() }, [settingsTab])
+
+  const handleAutoLoginNow = async () => {
+    setAutoLoginBusy(true)
+    try {
+      const r = await api.kiteAutoLoginNow()
+      setAutoLogin(r.data.auto_login)
+      addToast('Kite logged in automatically for today', 'buy')
+      refreshCredentials()
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Automatic Kite login failed', 'error')
+      refreshCredentials()
+    } finally { setAutoLoginBusy(false) }
+  }
 
   const handleKiteLogin = async () => {
     try {
@@ -130,6 +152,9 @@ export default function Header() {
     const payload: Record<string, any> = {}
     if (credForm.kite_api_key.trim())      payload.kite_api_key      = credForm.kite_api_key.trim()
     if (credForm.kite_api_secret.trim())   payload.kite_api_secret   = credForm.kite_api_secret.trim()
+    if (credForm.kite_user_id.trim())      payload.kite_user_id      = credForm.kite_user_id.trim()
+    if (credForm.kite_password.trim())     payload.kite_password     = credForm.kite_password.trim()
+    if (credForm.kite_totp_secret.trim())  payload.kite_totp_secret  = credForm.kite_totp_secret.trim()
     if (credForm.anthropic_api_key.trim()) payload.anthropic_api_key = credForm.anthropic_api_key.trim()
     if (credForm.truedata_username.trim()) payload.truedata_username = credForm.truedata_username.trim()
     if (credForm.truedata_password.trim()) payload.truedata_password = credForm.truedata_password.trim()
@@ -138,7 +163,7 @@ export default function Header() {
     try {
       const r = await api.updateCredentials({ ...payload, persist: remember })
       applyCredStatus(r.data.credentials ?? {}, r.data.vault)
-      setCredForm({ kite_api_key: '', kite_api_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
+      setCredForm({ kite_api_key: '', kite_api_secret: '', kite_user_id: '', kite_password: '', kite_totp_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
       setShowFields({})
       addToast(remember ? 'Saved — encrypted on the server' : 'Updated until the server restarts', 'buy')
     } catch (e: any) {
@@ -283,7 +308,7 @@ export default function Header() {
         onClick={() => {
           setTempKey(apiKey); setTempBase(apiBase)
           setSettingsTab('connection')
-          setCredForm({ kite_api_key: '', kite_api_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
+          setCredForm({ kite_api_key: '', kite_api_secret: '', kite_user_id: '', kite_password: '', kite_totp_secret: '', anthropic_api_key: '', truedata_username: '', truedata_password: '' })
           setShowFields({})
           setAppLoginForm({ username: '', new_password: '', confirm_password: '' })
           setShowAppFields({})
@@ -367,8 +392,39 @@ export default function Header() {
                   </Btn>
                 </div>
                 <p className="text-xs text-slate-500">
-                  Your Zerodha user ID, password and TOTP are typed on Zerodha's own page — this app never
-                  sees or stores them. Kite requires this login once a day; the session is kept until it expires.
+                  Manual login: your Zerodha user ID, password and TOTP are typed on Zerodha's own page.
+                  Kite requires a login once a day; the session is kept until it expires.
+                </p>
+              </div>
+              <div className="mt-3 rounded-lg border border-indigo-200 bg-indigo-50/60 p-3 space-y-3" data-testid="kite-auto-login">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium text-slate-800">Automatic daily login</span>
+                  <Badge variant={autoLogin?.enabled ? 'buy' : 'warning'}>
+                    {autoLogin?.enabled ? 'On · 08:45 IST weekdays' : 'Off'}
+                  </Badge>
+                </div>
+                <div className="space-y-3">
+                  {credField('Zerodha user ID (e.g. AB1234)', 'kite_user_id', false)}
+                  {credField('Zerodha password', 'kite_password')}
+                  {credField('TOTP secret (base32 seed from Zerodha 2FA setup)', 'kite_totp_secret')}
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-600">
+                    {autoLogin?.running ? 'Logging in…'
+                      : autoLogin?.last_error ? <span className="text-rose-600">Last attempt failed: {autoLogin.last_error}</span>
+                      : autoLogin?.last_success ? `Last automatic login ${autoLogin.last_success.replace('T', ' ').slice(0, 16)} IST`
+                      : autoLogin?.enabled ? 'Not run yet today' : 'Save all three fields to enable'}
+                  </span>
+                  <Btn size="sm" className="shrink-0 whitespace-nowrap" onClick={handleAutoLoginNow}
+                       disabled={!autoLogin?.enabled || autoLoginBusy}>
+                    {autoLoginBusy ? 'Logging in…' : 'Log in now'}
+                  </Btn>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Stored encrypted on this server and used only to complete Zerodha's login at 08:45 IST
+                  (retried 08:55 and 09:05) and whenever the server starts without a token for the day.
+                  Anyone with this server and its vault key could log in to your Zerodha account — keep the
+                  admin password and SECRETS_MASTER_KEY private, and keep Zerodha's login alerts on.
                 </p>
               </div>
             </div>

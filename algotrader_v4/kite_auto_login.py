@@ -1,106 +1,167 @@
 """
-kite_auto_login.py
-Headless Playwright automation for the Zerodha Kite Connect OAuth flow.
-Called by the platform scheduler at 08:50 AM IST every trading day.
+kite_auto_login.py — the daily Zerodha Kite Connect login, done without a browser.
 
-Requires in .env:
-  KITE_USER_ID       — Zerodha client ID (e.g. ZA1234)
-  KITE_PASSWORD      — Zerodha login password
-  KITE_TOTP_SECRET   — TOTP secret from Zerodha 2FA setup (Google Authenticator seed)
-  KITE_REDIRECT_URL  — full callback URL registered in your Kite app
-                       e.g. https://yourdomain.com/auth/kite/callback
+Zerodha issues a new access token every trading day and only after the user's ID, password
+and TOTP are entered on kite.zerodha.com. This module walks Zerodha's own login endpoints the
+way the login page does (user ID + password, then TOTP, then the Kite Connect redirect) and
+exchanges the resulting request_token for an access token with the API secret.
+
+Credentials come from the encrypted vault (Settings → API Keys): KITE_USER_ID, KITE_PASSWORD and
+KITE_TOTP_SECRET (the base32 seed shown when enabling TOTP on Zerodha, not a 6-digit code).
+Nothing is typed in here — the scheduler calls it at 08:45 IST on weekdays, again at 08:55 and
+09:05 if it failed, and once at startup when there is no valid token for the day.
+
+Note: your Zerodha password and TOTP seed stored on the server let anyone with the server AND the
+vault master key log in to your account. Keep SECRETS_MASTER_KEY out of the repo and the image.
 """
 from __future__ import annotations
 
-import re
 import asyncio
+import re
+import threading
+from datetime import datetime
+from typing import Callable, Optional
+from urllib.parse import parse_qs, urlparse
+
+import httpx
+import pyotp
 from loguru import logger
 
-import pyotp
-from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
-
 from config import settings
-from kite_client import kite_client
+from ist_clock import now_ist
+
+KITE = "https://kite.zerodha.com"
+REQUIRED = ("kite_api_key", "kite_api_secret", "kite_user_id", "kite_password", "kite_totp_secret")
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "X-Kite-Version": "3.0",
+    "Accept": "application/json, text/plain, */*",
+}
+
+_lock = threading.Lock()
+_state: dict = {"last_attempt": None, "last_success": None, "last_error": None, "running": False, "attempts": 0}
 
 
-_CHROMIUM = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+class KiteLoginError(RuntimeError):
+    pass
 
 
-def _extract_request_token(url: str) -> str | None:
-    m = re.search(r"[?&]request_token=([^&]+)", url)
-    return m.group(1) if m else None
+def credentials_ready() -> bool:
+    return all(getattr(settings, k, "") for k in REQUIRED)
 
 
-def run_kite_auto_login() -> str:
-    """
-    Drives the full Zerodha Kite Connect OAuth flow in a headless browser.
+def missing_credentials() -> list[str]:
+    return [k.upper() for k in REQUIRED if not getattr(settings, k, "")]
 
-    Returns the new access token string on success.
-    Raises RuntimeError on any failure (caller sends Telegram alert).
-    """
-    missing = [k for k in ("kite_user_id", "kite_password", "kite_totp_secret",
-                            "kite_api_key", "kite_redirect_url")
-               if not getattr(settings, k, "")]
+
+def status() -> dict:
+    return {**_state, "enabled": credentials_ready(), "missing": missing_credentials(),
+            "schedule_ist": ["08:45", "08:55", "09:05"]}
+
+
+def _err(r: httpx.Response, what: str) -> str:
+    try:
+        j = r.json()
+        return f"{what}: {j.get('message') or j.get('error_type') or r.text[:200]}"
+    except Exception:
+        return f"{what}: HTTP {r.status_code} {r.text[:200]}"
+
+
+def fetch_request_token(client: Optional[httpx.Client] = None, totp_now: Optional[Callable[[], str]] = None) -> str:
+    """Log in to Zerodha with user ID, password and TOTP and return the Kite Connect request_token."""
+    missing = missing_credentials()
     if missing:
-        raise RuntimeError(f"Missing config: {', '.join(k.upper() for k in missing)}")
+        raise KiteLoginError("missing " + ", ".join(missing))
+    totp_now = totp_now or pyotp.TOTP(settings.kite_totp_secret.replace(" ", "")).now
+    own = client is None
+    client = client or httpx.Client(headers=_HEADERS, timeout=20, follow_redirects=True)
+    try:
+        # 1. Kite Connect login page: gives us the OAuth session id for this api_key
+        r = client.get(f"{KITE}/connect/login", params={"v": "3", "api_key": settings.kite_api_key})
+        sess_id = parse_qs(urlparse(str(r.url)).query).get("sess_id", [""])[0]
+        if not sess_id:
+            raise KiteLoginError(f"no sess_id from Kite Connect login page (HTTP {r.status_code}); is the API key right?")
+        # 2. user id + password
+        r = client.post(f"{KITE}/api/login", data={"user_id": settings.kite_user_id, "password": settings.kite_password})
+        if r.status_code != 200 or r.json().get("status") != "success":
+            raise KiteLoginError(_err(r, "password step failed"))
+        request_id = r.json()["data"]["request_id"]
+        twofa_type = r.json()["data"].get("twofa_type", "totp")
+        # 3. TOTP
+        r = client.post(f"{KITE}/api/twofa", data={"user_id": settings.kite_user_id, "request_id": request_id,
+                                                  "twofa_value": totp_now(), "twofa_type": twofa_type,
+                                                  "skip_session": "true"})
+        if r.status_code != 200 or r.json().get("status") != "success":
+            raise KiteLoginError(_err(r, "TOTP step failed (check KITE_TOTP_SECRET and the server clock)"))
+        # 4. finish the OAuth flow: Zerodha redirects to our callback URL carrying request_token.
+        #    Follow redirects by hand so the callback itself (our own server) is never hit from here.
+        url = f"{KITE}/connect/finish?v=3&api_key={settings.kite_api_key}&sess_id={sess_id}"
+        for _ in range(6):
+            r = client.get(url, follow_redirects=False)
+            token = parse_qs(urlparse(str(r.url)).query).get("request_token", [""])[0]
+            loc = r.headers.get("location", "")
+            tok_in_loc = parse_qs(urlparse(loc).query).get("request_token", [""])[0]
+            if tok_in_loc:
+                return tok_in_loc
+            if token:
+                return token
+            if r.status_code in (301, 302, 303, 307, 308) and loc:
+                url = loc if loc.startswith("http") else KITE + loc
+                continue
+            raise KiteLoginError(f"Kite did not redirect with a request_token (HTTP {r.status_code}): {r.text[:200]}")
+        raise KiteLoginError("too many redirects finishing the Kite Connect login")
+    finally:
+        if own:
+            client.close()
 
-    totp = pyotp.TOTP(settings.kite_totp_secret)
-    login_url = kite_client.login_url()
-    redirect_prefix = settings.kite_redirect_url.split("?")[0]
 
-    import os
-    chromium = _CHROMIUM if os.path.exists(_CHROMIUM) else None  # falls back to installed
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            executable_path=chromium,
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        )
-        ctx  = browser.new_context()
-        page = ctx.new_page()
-        page.set_default_timeout(30_000)
-
-        try:
-            # ── 1. Open Kite login ────────────────────────────────────────
-            logger.info("[kite_login] navigating to Kite OAuth…")
-            page.goto(login_url, wait_until="domcontentloaded")
-
-            # ── 2. User ID + password ─────────────────────────────────────
-            page.fill('input[id="userid"], input[placeholder*="User ID"]', settings.kite_user_id)
-            page.fill('input[id="password"], input[type="password"]',      settings.kite_password)
-            page.click('button[type="submit"]')
-
-            # ── 3. TOTP 2FA ───────────────────────────────────────────────
-            page.wait_for_selector(
-                'input[id="pin"], input[placeholder*="TOTP"], input[placeholder*="code"]',
-                timeout=15_000,
-            )
-            page.fill(
-                'input[id="pin"], input[placeholder*="TOTP"], input[placeholder*="code"]',
-                totp.now(),
-            )
-            page.click('button[type="submit"]')
-
-            # ── 4. Wait for redirect to our callback URL ──────────────────
+def run_kite_auto_login(remember: bool = True) -> str:
+    """Full daily login: request_token → access token (via API secret), applied to the Kite client
+    and saved in the vault for the day. Returns the access token. Raises KiteLoginError."""
+    from kite_client import kite_client
+    with _lock:
+        _state["running"] = True
+        _state["attempts"] += 1
+        _state["last_attempt"] = now_ist().isoformat(timespec="seconds")
+    try:
+        request_token = fetch_request_token()
+        token = kite_client.set_access_token(request_token=request_token)
+        settings.kite_access_token = token
+        if remember:
             try:
-                page.wait_for_url(f"{redirect_prefix}**", timeout=20_000)
-            except PwTimeout:
-                raise RuntimeError("Kite did not redirect to callback URL in time")
-
-            request_token = _extract_request_token(page.url)
-            if not request_token:
-                raise RuntimeError(f"No request_token in redirect URL: {page.url}")
-
-        finally:
-            browser.close()
-
-    # ── 5. Exchange request_token for access_token ────────────────────────
-    token = kite_client.set_access_token(request_token=request_token)
-    logger.info("[kite_login] access token refreshed: {}…", token[:8])
-    return token
+                from secret_store import secret_store
+                secret_store.save({"kite_access_token": token})
+            except Exception as exc:
+                logger.warning("[kite_login] token not saved to vault: {}", exc)
+        _state.update(last_success=now_ist().isoformat(timespec="seconds"), last_error=None)
+        logger.info("[kite_login] Kite access token refreshed automatically ({}…)", token[:6])
+        return token
+    except Exception as exc:
+        _state["last_error"] = str(exc)
+        logger.error("[kite_login] automatic Kite login failed: {}", exc)
+        raise KiteLoginError(str(exc)) from exc
+    finally:
+        _state["running"] = False
 
 
 async def refresh_kite_token_async() -> str:
-    """Async wrapper — runs blocking Playwright in a thread pool."""
     return await asyncio.to_thread(run_kite_auto_login)
+
+
+def token_valid_today() -> bool:
+    """Is there an access token that Kite accepts right now?"""
+    from kite_client import kite_client
+    if not settings.kite_access_token:
+        return False
+    try:
+        kite_client.profile()
+        return True
+    except Exception:
+        return False
+
+
+def needed_now() -> bool:
+    """Startup / catch-up rule: weekday, before 15:30 IST, credentials present, no working token."""
+    now = now_ist()
+    return (credentials_ready() and now.weekday() < 5 and (now.hour, now.minute) < (15, 30)
+            and not token_valid_today())

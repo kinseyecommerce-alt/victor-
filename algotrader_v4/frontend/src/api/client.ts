@@ -101,6 +101,9 @@ export const api = {
   updateCredentials: (data: {
     kite_api_key?: string
     kite_api_secret?: string
+    kite_user_id?: string
+    kite_password?: string
+    kite_totp_secret?: string
     anthropic_api_key?: string
     truedata_username?: string
     truedata_password?: string
@@ -110,6 +113,7 @@ export const api = {
   deleteCredentials: (fields: string[]) => ax().delete('/settings/credentials', { data: { fields } }),
   kiteLoginUrl: () => ax().get('/auth/login-url'),
   kiteStatus: () => ax().get('/auth/kite/status'),
+  kiteAutoLoginNow: () => ax().post('/auth/kite/auto-login'),
 
   // App login
   updateAppPassword: (data: { username?: string; new_password: string }) =>

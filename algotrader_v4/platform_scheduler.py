@@ -3,7 +3,8 @@ platform_scheduler.py
 Server-level scheduler — starts with FastAPI, independent of the trading bot.
 
 Jobs (all IST, Mon–Fri):
-  08:50  Kite token auto-refresh via Playwright
+  08:45  Kite daily login (user ID + password + TOTP from the vault), retried 08:55 and 09:05
+         if it failed; also attempted at startup when today's token is missing
   09:16  Auto-start trading bot (1 min after daily_reset fires at 09:15)
 """
 from __future__ import annotations
@@ -23,14 +24,17 @@ class PlatformScheduler:
         self._token_ok = False
 
     def start(self) -> None:
-        if not settings.kite_api_key:
-            logger.warning("[platform] KITE_API_KEY not set — platform scheduler skipped")
-            return
-
+        # Keys may arrive later through the dashboard vault, so the scheduler always runs and
+        # each job checks what it needs when it fires.
         self._sched.add_job(
             self._kite_token_refresh, "cron",
-            hour=8, minute=50, day_of_week="mon-fri", id="kite_refresh",
+            hour=8, minute="45,55", day_of_week="mon-fri", id="kite_refresh",
         )
+        self._sched.add_job(
+            self._kite_token_refresh, "cron",
+            hour=9, minute=5, day_of_week="mon-fri", id="kite_refresh_last",
+        )
+        self._sched.add_job(self._kite_login_at_startup, "date", id="kite_login_startup")
         self._sched.add_job(
             self._pre_market_report, "cron",
             hour=9, minute=0, day_of_week="mon-fri", id="pre_market",
@@ -48,7 +52,7 @@ class PlatformScheduler:
             minutes=5, id="options_cache",
         )
         self._sched.start()
-        logger.info("[platform] scheduler started (Kite@08:50, Report@09:00, Data@09:10, Start@09:16 IST)")
+        logger.info("[platform] scheduler started (Kite login@08:45/08:55/09:05, Report@09:00, Data@09:10, Start@09:16 IST)")
 
     async def stop(self) -> None:
         try:
@@ -117,8 +121,24 @@ class PlatformScheduler:
         except Exception as exc:
             logger.debug("[platform] Options cache refresh: {}", exc)
 
+    async def _kite_login_at_startup(self) -> None:
+        """Server (re)started on a trading day without a working token → log in now."""
+        import kite_auto_login
+        try:
+            if await asyncio.to_thread(kite_auto_login.needed_now):
+                await self._kite_token_refresh()
+        except Exception as exc:
+            logger.debug("[platform] startup Kite login check: {}", exc)
+
     async def _kite_token_refresh(self) -> None:
-        logger.info("[platform] Kite token refresh starting…")
+        import kite_auto_login
+        if not kite_auto_login.credentials_ready():
+            logger.info("[platform] Kite auto-login skipped: {} not set (log in from the dashboard)",
+                        ", ".join(kite_auto_login.missing_credentials()))
+            return
+        if self._token_ok and await asyncio.to_thread(kite_auto_login.token_valid_today):
+            return                                   # an earlier attempt today already succeeded
+        logger.info("[platform] Kite daily login starting…")
         try:
             from kite_auto_login import refresh_kite_token_async
             token = await refresh_kite_token_async()
