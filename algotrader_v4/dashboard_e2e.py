@@ -96,7 +96,13 @@ def main() -> int:
         # Agents only trade during NSE hours (or in demo mode). Outside them the bot is
         # "running" but every agent idles — that is correct, so the trading checks are
         # skipped rather than failed and the rest of the UI is still exercised.
-        trading_possible = bool(s.get("demo_mode")) or bool(s.get("market_open"))
+        # Real-price mode also needs today's Kite login; without it there is no data to trade on.
+        kite_ok = True
+        try:
+            kite_ok = bool(api_get("/settings/credentials/status")["credentials"].get("kite_access_token"))
+        except Exception:
+            pass
+        trading_possible = bool(s.get("demo")) or (bool(s.get("market_open")) and kite_ok)
         if trading_possible:
             page.wait_for_function(
                 "() => [...document.querySelectorAll('[data-testid^=agent-]')]"
@@ -129,7 +135,7 @@ def main() -> int:
                 check("Activity feed lists orders",
                       page.locator('[data-testid="activity"] li').count() > 0)
         else:
-            print("     (market closed and not demo mode — trading checks skipped)")
+            print("     (market closed or no Kite login, and not demo mode — trading checks skipped)")
             check("Bot reports running after Start", summary().get("bot_running", False))
 
         page.wait_for_timeout(4000)
