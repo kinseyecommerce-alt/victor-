@@ -1523,9 +1523,12 @@ async def momentum_rebalance(execute: bool = True):
 async def backtest_replay(req: ReplayRequest):
     """Replay real minute bars through the live agent code (same patterns, sizing, trailing
     stop) with slippage and costs. Returns net results vs buy-and-hold of the symbols and NIFTY."""
+    from bg_compute import run_in_process
     import replay_backtest as rb
-    res = await rb.replay_async(req.agent, [s.upper() for s in req.symbols], req.days, req.slippage_bps, req.params)
-    return {**res.to_dict(include_trades=req.include_trades), "benchmark": rb.benchmark_for(res)}
+    out = await run_in_process("replay_job", req.agent, [s.upper() for s in req.symbols], req.days,
+                               req.slippage_bps, req.params, req.include_trades)
+    rb._LAST[req.agent] = {k: v for k, v in out.items() if k not in ("trades", "benchmark")}
+    return out
 
 
 @app.get("/backtest/replay/last", tags=["Backtest"])

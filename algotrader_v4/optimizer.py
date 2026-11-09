@@ -210,13 +210,24 @@ async def optimise_async(agent: str, symbols: list[str], days: int = 45,
               "data": "provided" if provided else ("synthetic (paper simulator)" if not settings.uses_kite_market_data else "real"),
               "at": now_ist().isoformat(timespec="seconds")}
     if best and apply:
-        data = load_params()
-        data[agent] = {"params": best["params"], "chosen_at": report["at"], "test_net": best["test"]["net"],
-                       "current_test_net": cur_test["net"], "symbols": list(bars_by_symbol), "days": days}
-        save_params(data)
-        apply_params()
-        logger.info("[optimizer] {} → {} (test ₹{:,.0f} vs ₹{:,.0f})", agent, best["params"], best["test"]["net"], cur_test["net"])
+        adopt(report)
     return report
+
+
+def adopt(report: dict) -> bool:
+    """Save and apply a report's adopted parameters (used by the parent process after a worker run)."""
+    if not report or not report.get("adopted"):
+        return False
+    agent = report["agent"]
+    best = next((r for r in report.get("top", []) if r.get("verdict") == "adopted"), None)
+    test_net = (best or {}).get("test", {}).get("net")
+    data = load_params()
+    data[agent] = {"params": report["adopted"], "chosen_at": report["at"], "test_net": test_net,
+                   "current_test_net": report["current"]["test"]["net"], "symbols": report["symbols"], "days": report["days"]}
+    save_params(data)
+    apply_params()
+    logger.info("[optimizer] {} → {} (test ₹{} vs ₹{:,.0f})", agent, report["adopted"], test_net, report["current"]["test"]["net"])
+    return True
 
 
 def optimise(agent: str, symbols: list[str], days: int = 45, bars_by_symbol=None, apply: bool = True) -> dict:
@@ -231,9 +242,12 @@ async def run_all_async(symbols: list[str], days: int = 45) -> dict:
             return {"error": "already running", **_state}
         _state.update(running=True, started_at=now_ist().isoformat(timespec="seconds"), finished_at=None, report=None, error=None)
     try:
+        from bg_compute import run_in_process
         report = {}
         for agent in GRIDS:
-            report[agent] = await optimise_async(agent, symbols, days)
+            # the search runs in a worker process so ticks, the dashboard and /health keep going
+            report[agent] = await run_in_process("optimise_job", agent, symbols, days)
+            adopt(report[agent])
         _state["report"] = report
         return report
     except Exception as exc:
