@@ -575,7 +575,13 @@ class AITrader:
             except anthropic.APIStatusError as exc:
                 self._ai_errors += 1
                 logger.error("[ai] API error {}: {}", exc.status_code, exc.message)
-                return f"Claude API error ({exc.status_code})."
+                # surface Anthropic's own explanation (e.g. "credit balance is too low") — a bare
+                # status code sends people hunting through server logs
+                detail = ""
+                body = getattr(exc, "body", None)
+                if isinstance(body, dict):
+                    detail = str((body.get("error") or {}).get("message") or "")
+                return f"Claude API error ({exc.status_code}): {detail[:200]}" if detail else f"Claude API error ({exc.status_code})."
             except anthropic.APIConnectionError:
                 self._ai_errors += 1
                 return "Could not reach the Claude API."
