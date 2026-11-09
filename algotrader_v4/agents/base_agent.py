@@ -113,6 +113,18 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
                                  signal_price=entry.get("signal_price"))
     except Exception as exc:
         logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
+    _notify_agent_result(strategy, symbol, pnl)
+
+
+def _notify_agent_result(strategy: str, symbol: str, pnl: float) -> None:
+    """Agents that adapt within the day (ScalpV2Agent stops after a loss) learn the result here."""
+    try:
+        from agents.strategy_agents import ALL_AGENTS      # lazy: strategy_agents imports this module
+        hook = getattr(ALL_AGENTS.get(strategy), "record_result", None)
+        if hook:
+            hook(symbol, pnl)
+    except Exception as exc:
+        logger.debug("[{}] record_result failed for {}: {}", strategy, symbol, exc)
 
 
 def _setup_tsl_callbacks() -> None:

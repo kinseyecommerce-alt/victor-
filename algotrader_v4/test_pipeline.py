@@ -34,14 +34,14 @@ def run(name: str, fn):
         fn()
         ok(name)
     except Exception as exc:
-        fail(name, str(exc)[:120])
+        fail(name, str(exc)[:300] or repr(exc)[:300])
 
 async def arun(name: str, coro):
     try:
         await coro
         ok(name)
     except Exception as exc:
-        fail(name, str(exc)[:120])
+        fail(name, str(exc)[:300] or repr(exc)[:300])
 
 def section(title: str):
     print(f"\n{'═'*60}")
@@ -864,6 +864,8 @@ section("11. STRATEGY AGENTS")
 from agents.strategy_agents import (
     ALL_AGENTS, IntradayAgent, FnOAgent, SwingAgent, ScalpingAgent
 )
+from agents.intraday_v2 import IntradayV2Agent, ScalpV2Agent
+import agents.intraday_v2 as _iv2
 from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
 
 def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
@@ -1098,6 +1100,128 @@ def t_intraday_buy_has_target():
     action, sig = agent.evaluate_tick(snap)
     if action == "BUY" and sig:
         assert "target" in sig or "stop_loss" in sig
+
+
+# ── v2 agents (live intraday + scalping) ─────────────────────────────────
+def _orb_snap(symbol, now, ltp, rng_lo, rng_hi, bias="UP", vol_ratio=1.5, ema9=None, ema21=None, vwap=None):
+    """A 1-minute session from 09:15 to `now`: a flat opening range [rng_lo, rng_hi] then price at ltp."""
+    from unittest.mock import patch
+    candles = []
+    t = datetime(now.year, now.month, now.day, 9, 15)
+    while t <= now:
+        in_range = t < datetime(now.year, now.month, now.day, 9, 30)
+        px = (rng_lo + rng_hi) / 2 if in_range else ltp
+        candles.append(Candle(px, rng_hi if in_range else max(px, ltp) + 0.5, rng_lo if in_range else min(px, ltp) - 0.5,
+                              px, 400000, t))
+        t += timedelta(minutes=1)
+    snap = _make_snap(symbol=symbol, ltp=ltp, vwap=vwap or (rng_lo + rng_hi) / 2, volume_ratio=vol_ratio,
+                      ema9=ema9 or ltp, ema21=ema21 or (rng_lo + rng_hi) / 2)
+    snap.candles_1min = candles
+    return snap
+
+def _with_v2_clock(now, bias):
+    from unittest.mock import patch
+    class _Ctx:
+        def __enter__(self):
+            self.p = patch("agents.strategy_agents.now_ist", return_value=now); self.p.start()
+            self.prev = _iv2.BIAS_PROVIDER; _iv2.BIAS_PROVIDER = (lambda sym, day: bias)
+            return self
+        def __exit__(self, *a):
+            self.p.stop(); _iv2.BIAS_PROVIDER = self.prev
+    return _Ctx()
+
+def t_v2_live_registry():
+    assert isinstance(ALL_AGENTS["intraday"], IntradayV2Agent) and isinstance(ALL_AGENTS["scalping"], ScalpV2Agent)
+    assert ALL_AGENTS["intraday"].name == "intraday" and ALL_AGENTS["scalping"].name == "scalping"
+    assert IntradayV2Agent.TREND_FILTER == 1 and IntradayV2Agent.RR == 2.5 and IntradayV2Agent.ORB_WINDOW_END_MIN == 600
+    assert ScalpV2Agent.MODE == "ORB_RETEST" and ScalpV2Agent.RT_TOUCH_PCT == 0.2 and ScalpV2Agent.RT_END_MIN == 750
+
+def t_v2_orb_breakout_buy():
+    now = datetime(2026, 1, 15, 9, 40)
+    a = IntradayV2Agent()
+    with _with_v2_clock(now, "UP"):
+        a.evaluate_tick(_orb_snap("ORB", now - timedelta(minutes=1), 1004.0, 1000.0, 1006.0))  # inside the range
+        action, sig = a.evaluate_tick(_orb_snap("ORB", now, 1008.0, 1000.0, 1006.0))        # fresh break of 1006
+    assert action == "BUY", action
+    assert sig["stop_loss"] < 1008.0 < sig["target"] and "ORB" in sig["trigger"]
+    risk = 1008.0 - sig["stop_loss"]; assert abs((sig["target"] - 1008.0) / risk - 2.5) < 0.01, sig
+    assert 0.35 <= sig["stop_loss_pct"] <= 0.8
+    with _with_v2_clock(now + timedelta(minutes=1), "UP"):
+        action2, _ = a.evaluate_tick(_orb_snap("ORB", now + timedelta(minutes=1), 1012.0, 1000.0, 1006.0))
+    assert action2 == "HOLD", "one opening-range trade per symbol per day"
+
+def t_v2_orb_trend_filter_blocks_counter_trend():
+    now = datetime(2026, 1, 15, 9, 40)
+    a = IntradayV2Agent()
+    with _with_v2_clock(now, "DOWN"):
+        a.evaluate_tick(_orb_snap("ORB2", now - timedelta(minutes=1), 1004.0, 1000.0, 1006.0))
+        action, _ = a.evaluate_tick(_orb_snap("ORB2", now, 1008.0, 1000.0, 1006.0))
+    assert action == "HOLD", "an upside break against a 20-day downtrend is skipped"
+    b = IntradayV2Agent(); b.TREND_FILTER = 0
+    with _with_v2_clock(now, "DOWN"):
+        b.evaluate_tick(_orb_snap("ORB2", now - timedelta(minutes=1), 1004.0, 1000.0, 1006.0))
+        action, _ = b.evaluate_tick(_orb_snap("ORB2", now, 1008.0, 1000.0, 1006.0))
+    assert action == "BUY", "without the filter the same break trades"
+
+def t_v2_orb_window_and_range_limits():
+    a = IntradayV2Agent()
+    late = datetime(2026, 1, 15, 10, 5)                       # after the 10:00 window
+    with _with_v2_clock(late, "UP"):
+        a.evaluate_tick(_orb_snap("ORB3", late - timedelta(minutes=1), 1004.0, 1000.0, 1006.0))
+        action, _ = a.evaluate_tick(_orb_snap("ORB3", late, 1008.0, 1000.0, 1006.0))
+    assert action == "HOLD"
+    now = datetime(2026, 1, 15, 9, 40)
+    b = IntradayV2Agent()
+    with _with_v2_clock(now, "UP"):                           # 0.1% range: too narrow to trust
+        b.evaluate_tick(_orb_snap("ORB4", now - timedelta(minutes=1), 1000.5, 1000.0, 1001.0))
+        action, _ = b.evaluate_tick(_orb_snap("ORB4", now, 1002.0, 1000.0, 1001.0))
+    assert action == "HOLD"
+
+def t_v2_scalp_retest_and_loss_stop():
+    a = ScalpV2Agent()
+    day = datetime(2026, 1, 15, 9, 15)
+    def snap_at(mins, ltp, low=None, high=None, close=None, open_=None):
+        now = day + timedelta(minutes=mins)
+        s = _orb_snap("RT", now, ltp, 1000.0, 1006.0, vwap=1003.0, ema9=ltp + 1, ema21=ltp - 1)
+        c = s.candles_1min[-1]
+        s.candles_1min[-1] = Candle(open_ or c.open, high or c.high, low if low is not None else c.low, close or c.close, c.volume, c.ts)
+        return now, s
+    with _with_v2_clock(day + timedelta(minutes=20), "UP"):
+        n, s = snap_at(20, 1012.0)                            # 09:35 — clearly out of the range (>0.4%)
+        assert a.evaluate_tick(s)[0] == "HOLD"
+    with _with_v2_clock(day + timedelta(minutes=30), "UP"):
+        n, s = snap_at(30, 1007.5, low=1006.5, open_=1006.8, close=1007.5)   # 09:45 pullback touches 1006, closes green above it
+        action, sig = a.evaluate_tick(s)
+    assert action == "BUY", action
+    assert "ORB_RETEST" in sig["trigger"] and sig["stop_loss"] < 1007.5 < sig["target"]
+    risk = 1007.5 - sig["stop_loss"]; assert abs((sig["target"] - 1007.5) / risk - 1.5) < 0.01
+    # a loss ends the symbol's day; the next day starts clean
+    a.record_result("RT", -500.0, now=day + timedelta(minutes=40))
+    assert a._losses[("RT", day.date())] == 1
+    b = ScalpV2Agent()
+    with _with_v2_clock(day + timedelta(minutes=30), "DOWN"):                 # same retest against the trend: skipped
+        b.evaluate_tick(snap_at(20, 1012.0)[1])
+        assert b.evaluate_tick(snap_at(30, 1007.5, low=1006.5, open_=1006.8, close=1007.5)[1])[0] == "HOLD"
+
+def t_v2_close_hook_reaches_agent():
+    from agents import base_agent as _ba
+    calls = []
+    sc = ALL_AGENTS["scalping"]; orig = sc.record_result
+    sc.record_result = lambda sym, pnl, now=None: calls.append((sym, pnl))
+    try:
+        _ba._notify_agent_result("scalping", "RELIANCE", -120.0)
+        _ba._notify_agent_result("intraday", "RELIANCE", 50.0)       # no hook on this agent: silently ignored
+        _ba._notify_agent_result("nope", "RELIANCE", 50.0)
+    finally:
+        sc.record_result = orig
+    assert calls == [("RELIANCE", -120.0)]
+
+run("v2: live registry runs IntradayV2Agent + ScalpV2Agent",  t_v2_live_registry)
+run("v2: opening-range breakout → BUY at 2.5R, once per day",  t_v2_orb_breakout_buy)
+run("v2: 20-day trend filter blocks counter-trend breakouts",  t_v2_orb_trend_filter_blocks_counter_trend)
+run("v2: breakout window and range limits enforced",           t_v2_orb_window_and_range_limits)
+run("v2: scalper retest entry at 1.5R, stops after a loss",    t_v2_scalp_retest_and_loss_stop)
+run("v2: trade-close hook reaches the agent",                  t_v2_close_hook_reaches_agent)
 
 run("ALL_AGENTS has 4 strategy agents",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
@@ -4819,7 +4943,7 @@ def t_replay_runs_live_agent_code():
     prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
     try:
         bars = {"RPL": _trend_bars()}
-        res = _rb.replay("intraday", ["RPL"], days=3, bars_by_symbol=bars)
+        res = _rb.replay("intraday_legacy", ["RPL"], days=3, bars_by_symbol=bars)
         m = res.metrics()
         assert res.bars == 1125 and res.source == "provided" and res.period[0].startswith("2026-01-12")
         assert m["trades"] >= 1, "a trending series with volume bursts must trigger the intraday patterns"
@@ -4829,7 +4953,7 @@ def t_replay_runs_live_agent_code():
         assert all(x.exit_ts.time() <= time(15, 16) or x.exit_reason == "END" for x in res.trades), "MIS squared off by 15:15"
         assert all(x.entry_ts > bars["RPL"][29]["ts"] for x in res.trades), "no entries before 30 bars of warm-up"
         d = res.to_dict()
-        assert "trades" in d and d["exit_reasons"] and _rb._LAST["intraday"]["trades"] == m["trades"]
+        assert "trades" in d and d["exit_reasons"] and _rb._LAST["intraday_legacy"]["trades"] == m["trades"]
     finally:
         _ai_settings.use_multi_timeframe = prev
     # the live agents' shared state must not carry replay aliases, and the clock must be restored
@@ -4842,8 +4966,8 @@ def t_replay_stop_before_target_and_slippage():
     prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
     try:
         bars = _trend_bars("RPS", days=2, seed=3)
-        res0 = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": bars})
-        res5 = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=50.0, bars_by_symbol={"RPS": bars})
+        res0 = _rb.replay("intraday_legacy", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": bars})
+        res5 = _rb.replay("intraday_legacy", ["RPS"], days=2, slippage_bps=50.0, bars_by_symbol={"RPS": bars})
         assert res0.trades and res5.trades
         a, b5 = res0.trades[0], res5.trades[0]
         assert a.entry_ts == b5.entry_ts and a.side == b5.side
@@ -4853,7 +4977,7 @@ def t_replay_stop_before_target_and_slippage():
         i = next(k for k, b in enumerate(bars) if b["ts"] == t0.entry_ts)
         crafted = [dict(b) for b in bars[: i + 1]]
         crafted.append({**bars[i + 1], "high": t0.entry * 1.10, "low": t0.entry * 0.90})
-        r = _rb.replay("intraday", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": crafted})
+        r = _rb.replay("intraday_legacy", ["RPS"], days=2, slippage_bps=0.0, bars_by_symbol={"RPS": crafted})
         assert r.trades and r.trades[0].exit_reason == "STOP" and r.trades[0].net < 0, r.trades[0]
     finally:
         _ai_settings.use_multi_timeframe = prev
@@ -4862,12 +4986,12 @@ def t_replay_param_override_and_validation():
     prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
     try:
         bars = {"RPP": _trend_bars("RPP")}
-        base = _rb.replay("intraday", ["RPP"], days=3, bars_by_symbol=bars).metrics()["trades"]
-        strict = _rb.replay("intraday", ["RPP"], days=3, params={"MIN_SCORE": 9}, bars_by_symbol=bars).metrics()["trades"]
+        base = _rb.replay("intraday_legacy", ["RPP"], days=3, bars_by_symbol=bars).metrics()["trades"]
+        strict = _rb.replay("intraday_legacy", ["RPP"], days=3, params={"MIN_SCORE": 9}, bars_by_symbol=bars).metrics()["trades"]
         assert strict <= base, "a stricter MIN_SCORE can only reduce trades"
         assert IntradayAgent.MIN_SCORE == 4, "overrides are per replay instance, never the live class"
         try:
-            _rb.replay("intraday", ["RPP"], days=3, params={"NOPE": 1}, bars_by_symbol=bars); raise AssertionError("bad param accepted")
+            _rb.replay("intraday_legacy", ["RPP"], days=3, params={"NOPE": 1}, bars_by_symbol=bars); raise AssertionError("bad param accepted")
         except ValueError as e:
             assert "no parameter" in str(e)
         try:
@@ -4907,7 +5031,7 @@ def _with_params_file(fn):
         try:
             return fn(path)
         finally:
-            for a in ("MIN_SCORE", "SL_MIN_PCT", "TGT_MIN_PCT"):
+            for a in ("RR", "SL_MIN_PCT", "VOL_ORB"):
                 if a in vars(ALL_AGENTS["intraday"]): delattr(ALL_AGENTS["intraday"], a)
 
 def t_opt_folds_are_time_ordered():
@@ -4922,37 +5046,37 @@ def t_opt_adopts_only_out_of_sample_winners():
     """Decision logic with canned scores: a candidate must beat the current params on unseen data,
     with enough trades and no worse drawdown; otherwise nothing changes."""
     bars = {"OPT": _trend_bars("OPT", days=6)}
-    grid = {"MIN_SCORE": [4, 5]}
+    grid = {"RR": [2.5, 3.0]}
     def scorer(net_for):
         async def _score(agent, params, bars_by_symbol, days):
             return {"net": net_for(params), "trades": 8, "win_rate": 50.0, "pf": 1.1, "max_dd": 100.0}
         return _score
     def body(path):
         with _patch.dict(_opt.GRIDS, {"intraday": grid}), \
-             _patch.object(_opt, "_score", scorer(lambda p: 500.0 if p["MIN_SCORE"] == 5 else 100.0)):
+             _patch.object(_opt, "_score", scorer(lambda p: 500.0 if p["RR"] == 3.0 else 100.0)):
             rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
-        assert rep["folds"] == 3 and rep["candidates"] == 2 and rep["current"]["params"]["MIN_SCORE"] == 4
-        assert rep["adopted"] == {"MIN_SCORE": 5}, rep["top"]
-        assert _opt.load_params()["intraday"]["params"] == {"MIN_SCORE": 5}
-        assert ALL_AGENTS["intraday"].MIN_SCORE == 5 and IntradayAgent.MIN_SCORE == 4, "applied to the instance, not the class"
+        assert rep["folds"] == 3 and rep["candidates"] == 2 and rep["current"]["params"]["RR"] == 2.5
+        assert rep["adopted"] == {"RR": 3.0}, rep["top"]
+        assert _opt.load_params()["intraday"]["params"] == {"RR": 3.0}
+        assert ALL_AGENTS["intraday"].RR == 3.0 and IntradayV2Agent.RR == 2.5, "applied to the instance, not the class"
         # a candidate that is better in sample but worse out of sample is NOT adopted
         _opt.reset("intraday")
-        assert ALL_AGENTS["intraday"].MIN_SCORE == 4 and "intraday" not in _opt.load_params()
+        assert ALL_AGENTS["intraday"].RR == 2.5 and "intraday" not in _opt.load_params()
         calls = {"n": 0}
         async def tricky(agent, params, bars_by_symbol, days):
             calls["n"] += 1
             in_sample = len(next(iter(bars_by_symbol.values()))) > 375 * 1.2       # train parts are bigger
-            if params["MIN_SCORE"] == 5:
+            if params["RR"] == 3.0:
                 return {"net": 900.0 if in_sample else -50.0, "trades": 8, "win_rate": 50.0, "pf": 1.0, "max_dd": 100.0}
             return {"net": 100.0, "trades": 8, "win_rate": 50.0, "pf": 1.0, "max_dd": 100.0}
         with _patch.dict(_opt.GRIDS, {"intraday": grid}), _patch.object(_opt, "_score", tricky):
             rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
         assert rep["adopted"] is None and any("does not beat" in r.get("verdict", "") or "loses" in r.get("verdict", "")
                                                for r in rep["top"] if not r["is_current"]), rep["top"]
-        assert ALL_AGENTS["intraday"].MIN_SCORE == 4
+        assert ALL_AGENTS["intraday"].RR == 2.5
         # too few out-of-sample trades → not adopted either
         async def thin(agent, params, bars_by_symbol, days):
-            return {"net": 1000.0 if params["MIN_SCORE"] == 5 else 1.0, "trades": 1, "win_rate": 50.0, "pf": 1.0, "max_dd": 10.0}
+            return {"net": 1000.0 if params["RR"] == 3.0 else 1.0, "trades": 1, "win_rate": 50.0, "pf": 1.0, "max_dd": 10.0}
         with _patch.dict(_opt.GRIDS, {"intraday": grid}), _patch.object(_opt, "_score", thin):
             rep = _opt.optimise("intraday", ["OPT"], 6, bars_by_symbol=bars)
         assert rep["adopted"] is None and "too few" in [r.get("verdict", "") for r in rep["top"] if not r["is_current"]][0]
@@ -4965,9 +5089,9 @@ def t_opt_apply_and_persist():
         assert applied == {"intraday": {"SL_MIN_PCT": 0.7, "BOGUS": 1}}
         assert ALL_AGENTS["intraday"].SL_MIN_PCT == 0.7 and not hasattr(ALL_AGENTS["intraday"], "BOGUS") or \
                "BOGUS" not in vars(ALL_AGENTS["intraday"]), "only grid keys are applied"
-        assert _opt.current_params("intraday")["SL_MIN_PCT"] == 0.7 and _opt.current_params("intraday")["MIN_SCORE"] == 4
+        assert _opt.current_params("intraday")["SL_MIN_PCT"] == 0.7 and _opt.current_params("intraday")["RR"] == 2.5
         _opt.reset("intraday")
-        assert ALL_AGENTS["intraday"].SL_MIN_PCT == IntradayAgent.SL_MIN_PCT
+        assert ALL_AGENTS["intraday"].SL_MIN_PCT == IntradayV2Agent.SL_MIN_PCT
     _with_params_file(body)
 
 def t_opt_real_run_small_grid():
@@ -4975,10 +5099,10 @@ def t_opt_real_run_small_grid():
     prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
     bars = {"OPR": _trend_bars("OPR", days=6, seed=11)}
     def body(path):
-        with _patch.dict(_opt.GRIDS, {"intraday": {"MIN_SCORE": [4, 9]}}):
+        with _patch.dict(_opt.GRIDS, {"intraday": {"RR": [2.5, 9]}}):
             rep = _opt.optimise("intraday", ["OPR"], 6, bars_by_symbol=bars)
         assert rep["folds"] == 3 and len(rep["top"]) >= 1 and "test" in rep["current"]
-        assert rep["adopted"] in (None, {"MIN_SCORE": 9}) and rep["data"] == "provided"
+        assert rep["adopted"] in (None, {"RR": 9}) and rep["data"] == "provided"
         if rep["adopted"]:
             assert rep["top"][0]["test"]["net"] > rep["current"]["test"]["net"]
     try:
@@ -5009,7 +5133,7 @@ def _with_research_files(fn):
         try:
             return fn(d)
         finally:
-            for a in ("MIN_SCORE", "SL_MIN_PCT", "TGT_MIN_PCT"):
+            for a in ("RR", "SL_MIN_PCT", "VOL_ORB"):
                 if a in vars(ALL_AGENTS["intraday"]): delattr(ALL_AGENTS["intraday"], a)
 
 def t_research_validate_proposals():
@@ -5018,7 +5142,7 @@ def t_research_validate_proposals():
         assert _rl.validate({"agent": "intraday", "param": "SL_MIN_PCT", "value": 0.7}) is None
         assert "not in" in _rl.validate({"agent": "intraday", "param": "COOL_S", "value": 60})
         assert "not an allowed value" in _rl.validate({"agent": "intraday", "param": "SL_MIN_PCT", "value": 3.0})
-        assert "already the current" in _rl.validate({"agent": "intraday", "param": "MIN_SCORE", "value": 4})
+        assert "already the current" in _rl.validate({"agent": "intraday", "param": "RR", "value": 2.5})
         assert "not tunable" in _rl.validate({"agent": "swing", "param": "x", "value": 1})
     _with_research_files(body)
 
@@ -5040,7 +5164,7 @@ def t_research_ab_test_verdicts():
             with _patch.object(_rb, "replay_async", fake_replay(base, cand)):
                 ab = asyncio.run(_rl.ab_test("intraday", "SL_MIN_PCT", 0.7, ["X"], bars_by_symbol={"X": [1]}))
             assert expect in ab["verdict"], (expect, ab["verdict"])
-            assert ab["proposed"]["params"]["SL_MIN_PCT"] == 0.7 and ab["current"]["params"]["SL_MIN_PCT"] == 0.5
+            assert ab["proposed"]["params"]["SL_MIN_PCT"] == 0.7 and ab["current"]["params"]["SL_MIN_PCT"] == IntradayV2Agent.SL_MIN_PCT
     _with_research_files(body)
 
 def t_research_cycle_adopts_and_logs():
@@ -5059,12 +5183,12 @@ def t_research_cycle_adopts_and_logs():
             assert ALL_AGENTS["intraday"].SL_MIN_PCT == 0.7 and _opt.load_params()["intraday"]["source"] == "research_loop"
             assert _rl.log()[-1]["kind"] == "adopted" and "adopted" in _rl.telegram_text(entry)
             # second cycle: a losing proposal is rejected and nothing changes
-            client2 = _FakeResearchClient({"agent": "intraday", "param": "MIN_SCORE", "value": 6, "rationale": "fewer trades"})
+            client2 = _FakeResearchClient({"agent": "intraday", "param": "RR", "value": 3.0, "rationale": "fewer trades"})
             async def _r2(agent, symbols, days, slippage_bps=5.0, params=None, bars_by_symbol=None):
-                return _NS(metrics=lambda: {"trades": 12, "net_pnl": 100.0, "max_drawdown": 100.0} if params.get("MIN_SCORE") == 6 else good)
+                return _NS(metrics=lambda: {"trades": 12, "net_pnl": 100.0, "max_drawdown": 100.0} if params.get("RR") == 3.0 else good)
             with _patch.object(_rb, "replay_async", _r2):
                 entry = asyncio.run(_rl.run_cycle(client=client2, bars_by_symbol={"X": [1]}))
-            assert entry["kind"] == "rejected" and ALL_AGENTS["intraday"].MIN_SCORE == 4 and "rejected" in _rl.telegram_text(entry)
+            assert entry["kind"] == "rejected" and ALL_AGENTS["intraday"].RR == 2.5 and "rejected" in _rl.telegram_text(entry)
             # invalid and no-change proposals are logged without touching anything
             e = asyncio.run(_rl.run_cycle(client=_FakeResearchClient({"agent": "intraday", "param": "SL_MIN_PCT", "value": 9, "rationale": "x"}),
                                           bars_by_symbol={"X": [1]}))
@@ -5896,12 +6020,12 @@ def t_bg_replay_endpoint_uses_worker():
 
 def t_optimizer_adopt_from_worker_report():
     import optimizer as _opt
-    report = {"agent": "scalping", "adopted": {"MIN_SCORE": 5, "SL_PCT": 0.25, "TGT_PCT": 0.5}, "at": "2026-01-01T00:00:00",
+    report = {"agent": "scalping", "adopted": {"RT_RR": 2.0, "RT_TOUCH_PCT": 0.25, "RT_END_MIN": 690}, "at": "2026-01-01T00:00:00",
               "current": {"params": {}, "test": {"net": -100.0}}, "symbols": ["X"], "days": 45,
-              "top": [{"params": {"MIN_SCORE": 5, "SL_PCT": 0.25, "TGT_PCT": 0.5}, "test": {"net": 250.0}, "verdict": "adopted"}]}
+              "top": [{"params": {"RT_RR": 2.0, "RT_TOUCH_PCT": 0.25, "RT_END_MIN": 690}, "test": {"net": 250.0}, "verdict": "adopted"}]}
     try:
         assert _opt.adopt(report) is True
-        assert _opt.current_params("scalping")["MIN_SCORE"] == 5 and _opt.load_params()["scalping"]["test_net"] == 250.0
+        assert _opt.current_params("scalping")["RT_RR"] == 2.0 and _opt.load_params()["scalping"]["test_net"] == 250.0
         assert _opt.adopt({"agent": "scalping", "adopted": None}) is False
     finally:
         _opt.reset("scalping")

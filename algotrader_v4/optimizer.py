@@ -35,8 +35,9 @@ PARAMS_FILE = Path(os.getenv("STRATEGY_PARAMS_FILE") or Path(__file__).resolve()
 # The agents use max(ATR × multiple, price × min %): at normal 1-minute volatility the min-%
 # floor is what binds, so that is what gets tuned (the ATR multiples barely change anything).
 GRIDS: dict[str, dict[str, list]] = {
-    "intraday": {"MIN_SCORE": [4, 5, 6], "SL_MIN_PCT": [0.4, 0.5, 0.7], "TGT_MIN_PCT": [0.8, 1.0, 1.4]},
-    "scalping": {"MIN_SCORE": [3, 4, 5], "SL_PCT": [0.2, 0.25, 0.35], "TGT_PCT": [0.4, 0.5, 0.7]},
+    # tunables of the live agents (agents/intraday_v2.py); the middle value of each is the default
+    "intraday": {"RR": [2.0, 2.5, 3.0], "SL_MIN_PCT": [0.35, 0.5, 0.7], "VOL_ORB": [0.8, 1.0, 1.3]},
+    "scalping": {"RT_RR": [1.2, 1.5, 2.0], "RT_TOUCH_PCT": [0.15, 0.2, 0.25], "RT_END_MIN": [690, 750, 810]},
 }
 MIN_TEST_TRADES = 10
 MAX_DD_WORSENING = 1.2          # candidate's test drawdown may be at most 20% worse than current
@@ -86,21 +87,27 @@ def apply_params(agents: Optional[dict] = None) -> dict[str, dict]:
     return applied
 
 
+def _agent_class(name: str):
+    """The class of the live agent (what the replay runs for that name)."""
+    from agents.strategy_agents import ALL_AGENTS
+    if name not in GRIDS:
+        raise KeyError(name)
+    return type(ALL_AGENTS[name])
+
+
 def current_params(name: str) -> dict:
     """Defaults (class attributes), overridden by anything saved."""
-    from agents.strategy_agents import IntradayAgent, ScalpingAgent
-    cls = {"intraday": IntradayAgent, "scalping": ScalpingAgent}[name]
+    cls = _agent_class(name)
     base = {k: getattr(cls, k) for k in GRIDS[name]}
     base.update((load_params().get(name) or {}).get("params") or {})
     return base
 
 
 def reset(name: str) -> None:
-    from agents.strategy_agents import IntradayAgent, ScalpingAgent, ALL_AGENTS
+    from agents.strategy_agents import ALL_AGENTS
     data = load_params()
     data.pop(name, None)
     save_params(data)
-    cls = {"intraday": IntradayAgent, "scalping": ScalpingAgent}[name]
     a = ALL_AGENTS.get(name)
     if a:
         for k in GRIDS[name]:
