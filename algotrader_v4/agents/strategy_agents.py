@@ -953,6 +953,7 @@ class SwingAgent(BaseAgent):
 
     SL/TGT: fixed 3% / 8% (matches should_exit_position).
     """
+    validated_by_replay = True       # replay_backtest on real 1-minute data (swing)
     name    = "swing"
     product = "CNC"
     min_candles_1min = 200   # needs EMA200

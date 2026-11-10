@@ -317,7 +317,23 @@ class BaseAgent(ABC):
 
     # ── Backtest filter ───────────────────────────────────────────────────
 
+    # Agents validated at strategy level on real 1-minute data (replay_backtest) trade their whole
+    # watchlist; the legacy per-symbol backtest tests a different, older rule set and cannot fetch history
+    # on the server ("Insufficient data (0 bars)" for every symbol), which left them with nothing to trade.
+    validated_by_replay: bool = False
+
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
+        try:
+            from tick_engine import canonical_symbol           # INFOSYS → INFY etc.: ticks arrive canonical
+            watchlist = [{**i, "symbol": canonical_symbol(i["symbol"])} for i in watchlist]
+        except Exception:
+            pass
+        if self.validated_by_replay:
+            approved = list(watchlist)
+            self._approved.update(i["symbol"] for i in approved)
+            self.state.approved_symbols = [a["symbol"] for a in approved]
+            logger.info("[{}] validated by real-data replay — all {} watchlist symbols ready", self.name, len(approved))
+            return approved
         # Fast path: pre-learned system — skip per-symbol backtests
         if settings.skip_startup_backtest:
             approved_path = Path("logs/approved_symbols.json")
@@ -344,6 +360,12 @@ class BaseAgent(ABC):
         for item in watchlist:
             sym, exch = item["symbol"], item.get("exchange", "NSE")
             res = backtest_engine.run(sym, exch, self.name)
+            no_data = not res.passed and res.fail_reasons and all("Insufficient data" in r for r in res.fail_reasons)
+            if no_data:                      # missing history is not evidence against the symbol
+                approved.append(item)
+                self._approved.add(sym)
+                logger.warning("[{}] {} no history for the approval backtest — approved", self.name, sym)
+                continue
             if res.passed:
                 approved.append(item)
                 self._approved.add(sym)

@@ -6526,6 +6526,30 @@ def t_gate_replay_scores_ai_against_all_signals():
 
 run("gate replay: AI-approved vs all signals, sizing, budget cap", t_gate_replay_scores_ai_against_all_signals)
 
+def t_watchlist_approval_for_validated_agents():
+    """Regression: production logged 'FAIL: Insufficient data (0 bars)' for every symbol of every agent at
+    start (the legacy per-symbol backtest cannot fetch history there), so agents started with nothing."""
+    from agents.intraday_v2 import IntradayV2Agent, ScalpV2Agent
+    import backtest_engine as _be
+    wl = [{"symbol": "RELIANCE", "exchange": "NSE"}, {"symbol": "INFOSYS", "exchange": "NSE"}]
+    with _patch.object(_be.backtest_engine, "run", side_effect=AssertionError("no legacy backtest for validated agents")):
+        for cls in (IntradayV2Agent, ScalpV2Agent, SwingAgent):
+            a = cls(); got = a.filter_watchlist(wl)
+            assert [g["symbol"] for g in got] == ["RELIANCE", "INFY"] and a._approved == {"RELIANCE", "INFY"}, (cls, got)
+    # an agent still on the legacy backtest: no data → approved; a real fail → rejected
+    class _R:
+        def __init__(s, passed, reasons): s.passed, s.fail_reasons, s.win_rate, s.sharpe_ratio = passed, reasons, 0, 0
+    prev = _ai_settings.skip_startup_backtest; _ai_settings.skip_startup_backtest = False
+    try:
+        outcomes = {"RELIANCE": _R(False, ["Insufficient data (0 bars)"]), "INFY": _R(False, ["Win rate 30% < 45%"])}
+        with _patch.object(_be.backtest_engine, "run", side_effect=lambda sym, ex, st: outcomes[sym]):
+            f = FnOAgent(); got = f.filter_watchlist(wl)
+        assert [g["symbol"] for g in got] == ["RELIANCE"], got
+    finally:
+        _ai_settings.skip_startup_backtest = prev
+
+run("watchlist: validated agents trade all symbols; no-data is not a fail", t_watchlist_approval_for_validated_agents)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

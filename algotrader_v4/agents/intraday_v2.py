@@ -77,6 +77,7 @@ def daily_bias(sym: str, day) -> Optional[str]:
 
 class IntradayV2Agent(BaseAgent):
     name = "intraday"
+    validated_by_replay = True
     product = "MIS"
     min_candles_1min = 21
 
@@ -217,6 +218,7 @@ class IntradayV2Agent(BaseAgent):
 
 class ScalpV2Agent(BaseAgent):
     name = "scalping"
+    validated_by_replay = True
     product = "MIS"
     min_candles_1min = 50
 
