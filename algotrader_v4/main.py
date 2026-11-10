@@ -756,13 +756,14 @@ def orders():
 @app.get("/gate/log", tags=["AI Signal"])
 def gate_log(n: int = 50):
     """Return last n Claude trade-gate decisions (newest first). Used by dashboard."""
-    from claude_trade_gate import get_gate_log
+    from claude_trade_gate import get_gate_log, get_gate_stats
     decisions = get_gate_log(n)
     # Normalise: add `enter` bool from decision string if needed
     for d in decisions:
         if "enter" not in d:
             d["enter"] = d.get("decision", "").upper() == "ENTER"
-    return {"decisions": decisions, "count": len(decisions)}
+    return {"decisions": decisions, "count": len(decisions), "stats": get_gate_stats(),
+            "enabled": settings.use_claude_trade_gate}
 
 
 # ── Signals / Risk ──────────────────────────────────────────────────────────
@@ -905,10 +906,9 @@ def _refresh_after_credential_change(changed: set[str]) -> None:
         from llm_provider import llm_router
         llm_router.reset()                 # new keys on the next AI call, both providers
     if "anthropic_api_key" in changed:
-        import anthropic, claude_trade_gate, trade_memory
+        import anthropic, trade_memory
         from signal_engine import signal_engine
         ai_trader._client = None
-        claude_trade_gate._client = None
         trade_memory._client = None
         master_agent._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         if getattr(signal_engine, "_client", None) is not None:

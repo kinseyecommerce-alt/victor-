@@ -6349,6 +6349,72 @@ run("allocator: defaults, AI decision clamped + persisted, failure keeps factors
 run("sizing: allocator factor and shared-bucket cap",                            t_allocate_quantity_factor_and_bucket_cap)
 run("allocator: GET /allocator, POST /allocator/run",                            t_allocator_endpoints)
 
+# ── Trade gate: never crashes the entry path, routes through the provider router ──
+def t_gate_context_survives_regime_signals():
+    """Regression: the gate read sigs.vix / sigs.breadth (not RegimeSignals fields), so once the master
+    computed its first regime every agent entry raised and was silently dropped."""
+    import claude_trade_gate as _g, market_regime as _mr
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
+    src = open(__file__).read(); i = src.index("def _make_snap("); j = src.index("\ndef ", i + 5)
+    ns = {"MarketSnapshot": MarketSnapshot, "Tick": Tick, "LiveIndicators": LiveIndicators, "Candle": Candle,
+          "datetime": datetime, "timedelta": timedelta}
+    exec(src[i:j], ns)
+    snap = ns["_make_snap"]()
+    prev = _mr.regime_detector.current_signals
+    try:
+        _mr.regime_detector.current_signals = _mr.RegimeSignals(india_vix=13.2, nifty_ltp=24100.0, nifty_1d_chg_pct=-0.4,
+                                                                advance_count=30, decline_count=20, advance_decline=1.5)
+        ctx = _g._build_context(snap, "BUY", {"stop_loss": 2780.0, "target": 2850.0, "trigger": "ORB"}, "intraday")
+        assert ctx["regime"]["vix"] == 13.2 and ctx["regime"]["nifty_change_pct"] == -0.4 and ctx["regime"]["advance_decline"] == 1.5
+        assert "Opening-range" in ctx["strategy_rules"] and ctx["proposed_stop"] == 2780.0
+        json.dumps(ctx, default=str)
+    finally:
+        _mr.regime_detector.current_signals = prev
+
+def t_gate_decides_via_router_and_fails_open():
+    import claude_trade_gate as _g, llm_provider as _lpm
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
+    src = open(__file__).read(); i = src.index("def _make_snap("); j = src.index("\ndef ", i + 5)
+    ns = {"MarketSnapshot": MarketSnapshot, "Tick": Tick, "LiveIndicators": LiveIndicators, "Candle": Candle,
+          "datetime": datetime, "timedelta": timedelta}
+    exec(src[i:j], ns)
+    snap = ns["_make_snap"]()
+    prev = (_ai_settings.use_claude_trade_gate, _ai_settings.anthropic_api_key, _ai_settings.openai_api_key, dict(_g._stats))
+    seen = {}
+    async def fake_create(**kw):
+        seen.update(kw)
+        blk = _lpm.Block(type="tool_use", id="g1", name="decide",
+                         input={"enter": False, "size_factor": 0.5, "confidence": 30, "red_flags": ["chasing: 1.6 ATR past trigger"],
+                                "reason": "Entry is 1.6 ATR beyond the range high."})
+        return _lpm.LLMResponse([blk], "tool_use", _lpm.Usage(input_tokens=10, output_tokens=5), "openai", "gpt-5")
+    try:
+        _ai_settings.anthropic_api_key = ""; _ai_settings.openai_api_key = "sk-oai"
+        # off and not forced → approved without a call
+        _ai_settings.use_claude_trade_gate = False
+        with _patch.object(_lpm.llm_router, "create", side_effect=AssertionError("no call when off")):
+            d = asyncio.run(_g.assess(snap, "BUY", {}, "intraday")); assert d.enter and "disabled" in d.reason
+        # forced by the allocator → reviewed through the router with the forced decide tool
+        with _patch.object(_lpm.llm_router, "create", fake_create):
+            d = asyncio.run(_g.assess(snap, "BUY", {"stop_loss": 2780.0}, "intraday", force=True))
+        assert not d.enter and d.size_factor == 0.5 and d.warnings[0].startswith("chasing") and not d.fail_open
+        assert seen["tool_choice"] == {"type": "tool", "name": "decide"} and seen["tools"][0]["name"] == "decide"
+        assert seen["effort"] == "low" and "Approve by default" in seen["system"]
+        # API failure / timeout / context crash → approved and counted as fail-open, never raised
+        _ai_settings.use_claude_trade_gate = True
+        before = _g._stats["fail_open"]
+        async def boom(**kw): raise RuntimeError("billing")
+        with _patch.object(_lpm.llm_router, "create", boom):
+            d = asyncio.run(_g.assess(snap, "SELL", {}, "scalping")); assert d.enter and d.fail_open
+        with _patch.object(_g, "_build_context", side_effect=AttributeError("x")):
+            d = asyncio.run(_g.assess(snap, "SELL", {}, "scalping")); assert d.enter and d.fail_open and "context" in d.reason
+        assert _g._stats["fail_open"] == before + 2 and _g.get_gate_log(1)[0]["fail_open"] is True
+    finally:
+        (_ai_settings.use_claude_trade_gate, _ai_settings.anthropic_api_key, _ai_settings.openai_api_key) = prev[:3]
+        _g._stats.clear(); _g._stats.update(prev[3])
+
+run("gate: context builds with real regime signals (entry-crash regression)", t_gate_context_survives_regime_signals)
+run("gate: router + forced tool, allocator force, fails open and counts it", t_gate_decides_via_router_and_fails_open)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

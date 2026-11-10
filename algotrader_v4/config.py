@@ -81,7 +81,8 @@ class Settings(BaseSettings):
     use_nifty100_watchlist: bool = False  # auto-use full Nifty 100 as watchlist
 
     # Intelligence layer
-    use_claude_trade_gate: bool = True    # per-trade Claude assessment via Sonnet
+    use_claude_trade_gate: bool = True    # per-trade AI review of agent signals (llm_router: Claude → OpenAI)
+    claude_gate_timeout_s: float = 25.0   # reviewer budget per signal; on timeout the trade proceeds unreviewed
     claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
     use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
     mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)

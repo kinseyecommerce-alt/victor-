@@ -40,6 +40,9 @@ from trailing_sl_engine import TrailingSLEngine, TRAIL_CONFIGS
 SQUARE_OFF = time(15, 15)
 MAX_CNC_SESSIONS = 15
 _LAST: dict[str, dict] = {}                   # last result per agent (for the dashboard / research loop / allocator)
+# Live-only entry filters the replay can apply to measure their effect (off = raw agent signals)
+LIVE_FILTERS: dict[str, bool] = {"mtf": False}
+FILTER_STATS: dict[str, int] = {}
 _LAST_FILE = Path(os.getenv("REPLAY_LAST_FILE")
                   or Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" / "performance.json")
                   .parent / "replay_last.json")
@@ -351,6 +354,11 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
             if action in ("BUY", "SELL") and sig:
                 if name == "swing" and action != "BUY":
                     continue
+                if LIVE_FILTERS.get("mtf"):        # the live pipeline's multi-timeframe veto (base_agent)
+                    from multi_timeframe import check as _mtf_check
+                    if not _mtf_check(snap, action).aligned:
+                        FILTER_STATS["mtf_vetoed"] = FILTER_STATS.get("mtf_vetoed", 0) + 1
+                        continue
                 from risk_manager import risk_manager
                 qty = risk_manager.calculate_quantity(b["close"], agent=name)
                 cap_q = int(settings.total_capital * settings.risk_per_trade_pct / 100 // max(abs(b["close"] - sig.get("stop_loss", b["close"] * 0.99)), 0.01))
