@@ -234,8 +234,11 @@ class AIReplay:
             raise RuntimeError("no bars for any symbol")
 
     def session_days(self) -> list[date]:
+        """The last N exchange trading days in the data (a Muhurat Sunday or a holiday with a few
+        bars is not a session and must not use up a day)."""
+        from ist_clock import is_trading_day
         days = sorted({b["ts"].date() for s in self.syms.values() for b in s.bars})
-        return days[-self.days:]
+        return [d for d in days if is_trading_day(d)][-self.days:]
 
     # ── simulation ───────────────────────────────────────────────────────
     def _qty(self, price: float, stop: float) -> int:
