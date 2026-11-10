@@ -379,7 +379,7 @@ class AIReplay:
         if self.create is not None:
             return await self.create(messages=messages, system=SYSTEM_PROMPT, tools=TOOLS)
         from llm_provider import llm_router
-        return await llm_router.create(messages=messages, system=SYSTEM_PROMPT, tools=TOOLS, max_tokens=4000,
+        return await llm_router.create(messages=messages, system=SYSTEM_PROMPT, tools=TOOLS, max_tokens=12000,
                                        effort=settings.ai_agent_effort)
 
     def _account(self, resp) -> None:
