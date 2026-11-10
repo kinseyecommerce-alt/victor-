@@ -55,12 +55,14 @@ class Settings(BaseSettings):
 
     # Risk
     max_daily_loss: float = 5000.0
-    max_position_size: float = 50000.0
+    max_position_size: float = 150000.0   # per order (₹). Must cover per-agent capital × the allocator's 1.5× max:
+                                           # MIS bucket ₹2L ÷ 2 positions = ₹1L; at ₹50k every intraday/scalping entry was rejected
     max_futures_order_value: float = 2_500_000.0  # per-order contract value cap for index futures
-    max_open_positions: int = 5
+    max_open_positions: int = 8        # ≥ sum of per-agent caps (intraday 2 + scalping 2 + swing 3 + fno 1)
+    min_position_value_pct: float = 40.0   # skip equity entries smaller than this % of the agent's per-position capital
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
-    squareoff_time: str = "15:10"
+    squareoff_time: str = "15:15"     # MIS flatten time; the agents were validated with 15:15 (broker auto square-off ~15:20-15:25)
 
     # Backtest gate thresholds
     bt_min_win_rate: float = 55.0

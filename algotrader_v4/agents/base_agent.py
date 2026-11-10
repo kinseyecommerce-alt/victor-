@@ -131,9 +131,15 @@ def allocate_quantity(agent: str, qty: int, ltp: float) -> tuple[int, str]:
     cap = int(room // ltp)
     if cap < 1:
         return 0, f"capital bucket full (₹{risk_manager.bucket_exposure(agent):,.0f} deployed of ₹{risk_manager.bucket_total(agent):,.0f})"
+    why = "ok" if f == 1.0 else f"allocator {f:g}×"
     if qty > cap:
-        return cap, f"capped by bucket room ₹{room:,.0f}"
-    return max(0, qty), "ok" if f == 1.0 else f"allocator {f:g}×"
+        qty, why = cap, f"capped by bucket room ₹{room:,.0f}"
+    # A remnant of the bucket funds a position whose flat costs (~₹40 a round trip) eat the edge:
+    # skip anything under half the agent's normal position value.
+    floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(agent)
+    if qty * ltp < floor:
+        return 0, f"position ₹{qty * ltp:,.0f} under the ₹{floor:,.0f} minimum ({why})"
+    return max(0, qty), why
 
 
 def _notify_agent_result(strategy: str, symbol: str, pnl: float) -> None:
@@ -274,6 +280,8 @@ class AgentState:
     approved_symbols: list  = field(default_factory=list)
     last_signal:      dict  = field(default_factory=dict)
     errors:           list  = field(default_factory=list)
+    skip_counts:      dict  = field(default_factory=dict)    # why signals did not become orders
+    last_skip:        str   = ""
 
 
 async def send_telegram(text: str) -> None:
@@ -316,6 +324,27 @@ class BaseAgent(ABC):
         ...
 
     # ── Backtest filter ───────────────────────────────────────────────────
+
+    # Strategy-rule exits (should_exit_position) on every tick. The validated agents' edge comes from
+    # holding to the structural stop or the 1.5-2.5R target; their "trend failed" rules were never part of
+    # the validation and, replayed on 45 days of real bars, turn every one of them into a loser
+    # (intraday +₹13,260 → −₹17,187, scalping +₹3,561 → −₹10,404, swing +₹3,527 → −₹8,836). With False,
+    # only the intraday 15:00 square-off branch is consulted; stops, targets and the trailing engine apply.
+    strategy_rule_exits: bool = True
+
+    def rule_exit(self, pos: dict, ind) -> tuple[bool, str]:
+        """The exit-rule policy shared by the live loop and the replay."""
+        if not self.strategy_rule_exits:
+            from datetime import time as _dtime
+            if self.product != "MIS":
+                return False, ""
+            import agents.strategy_agents as _sa
+            t = _sa.now_ist().time().replace(tzinfo=None)
+            h, m = (int(x) for x in settings.squareoff_time.split(":"))
+            if t >= _dtime(h, m):            # same time as the replay that validated these agents
+                return True, f"Auto square-off {settings.squareoff_time}"
+            return False, ""
+        return self.should_exit_position(pos, ind)
 
     # Agents validated at strategy level on real 1-minute data (replay_backtest) trade their whole
     # watchlist; the legacy per-symbol backtest tests a different, older rule set and cannot fetch history
@@ -490,6 +519,13 @@ class BaseAgent(ABC):
 
     # ── Entry ───────────────────────────────────────────────────────────
 
+    def _skip(self, sym: str, reason: str) -> None:
+        """Every signal that does not become an order says why (log + per-reason count in get_status)."""
+        key = reason.split(":")[0][:40]
+        self.state.skip_counts[key] = self.state.skip_counts.get(key, 0) + 1
+        self.state.last_skip = f"{sym}: {reason}"[:160]
+        logger.info("[{}] {} signal skipped — {}", self.name, sym, reason)
+
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         sym  = snap.symbol
         ltp  = snap.tick.ltp
@@ -504,13 +540,12 @@ class BaseAgent(ABC):
         # Today's allocation (AI capital manager) and the shared-bucket cap
         qty, why = allocate_quantity(self.name, qty, ltp)
         if qty < 1:
-            logger.info("[{}] {} skipped: {}", self.name, sym, why)
-            return
+            return self._skip(sym, why)
 
         from performance import performance
         allowed, reason = performance.is_allowed(self.name)
         if not allowed:
-            return                                   # auto-pruned: losing after costs
+            return self._skip(sym, f"pruned: {reason}")   # auto-pruned: losing after costs
         import portfolio_risk
         stop_px = signal.get("stop_loss") or (ltp * (1 - signal.get("stop_loss_pct", settings.stop_loss_pct) / 100)
                                               if action == "BUY" else ltp * (1 + signal.get("stop_loss_pct", settings.stop_loss_pct) / 100))
@@ -518,19 +553,21 @@ class BaseAgent(ABC):
                                       kind="option" if exch == "NFO" else "equity",
                                       underlying=signal.get("underlying"))
         if not pr["ok"]:
-            logger.info("[{}] {} skipped by portfolio risk: {}", self.name, sym, pr["reason"])
-            return
+            return self._skip(sym, f"portfolio risk: {pr['reason']}")
         if qty > pr["max_quantity"]:
             logger.info("[{}] {} size {} → {} ({})", self.name, sym, qty, pr["max_quantity"], pr["reason"])
             qty = pr["max_quantity"]
+            floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(self.name)
+            if exch == "NSE" and qty * ltp < floor:
+                return self._skip(sym, f"portfolio risk cut it to ₹{qty * ltp:,.0f}, under the ₹{floor:,.0f} minimum")
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
-            return
+            return self._skip(sym, f"order guard: {reason}")
         if order_guard.is_symbol_active_anywhere(sym):
-            return
-        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
+            return self._skip(sym, "symbol already active in another agent")
+        allowed, reason = risk_manager.check_before_order(sym, qty, ltp, action)
         if not allowed:
-            return
+            return self._skip(sym, f"risk: {reason}")
 
         # LOW-2: SEBI pre-order compliance check
         from sebi_compliance import sebi_compliance
@@ -543,8 +580,7 @@ class BaseAgent(ABC):
             regime=regime_detector.current_regime.value,
         )
         if not sebi_ok:
-            logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
-            return
+            return self._skip(sym, f"SEBI: {sebi_reason}")
 
         product = signal.get("product", self.product)
         from execution import entry_order, fill_after
@@ -633,7 +669,7 @@ class BaseAgent(ABC):
         for pos in kite_client.positions().get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
                 continue
-            should, reason = self.should_exit_position(pos, ind)
+            should, reason = self.rule_exit(pos, ind)
             if not should:
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
@@ -691,4 +727,6 @@ class BaseAgent(ABC):
             "approved_symbols": self.state.approved_symbols,
             "last_signal":      self.state.last_signal,
             "errors":           self.state.errors[-5:],
+            "skip_counts":      self.state.skip_counts,
+            "last_skip":        self.state.last_skip,
         }

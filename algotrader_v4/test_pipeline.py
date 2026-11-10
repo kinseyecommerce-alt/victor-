@@ -4924,11 +4924,20 @@ def t_risk_applied_to_ai_and_agents():
         # rule agent: size scaled down, not rejected
         agent = IntradayAgent()
         n = len(_te_kite_client._paper_orders)
-        with _patch("portfolio_risk.pre_entry", return_value={"ok": True, "reason": "VaR", "max_quantity": 3, "size_factor": 1.0}), \
-             _patch.object(_rm_x, "calculate_quantity", return_value=20):
+        floor_q = int(_ai_settings.min_position_value_pct / 100 * _rm_x.max_capital_for_agent("intraday") // 1000) + 1
+        with _patch("portfolio_risk.pre_entry", return_value={"ok": True, "reason": "VaR", "max_quantity": floor_q, "size_factor": 1.0}), \
+             _patch.object(_rm_x, "calculate_quantity", return_value=floor_q * 3), \
+             _patch.object(_rm_x, "bucket_room", return_value=1e9):
             asyncio.run(agent._try_enter(_make_snap(symbol="PRA3", ltp=1000.0), "BUY", {"stop_loss": 990, "target": 1020}))
         placed = [o for o in _te_kite_client._paper_orders[n:] if o["tradingsymbol"] == "PRA3"]
-        assert placed and placed[0]["quantity"] == 3, placed
+        assert placed and placed[0]["quantity"] == floor_q, (placed, agent.state.last_skip)
+        # a risk cut below the minimum position is skipped, not opened at a cost-dominated size
+        n = len(_te_kite_client._paper_orders)
+        with _patch("portfolio_risk.pre_entry", return_value={"ok": True, "reason": "VaR", "max_quantity": 3, "size_factor": 1.0}), \
+             _patch.object(_rm_x, "calculate_quantity", return_value=floor_q * 3), \
+             _patch.object(_rm_x, "bucket_room", return_value=1e9):
+            asyncio.run(agent._try_enter(_make_snap(symbol="PRA4", ltp=1000.0), "BUY", {"stop_loss": 990, "target": 1020}))
+        assert not [o for o in _te_kite_client._paper_orders[n:] if o["tradingsymbol"] == "PRA4"] and "minimum" in agent.state.last_skip
         asyncio.run(agent._close_all_positions("t")) if hasattr(agent, "_close_all_positions") else None
     _with_ai_env(body)
 
@@ -6549,6 +6558,111 @@ def t_watchlist_approval_for_validated_agents():
         _ai_settings.skip_startup_backtest = prev
 
 run("watchlist: validated agents trade all symbols; no-data is not a fail", t_watchlist_approval_for_validated_agents)
+
+def _live_snap(sym="RELIANCE", ltp=1300.0):
+    from tick_engine import MarketSnapshot, Tick, LiveIndicators, Candle
+    src = open(__file__).read(); i = src.index("def _make_snap("); j = src.index("\ndef ", i + 5)
+    ns = {"MarketSnapshot": MarketSnapshot, "Tick": Tick, "LiveIndicators": LiveIndicators, "Candle": Candle,
+          "datetime": datetime, "timedelta": timedelta}
+    exec(src[i:j], ns)
+    return ns["_make_snap"](symbol=sym, ltp=ltp)
+
+def t_live_entry_path_reaches_the_broker():
+    """A validated agent's signal must become a paper order through every live check (sizing, allocator,
+    bucket, pruning, portfolio risk, order guard, risk limits, SEBI, SL-M). Before tonight four separate
+    checks silently stopped it: the gate crash, the MTF veto, the ₹50k order limit, inherited pruning."""
+    from agents.intraday_v2 import IntradayV2Agent
+    from tick_engine import tick_engine as _te
+    from kite_client import kite_client as _kc
+    import performance as _pf, allocator as _al, order_guard as _og
+    from trailing_sl_engine import trailing_sl_engine as _tse
+    from risk_manager import risk_manager as _rm
+    snap = _live_snap("LIVEPATH", 1300.0)
+    prev = (_ai_settings.trading_mode, _ai_settings.total_capital, _ai_settings.intraday_capital_pct,
+            _ai_settings.max_intraday_positions, list(_pf.performance.trades), dict(_pf.performance.pruned),
+            dict(_tse._positions), _rm.open_position_count, _rm.is_trading_halted)
+    try:
+        _ai_settings.trading_mode = "PAPER"; _ai_settings.total_capital = 500000
+        _ai_settings.intraday_capital_pct = 40; _ai_settings.max_intraday_positions = 2
+        # an old v1 agent's losing record and prune must not block the v2 agent
+        _pf.performance.trades = [{"t": "2026-11-01T10:00:00", "strategy": "intraday", "net": -100.0, "symbol": "X"}] * 40
+        _pf.performance.pruned = {"intraday": {"since": "2026-11-01", "reason": "v1 lost money"}}
+        _tse._positions.clear(); _rm.open_position_count = 0; _rm.is_trading_halted = False
+        _te._latest_tick["LIVEPATH"] = snap.tick
+        a = IntradayV2Agent()
+        before = len(_kc._paper_orders)
+        with _patch.object(_al, "size_factor", return_value=1.0):
+            asyncio.run(a._try_enter(snap, "BUY", {"symbol": "LIVEPATH", "exchange": "NSE", "side": "BUY", "price": 1300.0,
+                                                   "stop_loss": 1290.0, "target": 1325.0, "product": "MIS", "trigger": "ORB"}))
+        new = _kc._paper_orders[before:]
+        entries = [o for o in new if o["tradingsymbol"] == "LIVEPATH" and o["order_type"] not in ("SL", "SL-M")]
+        stops = [o for o in new if o["tradingsymbol"] == "LIVEPATH" and o["order_type"] in ("SL", "SL-M")]
+        assert entries and stops, (a.state.last_skip, a.state.skip_counts)
+        assert entries[0]["quantity"] * entries[0]["price"] > 50000, "₹1L position not capped back to ₹50k"
+        # v2 trades are judged on their own: 30 losing v2 trades do prune it
+        _pf.performance.pruned = {}
+        _pf.performance.enabled_since.pop("intraday", None)
+        _prev_prune = _ai_settings.prune_enabled; _ai_settings.prune_enabled = True
+        _pf.performance.trades = [{"t": "2026-11-02T10:00:00", "strategy": "intraday", "version": "v2", "net": -100.0, "symbol": "X"}] * 29
+        with _patch.object(_pf.performance, "_save", lambda *a, **k: None), _patch.object(_pf.performance, "_announce_prune", lambda *a, **k: None), \
+             _patch.object(_pf.performance, "_apply_toggle", lambda *a, **k: None):
+            _pf.performance.record_trade("intraday", "X", "BUY", 1, 100.0, -50.0)
+        assert _pf.performance.trades[-1]["version"] == "v2" and not _pf.performance.is_allowed("intraday")[0], \
+            (_pf.performance.trades[-1].get("version"), _pf.performance.is_allowed("intraday"), _ai_settings.prune_enabled,
+             _ai_settings.prune_min_trades, len(_pf.performance._strategy_trades("intraday")), _pf.performance.enabled_since.get("intraday"))
+        _ai_settings.prune_enabled = _prev_prune
+    finally:
+        (_ai_settings.trading_mode, _ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.max_intraday_positions) = prev[:4]
+        _pf.performance.trades, _pf.performance.pruned = prev[4], prev[5]
+        _tse._positions.clear(); _tse._positions.update(prev[6]); _rm.open_position_count, _rm.is_trading_halted = prev[7], prev[8]
+        try:
+            _og.order_guard.release_order("LIVEPATH", "intraday", "BUY", 0.0)
+        except Exception:
+            pass
+
+def t_validated_agents_exit_policy_and_candle_depth():
+    from agents.intraday_v2 import IntradayV2Agent, ScalpV2Agent
+    import agents.strategy_agents as _sam
+    snap = _live_snap("EXITP", 1000.0)
+    ind = snap.indicators; ind.ema9, ind.ema21, ind.vwap, ind.ltp = 990.0, 1000.0, 1010.0, 995.0   # "trend failed" for a long
+    pos = {"average_price": 1000.0, "quantity": 10, "tradingsymbol": "EXITP"}
+    prev_clock = _sam.now_ist
+    try:
+        _sam.now_ist = lambda: datetime(2026, 11, 11, 11, 0)
+        for cls in (IntradayV2Agent, ScalpV2Agent, SwingAgent):
+            assert cls().rule_exit(pos, ind) == (False, ""), cls
+        assert IntradayV2Agent().should_exit_position(pos, ind)[0], "the rule still exists, it is just not consulted"
+        _sam.now_ist = lambda: datetime(2026, 11, 11, 15, 15)
+        assert IntradayV2Agent().rule_exit(pos, ind)[0] and ScalpV2Agent().rule_exit(pos, ind)[0]
+        assert SwingAgent().rule_exit(pos, ind) == (False, ""), "CNC is never squared off"
+        _sam.now_ist = lambda: datetime(2026, 11, 11, 15, 14)
+        assert not IntradayV2Agent().rule_exit(pos, ind)[0]
+    finally:
+        _sam.now_ist = prev_clock
+    assert _ai_settings.squareoff_time == "15:15"
+    for cls in (IntradayV2Agent, ScalpV2Agent, SwingAgent):
+        assert cls.min_candles_1min <= 60, f"{cls.__name__} needs more candles than a live snapshot carries"
+
+def t_min_position_value_skips_bucket_remnants():
+    import allocator as _al
+    from agents import base_agent as _ba
+    from risk_manager import risk_manager
+    prev = (_ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.max_intraday_positions)
+    try:
+        _ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.max_intraday_positions = 500000, 40, 2
+        with _patch.object(_al, "size_factor", return_value=1.0), _patch.object(risk_manager, "bucket_room", return_value=1500.0), \
+             _patch.object(risk_manager, "bucket_exposure", return_value=198500.0):
+            q, why = _ba.allocate_quantity("intraday", 50, 1000.0)
+        assert q == 0 and "minimum" in why, (q, why)
+        with _patch.object(_al, "size_factor", return_value=1.0), _patch.object(risk_manager, "bucket_room", return_value=60000.0):
+            q, why = _ba.allocate_quantity("intraday", 100, 1000.0)
+        assert q == 60 and "bucket room" in why
+    finally:
+        _ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.max_intraday_positions = prev
+
+run("live path: validated signal reaches the paper broker at full size",  t_live_entry_path_reaches_the_broker)
+run("exits: validated agents hold to stop/target; square-off at 15:15",    t_validated_agents_exit_policy_and_candle_depth)
+run("sizing: bucket remnants under 40% of a position are skipped",         t_min_position_value_skips_bucket_remnants)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

@@ -41,7 +41,7 @@ SQUARE_OFF = time(15, 15)
 MAX_CNC_SESSIONS = 15
 _LAST: dict[str, dict] = {}                   # last result per agent (for the dashboard / research loop / allocator)
 # Live-only entry filters the replay can apply to measure their effect (off = raw agent signals)
-LIVE_FILTERS: dict[str, bool] = {"mtf": False}
+LIVE_FILTERS: dict[str, bool] = {"mtf": False, "strategy_exits": False}
 FILTER_STATS: dict[str, int] = {}
 _LAST_FILE = Path(os.getenv("REPLAY_LAST_FILE")
                   or Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" / "performance.json")
@@ -344,6 +344,24 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
             ind = IndicatorCalc.from_row(alias, tick, frame.iloc[i], min(i + 1, 500))
             snap = MarketSnapshot(symbol=alias, tick=tick, indicators=ind, candles_1min=buf1.candles()[-60:],
                                   candles_5min=buf5.candles()[-30:])
+            if open_t and LIVE_FILTERS.get("strategy_exits"):      # the live loop's should_exit_position rule
+                q = open_t["qty"] if open_t["side"] == "BUY" else -open_t["qty"]
+                try:
+                    should, _why = agent.rule_exit({"average_price": open_t["entry"], "quantity": q,
+                                                    "tradingsymbol": alias}, ind)
+                except Exception:
+                    should = False
+                if should:
+                    e, qq, side = open_t["entry"], open_t["qty"], open_t["side"]
+                    xpx = b["close"] * (1 - slip if side == "BUY" else 1 + slip)
+                    gross = (xpx - e) * qq * (1 if side == "BUY" else -1)
+                    cost = trade_cost(e, xpx, qq, side, "NSE", product, symbol)
+                    trades.append(ReplayTrade(symbol, side, open_t["ts"], ts, round(e, 2), round(xpx, 2), qq,
+                                              round(gross, 2), cost, round(gross - cost, 2), "RULE",
+                                              i - open_t["i"], open_t["signal"], open_t.get("stop"), open_t.get("target")))
+                    FILTER_STATS["rule_exits"] = FILTER_STATS.get("rule_exits", 0) + 1
+                    eng.deregister(open_t["oid"])
+                    open_t = None
             if open_t or pending or len(snap.candles_1min) < 30:
                 continue
             if product == "MIS" and ts.time() >= time(15, 0):
