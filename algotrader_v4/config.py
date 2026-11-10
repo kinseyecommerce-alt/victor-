@@ -220,8 +220,8 @@ class Settings(BaseSettings):
     futures_capital_pct:    float = 10.0       # % for futures margin NRML (reserved)
 
     # Max concurrent positions per agent (capital divided per-symbol to avoid overrun)
-    max_intraday_positions: int = 5
-    max_scalping_positions: int = 5
+    max_intraday_positions: int = 2      # fewer, larger positions: flat ₹20/leg brokerage made ₹40k
+    max_scalping_positions: int = 2      # positions pay ~0.1% per round trip; ₹1L positions ~0.05%
     max_swing_positions:    int = 3
 
     # Server

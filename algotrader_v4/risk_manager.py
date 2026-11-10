@@ -129,6 +129,28 @@ class RiskManager:
             max_pos = 1   # lot-based agents (fno): return full bucket
         return bucket_total / max(max_pos, 1)
 
+    def bucket_exposure(self, agent_name: str) -> float:
+        """₹ value of positions the trailing engine currently tracks for every agent that shares
+        this agent's capital bucket (intraday + scalping share the MIS bucket)."""
+        from trailing_sl_engine import trailing_sl_engine
+        bucket = _AGENT_TO_BUCKET.get(agent_name, "intraday")
+        peers = {a for a, b in _AGENT_TO_BUCKET.items() if b == bucket}
+        total = 0.0
+        for pos in list(trailing_sl_engine._positions.values()):
+            if getattr(pos, "strategy", None) in peers:
+                total += float(pos.entry_price) * abs(int(pos.quantity))
+        return total
+
+    def bucket_total(self, agent_name: str) -> float:
+        bucket = _AGENT_TO_BUCKET.get(agent_name, "intraday")
+        pct_attr = _BUCKET_PCT_ATTR.get(bucket, "intraday_capital_pct")
+        return settings.total_capital * getattr(settings, pct_attr, 25.0) / 100
+
+    def bucket_room(self, agent_name: str) -> float:
+        """₹ still deployable in this agent's bucket. Fewer, larger positions (max 2 per agent) can
+        exceed the bucket when two agents share it, so every entry is capped by what is left."""
+        return max(0.0, self.bucket_total(agent_name) - self.bucket_exposure(agent_name))
+
     def calculate_quantity(
         self,
         price: float,

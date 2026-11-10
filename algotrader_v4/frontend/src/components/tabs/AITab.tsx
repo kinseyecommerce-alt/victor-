@@ -64,11 +64,25 @@ export default function AITab() {
   const [input, setInput] = useState('')
   const [convId, setConvId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [alloc, setAlloc] = useState<any>(null)
+  const [allocBusy, setAllocBusy] = useState(false)
   const chatEnd = useRef<HTMLDivElement>(null)
 
   const refresh = () => {
     api.aiStatus().then(r => setStatus(r.data)).catch(() => {})
     api.aiLog(80).then(r => setLog(r.data.log || [])).catch(() => {})
+    api.allocator().then(r => setAlloc(r.data)).catch(() => {})
+  }
+
+  const runAllocator = async () => {
+    setAllocBusy(true)
+    try {
+      const r = await api.allocatorRun()
+      addToast(r.data.source === 'ai' ? 'Allocation updated by the AI' : `Allocation: ${r.data.note || r.data.source}`, r.data.source === 'ai' ? 'buy' : 'info')
+      refresh()
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'Allocation call failed', 'error')
+    } finally { setAllocBusy(false) }
   }
 
   useEffect(() => {
@@ -158,6 +172,42 @@ export default function AITab() {
              disabled={!s?.open_positions}>
           Close AI positions ({s?.open_positions ?? 0})
         </Btn>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-xs" data-testid="allocator-card">
+          <div className="flex items-center justify-between mb-1">
+            <span className="font-semibold text-slate-700">Today's allocation</span>
+            <Btn size="sm" variant="outline" className="text-xs" onClick={runAllocator} disabled={allocBusy || !s?.api_key_set}>
+              {allocBusy ? 'Asking…' : 'Ask AI now'}
+            </Btn>
+          </div>
+          {alloc?.today ? (
+            <>
+              <div className="grid grid-cols-4 gap-1 text-center">
+                {(['intraday', 'scalping', 'swing', 'fno'] as const).map(k => {
+                  const f = alloc.today.factors?.[k] ?? 1
+                  return (
+                    <div key={k} className={clsx('rounded px-1 py-0.5 font-mono',
+                      f === 0 ? 'bg-red-100 text-red-700' : f < 1 ? 'bg-amber-100 text-amber-800' : f > 1 ? 'bg-emerald-100 text-emerald-800' : 'bg-white text-slate-700')}>
+                      <div className="text-[10px] uppercase text-slate-500">{k}</div>
+                      <div>{f}×</div>
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="mt-1 text-slate-600">
+                {alloc.today.source === 'ai'
+                  ? `${alloc.today.unusual_day ? 'Unusual day · every entry gated. ' : ''}${alloc.today.note || ''}`
+                  : alloc.today.source === 'no_ai_key' ? 'No AI key — all strategies at normal size'
+                  : 'No decision yet today — normal size. Calls run at 09:08 and 12:30 IST.'}
+                {alloc.today.at && <span className="text-slate-400"> · {String(alloc.today.at).slice(11, 16)} IST</span>}
+              </div>
+              {alloc.bucket && (
+                <div className="mt-1 text-slate-500">
+                  MIS bucket ₹{Math.round(alloc.bucket.intraday.deployed).toLocaleString('en-IN')} / ₹{Math.round(alloc.bucket.intraday.total).toLocaleString('en-IN')} deployed
+                </div>
+              )}
+            </>
+          ) : <div className="text-slate-400">—</div>}
+        </div>
         {s && (
           <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-slate-600">
             <span>Trades</span>
