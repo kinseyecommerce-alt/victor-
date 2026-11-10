@@ -79,6 +79,7 @@ class GateDecision:
     warnings: list[str] = field(default_factory=list)
     latency_ms: int = 0
     fail_open: bool = False
+    cost_usd: float = 0.0
 
 
 def _allow(reason: str) -> GateDecision:
@@ -298,12 +299,20 @@ async def decide(ctx: dict, strategy: str, symbol: str = "", action: str = "") -
     if call is None:
         raise ValueError("reviewer returned no decision")
     d = dict(call.input or {})
+    cost = 0.0
+    try:
+        from llm_provider import price_for
+        pr, u = price_for(getattr(resp, "model", "") or ""), resp.usage
+        cost = ((u.input_tokens or 0) * pr["in"] + (u.output_tokens or 0) * pr["out"]
+                + (getattr(u, "cache_read_input_tokens", 0) or 0) * pr["cache_read"]) / 1_000_000
+    except Exception:
+        pass
     sf = d.get("size_factor", 1.0)
     sf = 1.0 if sf not in (0.5, 0.75, 1.0) else float(sf)
     return GateDecision(confidence=int(d.get("confidence", 60) or 60), enter=bool(d.get("enter", True)),
                         size_factor=sf, reason=str(d.get("reason", ""))[:240],
                         warnings=[str(x)[:80] for x in (d.get("red_flags") or [])][:5],
-                        latency_ms=int((asyncio.get_event_loop().time() - t0) * 1000))
+                        latency_ms=int((asyncio.get_event_loop().time() - t0) * 1000), cost_usd=round(cost, 5))
 
 
 async def assess(snap, action: str, signal: dict, strategy: str, force: bool = False) -> GateDecision:
