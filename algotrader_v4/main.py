@@ -431,6 +431,21 @@ async def market_opportunities(top: int = 12, focus: str = "all", refresh: bool 
     return await asyncio.to_thread(opportunity_scanner.scan, max(1, min(top, 30)), focus, refresh)
 
 
+@app.get("/universe", tags=["AI"])
+def universe_status():
+    """The rolling NIFTY 100 universe for the opening-range agents (computed after each close)."""
+    import universe
+    return {**universe.load(), "enabled": settings.use_rolling_universe,
+            "today": universe.today_watchlist()}
+
+
+@app.post("/universe/refresh", tags=["AI"])
+async def universe_refresh(lookback: int | None = None):
+    """Recompute the universe now (replays ~100 stocks in the background worker; a few minutes)."""
+    import universe
+    return await universe.refresh(lookback)
+
+
 @app.get("/allocator", tags=["AI"])
 def allocator_today():
     """Today's AI capital allocation (size factor per strategy, day posture) and the evidence it sees."""

@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     market_holidays: str = ""        # extra exchange holidays "YYYY-MM-DD:Name,..." (adds to ist_clock.NSE_HOLIDAYS)
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""
+    use_rolling_universe: bool = False      # auto-start trades universe.py's evening pick (NIFTY 100, stocks whose
+    universe_lookback_sessions: int = 10    # opening-range signals netted > 0 over the last N sessions)
+    universe_min_symbols: int = 5           # fewer positive stocks than this → use the fixed watchlist
     ai_agent_auto_start:  bool = False   # also start the AI trader when the bot auto-starts at 09:16
 
     # Autonomous AI trader (ai_trader.py) — every limit below is enforced in code,

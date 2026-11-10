@@ -56,6 +56,10 @@ class PlatformScheduler:
             hour=12, minute=30, day_of_week="mon-fri", id="allocate_midday",
         )
         self._sched.add_job(
+            self._refresh_universe, "cron",
+            hour=16, minute=30, day_of_week="mon-fri", id="universe_refresh",
+        )
+        self._sched.add_job(
             self._options_cache_refresh, "interval",
             minutes=5, id="options_cache",
         )
@@ -69,6 +73,19 @@ class PlatformScheduler:
             pass
 
     # ── Jobs ──────────────────────────────────────────────────────────────────
+
+    async def _refresh_universe(self) -> None:
+        """After the close: replay the opening-range agents on the NIFTY 100 for the next session's universe."""
+        from ist_clock import is_trading_day
+        if not (settings.use_rolling_universe and is_trading_day()):
+            return
+        try:
+            import universe
+            st = await universe.refresh()
+            await send_telegram(f"🌐 <b>Universe for {st['for_date']}</b>: {len(st['symbols'])} stocks"
+                                + (" (too few — fixed list)" if st["fallback"] else f" — {', '.join(st['symbols'][:12])}"))
+        except Exception as exc:
+            logger.error("[platform] universe refresh failed: {}", exc)
 
     async def _allocate(self, reason: str) -> None:
         """The AI capital manager's two daily calls (09:08 before auto-start, 12:30)."""
@@ -237,6 +254,10 @@ class PlatformScheduler:
             else:
                 watchlist = as_watchlist(NIFTY_100)
             logger.info("[platform] Using full Nifty 100 watchlist ({} symbols)", len(watchlist))
+        elif settings.use_rolling_universe and __import__("universe").today_watchlist():
+            import universe
+            watchlist = [{"symbol": s, "exchange": "NSE"} for s in universe.today_watchlist()]
+            logger.info("[platform] Using the rolling universe ({} stocks)", len(watchlist))
         elif settings.auto_start_watchlist:
             watchlist = [
                 {"symbol": s.strip(), "exchange": "NSE"}
