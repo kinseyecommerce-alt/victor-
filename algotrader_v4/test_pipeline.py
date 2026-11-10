@@ -6825,6 +6825,32 @@ def t_live_kite_ticks_become_ist_candles_the_agent_can_use():
 
 run("live ticks: IST candles, per-minute volume, history first, ORB found", t_live_kite_ticks_become_ist_candles_the_agent_can_use)
 
+def t_kronos_veto_is_opt_in_and_fails_open():
+    from agents.intraday_v2 import IntradayV2Agent
+    import kronos_forecast as _kf
+    from tick_engine import tick_engine as _te, TickBuffer, Candle
+    a = IntradayV2Agent(); snap = _live_snap("KVETO", 1000.0)
+    prev = (_ai_settings.kronos_veto_enabled, _ai_settings.kronos_veto_pct)
+    try:
+        _te._bufs_1min["KVETO"] = TickBuffer(60, maxlen=400)
+        _te._bufs_1min["KVETO"].prepend_history([Candle(1000, 1001, 999, 1000, 10, datetime(2026, 11, 10, 10, 0) + timedelta(minutes=i)) for i in range(120)])
+        against = lambda *a_, **k: {"available": True, "expected_move_pct": -0.3, "source": "kronos:Kronos-small", "flag": None}
+        with _patch.object(_kf, "forecast", against):
+            _ai_settings.kronos_veto_enabled = False
+            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None, "off by default"
+            _ai_settings.kronos_veto_enabled = True; _ai_settings.kronos_veto_pct = -0.19
+            assert "against" in asyncio.run(a._kronos_veto(snap, "BUY"))
+            assert asyncio.run(a._kronos_veto(snap, "SELL")) is None, "a forecast down supports a short"
+        with _patch.object(_kf, "forecast", lambda *a_, **k: {"available": True, "expected_move_pct": -0.3, "source": "fallback", "flag": None}):
+            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None, "the statistical fallback never vetoes"
+        with _patch.object(_kf, "forecast", side_effect=RuntimeError("model down")):
+            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None
+    finally:
+        _ai_settings.kronos_veto_enabled, _ai_settings.kronos_veto_pct = prev
+        _te._bufs_1min.pop("KVETO", None)
+
+run("Kronos veto: opt-in, direction-aware, never vetoes on fallback or error", t_kronos_veto_is_opt_in_and_fails_open)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
