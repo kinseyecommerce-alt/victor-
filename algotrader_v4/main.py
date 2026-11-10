@@ -431,6 +431,22 @@ async def market_opportunities(top: int = 12, focus: str = "all", refresh: bool 
     return await asyncio.to_thread(opportunity_scanner.scan, max(1, min(top, 30)), focus, refresh)
 
 
+@app.get("/allocator", tags=["AI"])
+def allocator_today():
+    """Today's AI capital allocation (size factor per strategy, day posture) and the evidence it sees."""
+    import allocator
+    return {"today": allocator.today(), "evidence": allocator.evidence(),
+            "bucket": {a: {"total": risk_manager.bucket_total(a), "deployed": risk_manager.bucket_exposure(a)}
+                       for a in ("intraday", "swing", "fno")}}
+
+
+@app.post("/allocator/run", tags=["AI"])
+async def allocator_run(reason: str = "manual"):
+    """Ask the AI allocator for today's allocation now (one model call)."""
+    import allocator
+    return await allocator.run(reason)
+
+
 @app.post("/ai/providers/test", tags=["Status"])
 async def test_ai_providers():
     """Send a one-word health prompt to every configured AI provider (Anthropic, OpenAI) so the

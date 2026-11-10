@@ -1252,6 +1252,7 @@ def t_v2_daily_bias_never_blocks_tick_loop():
 run("v2: trade-close hook reaches the agent",                  t_v2_close_hook_reaches_agent)
 run("v2: daily trend bias never blocks the tick loop",         t_v2_daily_bias_never_blocks_tick_loop)
 
+
 run("ALL_AGENTS has 4 strategy agents",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
 run("IntradayAgent → BUY on bullish setup",      t_intraday_buy_signal)
@@ -6248,6 +6249,97 @@ run("optimizer: parent adopts a worker's report",                   t_optimizer_
 run("agent enables persist across restarts",                        t_agent_enables_persist)
 run("AI trader auto-start follows the bot auto-start",              t_ai_auto_start_setting)
 
+
+# ── AI capital allocator + shared-bucket sizing ────────────────────────────
+def t_allocator_defaults_and_persistence():
+    import allocator as _al, llm_provider as _lpm
+    from pathlib import Path as _P
+    prev_file, prev_keys = _al._FILE, (_ai_settings.anthropic_api_key, _ai_settings.openai_api_key)
+    try:
+        _al._FILE = _P(_vtmp.mkdtemp()) / "allocation.json"; _al.reset()
+        t = _al.today()
+        assert t["factors"] == {"intraday": 1.0, "scalping": 1.0, "swing": 1.0, "fno": 1.0} and not _al.gate_required()
+        assert _al.size_factor("intraday") == 1.0 and _al.size_factor("nope") == 1.0
+        # no key → explicit default, persisted
+        _ai_settings.anthropic_api_key = ""; _ai_settings.openai_api_key = ""
+        st = asyncio.run(_al.run("test")); assert st["source"] == "no_ai_key" and _al._FILE.exists()
+        # a scripted model decision is clamped, applied and persisted; the evidence card is well formed
+        _ai_settings.openai_api_key = "sk-oai"
+        seen = {}
+        async def fake(messages):
+            seen["user"] = messages[0]["content"]
+            blk = _lpm.Block(type="tool_use", id="a1", name="set_allocation",
+                             input={"intraday": 1.3, "scalping": 0, "swing": 9.0, "fno": -1, "unusual_day": True,
+                                    "gate_all_entries": True, "note": "RBI day: gate everything, no scalps"})
+            return _lpm.LLMResponse([blk], "tool_use", _lpm.Usage(input_tokens=10, output_tokens=5), "openai", "gpt-5")
+        with _patch.object(_al, "_create", fake):
+            st = asyncio.run(_al.run("morning"))
+        assert st["factors"] == {"intraday": 1.3, "scalping": 0.0, "swing": 1.5, "fno": 0.0}, st["factors"]
+        assert st["source"] == "ai" and st["gate_all_entries"] and _al.gate_required() and _al.size_factor("swing") == 1.5
+        assert "Evidence (JSON)" in seen["user"] and '"strategies"' in seen["user"] and '"regime"' in seen["user"]
+        _al.reset(); assert _al.today()["factors"]["intraday"] == 1.3, "reloaded from disk"
+        ev = _al.evidence(); assert set(ev["strategies"]) == {"intraday", "scalping", "swing", "fno"} and "limits" in ev
+        # a failed call keeps today's factors
+        async def boom(messages): raise RuntimeError("provider down")
+        with _patch.object(_al, "_create", boom):
+            st = asyncio.run(_al.run("midday"))
+        assert st["factors"]["intraday"] == 1.3 and "allocator call failed" in st["note"]
+        # yesterday → a different day: back to defaults
+        with _patch.object(_al, "now_ist", return_value=datetime(2030, 1, 7, 9, 0)):
+            assert _al.today()["factors"]["intraday"] == 1.0
+    finally:
+        _al._FILE = prev_file; _al.reset()
+        _ai_settings.anthropic_api_key, _ai_settings.openai_api_key = prev_keys
+
+def t_allocate_quantity_factor_and_bucket_cap():
+    import allocator as _al
+    from agents import base_agent as _ba
+    from risk_manager import risk_manager
+    from trailing_sl_engine import trailing_sl_engine as _tse, PositionSL as _PS
+    prev = (dict(_tse._positions), _ai_settings.total_capital, _ai_settings.intraday_capital_pct,
+            _ai_settings.max_intraday_positions, _ai_settings.max_scalping_positions)
+    try:
+        _ai_settings.total_capital = 500000; _ai_settings.intraday_capital_pct = 40
+        _ai_settings.max_intraday_positions = 2; _ai_settings.max_scalping_positions = 2
+        assert risk_manager.max_capital_for_agent("intraday") == 100000 and risk_manager.bucket_total("scalping") == 200000
+        _tse._positions.clear()
+        with _patch.object(_al, "size_factor", return_value=1.0):
+            q, why = _ba.allocate_quantity("intraday", 50, 2000.0); assert (q, why) == (50, "ok")
+        with _patch.object(_al, "size_factor", return_value=0.5):
+            q, why = _ba.allocate_quantity("intraday", 50, 2000.0); assert q == 25 and "0.5" in why
+        with _patch.object(_al, "size_factor", return_value=0.0):
+            assert _ba.allocate_quantity("intraday", 50, 2000.0)[0] == 0
+        # scalping has ₹1.5L deployed in the shared MIS bucket → intraday gets only the ₹50k left
+        import inspect
+        fields = [f for f in inspect.signature(_PS).parameters]
+        kw = {"symbol": "X", "strategy": "scalping", "side": "BUY", "entry_price": 1500.0, "quantity": 100}
+        for f in fields:
+            if f not in kw and f != "order_id":
+                kw[f] = inspect.signature(_PS).parameters[f].default if inspect.signature(_PS).parameters[f].default is not inspect._empty else 0
+        if "order_id" in fields: kw["order_id"] = "o1"
+        _tse._positions["o1"] = _PS(**kw)
+        assert risk_manager.bucket_exposure("intraday") == 150000 and risk_manager.bucket_room("intraday") == 50000
+        with _patch.object(_al, "size_factor", return_value=1.0):
+            q, why = _ba.allocate_quantity("intraday", 50, 2000.0); assert q == 25 and "bucket room" in why
+            q, why = _ba.allocate_quantity("intraday", 10, 60000.0); assert q == 0 and "bucket full" in why
+        assert risk_manager.bucket_exposure("swing") == 0.0, "swing has its own bucket"
+    finally:
+        _tse._positions.clear(); _tse._positions.update(prev[0])
+        (_ai_settings.total_capital, _ai_settings.intraday_capital_pct,
+         _ai_settings.max_intraday_positions, _ai_settings.max_scalping_positions) = prev[1:]
+
+def t_allocator_endpoints():
+    import main as _main, allocator as _al
+    c = TestClient(_main.app)
+    r = c.get("/allocator"); assert r.status_code == 200, r.text
+    d = r.json(); assert set(d["today"]["factors"]) == {"intraday", "scalping", "swing", "fno"} and "intraday" in d["bucket"]
+    async def fake(reason="manual"): return {"date": "x", "factors": {"intraday": 0.7}, "source": "ai", "reason": reason}
+    with _patch.object(_al, "run", fake):
+        r = c.post("/allocator/run?reason=test"); assert r.status_code == 200 and r.json()["reason"] == "test"
+
+run("allocator: defaults, AI decision clamped + persisted, failure keeps factors", t_allocator_defaults_and_persistence)
+run("sizing: allocator factor and shared-bucket cap",                            t_allocate_quantity_factor_and_bucket_cap)
+run("allocator: GET /allocator, POST /allocator/run",                            t_allocator_endpoints)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

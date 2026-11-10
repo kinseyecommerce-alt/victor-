@@ -116,6 +116,26 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     _notify_agent_result(strategy, symbol, pnl)
 
 
+def allocate_quantity(agent: str, qty: int, ltp: float) -> tuple[int, str]:
+    """Scale a risk-based quantity by today's allocator factor (0–1.5) and cap it by the ₹ still
+    free in the agent's capital bucket. Returns (quantity, reason) — quantity 0 means skip."""
+    import allocator
+    f = allocator.size_factor(agent)
+    if f <= 0:
+        return 0, f"allocator set {agent} to 0× today"
+    if f != 1.0:
+        qty = int(qty * f)
+    if ltp <= 0:
+        return max(0, qty), "no price"
+    room = risk_manager.bucket_room(agent)
+    cap = int(room // ltp)
+    if cap < 1:
+        return 0, f"capital bucket full (₹{risk_manager.bucket_exposure(agent):,.0f} deployed of ₹{risk_manager.bucket_total(agent):,.0f})"
+    if qty > cap:
+        return cap, f"capped by bucket room ₹{room:,.0f}"
+    return max(0, qty), "ok" if f == 1.0 else f"allocator {f:g}×"
+
+
 def _notify_agent_result(strategy: str, symbol: str, pnl: float) -> None:
     """Agents that adapt within the day (ScalpV2Agent stops after a loss) learn the result here."""
     try:
@@ -402,7 +422,9 @@ class BaseAgent(ABC):
                         continue
 
                     # ── Claude per-trade intelligence gate ────────────────────
-                    if settings.use_claude_trade_gate:
+                    # (always on when the allocator marked today as unusual)
+                    import allocator as _alloc
+                    if settings.use_claude_trade_gate or _alloc.gate_required():
                         from claude_trade_gate import assess as gate_assess
                         from master_agent_v5 import record_gate_decision
                         gate = await gate_assess(snap, action, signal, self.name)
@@ -453,6 +475,12 @@ class BaseAgent(ABC):
         size_factor = signal.pop("_gate_size_factor", 1.0)
         if settings.use_kelly_sizing and size_factor < 1.0:
             qty = max(1, int(qty * size_factor))
+
+        # Today's allocation (AI capital manager) and the shared-bucket cap
+        qty, why = allocate_quantity(self.name, qty, ltp)
+        if qty < 1:
+            logger.info("[{}] {} skipped: {}", self.name, sym, why)
+            return
 
         from performance import performance
         allowed, reason = performance.is_allowed(self.name)

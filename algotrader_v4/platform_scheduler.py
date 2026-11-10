@@ -44,8 +44,16 @@ class PlatformScheduler:
             hour=9, minute=10, day_of_week="mon-fri", id="morning_data",
         )
         self._sched.add_job(
+            self._allocate, "cron", args=["morning"],
+            hour=9, minute=8, day_of_week="mon-fri", id="allocate_morning",
+        )
+        self._sched.add_job(
             self._auto_start_bot, "cron",
             hour=9, minute=16, day_of_week="mon-fri", id="auto_start",
+        )
+        self._sched.add_job(
+            self._allocate, "cron", args=["midday"],
+            hour=12, minute=30, day_of_week="mon-fri", id="allocate_midday",
         )
         self._sched.add_job(
             self._options_cache_refresh, "interval",
@@ -61,6 +69,17 @@ class PlatformScheduler:
             pass
 
     # ── Jobs ──────────────────────────────────────────────────────────────────
+
+    async def _allocate(self, reason: str) -> None:
+        """The AI capital manager's two daily calls (09:08 before auto-start, 12:30)."""
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        try:
+            import allocator
+            await allocator.run(reason)
+        except Exception as exc:
+            logger.error("[platform] allocation ({}) failed: {}", reason, exc)
 
     async def _pre_market_report(self) -> None:
         from ist_clock import is_trading_day
