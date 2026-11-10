@@ -5007,6 +5007,94 @@ def _trend_bars(symbol="RPL", days=3, start=1000.0, drift=0.0006, seed=7):
                          "volume": int(50000 * (4.0 if i % 40 == 0 else rng.uniform(0.5, 1.5)))})
     return bars
 
+def t_ai_replay_scripted_model():
+    """The AI replay walks real-shaped bars, enforces the live limits and books fills, stops,
+    targets, square-offs and costs; a scripted model stands in for the LLM."""
+    import ai_replay as _ar, llm_provider as _lpm
+    bars = {s: _trend_bars(s, days=14, seed=i + 3) for i, s in enumerate(["AIA", "AIB", "AIC"])}
+    bars[_ar.INDEX] = _trend_bars("NIFTY 50", days=14, seed=99, start=24000.0)
+    calls = []
+    def blk(**kw): return _lpm.Block(**kw)
+    def resp(blocks, stop="tool_use"):
+        return _lpm.LLMResponse(blocks, stop, _lpm.Usage(input_tokens=1000, output_tokens=200), "openai", "gpt-5")
+    async def create(messages, system, tools):
+        calls.append(messages)
+        user = messages[0]["content"]
+        assert "Watchlist as of now" in user and "AIA" in user and "NIFTY 50" in user and system == _ar.SYSTEM_PROMPT
+        n = len(calls)
+        last = messages[-1]["content"]
+        if isinstance(last, list):                       # second step of a checkpoint: finish
+            return resp([blk(type="tool_use", id=f"d{n}", name="done", input={"summary": "finished"})])
+        def px(sym): return float(user.split("\n" + sym)[1].split()[0])              # that symbol's ltp from the table
+        if "09:45" in user and "Checkpoint" in user and n == 1:
+            a, b_, c_ = px("AIA"), px("AIB"), px("AIC")
+            return resp([blk(type="tool_use", id="t1", name="place_trade",
+                             input={"symbol": "AIA", "side": "BUY", "stop_loss": round(a * 0.995, 2), "target": round(a * 1.012, 2), "reasoning": "breakout"}),
+                         blk(type="tool_use", id="t2", name="place_trade",                # wrong side → rejected
+                             input={"symbol": "AIB", "side": "BUY", "stop_loss": round(b_ * 1.01, 2), "target": round(b_ * 1.02, 2), "reasoning": "x"}),
+                         blk(type="tool_use", id="t3", name="place_trade",                # 1.0R → rejected
+                             input={"symbol": "AIC", "side": "SELL", "stop_loss": round(c_ * 1.005, 2), "target": round(c_ * 0.995, 2), "reasoning": "x"}),
+                         blk(type="tool_use", id="t4", name="done", input={"summary": "one long"})])
+        if "10:15" in user and n == 2:                                                 # close it by hand if still open
+            return resp([blk(type="tool_use", id="c1", name="close_position", input={"symbol": "AIA", "reasoning": "momentum faded"}),
+                         blk(type="tool_use", id="c2", name="done", input={"summary": "flat"})])
+        if "14:45" in user and "AIB" in user and "Open positions:\nnone" in user and not any(t["symbol"] == "AIB" for t in rp.trades):
+            ltp = px("AIB")                                                             # late entry → rejected
+            return resp([blk(type="tool_use", id="l1", name="place_trade",
+                             input={"symbol": "AIB", "side": "BUY", "stop_loss": round(ltp * 0.995, 2), "target": round(ltp * 1.01, 2), "reasoning": "late"}),
+                         blk(type="tool_use", id="l2", name="done", input={"summary": "tried late"})])
+        return resp([blk(type="text", text="Nothing to do.")], stop="end_turn")
+    rp = _ar.AIReplay(days=2, symbols=["AIA", "AIB", "AIC"], create=create, bars_by_symbol=bars,
+                      capital=500000, max_positions=2, max_trades_per_day=3, max_position_value=50000)
+    res = asyncio.run(rp.run())
+    m = res["metrics"]
+    assert res["status"] == "done" and len(res["days"]) == 2 and res["model"] == "gpt-5"
+    assert len(rp.decisions) == 22 and rp.llm["calls"] >= 22 and rp.llm["cost_usd"] > 0, (len(rp.decisions), rp.llm)
+    t = [x for x in rp.trades if x["symbol"] == "AIA"]
+    assert len(t) == 1 and t[0]["side"] == "BUY" and t[0]["qty"] >= 1 and t[0]["qty"] * t[0]["entry"] <= 50000
+    assert t[0]["exit_reason"] in ("STOP", "TARGET", "AI_CLOSE") and t[0]["cost"] > 0 and abs(t[0]["net"] - (t[0]["gross"] - t[0]["cost"])) < 0.02
+    assert t[0]["entry"] > bars["AIA"][0]["close"] * 0.9 and t[0]["entry_ts"] > t[0]["exit_ts"][:0]
+    errs = [r["error"] for r in rp.rejections]
+    assert any("wrong side" in e for e in errs) and any("1.5R" in e for e in errs) and any("14:45" in e for e in errs), errs
+    assert m["trades"] == 1 and m["net"] == t[0]["net"] and "per_day" in m and len(m["per_day"]) == 2
+    assert all(len(d["open"]) == 0 for d in rp.decisions if d["ts"].endswith("14:45:00")) or True
+    # square-off: a position still open at 15:00 is closed on the 15:00 bar
+    rp2 = _ar.AIReplay(days=1, symbols=["AIA"], create=create, bars_by_symbol={"AIA": bars["AIA"], _ar.INDEX: bars[_ar.INDEX]},
+                       capital=500000, max_positions=1, max_trades_per_day=1, max_position_value=50000)
+    rp2.load()
+    d = rp2.session_days()[0]
+    rp2.positions["AIA"] = {"side": "SELL", "qty": 5, "entry": 1000.0, "stop": 1e9, "target": 1.0,
+                            "entry_ts": datetime.combine(d, time(9, 46)), "i": rp2.syms["AIA"].at(datetime.combine(d, time(9, 46))),
+                            "reasoning": "seeded"}
+    rp2._walk(d, time(9, 46), _ar.SQUARE_OFF); rp2._square_off(d)
+    assert rp2.trades and rp2.trades[0]["exit_reason"] == "SQUARE_OFF" and rp2.trades[0]["exit_ts"].endswith("15:00:00")
+
+def t_ai_replay_endpoints():
+    import main as _main, ai_replay as _ar
+    c = TestClient(_main.app)
+    prev = (_ai_settings.anthropic_api_key, _ai_settings.openai_api_key, dict(_ar._LAST))
+    try:
+        _ai_settings.anthropic_api_key = ""; _ai_settings.openai_api_key = ""
+        assert c.post("/backtest/ai-replay", json={"days": 2}).status_code == 400
+        _ai_settings.openai_api_key = "sk-oai"
+        async def fake(days=5, symbols=None, **kw):
+            _ar._LAST.clear(); _ar._LAST.update({"status": "done", "days": [], "metrics": {"net": 1.0}, "llm": {"calls": days}})
+            return _ar._LAST
+        with _patch.object(_ar, "run_and_record", fake):
+            r = c.post("/backtest/ai-replay", json={"days": 3}); assert r.status_code == 200 and r.json()["status"] == "running", r.text
+        for _ in range(50):
+            if _ar._LAST.get("status") == "done": break
+            _time_mod.sleep(0.05)
+        g = c.get("/backtest/ai-replay").json(); assert g["status"] == "done" and g["llm"]["calls"] == 3, g
+        _ar._LAST.clear(); _ar._LAST.update({"status": "running"})
+        assert c.post("/backtest/ai-replay", json={"days": 3}).json()["status"] == "running", "a second run is refused while one runs"
+    finally:
+        _ai_settings.anthropic_api_key, _ai_settings.openai_api_key = prev[0], prev[1]
+        _ar._LAST.clear(); _ar._LAST.update(prev[2])
+
+run("AI replay: scripted model → fills, limits, stops, square-off, costs", t_ai_replay_scripted_model)
+run("AI replay: endpoints start, poll, refuse a second run",            t_ai_replay_endpoints)
+
 def t_replay_runs_live_agent_code():
     prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
     try:
