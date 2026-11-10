@@ -158,7 +158,32 @@ class MarketSnapshot:
 
 # ── Tick buffer ───────────────────────────────────────────────────────────────
 
+_IST_TZ = None
+
+
+def ist_naive(ts: datetime) -> datetime:
+    """A timestamp as naive IST. Naive input is the container's local clock (UTC on the server), so
+    live candles land on 09:15-15:30 like the replay's Kite bars and the agents' opening-range logic."""
+    global _IST_TZ
+    if _IST_TZ is None:
+        from zoneinfo import ZoneInfo
+        _IST_TZ = ZoneInfo("Asia/Kolkata")
+    if ts.tzinfo is None:
+        ts = ts.astimezone()
+    return ts.astimezone(_IST_TZ).replace(tzinfo=None)
+
+
 class TickBuffer:
+    def prepend_history(self, candles: list["Candle"]) -> int:
+        """Insert completed historical candles before anything already in the buffer (live ticks may
+        have started while history was loading). Returns how many were added."""
+        with self._lock:
+            first = self._candles[0].ts if self._candles else self._current_ts
+            hist = [c for c in candles if first is None or c.ts < first]
+            merged = (hist + list(self._candles))[-(self._candles.maxlen or len(hist) + len(self._candles)):]
+            self._candles = deque(merged, maxlen=self._candles.maxlen)
+            return len(hist)
+
     def __init__(self, resolution_sec: int, maxlen: int = 500):
         self.resolution = resolution_sec
         self._candles: deque[Candle] = deque(maxlen=maxlen)
@@ -665,6 +690,7 @@ class TickEngine:
         self._bufs_5min: dict[str, TickBuffer] = {}
 
         self._latest_tick: dict[str, Tick]            = {}
+        self._last_cum_vol: dict[str, int]            = {}
         self._latest_ind:  dict[str, LiveIndicators]  = {}
 
         self._subscribers:  dict[str, asyncio.Queue]  = {}
@@ -707,6 +733,11 @@ class TickEngine:
             if settings.demo_active:
                 self._demo_backfill(added)
 
+        if settings.uses_kite_market_data and added:
+            import threading
+            threading.Thread(target=self._kite_backfill, args=(list(added),), daemon=True,
+                             name="kite-backfill").start()
+
         logger.info("TickEngine: subscribed {} symbols via {}",
                     len(self._symbols), self.data_source())
 
@@ -714,6 +745,51 @@ class TickEngine:
         # Only equities ride the WebSocket (it resolves NSE tokens); option legs use REST
         if self._running and any(self._exchange[s] in ("NSE", "BSE") for s in added):
             self._start_ws()
+
+    def _kite_backfill(self, symbols: list[str], bars: int = 375) -> int:
+        """Load each symbol's recent 1-minute history from Kite into its buffers, so indicators and the
+        agents' warm-up match the replay (which runs on continuous history) from the first live minute."""
+        try:
+            if not kite_client.has_session():
+                return 0
+            eq = [s for s in symbols if self._exchange.get(s) in ("NSE", "BSE")]
+            toks = kite_client.get_instrument_tokens(eq, "NSE") if eq else {}
+            from ist_clock import now_ist
+            end = now_ist().replace(tzinfo=None)
+            start = end - timedelta(days=7)
+            done = 0
+            for sym in eq:
+                tok = toks.get(sym)
+                b1, b5 = self._bufs_1min.get(sym), self._bufs_5min.get(sym)
+                if not tok or b1 is None:
+                    continue
+                try:
+                    rows = kite_client.historical_data(tok, start, end, "minute")[-bars:]
+                except Exception as exc:
+                    logger.debug("[backfill] {}: {}", sym, exc)
+                    continue
+                c1, c5 = [], {}
+                for r in rows:
+                    ts = r["date"]
+                    ts = ist_naive(ts) if getattr(ts, "tzinfo", None) else ts
+                    c1.append(Candle(float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
+                                     int(r.get("volume") or 0), ts))
+                    k = ts.replace(minute=ts.minute - ts.minute % 5, second=0, microsecond=0)
+                    if k not in c5:
+                        c5[k] = Candle(float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
+                                       int(r.get("volume") or 0), k)
+                    else:
+                        c = c5[k]; c.high = max(c.high, float(r["high"])); c.low = min(c.low, float(r["low"]))
+                        c.close = float(r["close"]); c.volume += int(r.get("volume") or 0)
+                n = b1.prepend_history(c1)
+                if b5 is not None:
+                    b5.prepend_history(sorted(c5.values(), key=lambda c: c.ts))
+                done += 1 if n else 0
+            logger.info("[backfill] minute history loaded for {}/{} symbols", done, len(eq))
+            return done
+        except Exception as exc:
+            logger.warning("[backfill] failed: {}", exc)
+            return 0
 
     def _demo_backfill(self, symbols: list[str], minutes: int = 90) -> None:
         """DEMO_MODE only: give new symbols 90 minutes of simulated history so strategies
@@ -825,8 +901,15 @@ class TickEngine:
         if symbol not in self._bufs_1min:
             return
 
-        self._bufs_1min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
-        self._bufs_5min[symbol].push(tick.ltp, tick.volume, tick.timestamp)
+        ts, vol = tick.timestamp, tick.volume
+        if settings.uses_kite_market_data:
+            ts = ist_naive(ts)
+            cum = int(tick.volume or 0)                  # Kite's volume_traded = day's running total
+            prev = self._last_cum_vol.get(symbol)
+            vol = cum - prev if prev is not None and cum >= prev else 0
+            self._last_cum_vol[symbol] = cum
+        self._bufs_1min[symbol].push(tick.ltp, vol, ts)
+        self._bufs_5min[symbol].push(tick.ltp, vol, ts)
 
         df  = self._bufs_1min[symbol].as_dataframe()
         ind = IndicatorCalc.compute(symbol, tick, df)
@@ -1008,6 +1091,11 @@ class TickEngine:
                 if not self._running:
                     self.start_loop()
                 self.warm_watchlist("kite login")
+                short = [x for x in self._symbols if len(self._bufs_1min[x].candles()) < 60]
+                if short and settings.uses_kite_market_data:      # restarted before the login: no history yet
+                    import threading
+                    threading.Thread(target=self._kite_backfill, args=(short,), daemon=True,
+                                     name="kite-backfill-login").start()
                 if self._symbols:
                     self._start_ws()
                     asyncio.ensure_future(self._fetch_kite_batch(idle=not is_market_open()))

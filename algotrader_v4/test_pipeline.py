@@ -6759,6 +6759,72 @@ def t_forecast_at_signal_times_no_lookahead():
 
 run("forecast at signal times: bars before the signal only", t_forecast_at_signal_times_no_lookahead)
 
+def t_live_kite_ticks_become_ist_candles_the_agent_can_use():
+    """Regression: the server stamps ticks with its UTC clock and Kite sends the day's running volume.
+    Candles were stamped 03:45-04:00 for the 09:15-09:30 opening range (so the opening-range agents could
+    never trade) and their volume was a sum of running totals. Candles must be IST with per-minute volume,
+    and history must sit before live candles so indicators are warm at the open like in the replay."""
+    import tick_engine as _tem
+    from tick_engine import tick_engine as _te, Tick, Candle, TickBuffer
+    from datetime import timezone as _tz
+    from agents.intraday_v2 import IntradayV2Agent
+    import agents.strategy_agents as _sam
+    # conversion: aware UTC and naive local (server clock in UTC)
+    assert _tem.ist_naive(datetime(2026, 11, 11, 3, 45, tzinfo=_tz.utc)) == datetime(2026, 11, 11, 9, 15)
+    import os as _os, time as _tm
+    prev_tz = _os.environ.get("TZ")
+    try:
+        _os.environ["TZ"] = "UTC"; _tm.tzset()
+        assert _tem.ist_naive(datetime(2026, 11, 11, 3, 46)) == datetime(2026, 11, 11, 9, 16)
+    finally:
+        if prev_tz is None: _os.environ.pop("TZ", None)
+        else: _os.environ["TZ"] = prev_tz
+        _tm.tzset()
+    # history goes before live candles, never interleaved
+    b = TickBuffer(60, maxlen=400)
+    b.push(100.0, 5, datetime(2026, 11, 11, 9, 15, 10)); b.push(101.0, 5, datetime(2026, 11, 11, 9, 16, 5))
+    hist = [Candle(99.0, 99.5, 98.5, 99.2, 1000, datetime(2026, 11, 10, 15, 28)),
+            Candle(99.2, 99.6, 99.0, 99.4, 900, datetime(2026, 11, 10, 15, 29)),
+            Candle(1.0, 1.0, 1.0, 1.0, 1, datetime(2026, 11, 11, 9, 15))]          # overlaps live: dropped
+    assert b.prepend_history(hist) == 2
+    assert [c.ts.time().strftime("%H:%M") for c in b.candles()] == ["15:28", "15:29", "09:15", "09:16"]
+    # the live path: UTC-stamped ticks with running volume → IST candles with per-minute volume
+    sym = "TZLIVE"
+    prev = (_ai_settings.trading_mode, _ai_settings.paper_data_source)
+    try:
+        _ai_settings.trading_mode, _ai_settings.paper_data_source = "PAPER", "KITE"
+        _te._bufs_1min[sym] = TickBuffer(60, maxlen=400); _te._bufs_5min[sym] = TickBuffer(300, maxlen=200)
+        _te._exchange[sym] = "NSE"; _te._last_cum_vol.pop(sym, None)
+        _te._bufs_1min[sym].prepend_history([Candle(100.0, 100.2, 99.8, 100.0, 1000, datetime(2026, 11, 10, 15, 0) + timedelta(minutes=i)) for i in range(29)])
+        cum = 50000
+        px = {i: 100.0 + (0.6 if i in range(5, 10) else 0.0) + (0.0 if i < 15 else 0.9) for i in range(0, 20)}
+        with _patch("tick_engine.is_market_open", return_value=True):
+            for i in range(20):                                   # 09:15 … 09:34 IST = 03:45 … 04:04 UTC
+                for k in range(3):
+                    cum += 400
+                    t = Tick(symbol=sym, ltp=px[i] + (0.4 if (i in range(5, 10) and k == 1) else 0.0) - (0.4 if (i in range(10, 15) and k == 2) else 0.0),
+                             bid=0, ask=0, volume=cum, change=0, change_pct=0, high=0, low=0, open=100.0,
+                             timestamp=datetime(2026, 11, 11, 3, 45, 10 + k * 15, tzinfo=_tz.utc) + timedelta(minutes=i))
+                    asyncio.run(_te._process_tick(sym, t, source="KITE_WS"))
+        live = [c for c in _te._bufs_1min[sym].candles() if c.ts.date() == datetime(2026, 11, 11).date()]
+        assert live[0].ts == datetime(2026, 11, 11, 9, 15) and live[-1].ts == datetime(2026, 11, 11, 9, 34), live[-1].ts
+        assert live[1].volume == 1200 and live[0].volume == 800, [c.volume for c in live[:3]]   # first tick has no previous total
+        # the agent finds the 09:15-09:30 opening range on these candles
+        from types import SimpleNamespace as _NS
+        a = IntradayV2Agent(); prev_clock = _sam.now_ist
+        try:
+            _sam.now_ist = lambda: datetime(2026, 11, 11, 9, 34)
+            r = a._range(sym, _NS(candles_1min=_te._bufs_1min[sym].candles()[-60:]), datetime(2026, 11, 11, 9, 34))
+        finally:
+            _sam.now_ist = prev_clock
+        assert r["done"] and r["h"] >= 101.0 and r["l"] <= 99.7, r
+    finally:
+        _ai_settings.trading_mode, _ai_settings.paper_data_source = prev
+        for d in (_te._bufs_1min, _te._bufs_5min, _te._exchange, _te._latest_tick, _te._latest_ind, _te._last_cum_vol):
+            d.pop(sym, None)
+
+run("live ticks: IST candles, per-minute volume, history first, ORB found", t_live_kite_ticks_become_ist_candles_the_agent_can_use)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
