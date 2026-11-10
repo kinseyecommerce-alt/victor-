@@ -1563,6 +1563,33 @@ async def backtest_replay(req: ReplayRequest):
     return out
 
 
+class AIReplayRequest(BaseModel):
+    days: int = Field(default=5, ge=1, le=15)
+    symbols: list[str] | None = Field(default=None, max_length=25)
+
+
+@app.post("/backtest/ai-replay", tags=["Backtest"])
+async def backtest_ai_replay(req: AIReplayRequest):
+    """Replay the AI trader's intraday stock decisions over the last N sessions on real minute bars,
+    with the configured model (Claude → OpenAI failover), costs and slippage. Runs in the
+    background; poll GET /backtest/ai-replay. Costs real API tokens (~11 model calls per day)."""
+    import ai_replay
+    if not (settings.anthropic_api_key or settings.openai_api_key):
+        raise HTTPException(400, "No AI provider key set — add an Anthropic or OpenAI key under Settings")
+    if ai_replay._LAST.get("status") == "running":
+        return ai_replay._LAST
+    asyncio.create_task(ai_replay.run_and_record(days=req.days, symbols=req.symbols))
+    await asyncio.sleep(0)
+    return {"status": "running", "days": req.days, "symbols": req.symbols or ai_replay.DEFAULT_SYMBOLS}
+
+
+@app.get("/backtest/ai-replay", tags=["Backtest"])
+def backtest_ai_replay_status():
+    """Progress of the running AI replay, or the last finished one (survives restarts)."""
+    import ai_replay
+    return ai_replay.last()
+
+
 @app.get("/backtest/bars", tags=["Backtest"])
 async def backtest_bars(symbols: str, days: int = 45):
     """Minute bars for research (what the replay uses): {symbol: {source, bars: [[ts, o, h, l, c, v], ...]}}.
