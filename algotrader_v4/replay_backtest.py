@@ -19,10 +19,13 @@ Agents keep per-symbol state in class-level dicts, so the replay runs every symb
 from __future__ import annotations
 
 import asyncio
+import json
 import math
+import os
 import random
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -36,7 +39,32 @@ from trailing_sl_engine import TrailingSLEngine, TRAIL_CONFIGS
 
 SQUARE_OFF = time(15, 15)
 MAX_CNC_SESSIONS = 15
-_LAST: dict[str, dict] = {}                   # last result per agent (for the dashboard / research loop)
+_LAST: dict[str, dict] = {}                   # last result per agent (for the dashboard / research loop / allocator)
+_LAST_FILE = Path(os.getenv("REPLAY_LAST_FILE")
+                  or Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" / "performance.json")
+                  .parent / "replay_last.json")
+
+
+def save_last() -> None:
+    """Keep the last replay per agent on disk: it is the evidence the AI allocator reads each morning."""
+    try:
+        _LAST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _LAST_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_LAST, default=str))
+        tmp.replace(_LAST_FILE)
+    except Exception as exc:
+        logger.debug("[replay] last results not saved: {}", exc)
+
+
+def load_last() -> None:
+    try:
+        if _LAST_FILE.exists() and not _LAST:
+            _LAST.update(json.loads(_LAST_FILE.read_text()))
+    except Exception as exc:
+        logger.debug("[replay] last results not loaded: {}", exc)
+
+
+load_last()
 
 
 # ── Data ─────────────────────────────────────────────────────────────────────
