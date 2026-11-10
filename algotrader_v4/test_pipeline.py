@@ -6272,9 +6272,17 @@ def t_allocator_defaults_and_persistence():
                              input={"intraday": 1.3, "scalping": 0, "swing": 9.0, "fno": -1, "unusual_day": True,
                                     "gate_all_entries": True, "note": "RBI day: gate everything, no scalps"})
             return _lpm.LLMResponse([blk], "tool_use", _lpm.Usage(input_tokens=10, output_tokens=5), "openai", "gpt-5")
-        with _patch.object(_al, "_create", fake):
+        with _patch.object(_al, "_create", fake), _patch.object(_al, "_thin_evidence", return_value=False):
             st = asyncio.run(_al.run("morning"))
         assert st["factors"] == {"intraday": 1.3, "scalping": 0.0, "swing": 1.5, "fno": 0.0}, st["factors"]
+        # with an unmeasured regime and no live history, a 0 is floored to 0.5 and the note says so
+        thin = {"regime": {"regime": "UNKNOWN"}, "strategies": {"scalping": {"live": None}, "fno": {"live": {"trades": 12}}}}
+        assert _al._thin_evidence(thin, "scalping") and not _al._thin_evidence(thin, "fno")
+        with _patch.object(_al, "_create", fake), _patch.object(_al, "evidence", return_value={**thin, "date": _al.now_ist().date().isoformat(), "time": "09:08"}):
+            st2 = asyncio.run(_al.run("morning"))
+        assert st2["factors"]["scalping"] == 0.5 and st2["factors"]["fno"] == 0.0 and "floored" in st2["note"], st2
+        with _patch.object(_al, "_create", fake), _patch.object(_al, "_thin_evidence", return_value=False):
+            st = asyncio.run(_al.run("morning"))
         assert st["source"] == "ai" and st["gate_all_entries"] and _al.gate_required() and _al.size_factor("swing") == 1.5
         assert "Evidence (JSON)" in seen["user"] and '"strategies"' in seen["user"] and '"regime"' in seen["user"]
         _al.reset(); assert _al.today()["factors"]["intraday"] == 1.3, "reloaded from disk"

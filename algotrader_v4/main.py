@@ -1576,6 +1576,7 @@ async def backtest_replay(req: ReplayRequest):
     out = await run_in_process("replay_job", req.agent, [s.upper() for s in req.symbols], req.days,
                                req.slippage_bps, req.params, req.include_trades)
     rb._LAST[req.agent] = {k: v for k, v in out.items() if k not in ("trades", "benchmark")}
+    rb.save_last()
     return out
 
 

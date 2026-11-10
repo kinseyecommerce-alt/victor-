@@ -51,6 +51,7 @@ regime fits; never above 1.5.
 - Unusual day = major scheduled event (RBI policy, budget, index expiry with extreme VIX, results in many \
 watchlist stocks), VIX move over 10 %, or a gap over 1 % on NIFTY: set unusual_day true, gate_all_entries \
 true and shade the factors down.
+- Missing data is not evidence. Before the open the regime detector reports UNKNOWN, VIX may be null and the platform's own size_factor / paused list reflects the previous session or a closed market: ignore them in that case and keep 1.0. Only cut a strategy on positive evidence against it (losing live results after costs, a wrong regime that is actually measured, an event). A strategy with no live history yet trades at its replay-validated size, 1.0.
 - Be brief and concrete in the note (what you saw, what you changed, why). Call set_allocation exactly once."""
 
 TOOL = {"name": "set_allocation",
@@ -185,6 +186,13 @@ async def _create(messages: list):
                                    effort=settings.ai_agent_effort, tool_choice={"type": "tool", "name": "set_allocation"})
 
 
+def _thin_evidence(ev: dict, strategy: str) -> bool:
+    """No measured regime and no live trades for the strategy: nothing to justify switching it off."""
+    regime = (ev.get("regime") or {}).get("regime")
+    live = ((ev.get("strategies") or {}).get(strategy) or {}).get("live") or {}
+    return regime in (None, "UNKNOWN") and not (live.get("trades") or 0)
+
+
 def _clamp(x, lo=0.0, hi=MAX_FACTOR) -> float:
     try:
         return round(min(hi, max(lo, float(x))), 2)
@@ -215,9 +223,14 @@ async def run(reason: str = "manual") -> dict:
         st["note"] = (st.get("note") or "") + " | model returned no allocation: factors unchanged"
         _state = st; _save(st); return st
     a = dict(call.input or {})
-    st = {"date": ev["date"], "factors": {s: _clamp(a.get(s, 1.0)) for s in STRATEGIES},
+    factors = {s: _clamp(a.get(s, 1.0)) for s in STRATEGIES}
+    floored = [s for s in STRATEGIES if factors[s] < 0.5 and _thin_evidence(ev, s)]
+    for s in floored:                      # the model may not switch a strategy off on missing data
+        factors[s] = 0.5
+    st = {"date": ev["date"], "factors": factors,
           "unusual_day": bool(a.get("unusual_day")), "gate_all_entries": bool(a.get("gate_all_entries")),
-          "note": str(a.get("note", ""))[:600], "source": "ai", "reason": reason,
+          "note": str(a.get("note", ""))[:600] + (f" | floored to 0.5 on thin evidence: {', '.join(floored)}" if floored else ""),
+          "source": "ai", "reason": reason,
           "at": now_ist().isoformat(timespec="seconds"), "model": getattr(resp, "model", None),
           "evidence": {k: ev.get(k) for k in ("regime", "events", "nifty", "yesterday")}}
     _state = st
