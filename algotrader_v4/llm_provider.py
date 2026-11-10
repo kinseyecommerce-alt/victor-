@@ -417,6 +417,10 @@ class LLMRouter:
         else:
             healthy = [n for n in configured if prov[n]["state"] in ("ok", "untested")]
             active = self.last_used if self.last_used in configured else configured[0]
+            if prov[active]["state"] != "ok":
+                ok = [n for n in configured if prov[n]["state"] == "ok"]   # a verified route beats a failing primary
+                if ok:
+                    active = ok[0]
             if prov[active]["state"] == "ok":
                 top = {"state": "ok", "detail": f"AI served by {active} ({prov[active]['model']})"
                                                  + (" — primary down, on fallback" if active != order[0] else "")}
