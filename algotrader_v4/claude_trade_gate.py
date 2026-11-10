@@ -1,22 +1,26 @@
 """
-claude_trade_gate.py
-Per-trade Claude intelligence gate using Sonnet.
+claude_trade_gate.py — per-trade AI review of the strategy agents' signals.
 
-Called for EVERY generated signal before order placement.
-Claude assesses setup quality, can approve/veto/modify trade parameters.
-Design principle: never block a genuinely good setup, never let a bad one through.
+Called for each generated signal before order placement when the gate is on (USE_CLAUDE_TRADE_GATE)
+or when today's AI allocator marked the day as unusual. The reviewer sees the setup, the market and
+the strategy's validated record, and approves (optionally at reduced size) or skips.
 
-Fallback on any API error → allow the trade (never block due to infra issues).
+Design rules
+- The signal comes from a mechanical strategy validated on real data; losses are normal for it
+  (win rate ~40 %, profit from targets 2–2.5x the risk). The reviewer vetoes only on concrete red
+  flags, never on "not sure".
+- Calls go through llm_router (Claude → OpenAI failover) with a forced decision tool.
+- The gate never raises and never blocks on infrastructure: a context error, timeout or API failure
+  approves the trade and is counted as a fail-open, visible at /gate/log and /gate/stats.
 """
 from __future__ import annotations
-
 import asyncio
 import json
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
-import anthropic
 from loguru import logger
 
 from config import settings
@@ -24,31 +28,44 @@ from ist_clock import now_ist as _now_ist, minutes_since_open, minutes_to_square
 
 # ── Gate decision log (ring buffer, read by /gate/log endpoint) ───────────────
 _gate_log: deque[dict] = deque(maxlen=100)
+_stats: dict[str, int] = {"reviewed": 0, "approved": 0, "vetoed": 0, "downsized": 0, "fail_open": 0}
 
+STRATEGY_PLAYBOOK = {
+    "intraday": "Opening-range (09:15-09:30) breakout taken 09:31-10:00 in the direction of the 20-day trend, "
+                "VWAP and EMA9/21 agreeing; stop at the other side of the range; target 2.5x the risk.",
+    "scalping": "First pullback that retests a broken opening range (within 0.2 %) 09:35-12:30, trend-aligned; "
+                "stop at the range midpoint; target 1.5x the risk.",
+    "swing":    "Multi-day breakout / pullback in a daily uptrend, delivery (CNC) with a GTT stop.",
+    "fno":      "Index option buy on a directional index move; risk limited to the premium.",
+}
 
-_SYSTEM_PROMPT = """You are an elite NSE/BSE quantitative trader with decades of experience.
-You assess individual trade setups and decide: execute as-is, execute with adjustments, or skip.
+_SYSTEM_PROMPT = """You review trade signals from mechanical NSE strategies before the order goes out. Each strategy was validated on 45 days of real 1-minute data after costs: they win about 40 % of trades and make their money from targets 1.5-2.5x the risk, so individual losers are expected and are NOT a reason to skip. Your job is to remove the few signals with a concrete, checkable red flag and let the rest through. Approve by default.
 
-GOAL: capture every high-quality opportunity, protect capital from every weak setup.
+Skip (enter=false) only for one of these, named in red_flags:
+- chasing: price already more than ~1x ATR beyond the trigger level, so the stop is far and the target near
+- event: results / RBI / a scheduled event for this symbol within the session
+- level: a strong level (prior day high/low, round number, recent swing) sits between entry and target within ~0.5x the planned reward, against the trade
+- market: NIFTY moving hard (>0.5 %) against the trade direction right now
+- time: too little session left for the target (intraday after ~14:15, scalping after ~13:00)
+- exhaustion: RSI beyond 80 for a buy / below 20 for a sell on a vertical move with fading volume
+Use size_factor 0.5 or 0.75 (instead of skipping) when a flag is present but weak, or when the portfolio is already carrying a loss today. Missing data is never a flag. Call decide exactly once."""
 
-RULES:
-1. "enter": true  → execute the trade (optionally with your adjustments)
-2. "enter": false → skip this trade
-3. Never block a trade purely on missing data — if data is incomplete, approve with tighter SL
-4. Adjust SL/target/size_factor only when clearly justified by the data
-5. Penalise: regime mismatch, low volume, overbought/oversold extremes, approaching key levels
-6. Reward: multi-TF alignment, high volume, clean trend, good R:R, healthy portfolio heat
-
-Output ONLY valid JSON — no markdown, no explanation outside the JSON:
-{
-  "confidence": 0-100,
-  "enter": true|false,
-  "adjusted_sl_pct": <float or null>,
-  "adjusted_target_pct": <float or null>,
-  "size_factor": <0.25|0.5|0.75|1.0 — default 1.0>,
-  "reason": "<one crisp sentence>",
-  "warnings": ["<string>", ...]
-}"""
+DECIDE_TOOL = {
+    "name": "decide",
+    "description": "Approve or skip this signal.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "enter":       {"type": "boolean"},
+            "size_factor": {"type": "number", "enum": [0.5, 0.75, 1.0]},
+            "confidence":  {"type": "integer", "description": "0-100: how sure you are the trade should be taken"},
+            "red_flags":   {"type": "array", "items": {"type": "string"}},
+            "reason":      {"type": "string", "description": "one crisp sentence"},
+        },
+        "required": ["enter", "size_factor", "confidence", "red_flags", "reason"],
+        "additionalProperties": False,
+    },
+}
 
 
 @dataclass
@@ -61,18 +78,21 @@ class GateDecision:
     reason: str = ""
     warnings: list[str] = field(default_factory=list)
     latency_ms: int = 0
+    fail_open: bool = False
 
 
-_ALLOW_ON_ERROR = GateDecision(confidence=60, enter=True, reason="API fallback — rule-based approval")
+def _allow(reason: str) -> GateDecision:
+    return GateDecision(confidence=60, enter=True, reason=reason, fail_open=True)
 
-_client: Optional[anthropic.AsyncAnthropic] = None
 
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    return _client
+def _validated(strategy: str) -> dict:
+    """The strategy's last real-data replay (the evidence the reviewer is told to respect)."""
+    try:
+        import replay_backtest as rb
+        r = rb._LAST.get(strategy) or {}
+        return {k: r.get(k) for k in ("trades", "win_rate", "net_pnl", "profit_factor", "max_drawdown")} if r else {}
+    except Exception:
+        return {}
 
 
 def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
@@ -222,12 +242,17 @@ def _build_context(snap, action: str, signal: dict, strategy: str) -> dict:
         },
         "multi_timeframe": snap.mtf_alignment if hasattr(snap, "mtf_alignment") else {},
         "regime": {
-            "current":         regime.value,
-            "vix":             round(sigs.vix, 1) if sigs else None,
-            "pcr":             round(sigs.pcr, 2) if sigs else None,
-            "nifty_direction": sigs.nifty_direction if sigs and hasattr(sigs, "nifty_direction") else None,
-            "breadth":         round(sigs.breadth, 2) if sigs else None,
+            "current":          regime.value,
+            "vix":              round(sigs.india_vix, 1) if sigs and sigs.india_vix else None,
+            "pcr":              round(sigs.pcr, 2) if sigs and sigs.pcr else None,
+            "nifty_change_pct": round(sigs.nifty_1d_chg_pct, 2) if sigs and sigs.nifty_ltp else None,
+            "advance_decline":  round(sigs.advance_decline, 2) if sigs and (sigs.advance_count or sigs.decline_count) else None,
         },
+        "strategy_rules":     STRATEGY_PLAYBOOK.get(strategy, ""),
+        "strategy_validated": _validated(strategy),
+        "proposed_stop":      signal.get("stop_loss"),
+        "proposed_target":    signal.get("target"),
+        "trigger":            str(signal.get("trigger") or signal.get("pattern") or "")[:120],
         "portfolio": {
             "open_positions":          risk_st.get("open_positions", 0),
             "daily_pnl":               risk_st.get("daily_pnl", 0.0),
@@ -260,63 +285,66 @@ def _minutes_to_squareoff() -> int:
     return _mts(settings.squareoff_time)
 
 
-async def assess(snap, action: str, signal: dict, strategy: str) -> GateDecision:
-    """
-    Ask Claude to assess this trade setup.
-    Always returns a GateDecision — never raises.
-    """
-    if not settings.anthropic_api_key or not settings.use_claude_trade_gate:
-        return GateDecision(confidence=70, enter=True, reason="Gate disabled — rule-based approval")
-
+async def decide(ctx: dict, strategy: str, symbol: str = "", action: str = "") -> GateDecision:
+    """The model call on an already-built context (live or replayed). Raises on API errors."""
+    from llm_provider import llm_router
     t0 = asyncio.get_event_loop().time()
-    ctx = _build_context(snap, action, signal, strategy)
+    resp = await asyncio.wait_for(
+        llm_router.create(messages=[{"role": "user", "content": json.dumps(ctx, default=str)}],
+                          system=_SYSTEM_PROMPT, tools=[DECIDE_TOOL], max_tokens=3000, effort="low",
+                          tool_choice={"type": "tool", "name": "decide"}),
+        timeout=settings.claude_gate_timeout_s)
+    call = next((b for b in resp.content if b.get("type") == "tool_use" and b.get("name") == "decide"), None)
+    if call is None:
+        raise ValueError("reviewer returned no decision")
+    d = dict(call.input or {})
+    sf = d.get("size_factor", 1.0)
+    sf = 1.0 if sf not in (0.5, 0.75, 1.0) else float(sf)
+    return GateDecision(confidence=int(d.get("confidence", 60) or 60), enter=bool(d.get("enter", True)),
+                        size_factor=sf, reason=str(d.get("reason", ""))[:240],
+                        warnings=[str(x)[:80] for x in (d.get("red_flags") or [])][:5],
+                        latency_ms=int((asyncio.get_event_loop().time() - t0) * 1000))
 
+
+async def assess(snap, action: str, signal: dict, strategy: str, force: bool = False) -> GateDecision:
+    """Review one live signal. `force` = the allocator marked today unusual. Never raises."""
+    if not (settings.use_claude_trade_gate or force):
+        return GateDecision(confidence=70, enter=True, reason="Gate disabled — rule-based approval")
+    if not (settings.anthropic_api_key or settings.openai_api_key):
+        return GateDecision(confidence=70, enter=True, reason="No AI key — rule-based approval")
+    sym = getattr(snap, "symbol", "?")
     try:
-        resp = await asyncio.wait_for(
-            _get_client().messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=256,
-                system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": json.dumps(ctx)}],
-            ),
-            timeout=4.0,
-        )
-        raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
-        d   = json.loads(raw)
-        latency = int((asyncio.get_event_loop().time() - t0) * 1000)
-
-        decision = GateDecision(
-            confidence=int(d.get("confidence", 60)),
-            enter=bool(d.get("enter", True)),
-            adjusted_sl_pct=d.get("adjusted_sl_pct"),
-            adjusted_target_pct=d.get("adjusted_target_pct"),
-            size_factor=float(d.get("size_factor", 1.0)),
-            reason=d.get("reason", ""),
-            warnings=d.get("warnings", []),
-            latency_ms=latency,
-        )
-
-        _log(snap.symbol, strategy, action, decision, ctx["indicators"]["rsi_14"])
-        return decision
-
-    except asyncio.TimeoutError:
-        logger.warning("[gate] {} timeout — allowing trade", snap.symbol)
-        return _ALLOW_ON_ERROR
+        ctx = _build_context(snap, action, signal, strategy)
     except Exception as exc:
-        logger.warning("[gate] {} error ({}) — allowing trade", snap.symbol, exc)
-        return _ALLOW_ON_ERROR
+        logger.warning("[gate] {} context failed ({}) — allowing trade", sym, exc)
+        d = _allow(f"context error: {str(exc)[:80]}")
+        _record(sym, strategy, action, d); return d
+    try:
+        d = await decide(ctx, strategy, sym, action)
+    except asyncio.TimeoutError:
+        logger.warning("[gate] {} timeout after {}s — allowing trade", sym, settings.claude_gate_timeout_s)
+        d = _allow("timeout — approved unreviewed")
+    except Exception as exc:
+        logger.warning("[gate] {} error ({}) — allowing trade", sym, exc)
+        d = _allow(f"AI error — approved unreviewed: {str(exc)[:80]}")
+    _record(sym, strategy, action, d)
+    return d
 
 
-def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -> None:
+def _record(symbol: str, strategy: str, action: str, d: GateDecision) -> None:
+    if d.fail_open:
+        _stats["fail_open"] += 1
+    else:
+        _stats["reviewed"] += 1
+        _stats["approved" if d.enter else "vetoed"] += 1
+        if d.enter and d.size_factor < 1.0:
+            _stats["downsized"] += 1
     verdict = "ENTER" if d.enter else "SKIP"
     warn = f" ⚠ {d.warnings[0]}" if d.warnings else ""
-    logger.info(
-        "[gate] {} {} {} {} | conf={} size={} {}{}  ({}ms)",
-        "✅" if d.enter else "🚫", verdict, action, symbol,
-        d.confidence, d.size_factor, d.reason, warn, d.latency_ms,
-    )
+    logger.info("[gate] {} {} {} {} | conf={} size={} {}{}  ({}ms)", "✅" if d.enter else "🚫", verdict, action,
+                symbol, d.confidence, d.size_factor, d.reason, warn, d.latency_ms)
     _gate_log.appendleft({
-        "time":        datetime.now().strftime("%H:%M:%S"),
+        "time":        _now_ist().strftime("%H:%M:%S"),
         "symbol":      symbol,
         "strategy":    strategy,
         "signal":      action,
@@ -326,7 +354,12 @@ def _log(symbol: str, strategy: str, action: str, d: GateDecision, rsi: float) -
         "reason":      d.reason,
         "warnings":    d.warnings,
         "latency_ms":  d.latency_ms,
+        "fail_open":   d.fail_open,
     })
+
+
+def get_gate_stats() -> dict:
+    return dict(_stats)
 
 
 def get_gate_log(n: int = 50) -> list[dict]:

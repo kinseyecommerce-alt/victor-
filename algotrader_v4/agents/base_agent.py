@@ -424,10 +424,11 @@ class BaseAgent(ABC):
                     # ── Claude per-trade intelligence gate ────────────────────
                     # (always on when the allocator marked today as unusual)
                     import allocator as _alloc
-                    if settings.use_claude_trade_gate or _alloc.gate_required():
+                    _force = _alloc.gate_required()
+                    if settings.use_claude_trade_gate or _force:
                         from claude_trade_gate import assess as gate_assess
                         from master_agent_v5 import record_gate_decision
-                        gate = await gate_assess(snap, action, signal, self.name)
+                        gate = await gate_assess(snap, action, signal, self.name, force=_force)
                         record_gate_decision(gate.enter)
                         if not gate.enter:
                             continue
@@ -462,6 +463,8 @@ class BaseAgent(ABC):
             except Exception as exc:
                 err = f"{snap.symbol}: {str(exc)[:100]}"
                 self.state.errors.append(err)
+                # a crash here silently drops a validated signal: always make it visible
+                logger.opt(exception=exc).warning("[{}] entry path error on {} — signal dropped", self.name, snap.symbol)
 
     # ── Entry ───────────────────────────────────────────────────────────
 
