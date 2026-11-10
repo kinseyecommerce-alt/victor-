@@ -526,6 +526,9 @@ def connection_status():
             "market_open": is_market_open(), "trading_day": _ic.is_trading_day(),
             "holiday": _ic.holiday_name(), "next_session": _ic.next_trading_day().isoformat(),
             "holiday_calendar_known": _ic.holiday_calendar_known()}
+    _depths = [len(b.candles()) for b in list(tick_engine._bufs_1min.values())]
+    data["candle_history"] = {"symbols": len(_depths), "ready": sum(1 for x in _depths if x >= 60),
+                              "min": min(_depths) if _depths else 0}
     return {"kite": kite, "claude": ai_trader.api_health(), "data": data,
             "ws_clients": len(ws_clients), "bot_running": master_agent.running, "mode": settings.trading_mode,
             "time_ist": now_ist().strftime("%H:%M:%S")}
