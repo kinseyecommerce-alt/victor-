@@ -5725,7 +5725,9 @@ def t_connection_status_endpoint():
         h = _ait.api_health(); assert h["state"] == "billing" and "no credits" in h["detail"], h
         _ai_settings.openai_api_key = "sk-openai"                  # a second key → a healthy route exists
         assert _ait.api_health()["state"] == "untested"
-        _rt._mark("openai", "ok", "gpt-4.1 responding"); _rt.last_used = "openai"
+        _rt._mark("openai", "ok", "gpt-4.1 responding")            # verified fallback, primary failing, nothing routed yet
+        h = _ait.api_health(); assert h["state"] == "ok" and "fallback" in h["detail"], h
+        _rt.last_used = "openai"
         h = _ait.api_health(); assert h["state"] == "ok" and "fallback" in h["detail"], h
     finally:
         _ai_settings.anthropic_api_key, _ai_settings.openai_api_key = prev_key, prev_okey

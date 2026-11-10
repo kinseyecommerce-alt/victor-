@@ -444,9 +444,11 @@ async def test_ai_providers():
         try:
             resp = await asyncio.wait_for(llm_router._create_with_step_down(prov, dict(
                 messages=[{"role": "user", "content": "Reply with the single word OK."}],
-                system="You are a connectivity check for a trading system.", tools=[], max_tokens=8)), timeout=45)
+                system="You are a connectivity check for a trading system.", tools=[], max_tokens=64)), timeout=45)
             text = " ".join(b.get("text", "") for b in resp.content if b.get("type") == "text").strip()
             llm_router._mark(name, "ok", f"{prov.model} responding")
+            if llm_router.last_used not in out or not out.get(llm_router.last_used, {}).get("ok"):
+                llm_router.last_used = name      # the status line names a provider that actually answered
             out[name] = {"ok": True, "state": "ok", "model": resp.model or prov.model, "reply": text[:40]}
         except ProviderError as exc:
             llm_router._mark(name, exc.kind, exc.message, code=exc.code)
