@@ -6706,6 +6706,59 @@ def t_review_runs_off_the_tick_loop_with_drift_check():
 
 run("AI review: own task, gate_strategies only, drift and stop checks", t_review_runs_off_the_tick_loop_with_drift_check)
 
+def t_rolling_universe_select_and_persist():
+    import universe as _u
+    from pathlib import Path as _P
+    days = [f"2026-10-{d:02d}" for d in range(1, 16)]
+    def tr(sym, d, net): return {"symbol": sym, "entry_ts": f"{d}T09:40:00", "net": net}
+    trades = {"intraday": [tr("A", days[-1], 500), tr("B", days[-2], -300), tr("C", days[0], 900),     # C is outside the window
+                           tr("D", days[-3], 200), tr("E", days[-4], 50)],
+              "scalping": [tr("B", days[-1], 100), tr("D", days[-1], -250), tr("F", days[-5], 10)]}
+    chosen, per = _u.select(trades, days, lookback=10, min_symbols=2)
+    assert chosen == ["A", "E", "F"] and per["D"] == -50 and "C" not in per, (chosen, per)
+    assert _u.select(trades, days, lookback=10, min_symbols=4)[0] == [], "too few positive stocks → fixed list"
+    prev = _u._FILE
+    try:
+        _u._FILE = _P(_vtmp.mkdtemp()) / "universe.json"
+        assert _u.today_watchlist() == []
+        _u._save({"for_date": "2026-11-11", "symbols": ["A", "E"]})
+        from datetime import date as _d
+        assert _u.today_watchlist(_d(2026, 11, 11)) == ["A", "E"] and _u.today_watchlist(_d(2026, 11, 12)) == []
+        async def fake_job(fn, agent, syms, days_, slip, params, incl):
+            assert fn == "replay_job" and incl and len(syms) == 2
+            return {"trades": trades[agent]}
+        import bg_compute as _bg
+        rs = _u.recent_sessions(10, datetime(2026, 11, 11, 16, 30))
+        assert len(rs) == 10 and rs[-1] == "2026-11-11" and "2026-11-10" not in rs, rs   # Diwali holiday skipped
+        assert _u.recent_sessions(3, datetime(2026, 11, 11, 10, 0))[-1] == "2026-11-09", "today counts only after the close"
+        with _patch.object(_bg, "run_in_process", fake_job), _patch.object(_u, "recent_sessions", return_value=days[-10:]), \
+             _patch.object(_ai_settings, "universe_min_symbols", 2), \
+             _patch.object(_u, "now_ist", return_value=datetime(2026, 11, 11, 16, 30)):
+            st = asyncio.run(_u.refresh(lookback=10, symbols=["A", "B"]))
+        assert st["for_date"] == "2026-11-12" and st["symbols"] == ["A", "E", "F"] and not st["fallback"]
+        assert _u.load()["per_symbol_net"]["A"] == 500
+    finally:
+        _u._FILE = prev
+    assert len(_u.candidates()) >= 95 and "INFY" in _u.candidates() and "INFOSYS" not in _u.candidates()
+
+run("universe: rolling pick of profitable stocks, persisted per session", t_rolling_universe_select_and_persist)
+
+def t_forecast_at_signal_times_no_lookahead():
+    import ai_replay as _ar, kronos_forecast as _kf, replay_backtest as _rbm
+    bars = _trend_bars("FCS", days=3)
+    sig_ts = bars[500]["ts"]
+    seen = {}
+    def fake_fc(sym, hist, horizon, step, samples, use_cache):
+        seen["last"] = hist[-1]["ts"]; seen["n"] = len(hist)
+        return {"available": True, "expected_move_pct": -0.2, "p_up": 0.3, "flag": None, "source": "test", "z_score": -1.0}
+    with _patch.object(_rbm, "load_bars", return_value=(bars, "test")), _patch.object(_kf, "forecast", fake_fc):
+        res = asyncio.run(_ar.forecast_signals([{"symbol": "FCS", "ts": sig_ts.isoformat(), "side": "SELL", "net": 120.0}], lookback=300))
+    r = res["rows"][0]
+    assert seen["last"] < sig_ts and seen["n"] == 300, "only bars before the signal"
+    assert r["agrees"] is True and r["move_with_pct"] == 0.2 and r["net"] == 120.0
+
+run("forecast at signal times: bars before the signal only", t_forecast_at_signal_times_no_lookahead)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

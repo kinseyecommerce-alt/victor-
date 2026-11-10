@@ -431,6 +431,21 @@ async def market_opportunities(top: int = 12, focus: str = "all", refresh: bool 
     return await asyncio.to_thread(opportunity_scanner.scan, max(1, min(top, 30)), focus, refresh)
 
 
+@app.get("/universe", tags=["AI"])
+def universe_status():
+    """The rolling NIFTY 100 universe for the opening-range agents (computed after each close)."""
+    import universe
+    return {**universe.load(), "enabled": settings.use_rolling_universe,
+            "today": universe.today_watchlist()}
+
+
+@app.post("/universe/refresh", tags=["AI"])
+async def universe_refresh(lookback: int | None = None):
+    """Recompute the universe now (replays ~100 stocks in the background worker; a few minutes)."""
+    import universe
+    return await universe.refresh(lookback)
+
+
 @app.get("/allocator", tags=["AI"])
 def allocator_today():
     """Today's AI capital allocation (size factor per strategy, day posture) and the evidence it sees."""
@@ -1546,6 +1561,31 @@ async def forecast_skill(symbol: str, days: int = 20, horizon: int | None = None
         raise HTTPException(404, f"no bar data for {symbol}")
     res = await asyncio.to_thread(kronos_forecast.skill_check, symbol.upper(), bars, horizon)
     return {**res, "data": src, "days": days}
+
+
+class ForecastSignalsRequest(BaseModel):
+    signals: list[dict] = Field(min_length=1, max_length=600)   # {symbol, ts (signal bar ISO), side, net, agent?}
+    samples: int = Field(default=8, ge=1, le=32)
+
+
+@app.post("/backtest/forecast-signals", tags=["Backtest"])
+async def backtest_forecast_signals(req: ForecastSignalsRequest):
+    """Kronos forecast at each given signal time from the bars before it (background; poll the GET)."""
+    import ai_replay
+    if ai_replay._FC_LAST.get("status") == "running":
+        return {k: v for k, v in ai_replay._FC_LAST.items() if k != "rows"}
+    asyncio.create_task(ai_replay.run_forecast_signals_and_record(req.signals, req.samples))
+    await asyncio.sleep(0)
+    return {"status": "running", "total": len(req.signals)}
+
+
+@app.get("/backtest/forecast-signals", tags=["Backtest"])
+def backtest_forecast_signals_status(rows: bool = False):
+    import ai_replay
+    st = dict(ai_replay._FC_LAST)
+    if not rows:
+        st.pop("rows", None)
+    return st
 
 
 @app.get("/market/trend-filter", tags=["Market Regime"])
