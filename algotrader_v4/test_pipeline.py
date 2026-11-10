@@ -2953,6 +2953,45 @@ def t_demo_clock_starts_in_market_hours():
     finally:
         _ai_settings.demo_mode, _clk._demo_anchor = prev
 
+def t_exchange_holiday_calendar():
+    """Weekday holidays close the market; MARKET_HOLIDAYS adds dates; session jobs skip the day."""
+    from datetime import date as _d
+    prev = _ai_settings.market_holidays
+    try:
+        assert _clk.holiday_name(_d(2026, 11, 10)) == "Diwali-Balipratipada" and not _clk.is_trading_day(_d(2026, 11, 10))
+        assert _clk.is_trading_day(_d(2026, 11, 11)) and not _clk.is_trading_day(_d(2026, 11, 14)), "Sat closed"
+        assert _clk.next_trading_day(_d(2026, 11, 6)) == _d(2026, 11, 9) and _clk.next_trading_day(_d(2026, 11, 9)) == _d(2026, 11, 11)
+        assert _clk.next_trading_day(_d(2026, 12, 24)) == _d(2026, 12, 28), "Christmas Friday → Monday"
+        _ai_settings.market_holidays = "2026-11-12:Special closure, bad-date, 2026-11-13"
+        assert _clk.holiday_name(_d(2026, 11, 12)) == "Special closure" and _clk.holiday_name(_d(2026, 11, 13)) == "Market holiday"
+        assert not _clk.is_trading_day(_d(2026, 11, 12)) and _clk.next_trading_day(_d(2026, 11, 11)) == _d(2026, 11, 16)
+        assert _clk.holiday_calendar_known(_d(2026, 5, 5)) and not _clk.holiday_calendar_known(_d(2027, 5, 5))
+        _ai_settings.market_holidays = "2027-01-26:Republic Day"
+        assert _clk.holiday_calendar_known(_d(2027, 5, 5)), "an operator list for the year counts"
+        _ai_settings.market_holidays = ""
+        # 10:00 IST on a weekday holiday is closed; the same time on the next day is open
+        with _patch.object(_clk, "now_ist", return_value=datetime(2026, 11, 10, 10, 0, tzinfo=_clk._IST)):
+            assert not _clk.is_market_open() and _clk.holiday_name() == "Diwali-Balipratipada"
+        with _patch.object(_clk, "now_ist", return_value=datetime(2026, 11, 11, 10, 0, tzinfo=_clk._IST)):
+            assert _clk.is_market_open()
+        # the auto-start job stands down on a holiday before touching Kite
+        import platform_scheduler as _ps
+        prev_as = _ai_settings.auto_start_strategies; _ai_settings.auto_start_strategies = "swing"
+        sent = []
+        async def fake_tg(msg, *a, **k): sent.append(msg)
+        try:
+            with _patch.object(_clk, "now_ist", return_value=datetime(2026, 11, 10, 9, 16, tzinfo=_clk._IST)), \
+                 _patch.object(_ps, "send_telegram", fake_tg), \
+                 _patch.object(_ps.kite_client, "profile", side_effect=AssertionError("must not call Kite on a holiday")):
+                asyncio.run(_ps.PlatformScheduler()._auto_start_bot())
+            assert sent and "holiday" in sent[0].lower() and "11 Nov" in sent[0], sent
+        finally:
+            _ai_settings.auto_start_strategies = prev_as
+    finally:
+        _ai_settings.market_holidays = prev
+
+run("exchange holidays: calendar, override, auto-start stands down", t_exchange_holiday_calendar)
+
 def t_dashboard_summary_shape():
     import main as _main
     def body():

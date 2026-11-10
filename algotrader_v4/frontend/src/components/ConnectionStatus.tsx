@@ -12,7 +12,8 @@ type Conn = {
   claude: { state: 'ok' | 'untested' | 'no_key' | 'bad_key' | 'billing' | 'rate_limited' | 'overloaded' | 'server' | 'connection' | 'not_found' | 'invalid_request' | 'error';
             detail: string; model: string; at?: string; active?: string | null; primary?: string; failovers?: number
             providers?: Record<string, { state: string; detail: string; model: string; role: string }> }
-  data: { source: string; symbols: number; last_tick_age_s: number | null; streaming: boolean; market_open: boolean }
+  data: { source: string; symbols: number; last_tick_age_s: number | null; streaming: boolean; market_open: boolean;
+          trading_day?: boolean; holiday?: string | null; next_session?: string }
   ws_clients: number
   bot_running: boolean
   mode: string
@@ -70,7 +71,7 @@ export default function ConnectionStatus({ dark = false, onClick }: { dark?: boo
     { key: 'claude', label: 'AI', tone: claudeTone(c), icon: <Brain size={14} />, text: claudeText(c) },
     { key: 'data', label: 'Data', tone: dataTone(c), icon: <Radio size={14} />,
       text: c.data.streaming ? `Live prices · ${c.data.symbols} symbols · ${c.data.last_tick_age_s}s ago`
-          : !c.data.market_open ? `Market closed · ${c.data.source}`
+          : !c.data.market_open ? (c.data.holiday ? `Exchange holiday · ${c.data.holiday} · next session ${c.data.next_session}` : `Market closed · ${c.data.source}`)
           : c.bot_running ? `No ticks for ${c.data.last_tick_age_s ?? '—'}s · ${c.data.source}` : `Bot stopped · ${c.data.source}` },
     { key: 'ws', label: 'Socket', tone: wsConnected ? 'ok' : 'bad', icon: wsConnected ? <Wifi size={14} /> : <WifiOff size={14} />,
       text: wsConnected ? 'Dashboard live feed connected' : 'Dashboard live feed disconnected — reconnecting' },

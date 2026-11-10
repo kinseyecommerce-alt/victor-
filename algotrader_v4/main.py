@@ -12,6 +12,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from ist_clock import now_ist
+import ist_clock as _ic
 from pathlib import Path
 from typing import Literal
 
@@ -491,7 +492,9 @@ def connection_status():
             "unknown_symbols": sorted(tick_engine._no_quote),
             "last_tick_age_s": round(age, 1) if age is not None else None,
             "streaming": age is not None and age < 15 and is_market_open(),
-            "market_open": is_market_open()}
+            "market_open": is_market_open(), "trading_day": _ic.is_trading_day(),
+            "holiday": _ic.holiday_name(), "next_session": _ic.next_trading_day().isoformat(),
+            "holiday_calendar_known": _ic.holiday_calendar_known()}
     return {"kite": kite, "claude": ai_trader.api_health(), "data": data,
             "ws_clients": len(ws_clients), "bot_running": master_agent.running, "mode": settings.trading_mode,
             "time_ist": now_ist().strftime("%H:%M:%S")}
