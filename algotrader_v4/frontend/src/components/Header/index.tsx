@@ -30,6 +30,8 @@ export default function Header() {
   const [autoLogin, setAutoLogin] = useState<{ enabled: boolean; missing: string[]; last_success?: string | null;
     last_error?: string | null; last_attempt?: string | null; running?: boolean; schedule_ist?: string[] } | null>(null)
   const [autoLoginBusy, setAutoLoginBusy] = useState(false)
+  const [aiTestBusy, setAiTestBusy] = useState(false)
+  const [aiTest, setAiTest] = useState<Record<string, any> | null>(null)
   const [showFields, setShowFields] = useState<Record<string, boolean>>({})
   const [credStatus, setCredStatus] = useState<Record<string, boolean>>({})
   const [credSaving, setCredSaving] = useState(false)
@@ -104,6 +106,22 @@ export default function Header() {
       addToast(e.response?.data?.detail || 'Automatic Kite login failed', 'error')
       refreshCredentials()
     } finally { setAutoLoginBusy(false) }
+  }
+
+  const handleTestAi = async () => {
+    setAiTestBusy(true); setAiTest(null)
+    try {
+      const r = await api.testAiProviders()
+      const prov = r.data.providers as Record<string, any>
+      setAiTest(prov)
+      const ok = Object.entries(prov).filter(([, v]) => v.ok).map(([k]) => k)
+      const bad = Object.entries(prov).filter(([, v]) => !v.ok && v.state !== 'no_key')
+      if (ok.length && !bad.length) addToast(`AI responding: ${ok.join(' + ')}`, 'buy')
+      else if (ok.length) addToast(`${ok.join(' + ')} responding; ${bad.map(([k, v]) => `${k}: ${v.state}`).join(', ')}`, 'info')
+      else addToast(bad.length ? `${bad.map(([k, v]) => `${k}: ${v.detail || v.state}`).join(' | ')}` : 'No AI key saved yet', 'error')
+    } catch (e: any) {
+      addToast(e.response?.data?.detail || 'AI test failed', 'error')
+    } finally { setAiTestBusy(false) }
   }
 
   const handleKiteLogin = async () => {
@@ -456,10 +474,26 @@ export default function Header() {
                 {credField('Anthropic API Key (Claude)', 'anthropic_api_key')}
                 {credField('OpenAI API Key', 'openai_api_key')}
               </div>
-              <p className="mt-2 text-xs text-slate-500" data-testid="ai-provider-note">
-                Either key is enough. With both, Claude is primary and OpenAI takes over automatically when
-                Claude is unavailable (no credits, rate limit, outage) — and back again when it recovers.
-              </p>
+              <div className="mt-2 flex items-start justify-between gap-3">
+                <p className="text-xs text-slate-500" data-testid="ai-provider-note">
+                  Either key is enough. With both, Claude is primary and OpenAI takes over automatically when
+                  Claude is unavailable (no credits, rate limit, outage) — and back again when it recovers.
+                </p>
+                <Btn size="sm" className="shrink-0 whitespace-nowrap" onClick={handleTestAi} disabled={aiTestBusy}
+                     data-testid="ai-test-btn">
+                  {aiTestBusy ? 'Testing…' : 'Test AI'}
+                </Btn>
+              </div>
+              {aiTest && (
+                <ul className="mt-2 space-y-1 text-xs" data-testid="ai-test-result">
+                  {Object.entries(aiTest).map(([name, v]: [string, any]) => (
+                    <li key={name} className={v.ok ? 'text-emerald-400' : v.state === 'no_key' ? 'text-slate-500' : 'text-rose-400'}>
+                      {v.ok ? '●' : '○'} {name === 'anthropic' ? 'Claude' : 'OpenAI'}{v.model ? ` (${v.model})` : ''}:{' '}
+                      {v.ok ? `responding${v.reply ? ` — "${v.reply}"` : ''}` : (v.detail || v.state)}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
             <div>
               <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">TrueData</p>
