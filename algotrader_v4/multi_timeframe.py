@@ -119,7 +119,12 @@ def check(snap, action: str) -> MTFResult:
             (t_5m  not in (wanted, "neutral")) or
             (t_15m not in (wanted, "neutral"))
         )
-        min_align = getattr(settings, "mtf_min_alignment", 2)
+        # A timeframe without enough bars to measure (the 5m and 15m trends need ~2-4 h of history,
+        # the snapshot carries 60 one-minute candles) is unknown, not disagreement: require alignment
+        # only from the timeframes that could be measured. Before this, 5m/15m were always "neutral"
+        # and the 2-of-3 rule vetoed every signal.
+        measurable = 1 + (len(df_5m) >= 23) + (len(df_15m) >= 16)
+        min_align = min(getattr(settings, "mtf_min_alignment", 2), measurable)
         aligned = (score >= min_align) and not actively_against
 
         # Attach to snapshot for claude_trade_gate context

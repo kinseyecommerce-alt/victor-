@@ -287,27 +287,13 @@ def _build_claude_payload(
 
 async def _call_claude(payload: str) -> Optional[dict]:
     """Call Claude Sonnet and parse the JSON response."""
-    if not settings.anthropic_api_key:
-        logger.warning("[pre_market] ANTHROPIC_API_KEY not set — skipping Claude synthesis")
+    if not (settings.anthropic_api_key or settings.openai_api_key):
+        logger.warning("[pre_market] no AI key set — skipping AI synthesis")
         return None
     try:
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-        resp = await asyncio.wait_for(
-            client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=1024,
-                system=_SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": payload}],
-            ),
-            timeout=20.0,
-        )
-        raw = resp.content[0].text.strip()
-        # Strip accidental markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip())
+        from llm_provider import complete_text, strip_json_fences
+        raw = await asyncio.wait_for(complete_text(_SYSTEM_PROMPT, payload, max_tokens=4000), timeout=60.0)
+        return json.loads(strip_json_fences(raw))
     except asyncio.TimeoutError:
         logger.warning("[pre_market] Claude call timed out")
         return None
