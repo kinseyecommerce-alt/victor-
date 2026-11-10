@@ -35,3 +35,8 @@ data/ai_swing_positions.json
 data/performance.json
 data/strategy_params.json
 data/research_log.json
+data/agent_enables.json
+data/allocation.json
+data/replay_last.json
+data/gate_replay_last.json
+data/ai_replay_last.json
