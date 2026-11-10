@@ -212,7 +212,7 @@ async def _haiku_analyse(
     Call Claude Haiku-4.5 to produce a one-sentence insight and a one-sentence
     actionable lesson for this trade.  Returns safe defaults on any error.
     """
-    if not settings.anthropic_api_key:
+    if not (settings.anthropic_api_key or settings.openai_api_key):
         return ("API key not configured", "No lesson available")
 
     payload = {
@@ -237,16 +237,9 @@ async def _haiku_analyse(
     )
 
     try:
-        resp = await asyncio.wait_for(
-            _get_client().messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=200,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            timeout=8.0,
-        )
-        raw = resp.content[0].text.strip().lstrip("```json").rstrip("```").strip()
-        d   = json.loads(raw)
+        from llm_provider import complete_text, strip_json_fences
+        raw = await asyncio.wait_for(complete_text("", prompt, max_tokens=1500), timeout=40.0)
+        d   = json.loads(strip_json_fences(raw))
         return d.get("insight", "No insight"), d.get("lesson", "No lesson")
     except asyncio.TimeoutError:
         logger.debug("[memory] Haiku timeout for {}", symbol)
@@ -325,7 +318,7 @@ async def weekly_synthesis() -> str:
             logger.info("[memory] weekly_synthesis: no entries found")
             return ""
 
-        if not settings.anthropic_api_key:
+        if not (settings.anthropic_api_key or settings.openai_api_key):
             logger.info("[memory] weekly_synthesis: no API key")
             return ""
 
@@ -355,15 +348,8 @@ async def weekly_synthesis() -> str:
             f"Trade records:\n{json.dumps(compact, indent=2)}"
         )
 
-        resp = await asyncio.wait_for(
-            _get_client().messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=800,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            timeout=30.0,
-        )
-        synthesis = resp.content[0].text.strip()
+        from llm_provider import complete_text
+        synthesis = await asyncio.wait_for(complete_text("", prompt, max_tokens=4000, effort="medium"), timeout=120.0)
 
         msg = (
             "<b>Weekly Trade Memory Synthesis</b>\n\n"

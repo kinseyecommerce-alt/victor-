@@ -6415,6 +6415,81 @@ def t_gate_decides_via_router_and_fails_open():
 run("gate: context builds with real regime signals (entry-crash regression)", t_gate_context_survives_regime_signals)
 run("gate: router + forced tool, allocator force, fails open and counts it", t_gate_decides_via_router_and_fails_open)
 
+def t_regime_pauses_only_in_extreme_volatility():
+    from master_agent_v5 import master_agent as _m
+    from market_regime import Regime as _R, REGIME_PLANS as _P
+    prev = _ai_settings.regime_pause_mode
+    try:
+        _ai_settings.regime_pause_mode = "extreme_only"
+        for r in (_R.RANGING, _R.BEAR_TREND, _R.BULL_VOLATILE, _R.BEAR_VOLATILE, _R.UNKNOWN):
+            paused, active = _m._regime_pauses(r, _P[r])
+            assert paused == [] and set(active) == {"intraday", "scalping", "swing", "fno"}, (r, paused)
+        paused, active = _m._regime_pauses(_R.HIGH_VOLATILE, _P[_R.HIGH_VOLATILE])
+        assert set(paused) == {"swing", "intraday"} and "intraday" not in active
+        _ai_settings.regime_pause_mode = "plan"
+        assert _m._regime_pauses(_R.RANGING, _P[_R.RANGING])[0] == ["swing"]
+        _ai_settings.regime_pause_mode = "off"
+        assert _m._regime_pauses(_R.HIGH_VOLATILE, _P[_R.HIGH_VOLATILE])[0] == []
+    finally:
+        _ai_settings.regime_pause_mode = prev
+
+def t_router_cools_down_billing_failures():
+    import llm_provider as _lpm
+    calls = []
+    class _P:
+        def __init__(s, name, fail): s.name, s.fail, s.model, s.model_override = name, fail, name + "-m", None
+        def configured(s): return True
+        def reset(s): pass
+        async def create(s, **kw):
+            calls.append(s.name)
+            if s.fail: raise _lpm.ProviderError(s.name, "billing", "credit balance too low", 400, True)
+            return _lpm.LLMResponse([_lpm.Block(type="text", text="ok")], "end_turn", _lpm.Usage(), s.name, s.model)
+    r = _lpm.LLMRouter(_P("anthropic", True), _P("openai", False))
+    prev = (_ai_settings.ai_provider_primary, _ai_settings.ai_provider_failover)
+    try:
+        _ai_settings.ai_provider_primary, _ai_settings.ai_provider_failover = "anthropic", True
+        asyncio.run(r.create(messages=[], system="", tools=[], max_tokens=10))
+        asyncio.run(r.create(messages=[], system="", tools=[], max_tokens=10))
+        assert calls == ["anthropic", "openai", "openai"], calls        # second call skips the cooling provider
+        assert "_mono" not in r.status()["providers"]["anthropic"]
+        r.health["anthropic"]["_mono"] -= 10_000                          # cooldown over → primary retried
+        asyncio.run(r.create(messages=[], system="", tools=[], max_tokens=10))
+        assert calls[-2:] == ["anthropic", "openai"], calls
+        # if every provider is cooling, they are still tried rather than failing without a call
+        r2 = _lpm.LLMRouter(_P("anthropic", True), _P("openai", True)); calls.clear()
+        for _ in range(2):
+            try: asyncio.run(r2.create(messages=[], system="", tools=[], max_tokens=10))
+            except _lpm.ProviderError: pass
+        assert calls == ["anthropic", "openai", "anthropic", "openai"], calls
+    finally:
+        _ai_settings.ai_provider_primary, _ai_settings.ai_provider_failover = prev
+
+def t_master_review_rule_based_and_quiet():
+    import inspect, master_agent_v5 as _mav
+    src = inspect.getsource(_mav.MasterAgent._master_review)
+    assert "claude-sonnet-4-6" not in src and "llm_router" in src and "master_ai_review" in src
+    assert "_last_regime_sent" in src, "telegram only when the regime changes"
+    assert _ai_settings.master_ai_review is False
+    for mod in ("pre_market_report", "trade_memory", "research_loop", "claude_trade_gate"):
+        m = __import__(mod); assert "claude-sonnet-4-6" not in inspect.getsource(m) and "haiku-4-5" not in inspect.getsource(m), mod
+
+def t_mtf_does_not_veto_unmeasurable_timeframes():
+    """Regression: with the snapshot's 60 one-minute candles the 5m/15m trends can never be measured,
+    and the 2-of-3 rule vetoed 100 % of signals (0 trades in 45 days for every agent)."""
+    import multi_timeframe as _mtf
+    from types import SimpleNamespace as _NS
+    from tick_engine import Candle
+    t0 = datetime(2026, 11, 5, 9, 15)
+    up = [Candle(100 + i*0.05, 100 + i*0.05 + 0.1, 100 + i*0.05 - 0.1, 100 + i*0.05 + 0.03, 1000, t0 + timedelta(minutes=i)) for i in range(60)]
+    r = _mtf.check(_NS(symbol="X", candles_1min=up), "BUY"); assert r.aligned and r.tf_1m == "bullish", r
+    r = _mtf.check(_NS(symbol="X", candles_1min=up), "SELL"); assert not r.aligned, "a sell against the 1-minute trend is still vetoed"
+    assert _ai_settings.use_multi_timeframe is False, "off by default: not part of the validated agents"
+
+run("mtf: unmeasurable timeframes no longer veto every signal",       t_mtf_does_not_veto_unmeasurable_timeframes)
+run("regime: only extreme volatility pauses the validated agents",    t_regime_pauses_only_in_extreme_volatility)
+run("router: provider failing on billing is skipped for a cooldown",   t_router_cools_down_billing_failures)
+run("master review: AI opt-in via router, Telegram only on change",    t_master_review_rule_based_and_quiet)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

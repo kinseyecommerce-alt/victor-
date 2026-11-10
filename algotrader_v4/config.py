@@ -83,8 +83,11 @@ class Settings(BaseSettings):
     # Intelligence layer
     use_claude_trade_gate: bool = True    # per-trade AI review of agent signals (llm_router: Claude → OpenAI)
     claude_gate_timeout_s: float = 25.0   # reviewer budget per signal; on timeout the trade proceeds unreviewed
+    regime_pause_mode: Literal["extreme_only", "plan", "off"] = "extreme_only"   # see MasterAgent._regime_pauses
+    master_ai_review:     bool = False    # per-minute AI regime review (superseded by the twice-daily allocator)
+    master_ai_review_min: int  = 30       # when on: at most one AI review per this many minutes
     claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
-    use_multi_timeframe: bool = True      # require 5m/15m alignment with entry direction
+    use_multi_timeframe: bool = False     # extra 5m/15m alignment veto; off: not part of the agents' validated rules
     mtf_min_alignment: int = 2            # how many of 3 TFs must agree (1, 2, or 3)
     use_kelly_sizing: bool = True         # apply Claude gate's size_factor to qty
 

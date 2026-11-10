@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Optional
+import time as time_mod
 
 import anthropic
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -130,11 +131,17 @@ def _gate_stats() -> dict:
     }
 
 
+class _RuleBased(Exception):
+    """Internal: take the rule-based directive path."""
+
+
 class MasterAgent:
 
     def __init__(self) -> None:
         self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         self._scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
+        self._last_ai_review = -1e9
+        self._last_regime_sent: Optional[str] = None
         self.running = False
         self._agent_watchlists: dict[str, list[dict]] = {}
         self.last_directives: dict = {}
@@ -277,14 +284,23 @@ class MasterAgent:
             "guard": order_guard.status(),
         }
 
+        # The per-minute AI review is replaced by the twice-daily allocator (allocator.py). It can be
+        # re-enabled (MASTER_AI_REVIEW=true) and then runs through llm_router at most every
+        # master_ai_review_min minutes; otherwise directives are the rule-based regime plan.
+        now_m = time_mod.monotonic()
+        use_ai = (settings.master_ai_review and (settings.anthropic_api_key or settings.openai_api_key)
+                  and now_m - self._last_ai_review >= settings.master_ai_review_min * 60)
         try:
-            msg = self._client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=800,
-                system=MASTER_PROMPT,
+            if not use_ai:
+                raise _RuleBased()
+            self._last_ai_review = now_m
+            from llm_provider import llm_router
+            msg = await llm_router.create(
                 messages=[{"role": "user", "content": json.dumps(report, indent=2, default=str)}],
+                system=MASTER_PROMPT, tools=[], max_tokens=3000, effort="low",
             )
-            raw = msg.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+            raw = "".join(b.get("text", "") for b in msg.content if b.get("type") == "text").strip()
+            raw = raw.replace("```json", "").replace("```", "").strip()
             d   = json.loads(raw)
             self.last_directives = {
                 **d,
@@ -293,7 +309,8 @@ class MasterAgent:
             }
             self._apply_directives(d)
         except Exception as exc:
-            logger.error("[master] Claude review error: {}", exc)
+            if not isinstance(exc, _RuleBased):
+                logger.error("[master] AI review error: {}", exc)
             self.last_directives = {
                 "regime":            regime.value,
                 "regime_reasoning":  plan.reasoning,
@@ -306,7 +323,8 @@ class MasterAgent:
             }
 
         summary = self.last_directives.get("summary", "")
-        if summary:
+        if summary and regime.value != self._last_regime_sent:   # notify on change, not every minute
+            self._last_regime_sent = regime.value
             asyncio.create_task(send_telegram(
                 f"<b>Regime: {regime.value}</b>\n"
                 f"Active: {', '.join(plan.active)}\n"
@@ -438,14 +456,27 @@ class MasterAgent:
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
+    def _regime_pauses(self, regime: Regime, plan) -> tuple[list[str], list[str]]:
+        """(paused, active) under settings.regime_pause_mode.
+        extreme_only (default): only a measured extreme-volatility regime (VIX > 25) pauses agents. The
+        regime plans were written for the retired pattern agents; the current agents were validated on
+        real data without them, so on every other day they run and today's AI allocation sizes them.
+        plan: the full regime plan (legacy). off: never pause."""
+        mode = getattr(settings, "regime_pause_mode", "extreme_only")
+        if mode == "plan":
+            return list(plan.paused), list(plan.active)
+        paused = list(plan.paused) if (mode == "extreme_only" and regime == Regime.HIGH_VOLATILE) else []
+        return paused, [s for s in ALL_AGENTS if s not in paused]
+
     def _apply_regime_plan(self, regime: Regime, plan) -> None:
-        for strat in plan.paused:
+        paused, active = self._regime_pauses(regime, plan)
+        for strat in paused:
             agent = ALL_AGENTS.get(strat)
             if agent and agent.state.running:
                 agent.stop()
                 logger.info("[master] Regime {} → paused {}", regime.value, strat)
 
-        for strat in plan.active:
+        for strat in active:
             agent = ALL_AGENTS.get(strat)
             if agent and not agent.state.running:
                 if not is_agent_enabled(strat):

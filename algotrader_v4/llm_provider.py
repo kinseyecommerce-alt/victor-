@@ -354,11 +354,23 @@ class LLMRouter:
 
     def _mark(self, name: str, state: str, detail: str, **extra) -> None:
         self.health[name] = {"state": state, "detail": detail[:300], "at": now_ist().isoformat(timespec="seconds"),
-                             "model": self.providers[name].model, **extra}
+                             "model": self.providers[name].model, "_mono": time.monotonic(), **extra}
+
+    # A provider that failed for a reason that will not fix itself within minutes (no credits, a rejected
+    # key) is skipped for this long, so every call does not first pay a failing round trip to it.
+    COOLDOWN_S = {"billing": 900, "bad_key": 900}
+
+    def _cooling(self, name: str) -> bool:
+        h = self.health.get(name) or {}
+        cd = self.COOLDOWN_S.get(h.get("state"))
+        if not cd or not h.get("_mono"):
+            return False
+        return time.monotonic() - h["_mono"] < cd
 
     async def create(self, **kwargs) -> LLMResponse:
         order = self.order()
-        candidates = [n for n in order if self.providers[n].configured()]
+        configured = [n for n in order if self.providers[n].configured()]
+        candidates = [n for n in configured if not self._cooling(n)] or configured   # never skip them all
         if not candidates:
             raise ProviderError("none", "no_key", "no AI provider key set (Anthropic or OpenAI)", 0, False)
         last: Optional[ProviderError] = None
@@ -405,7 +417,7 @@ class LLMRouter:
         prov: dict[str, dict] = {}
         for n in self.providers:
             p = self.providers[n]
-            h = dict(self.health[n])
+            h = {k: v for k, v in self.health[n].items() if k != "_mono"}
             if not p.configured():
                 h = {"state": "no_key", "detail": f"{n} API key not set", "at": None}
             h["model"] = p.model
@@ -437,3 +449,19 @@ class LLMRouter:
 
 
 llm_router = LLMRouter()
+
+
+async def complete_text(system: str, user: str, max_tokens: int = 2000, effort: str = "low") -> str:
+    """Plain text completion through the router (Claude → OpenAI failover). Raises ProviderError."""
+    resp = await llm_router.create(messages=[{"role": "user", "content": user}], system=system or "",
+                                   tools=[], max_tokens=max_tokens, effort=effort)
+    return "".join(b.get("text", "") for b in resp.content if b.get("type") == "text").strip()
+
+
+def strip_json_fences(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return raw.strip()

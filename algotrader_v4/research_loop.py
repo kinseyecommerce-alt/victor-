@@ -132,17 +132,20 @@ def gather_evidence(days: int = 7) -> dict:
 
 async def propose(evidence: dict, client=None) -> dict:
     """One tool call to Claude. Returns the proposal dict (agent may be 'none')."""
-    import anthropic
     from ai_trader import ai_trader, _FALLBACK_MODELS
-    client = client or ai_trader._get_client()
-    kwargs = dict(model=settings.ai_agent_model, max_tokens=2000, system=SYSTEM, tools=[PROPOSAL_TOOL],
-                  tool_choice={"type": "tool", "name": "propose_change"},
-                  messages=[{"role": "user", "content": "WEEKLY EVIDENCE\n" + json.dumps(evidence, default=str)}],
-                  output_config={"effort": "medium"})
-    if settings.ai_agent_model in _FALLBACK_MODELS:
-        resp = await client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
-    else:
-        resp = await client.messages.create(**kwargs)
+    messages = [{"role": "user", "content": "WEEKLY EVIDENCE\n" + json.dumps(evidence, default=str)}]
+    if client is None:                          # production: llm_router (Claude → OpenAI failover)
+        from llm_provider import llm_router
+        resp = await llm_router.create(messages=messages, system=SYSTEM, tools=[PROPOSAL_TOOL], max_tokens=6000,
+                                       effort="medium", tool_choice={"type": "tool", "name": "propose_change"})
+    else:                                       # tests inject an Anthropic-style client
+        kwargs = dict(model=settings.ai_agent_model, max_tokens=2000, system=SYSTEM, tools=[PROPOSAL_TOOL],
+                      tool_choice={"type": "tool", "name": "propose_change"}, messages=messages,
+                      output_config={"effort": "medium"})
+        if settings.ai_agent_model in _FALLBACK_MODELS:
+            resp = await client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
+        else:
+            resp = await client.messages.create(**kwargs)
     try:
         ai_trader._track_usage(resp)
     except Exception:
@@ -206,7 +209,7 @@ async def ab_test(agent: str, param: str, value: float, symbols: list[str], days
 async def run_cycle(symbols: Optional[list[str]] = None, client=None, bars_by_symbol: Optional[dict] = None) -> dict:
     """The whole weekly cycle. Returns the log entry that was written."""
     import optimizer
-    if not settings.anthropic_api_key and client is None:
+    if not (settings.anthropic_api_key or settings.openai_api_key) and client is None:
         entry = _entry("skipped", reason="no Anthropic key")
         _append_log(entry)
         return entry
