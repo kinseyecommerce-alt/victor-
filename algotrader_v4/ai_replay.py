@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Callable, Optional
@@ -530,3 +531,163 @@ async def run_and_record(days: int = 5, symbols: Optional[list[str]] = None, **k
                                     else {"status": "error", "error": str(exc)[:300]})
     _save(_LAST)
     return _LAST
+
+
+# ── Gate replay: does the AI reviewer improve the agents' own signals? ─────────
+# The agents are the validated engine; the AI earns its keep if, shown each real signal as it would be
+# live, it removes more losing trades than winning ones. This replays the agents on real bars, rebuilds
+# the reviewer's view one minute before each fill, asks the live reviewer (claude_trade_gate.decide) and
+# scores "all signals" against "AI-approved signals" (and AI-sized). Historical context lacks levels,
+# events, option chains and flow, so this is a lower bound on what the live reviewer sees.
+_GATE_LAST: dict = {"status": "idle"}
+_GATE_FILE = Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" / "performance.json").parent / "gate_replay_last.json"
+
+
+def _gate_ctx(s: "_Sym", idx: Optional["_Sym"], strategy: str, side: str, ts: datetime,
+              stop: Optional[float], target: Optional[float], trigger: str) -> Optional[dict]:
+    import claude_trade_gate as g
+    r = s.row(ts)
+    if r is None:
+        return None
+    ltp = r["ltp"]
+    def rd(v, n=2):
+        return None if v is None else round(v, n)
+    ni = idx.row(ts) if idx else None
+    mins_open = (ts.hour * 60 + ts.minute) - (9 * 60 + 15)
+    return {
+        "symbol": s.symbol, "strategy": strategy, "signal": side, "ltp": ltp,
+        "proposed_stop": stop, "proposed_target": target, "trigger": trigger,
+        "risk_reward": round(abs(target - ltp) / abs(ltp - stop), 2) if stop and target and abs(ltp - stop) > 0 else None,
+        "strategy_rules": g.STRATEGY_PLAYBOOK.get(strategy, ""), "strategy_validated": g._validated(strategy),
+        "indicators": {"rsi_14": rd(r["rsi14"], 1), "ema9": rd(r["ema9"]), "ema21": rd(r["ema21"]), "ema50": rd(r["ema50"]),
+                       "vwap": rd(r["vwap"]), "atr_14": rd(r["atr"]), "volume_ratio": rd(r["vol_ratio"]),
+                       "adx_14": rd(r["adx"], 1), "plus_di": rd(r["plus_di"], 1), "minus_di": rd(r["minus_di"], 1),
+                       "price_vs_vwap": None if not r["vwap"] else ("above" if ltp > r["vwap"] else "below")},
+        "day": {"open": r["day_open"], "high": r["day_high"], "low": r["day_low"], "change_pct": r["chg_pct"],
+                "opening_range": [r["orb_low"], r["orb_high"]], "last_5_five_min_closes": r["last5"]},
+        "daily_trend_20d": r["trend20"],
+        "nifty": {"change_pct": ni["chg_pct"], "vs_vwap": None if not ni["vwap"] else ("above" if ni["ltp"] > ni["vwap"] else "below"),
+                  "trend20": ni["trend20"]} if ni else None,
+        "time_context": {"time_ist": ts.strftime("%H:%M"), "weekday": ts.strftime("%A"), "minutes_since_open": max(0, mins_open),
+                         "minutes_to_squareoff": max(0, 15 * 60 - (ts.hour * 60 + ts.minute))},
+        "note": "levels, event calendar, option-chain and institutional-flow data are not available for this review",
+    }
+
+
+def _gate_metrics(rows: list[dict]) -> dict:
+    rev = [r for r in rows if r.get("decision") in ("ENTER", "SKIP")]
+    def agg(xs, sized=False):
+        nets = [x["net"] * (x["size_factor"] if sized else 1.0) for x in xs]
+        w = [n for n in nets if n > 0]
+        l = [n for n in nets if n <= 0]
+        peak = run = dd = 0.0
+        for n in nets:
+            run += n; peak = max(peak, run); dd = max(dd, peak - run)
+        return {"trades": len(nets), "net": round(sum(nets), 2), "win_rate": round(len(w) / len(nets) * 100, 1) if nets else 0.0,
+                "profit_factor": round(sum(w) / abs(sum(l)), 2) if l and sum(l) else None, "max_drawdown": round(dd, 2),
+                "avg_net": round(sum(nets) / len(nets), 2) if nets else 0.0}
+    approved = [r for r in rev if r["decision"] == "ENTER"]
+    vetoed = [r for r in rev if r["decision"] == "SKIP"]
+    return {"all_signals": agg(rev), "ai_approved": agg(approved), "ai_approved_sized": agg(approved, sized=True),
+            "vetoed": agg(vetoed), "downsized": sum(1 for r in approved if r["size_factor"] < 1.0),
+            "vetoed_losers_saved": round(-sum(r["net"] for r in vetoed if r["net"] <= 0), 2),
+            "vetoed_winners_missed": round(sum(r["net"] for r in vetoed if r["net"] > 0), 2),
+            "ai_edge": round(agg(approved, sized=True)["net"] - agg(rev)["net"], 2),
+            "reviewed": len(rev), "errors": sum(1 for r in rows if r.get("decision") == "ERROR")}
+
+
+async def gate_replay(agent: str, days: int = 45, symbols: Optional[list[str]] = None, budget_usd: float = 5.0,
+                      concurrency: int = 4, trades: Optional[list[dict]] = None,
+                      bars_by_symbol: Optional[dict[str, list[dict]]] = None, decide_fn: Optional[Callable] = None,
+                      progress: Optional[Callable] = None) -> dict:
+    import claude_trade_gate as g
+    symbols = [x.upper() for x in (symbols or DEFAULT_SYMBOLS)]
+    if trades is None:
+        from bg_compute import run_in_process
+        out = await run_in_process("replay_job", agent, symbols, days, 5.0, None, True)
+        trades = out.get("trades") or []
+    trades = sorted(trades, key=lambda t: str(t["entry_ts"]))
+    need = sorted({t["symbol"] for t in trades})
+    def _load():
+        objs = {}
+        for sname in need + [INDEX]:
+            bars = (bars_by_symbol or {}).get(sname)
+            if bars is None and not bars_by_symbol:
+                try:
+                    bars = _sym_bars(sname, days + 40)
+                except Exception as exc:
+                    logger.warning("[gate-replay] {}: {}", sname, exc); bars = []
+            if bars:
+                objs[sname] = _Sym(sname, bars)
+        return objs
+    syms = await asyncio.to_thread(_load)
+    idx = syms.get(INDEX)
+    decide = decide_fn or g.decide
+    sem = asyncio.Semaphore(max(1, concurrency))
+    spent = {"usd": 0.0}
+    rows: list[dict] = []
+
+    async def one(t: dict) -> None:
+        ts_fill = t["entry_ts"] if isinstance(t["entry_ts"], datetime) else datetime.fromisoformat(str(t["entry_ts"]))
+        ts = ts_fill - timedelta(minutes=1)
+        row = {"symbol": t["symbol"], "side": t["side"], "entry_ts": ts_fill.isoformat(), "net": float(t["net"]),
+               "exit_reason": t.get("exit_reason"), "size_factor": 1.0}
+        s = syms.get(t["symbol"])
+        ctx = _gate_ctx(s, idx, agent, t["side"], ts, t.get("stop"), t.get("target"), str(t.get("signal", ""))) if s else None
+        if ctx is None:
+            row["decision"] = "NO_DATA"; rows.append(row); return
+        async with sem:
+            if spent["usd"] >= budget_usd:
+                row["decision"] = "BUDGET"; rows.append(row); return
+            try:
+                d = await decide(ctx, agent, t["symbol"], t["side"])
+                spent["usd"] += getattr(d, "cost_usd", 0.0) or 0.0
+                row.update(decision="ENTER" if d.enter else "SKIP", size_factor=d.size_factor if d.enter else 0.0,
+                           confidence=d.confidence, reason=d.reason, red_flags=d.warnings)
+            except Exception as exc:
+                row.update(decision="ERROR", error=str(exc)[:160])
+        rows.append(row)
+        if progress:
+            progress(rows, spent["usd"])
+
+    await asyncio.gather(*(one(t) for t in trades))
+    rows.sort(key=lambda r: r["entry_ts"])
+    return {"status": "done", "agent": agent, "days": days, "symbols": symbols, "signals": len(trades),
+            "cost_usd": round(spent["usd"], 4), "budget_usd": budget_usd, "finished_at": now_ist().isoformat(timespec="seconds"),
+            "metrics": _gate_metrics(rows), "decisions": rows}
+
+
+def gate_last() -> dict:
+    if _GATE_LAST.get("status") == "idle" and _GATE_FILE.exists():
+        try:
+            _GATE_LAST.update(json.loads(_GATE_FILE.read_text()))
+        except Exception:
+            pass
+    return _GATE_LAST
+
+
+async def run_gate_and_record(agents: list[str], days: int = 45, symbols: Optional[list[str]] = None,
+                              budget_usd: float = 5.0) -> dict:
+    if _GATE_LAST.get("status") == "running":
+        return _GATE_LAST
+    _GATE_LAST.clear()
+    _GATE_LAST.update({"status": "running", "agents": agents, "started_at": now_ist().isoformat(timespec="seconds"),
+                       "progress": {}, "results": {}})
+    per_agent_budget = budget_usd / max(1, len(agents))
+    try:
+        for a in agents:
+            def prog(rows, usd, a=a):
+                _GATE_LAST["progress"][a] = {"reviewed": len(rows), "cost_usd": round(usd, 4)}
+            res = await gate_replay(a, days=days, symbols=symbols, budget_usd=per_agent_budget, progress=prog)
+            _GATE_LAST["results"][a] = res
+        _GATE_LAST["status"] = "done"
+    except Exception as exc:
+        logger.exception("[gate-replay] failed")
+        _GATE_LAST.update({"status": "error", "error": str(exc)[:300]})
+    _GATE_LAST["finished_at"] = now_ist().isoformat(timespec="seconds")
+    try:
+        _GATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _GATE_FILE.write_text(json.dumps(_GATE_LAST, default=str))
+    except Exception:
+        pass
+    return _GATE_LAST

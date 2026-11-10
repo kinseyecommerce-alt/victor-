@@ -1600,6 +1600,37 @@ async def backtest_ai_replay(req: AIReplayRequest):
     return {"status": "running", "days": req.days, "symbols": req.symbols or ai_replay.DEFAULT_SYMBOLS}
 
 
+class GateReplayRequest(BaseModel):
+    agents: list[Literal["intraday", "scalping", "swing"]] = Field(default=["intraday", "scalping", "swing"], min_length=1)
+    days: int = Field(default=45, ge=5, le=60)
+    symbols: list[str] | None = Field(default=None, max_length=25)
+    budget_usd: float = Field(default=5.0, gt=0, le=20)
+
+
+@app.post("/backtest/gate-replay", tags=["Backtest"])
+async def backtest_gate_replay(req: GateReplayRequest):
+    """Does the AI reviewer improve the agents? Replays each agent on real bars, asks the live reviewer about
+    every signal as it would have seen it, and compares all signals with AI-approved ones. Background run,
+    capped at budget_usd of API tokens; poll GET /backtest/gate-replay."""
+    import ai_replay
+    if not (settings.anthropic_api_key or settings.openai_api_key):
+        raise HTTPException(400, "No AI provider key set")
+    if ai_replay._GATE_LAST.get("status") == "running":
+        return ai_replay._GATE_LAST
+    asyncio.create_task(ai_replay.run_gate_and_record(req.agents, req.days, req.symbols, req.budget_usd))
+    await asyncio.sleep(0)
+    return {"status": "running", "agents": req.agents, "days": req.days, "budget_usd": req.budget_usd}
+
+
+@app.get("/backtest/gate-replay", tags=["Backtest"])
+def backtest_gate_replay_status(decisions: bool = False):
+    import ai_replay
+    st = dict(ai_replay.gate_last())
+    if not decisions and "results" in st:
+        st["results"] = {a: {k: v for k, v in r.items() if k != "decisions"} for a, r in st["results"].items()}
+    return st
+
+
 @app.get("/backtest/ai-replay", tags=["Backtest"])
 def backtest_ai_replay_status():
     """Progress of the running AI replay, or the last finished one (survives restarts)."""

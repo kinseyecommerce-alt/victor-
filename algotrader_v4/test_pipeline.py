@@ -6490,6 +6490,42 @@ run("regime: only extreme volatility pauses the validated agents",    t_regime_p
 run("router: provider failing on billing is skipped for a cooldown",   t_router_cools_down_billing_failures)
 run("master review: AI opt-in via router, Telegram only on change",    t_master_review_rule_based_and_quiet)
 
+def t_gate_replay_scores_ai_against_all_signals():
+    import ai_replay as _ar, claude_trade_gate as _g
+    bars = {"GRA": _trend_bars("GRA", days=14, seed=5), "GRB": _trend_bars("GRB", days=14, seed=6),
+            _ar.INDEX: _trend_bars("NIFTY 50", days=14, seed=99, start=24000.0)}
+    days = sorted({b["ts"].date() for b in bars["GRA"]})
+    def tr(sym, d, net, side="BUY"):
+        ts = datetime.combine(days[d], time(9, 45))
+        return {"symbol": sym, "side": side, "entry_ts": ts.isoformat(), "net": net, "exit_reason": "X",
+                "stop": 990.0, "target": 1030.0, "signal": "ORB"}
+    trades = [tr("GRA", 3, 500.0), tr("GRA", 4, -200.0), tr("GRB", 5, -300.0), tr("GRB", 6, 800.0), tr("ZZZ", 6, 50.0)]
+    seen = []
+    async def scripted(ctx, strategy, symbol, side):
+        seen.append(ctx)
+        assert ctx["symbol"] == symbol and ctx["strategy"] == "intraday" and ctx["proposed_stop"] == 990.0
+        assert ctx["time_context"]["time_ist"] == "09:44", "decided one minute before the fill"
+        assert "Opening-range" in ctx["strategy_rules"] and ctx["nifty"] is not None and ctx["indicators"]["vwap"]
+        veto = ctx["day"]["change_pct"] is not None and symbol == "GRB" and len(seen) and "GRB" in symbol and ctx["time_context"]["weekday"]
+        if symbol == "GRB" and ctx["ltp"] and ctx["proposed_target"] and ctx["signal"] == "BUY" and str(days[5]) in str(ctx):
+            pass
+        enter = not (symbol == "GRB" and len([c for c in seen if c["symbol"] == "GRB"]) == 1)   # veto the first GRB (a loser)
+        size = 0.5 if symbol == "GRA" and len([c for c in seen if c["symbol"] == "GRA"]) == 2 else 1.0
+        return _g.GateDecision(confidence=70, enter=enter, size_factor=size, reason="scripted", cost_usd=0.01)
+    res = asyncio.run(_ar.gate_replay("intraday", days=10, trades=trades, bars_by_symbol=bars, decide_fn=scripted, concurrency=1))
+    m = res["metrics"]
+    assert res["signals"] == 5 and m["reviewed"] == 4 and res["cost_usd"] == 0.04
+    assert [r["decision"] for r in res["decisions"]].count("NO_DATA") == 1, "unknown symbol is not reviewed"
+    assert m["all_signals"]["net"] == 800.0 and m["ai_approved"]["net"] == 1100.0, m
+    assert m["ai_approved_sized"]["net"] == 1200.0 and m["ai_edge"] == 400.0 and m["downsized"] == 1, m   # 500 - 100 + 800
+    assert m["vetoed_losers_saved"] == 300.0 and m["vetoed_winners_missed"] == 0.0
+    # budget cap: nothing reviewed beyond it
+    res2 = asyncio.run(_ar.gate_replay("intraday", days=10, trades=trades[:4], bars_by_symbol=bars, decide_fn=scripted,
+                                       concurrency=1, budget_usd=0.015))
+    assert [r["decision"] for r in res2["decisions"]].count("BUDGET") == 2, res2["decisions"]
+
+run("gate replay: AI-approved vs all signals, sizing, budget cap", t_gate_replay_scores_ai_against_all_signals)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

@@ -163,6 +163,8 @@ class ReplayTrade:
     exit_reason: str
     bars_held: int
     signal: str = ""
+    stop: Optional[float] = None       # the signal's planned stop and target (what a reviewer would see)
+    target: Optional[float] = None
 
 
 @dataclass
@@ -297,7 +299,7 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
                     pending["side"] == "SELL" and pending["stop"] > px else pos.current_sl
                 open_t = {"side": pending["side"], "entry": px, "qty": qty, "ts": ts, "i": i, "oid": oid,
                           "target": pending["target"], "signal": pending["signal"], "day": ts.date(),
-                          "days_held": 0}
+                          "days_held": 0, "stop": pending["stop"]}
                 pending = None
 
             # 2. manage the open trade on this bar
@@ -329,7 +331,7 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
                     cost = trade_cost(e, xpx, q, side, "NSE", product, symbol)
                     trades.append(ReplayTrade(symbol, side, open_t["ts"], ts, round(e, 2), round(xpx, 2), q,
                                               round(gross, 2), cost, round(gross - cost, 2), reason,
-                                              i - open_t["i"], open_t["signal"]))
+                                              i - open_t["i"], open_t["signal"], open_t.get("stop"), open_t.get("target")))
                     eng.deregister(open_t["oid"])
                     open_t = None
 
@@ -373,7 +375,8 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
             gross = (b["close"] - e) * q * (1 if side == "BUY" else -1)
             cost = trade_cost(e, b["close"], q, side, "NSE", product, symbol)
             trades.append(ReplayTrade(symbol, side, open_t["ts"], b["ts"], round(e, 2), round(b["close"], 2), q,
-                                      round(gross, 2), cost, round(gross - cost, 2), "END", len(bars) - open_t["i"], open_t["signal"]))
+                                      round(gross, 2), cost, round(gross - cost, 2), "END", len(bars) - open_t["i"], open_t["signal"],
+                                      open_t.get("stop"), open_t.get("target")))
         return trades
     finally:
         sa.now_ist = real_now
