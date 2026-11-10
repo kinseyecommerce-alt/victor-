@@ -1563,6 +1563,31 @@ async def forecast_skill(symbol: str, days: int = 20, horizon: int | None = None
     return {**res, "data": src, "days": days}
 
 
+class ForecastSignalsRequest(BaseModel):
+    signals: list[dict] = Field(min_length=1, max_length=600)   # {symbol, ts (signal bar ISO), side, net, agent?}
+    samples: int = Field(default=8, ge=1, le=32)
+
+
+@app.post("/backtest/forecast-signals", tags=["Backtest"])
+async def backtest_forecast_signals(req: ForecastSignalsRequest):
+    """Kronos forecast at each given signal time from the bars before it (background; poll the GET)."""
+    import ai_replay
+    if ai_replay._FC_LAST.get("status") == "running":
+        return {k: v for k, v in ai_replay._FC_LAST.items() if k != "rows"}
+    asyncio.create_task(ai_replay.run_forecast_signals_and_record(req.signals, req.samples))
+    await asyncio.sleep(0)
+    return {"status": "running", "total": len(req.signals)}
+
+
+@app.get("/backtest/forecast-signals", tags=["Backtest"])
+def backtest_forecast_signals_status(rows: bool = False):
+    import ai_replay
+    st = dict(ai_replay._FC_LAST)
+    if not rows:
+        st.pop("rows", None)
+    return st
+
+
 @app.get("/market/trend-filter", tags=["Market Regime"])
 def trend_filter(refresh: bool = False):
     return market_filter.state(refresh=refresh)

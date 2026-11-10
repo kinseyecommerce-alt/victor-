@@ -691,3 +691,53 @@ async def run_gate_and_record(agents: list[str], days: int = 45, symbols: Option
     except Exception:
         pass
     return _GATE_LAST
+
+
+# ── Forecast at signal times: does Kronos separate the agents' winners from their losers? ────────
+_FC_LAST: dict = {"status": "idle"}
+
+
+async def forecast_signals(signals: list[dict], lookback: int = 300, samples: int = 8,
+                           horizon: Optional[int] = None) -> dict:
+    """For each {symbol, ts (signal bar, ISO), side, net}: forecast `horizon` bars ahead from the bars
+    BEFORE the signal (no look-ahead) and return the forecast next to the trade's outcome."""
+    import kronos_forecast as kf
+    from replay_backtest import load_bars
+    if not signals:
+        return {"status": "done", "rows": []}
+    first = min(str(x["ts"])[:10] for x in signals)
+    days = (now_ist().date() - date.fromisoformat(first)).days + 5
+    bars_by: dict[str, list[dict]] = {}
+    rows = []
+    _FC_LAST.update({"status": "running", "total": len(signals), "done": 0})
+    for x in sorted(signals, key=lambda y: (y["symbol"], str(y["ts"]))):
+        sym = x["symbol"]
+        if sym not in bars_by:
+            bars_by[sym], _ = await asyncio.to_thread(load_bars, sym, min(60, days))
+        ts = datetime.fromisoformat(str(x["ts"])[:19])
+        hist = [b for b in bars_by[sym] if b["ts"] < ts][-lookback:]
+        row = {k: x.get(k) for k in ("symbol", "ts", "side", "net", "agent")}
+        if len(hist) < 60:
+            row["error"] = "too few bars"
+        else:
+            f = await asyncio.to_thread(kf.forecast, sym, hist, horizon, 1, samples, False)
+            sgn = 1 if x.get("side") == "BUY" else -1
+            row.update(expected_move_pct=f.get("expected_move_pct"), p_up=f.get("p_up"), flag=f.get("flag"),
+                       source=f.get("source"), z=f.get("z_score"),
+                       agrees=(f.get("expected_move_pct") or 0) * sgn > 0,
+                       move_with_pct=round((f.get("expected_move_pct") or 0) * sgn, 3))
+        rows.append(row)
+        _FC_LAST["done"] = len(rows)
+    return {"status": "done", "rows": rows, "model": kf.available()}
+
+
+async def run_forecast_signals_and_record(signals: list[dict], samples: int = 8) -> dict:
+    if _FC_LAST.get("status") == "running":
+        return _FC_LAST
+    try:
+        res = await forecast_signals(signals, samples=samples)
+        _FC_LAST.clear(); _FC_LAST.update(res); _FC_LAST["finished_at"] = now_ist().isoformat(timespec="seconds")
+    except Exception as exc:
+        logger.exception("[forecast-signals] failed")
+        _FC_LAST.clear(); _FC_LAST.update({"status": "error", "error": str(exc)[:300]})
+    return _FC_LAST

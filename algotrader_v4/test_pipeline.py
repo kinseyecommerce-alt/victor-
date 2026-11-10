@@ -6743,6 +6743,22 @@ def t_rolling_universe_select_and_persist():
 
 run("universe: rolling pick of profitable stocks, persisted per session", t_rolling_universe_select_and_persist)
 
+def t_forecast_at_signal_times_no_lookahead():
+    import ai_replay as _ar, kronos_forecast as _kf, replay_backtest as _rbm
+    bars = _trend_bars("FCS", days=3)
+    sig_ts = bars[500]["ts"]
+    seen = {}
+    def fake_fc(sym, hist, horizon, step, samples, use_cache):
+        seen["last"] = hist[-1]["ts"]; seen["n"] = len(hist)
+        return {"available": True, "expected_move_pct": -0.2, "p_up": 0.3, "flag": None, "source": "test", "z_score": -1.0}
+    with _patch.object(_rbm, "load_bars", return_value=(bars, "test")), _patch.object(_kf, "forecast", fake_fc):
+        res = asyncio.run(_ar.forecast_signals([{"symbol": "FCS", "ts": sig_ts.isoformat(), "side": "SELL", "net": 120.0}], lookback=300))
+    r = res["rows"][0]
+    assert seen["last"] < sig_ts and seen["n"] == 300, "only bars before the signal"
+    assert r["agrees"] is True and r["move_with_pct"] == 0.2 and r["net"] == 120.0
+
+run("forecast at signal times: bars before the signal only", t_forecast_at_signal_times_no_lookahead)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
