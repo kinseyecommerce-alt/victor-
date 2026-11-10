@@ -953,9 +953,12 @@ class SwingAgent(BaseAgent):
 
     SL/TGT: fixed 3% / 8% (matches should_exit_position).
     """
+    validated_by_replay = True       # replay_backtest on real 1-minute data (swing)
+    strategy_rule_exits = False      # exits: GTT stop, target, trailing, holding period (see BaseAgent)
+    VERSION = "v2"                   # rule exits off + live candle-depth fix: judged on its own trades
     name    = "swing"
     product = "CNC"
-    min_candles_1min = 200   # needs EMA200
+    min_candles_1min = 30    # the live snapshot carries 60 one-minute candles (200 here meant swing never evaluated); EMA200 comes from the indicator history
 
     # Swing only evaluates once per minute (not every tick — saves noise)
     _last_eval: dict[str, float] = {}

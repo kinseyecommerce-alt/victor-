@@ -73,6 +73,26 @@ int(per_symbol_capital // ltp) = quantity
 | `symbol_scanner.py` | Scans Nifty 100 universe for liquid, volatile symbols meeting entry criteria |
 | `atomic_bracket.py` | Places entry + SL-M + target orders as a unit; rolls back on partial failure |
 
+### Live / replay parity (read before changing the entry or exit path)
+
+The agents' only evidence is `replay_backtest.py` on real Kite minute bars. Any check the live path applies that the
+replay does not is an unvalidated change to the strategy, and several such checks silently stopped every live trade
+before (Nov 2026): the trade-gate context crashed on every entry, the multi-timeframe veto rejected 100 % of signals,
+the ₹50k order cap rejected ₹1L positions, the ledger pruned v2 agents on v1 losses, swing needed 200 candles from a
+60-candle snapshot, the legacy per-symbol backtest approved 0 symbols, and "trend failed" rule exits turned every agent
+into a loser. Rules that keep them in step:
+
+- Exits: `BaseAgent.rule_exit()` is the single exit-rule policy for both the live loop and the replay. Validated agents
+  (`strategy_rule_exits = False`) exit only by stop, target, trailing stop and the MIS square-off at `squareoff_time`.
+- Filters: `replay_backtest.LIVE_FILTERS` lets the replay apply live-only filters (MTF, strategy exits) so their effect
+  can be measured before they are switched on.
+- Versions: bump an agent's `VERSION` when its logic changes; the performance ledger, pruning and the allocator's live
+  evidence count only the current version.
+- Every early return in `BaseAgent._try_enter` goes through `_skip()` (logged, counted in `get_status()`); never return
+  silently.
+- Verify end to end with `test_pipeline.py`'s live-path test (a validated signal must reach the paper broker at full
+  size) after touching sizing, risk or filters.
+
 ### Agent Enable/Disable
 
 Agent enabled state lives in `bot_state.py` (not `main.py`) to avoid circular imports. The `/settings/agent-enables` endpoint reads/writes this. `master_agent_v5._apply_directives()` checks enabled state before resuming any strategy.

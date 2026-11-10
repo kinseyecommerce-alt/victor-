@@ -42,6 +42,15 @@ STRATEGY_LABELS = {
 }
 
 
+def _version(strategy: str) -> str:
+    """The live agent's VERSION ("v1" for agents that never declared one)."""
+    try:
+        from agents.strategy_agents import ALL_AGENTS
+        return str(getattr(ALL_AGENTS.get(strategy), "VERSION", "v1"))
+    except Exception:
+        return "v1"
+
+
 class Performance:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -87,7 +96,8 @@ class Performance:
         if exit_price is None and quantity and entry_price:
             exit_price = entry_price + (pnl / quantity) * (1 if side == "BUY" else -1)
         cost = trade_cost(entry_price, exit_price or entry_price, quantity, side, exchange, product, symbol)
-        row = {"t": now_ist().isoformat(timespec="seconds"), "strategy": strategy, "symbol": symbol,
+        row = {"t": now_ist().isoformat(timespec="seconds"), "strategy": strategy, "version": _version(strategy),
+               "symbol": symbol,
                "side": side, "qty": quantity, "entry": round(entry_price, 2),
                "exit": round(exit_price or entry_price, 2), "gross": round(pnl, 2), "cost": cost,
                "net": round(pnl - cost, 2), "product": product, "exchange": exchange, "note": note[:80]}
@@ -105,15 +115,22 @@ class Performance:
         return row
 
     # ── pruning ──────────────────────────────────────────────────────────
-    def _strategy_trades(self, strategy: str, since: Optional[str] = None) -> list[dict]:
-        rows = [t for t in self.trades if t["strategy"] == strategy]
+    def _strategy_trades(self, strategy: str, since: Optional[str] = None, all_versions: bool = False) -> list[dict]:
+        """Trades of the strategy's CURRENT version (an agent rebuilt under the same name must not inherit
+        its predecessor's record: the v2 agents were being auto-disabled by the v1 agents' losses)."""
+        v = _version(strategy)
+        rows = [t for t in self.trades if t["strategy"] == strategy and (all_versions or t.get("version", "v1") == v)]
         since = since or self.enabled_since.get(strategy)
         if since:
             rows = [t for t in rows if t["t"] >= since]
         return rows
 
+    def _current_prune(self, strategy: str) -> Optional[dict]:
+        p = self.pruned.get(strategy)
+        return p if p and p.get("version", "v1") == _version(strategy) else None
+
     def _evaluate_pruning(self, strategy: str) -> Optional[str]:
-        if not settings.prune_enabled or strategy in self.pruned:
+        if not settings.prune_enabled or self._current_prune(strategy):
             return None
         rows = self._strategy_trades(strategy)[-settings.prune_lookback_trades:]
         if len(rows) < settings.prune_min_trades:
@@ -124,7 +141,8 @@ class Performance:
         pf = gp / gl if gl > 0 else float("inf")
         if net < 0 and pf < 1.0:
             reason = (f"last {len(rows)} trades: net ₹{net:,.0f} after costs, profit factor {pf:.2f}")
-            self.pruned[strategy] = {"since": now_ist().isoformat(timespec="seconds"), "reason": reason}
+            self.pruned[strategy] = {"since": now_ist().isoformat(timespec="seconds"), "reason": reason,
+                                     "version": _version(strategy)}
             self._apply_toggle(strategy, False)
             return reason
         return None
@@ -149,7 +167,7 @@ class Performance:
             pass
 
     def is_allowed(self, strategy: str) -> tuple[bool, str]:
-        p = self.pruned.get(strategy)
+        p = self._current_prune(strategy)         # a prune of an earlier version of the agent does not apply
         if p:
             return False, f"{STRATEGY_LABELS.get(strategy, strategy)} was disabled automatically ({p['reason']})"
         return True, ""
@@ -160,7 +178,8 @@ class Performance:
                 self.pruned.pop(strategy, None)
                 self.enabled_since[strategy] = now_ist().isoformat()     # full precision: trades of the same second are excluded
             else:
-                self.pruned[strategy] = {"since": now_ist().isoformat(timespec="seconds"), "reason": reason}
+                self.pruned[strategy] = {"since": now_ist().isoformat(timespec="seconds"), "reason": reason,
+                                         "version": _version(strategy)}
             self._apply_toggle(strategy, enabled)
             self._save()
         return self.strategy_stats().get(strategy, {"strategy": strategy, "enabled": enabled})
@@ -211,7 +230,7 @@ class Performance:
             st = self._stats(rows)
             st.update(strategy=s, label=STRATEGY_LABELS.get(s, s),
                       recent=self._stats(rows[-settings.prune_lookback_trades:]) if rows else None,
-                      pruned=self.pruned.get(s), enabled=s not in self.pruned and
+                      version=_version(s), pruned=self._current_prune(s), enabled=not self._current_prune(s) and
                       (bot_state.is_agent_enabled(s) if s in ("intraday", "scalping", "swing", "fno") else True),
                       trades_until_judgement=max(0, settings.prune_min_trades - len(rows[-settings.prune_lookback_trades:])))
             out[s] = st

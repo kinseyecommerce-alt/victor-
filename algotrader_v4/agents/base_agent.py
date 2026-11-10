@@ -116,6 +116,9 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     _notify_agent_result(strategy, symbol, pnl)
 
 
+_ENTRY_LOCK = asyncio.Lock()
+
+
 def allocate_quantity(agent: str, qty: int, ltp: float) -> tuple[int, str]:
     """Scale a risk-based quantity by today's allocator factor (0–1.5) and cap it by the ₹ still
     free in the agent's capital bucket. Returns (quantity, reason) — quantity 0 means skip."""
@@ -131,9 +134,15 @@ def allocate_quantity(agent: str, qty: int, ltp: float) -> tuple[int, str]:
     cap = int(room // ltp)
     if cap < 1:
         return 0, f"capital bucket full (₹{risk_manager.bucket_exposure(agent):,.0f} deployed of ₹{risk_manager.bucket_total(agent):,.0f})"
+    why = "ok" if f == 1.0 else f"allocator {f:g}×"
     if qty > cap:
-        return cap, f"capped by bucket room ₹{room:,.0f}"
-    return max(0, qty), "ok" if f == 1.0 else f"allocator {f:g}×"
+        qty, why = cap, f"capped by bucket room ₹{room:,.0f}"
+    # A remnant of the bucket funds a position whose flat costs (~₹40 a round trip) eat the edge:
+    # skip anything under half the agent's normal position value.
+    floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(agent)
+    if qty * ltp < floor:
+        return 0, f"position ₹{qty * ltp:,.0f} under the ₹{floor:,.0f} minimum ({why})"
+    return max(0, qty), why
 
 
 def _notify_agent_result(strategy: str, symbol: str, pnl: float) -> None:
@@ -274,6 +283,8 @@ class AgentState:
     approved_symbols: list  = field(default_factory=list)
     last_signal:      dict  = field(default_factory=dict)
     errors:           list  = field(default_factory=list)
+    skip_counts:      dict  = field(default_factory=dict)    # why signals did not become orders
+    last_skip:        str   = ""
 
 
 async def send_telegram(text: str) -> None:
@@ -302,6 +313,7 @@ class BaseAgent(ABC):
         self._queue: Optional[asyncio.Queue] = None
         self._task:  Optional[asyncio.Task]  = None
         self._approved: set[str] = set()
+        self._review_tasks: set = set()           # in-flight AI reviews (keep references)
         # Instruments this agent holds but doesn't trade signals on (F&O option legs):
         # their ticks only drive exits
         self._exit_only: set[str] = set()
@@ -317,7 +329,44 @@ class BaseAgent(ABC):
 
     # ── Backtest filter ───────────────────────────────────────────────────
 
+    # Strategy-rule exits (should_exit_position) on every tick. The validated agents' edge comes from
+    # holding to the structural stop or the 1.5-2.5R target; their "trend failed" rules were never part of
+    # the validation and, replayed on 45 days of real bars, turn every one of them into a loser
+    # (intraday +₹13,260 → −₹17,187, scalping +₹3,561 → −₹10,404, swing +₹3,527 → −₹8,836). With False,
+    # only the intraday 15:00 square-off branch is consulted; stops, targets and the trailing engine apply.
+    strategy_rule_exits: bool = True
+
+    def rule_exit(self, pos: dict, ind) -> tuple[bool, str]:
+        """The exit-rule policy shared by the live loop and the replay."""
+        if not self.strategy_rule_exits:
+            from datetime import time as _dtime
+            if self.product != "MIS":
+                return False, ""
+            import agents.strategy_agents as _sa
+            t = _sa.now_ist().time().replace(tzinfo=None)
+            h, m = (int(x) for x in settings.squareoff_time.split(":"))
+            if t >= _dtime(h, m):            # same time as the replay that validated these agents
+                return True, f"Auto square-off {settings.squareoff_time}"
+            return False, ""
+        return self.should_exit_position(pos, ind)
+
+    # Agents validated at strategy level on real 1-minute data (replay_backtest) trade their whole
+    # watchlist; the legacy per-symbol backtest tests a different, older rule set and cannot fetch history
+    # on the server ("Insufficient data (0 bars)" for every symbol), which left them with nothing to trade.
+    validated_by_replay: bool = False
+
     def filter_watchlist(self, watchlist: list[dict]) -> list[dict]:
+        try:
+            from tick_engine import canonical_symbol           # INFOSYS → INFY etc.: ticks arrive canonical
+            watchlist = [{**i, "symbol": canonical_symbol(i["symbol"])} for i in watchlist]
+        except Exception:
+            pass
+        if self.validated_by_replay:
+            approved = list(watchlist)
+            self._approved.update(i["symbol"] for i in approved)
+            self.state.approved_symbols = [a["symbol"] for a in approved]
+            logger.info("[{}] validated by real-data replay — all {} watchlist symbols ready", self.name, len(approved))
+            return approved
         # Fast path: pre-learned system — skip per-symbol backtests
         if settings.skip_startup_backtest:
             approved_path = Path("logs/approved_symbols.json")
@@ -344,6 +393,12 @@ class BaseAgent(ABC):
         for item in watchlist:
             sym, exch = item["symbol"], item.get("exchange", "NSE")
             res = backtest_engine.run(sym, exch, self.name)
+            no_data = not res.passed and res.fail_reasons and all("Insufficient data" in r for r in res.fail_reasons)
+            if no_data:                      # missing history is not evidence against the symbol
+                approved.append(item)
+                self._approved.add(sym)
+                logger.warning("[{}] {} no history for the approval backtest — approved", self.name, sym)
+                continue
             if res.passed:
                 approved.append(item)
                 self._approved.add(sym)
@@ -421,45 +476,16 @@ class BaseAgent(ABC):
                                      self.name, snap.symbol, _evt["description"])
                         continue
 
-                    # ── Claude per-trade intelligence gate ────────────────────
-                    # (always on when the allocator marked today as unusual)
-                    import allocator as _alloc
-                    _force = _alloc.gate_required()
-                    if settings.use_claude_trade_gate or _force:
-                        from claude_trade_gate import assess as gate_assess
-                        from master_agent_v5 import record_gate_decision
-                        gate = await gate_assess(snap, action, signal, self.name, force=_force)
-                        record_gate_decision(gate.enter)
-                        if not gate.enter:
-                            continue
-                        # Apply Claude's SL/target/size adjustments
-                        if gate.adjusted_sl_pct:
-                            signal["stop_loss_pct"]  = gate.adjusted_sl_pct
-                        if gate.adjusted_target_pct:
-                            signal["target_pct"]     = gate.adjusted_target_pct
-                        signal["_gate_size_factor"]  = gate.size_factor
-                        signal["_gate_confidence"]   = gate.confidence
-
-                    # ── Compound size factors: event elevation + correlation ──
-                    _sf = signal.get("_gate_size_factor", 1.0)
-                    if _evt["size_factor"] < 1.0:
-                        _sf = round(_sf * _evt["size_factor"], 3)
-
-                    from correlation_guard import check as _corr_check
-                    _open_syms = [
-                        p["tradingsymbol"] for p in kite_client.positions().get("net", [])
-                        if p.get("quantity", 0) != 0
-                    ]
-                    _corr = _corr_check(snap.symbol, _open_syms)
-                    if not _corr["allowed"]:
-                        logger.debug("[{}] {} corr BLOCK: {}",
-                                     self.name, snap.symbol, _corr["reason"])
+                    # ── AI review of the signal (claude_trade_gate) ─────────────
+                    # Runs in its own task so a 5-25 s model call never stalls this loop
+                    # (a burst of opening-range signals would otherwise be reviewed one by
+                    # one and entered stale); the entry re-checks price drift afterwards.
+                    if self._gate_applies():
+                        task = asyncio.create_task(self._review_then_enter(snap, action, signal, _evt))
+                        self._review_tasks.add(task)
+                        task.add_done_callback(self._review_tasks.discard)
                         continue
-                    if _corr["size_factor"] < 1.0:
-                        _sf = round(_sf * _corr["size_factor"], 3)
-                    signal["_gate_size_factor"] = _sf
-
-                    await self._try_enter(snap, action, signal)
+                    await self._finish_entry(snap, action, signal, _evt)
             except Exception as exc:
                 err = f"{snap.symbol}: {str(exc)[:100]}"
                 self.state.errors.append(err)
@@ -467,6 +493,69 @@ class BaseAgent(ABC):
                 logger.opt(exception=exc).warning("[{}] entry path error on {} — signal dropped", self.name, snap.symbol)
 
     # ── Entry ───────────────────────────────────────────────────────────
+
+    def _gate_applies(self) -> bool:
+        """The AI review runs for the strategies where replay showed it adds value (gate_strategies),
+        and for every strategy on a day the allocator marked unusual."""
+        import allocator as _alloc
+        if _alloc.gate_required():
+            return True
+        if not settings.use_claude_trade_gate:
+            return False
+        allowed = {x.strip() for x in settings.gate_strategies.split(",") if x.strip()}
+        return not allowed or self.name in allowed
+
+    async def _review_then_enter(self, snap: MarketSnapshot, action: str, signal: dict, evt: dict) -> None:
+        sym = snap.symbol
+        try:
+            import allocator as _alloc
+            from claude_trade_gate import assess as gate_assess
+            from master_agent_v5 import record_gate_decision
+            gate = await gate_assess(snap, action, signal, self.name, force=_alloc.gate_required())
+            record_gate_decision(gate.enter)
+            if not gate.enter:
+                return self._skip(sym, f"AI review: {gate.reason[:100]}")
+            signal["_gate_size_factor"] = gate.size_factor
+            signal["_gate_confidence"] = gate.confidence
+            # the review took time: enter only if price has not run away or through the stop meanwhile
+            from tick_engine import tick_engine as _te
+            latest, _ = _te.latest(sym)
+            if latest and latest.ltp > 0 and snap.tick.ltp > 0:
+                drift = (latest.ltp / snap.tick.ltp - 1) * 100 * (1 if action == "BUY" else -1)
+                stop = signal.get("stop_loss")
+                through = stop and ((action == "BUY" and latest.ltp <= stop) or (action == "SELL" and latest.ltp >= stop))
+                if drift > settings.gate_max_drift_pct or through:
+                    return self._skip(sym, f"price moved {drift:+.2f}% during the AI review"
+                                           + (" through the stop" if through else ""))
+                import dataclasses as _dc
+                snap = _dc.replace(snap, tick=latest)
+            await self._finish_entry(snap, action, signal, evt)
+        except Exception as exc:
+            self.state.errors.append(f"{sym}: {str(exc)[:100]}")
+            logger.opt(exception=exc).warning("[{}] review/entry error on {} — signal dropped", self.name, sym)
+
+    async def _finish_entry(self, snap: MarketSnapshot, action: str, signal: dict, evt: dict) -> None:
+        """Compound the size factors (review, event elevation, correlation) and enter."""
+        _sf = signal.get("_gate_size_factor", 1.0)
+        if evt["size_factor"] < 1.0:
+            _sf = round(_sf * evt["size_factor"], 3)
+        from correlation_guard import check as _corr_check
+        _open_syms = [p["tradingsymbol"] for p in kite_client.positions().get("net", []) if p.get("quantity", 0) != 0]
+        _corr = _corr_check(snap.symbol, _open_syms)
+        if not _corr["allowed"]:
+            return self._skip(snap.symbol, f"correlation: {_corr['reason']}")
+        if _corr["size_factor"] < 1.0:
+            _sf = round(_sf * _corr["size_factor"], 3)
+        signal["_gate_size_factor"] = _sf
+        async with _ENTRY_LOCK:                 # concurrent reviews must not race for the same bucket room
+            await self._try_enter(snap, action, signal)
+
+    def _skip(self, sym: str, reason: str) -> None:
+        """Every signal that does not become an order says why (log + per-reason count in get_status)."""
+        key = reason.split(":")[0][:40]
+        self.state.skip_counts[key] = self.state.skip_counts.get(key, 0) + 1
+        self.state.last_skip = f"{sym}: {reason}"[:160]
+        logger.info("[{}] {} signal skipped — {}", self.name, sym, reason)
 
     async def _try_enter(self, snap: MarketSnapshot, action: str, signal: dict) -> None:
         sym  = snap.symbol
@@ -482,13 +571,12 @@ class BaseAgent(ABC):
         # Today's allocation (AI capital manager) and the shared-bucket cap
         qty, why = allocate_quantity(self.name, qty, ltp)
         if qty < 1:
-            logger.info("[{}] {} skipped: {}", self.name, sym, why)
-            return
+            return self._skip(sym, why)
 
         from performance import performance
         allowed, reason = performance.is_allowed(self.name)
         if not allowed:
-            return                                   # auto-pruned: losing after costs
+            return self._skip(sym, f"pruned: {reason}")   # auto-pruned: losing after costs
         import portfolio_risk
         stop_px = signal.get("stop_loss") or (ltp * (1 - signal.get("stop_loss_pct", settings.stop_loss_pct) / 100)
                                               if action == "BUY" else ltp * (1 + signal.get("stop_loss_pct", settings.stop_loss_pct) / 100))
@@ -496,19 +584,21 @@ class BaseAgent(ABC):
                                       kind="option" if exch == "NFO" else "equity",
                                       underlying=signal.get("underlying"))
         if not pr["ok"]:
-            logger.info("[{}] {} skipped by portfolio risk: {}", self.name, sym, pr["reason"])
-            return
+            return self._skip(sym, f"portfolio risk: {pr['reason']}")
         if qty > pr["max_quantity"]:
             logger.info("[{}] {} size {} → {} ({})", self.name, sym, qty, pr["max_quantity"], pr["reason"])
             qty = pr["max_quantity"]
+            floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(self.name)
+            if exch == "NSE" and qty * ltp < floor:
+                return self._skip(sym, f"portfolio risk cut it to ₹{qty * ltp:,.0f}, under the ₹{floor:,.0f} minimum")
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
-            return
+            return self._skip(sym, f"order guard: {reason}")
         if order_guard.is_symbol_active_anywhere(sym):
-            return
-        allowed, _ = risk_manager.check_before_order(sym, qty, ltp, action)
+            return self._skip(sym, "symbol already active in another agent")
+        allowed, reason = risk_manager.check_before_order(sym, qty, ltp, action)
         if not allowed:
-            return
+            return self._skip(sym, f"risk: {reason}")
 
         # LOW-2: SEBI pre-order compliance check
         from sebi_compliance import sebi_compliance
@@ -521,8 +611,7 @@ class BaseAgent(ABC):
             regime=regime_detector.current_regime.value,
         )
         if not sebi_ok:
-            logger.warning("[{}] SEBI blocked {} {}: {}", self.name, action, sym, sebi_reason)
-            return
+            return self._skip(sym, f"SEBI: {sebi_reason}")
 
         product = signal.get("product", self.product)
         from execution import entry_order, fill_after
@@ -611,7 +700,7 @@ class BaseAgent(ABC):
         for pos in kite_client.positions().get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
                 continue
-            should, reason = self.should_exit_position(pos, ind)
+            should, reason = self.rule_exit(pos, ind)
             if not should:
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
@@ -669,4 +758,6 @@ class BaseAgent(ABC):
             "approved_symbols": self.state.approved_symbols,
             "last_signal":      self.state.last_signal,
             "errors":           self.state.errors[-5:],
+            "skip_counts":      self.state.skip_counts,
+            "last_skip":        self.state.last_skip,
         }

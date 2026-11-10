@@ -77,6 +77,9 @@ def daily_bias(sym: str, day) -> Optional[str]:
 
 class IntradayV2Agent(BaseAgent):
     name = "intraday"
+    validated_by_replay = True
+    strategy_rule_exits = False
+    VERSION = "v2"                 # performance ledger and pruning judge each version on its own trades
     product = "MIS"
     min_candles_1min = 21
 
@@ -217,6 +220,9 @@ class IntradayV2Agent(BaseAgent):
 
 class ScalpV2Agent(BaseAgent):
     name = "scalping"
+    validated_by_replay = True
+    strategy_rule_exits = False
+    VERSION = "v2"                 # performance ledger and pruning judge each version on its own trades
     product = "MIS"
     min_candles_1min = 50
 
