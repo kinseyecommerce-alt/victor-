@@ -116,6 +116,9 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     _notify_agent_result(strategy, symbol, pnl)
 
 
+_ENTRY_LOCK = asyncio.Lock()
+
+
 def allocate_quantity(agent: str, qty: int, ltp: float) -> tuple[int, str]:
     """Scale a risk-based quantity by today's allocator factor (0–1.5) and cap it by the ₹ still
     free in the agent's capital bucket. Returns (quantity, reason) — quantity 0 means skip."""
@@ -310,6 +313,7 @@ class BaseAgent(ABC):
         self._queue: Optional[asyncio.Queue] = None
         self._task:  Optional[asyncio.Task]  = None
         self._approved: set[str] = set()
+        self._review_tasks: set = set()           # in-flight AI reviews (keep references)
         # Instruments this agent holds but doesn't trade signals on (F&O option legs):
         # their ticks only drive exits
         self._exit_only: set[str] = set()
@@ -472,45 +476,16 @@ class BaseAgent(ABC):
                                      self.name, snap.symbol, _evt["description"])
                         continue
 
-                    # ── Claude per-trade intelligence gate ────────────────────
-                    # (always on when the allocator marked today as unusual)
-                    import allocator as _alloc
-                    _force = _alloc.gate_required()
-                    if settings.use_claude_trade_gate or _force:
-                        from claude_trade_gate import assess as gate_assess
-                        from master_agent_v5 import record_gate_decision
-                        gate = await gate_assess(snap, action, signal, self.name, force=_force)
-                        record_gate_decision(gate.enter)
-                        if not gate.enter:
-                            continue
-                        # Apply Claude's SL/target/size adjustments
-                        if gate.adjusted_sl_pct:
-                            signal["stop_loss_pct"]  = gate.adjusted_sl_pct
-                        if gate.adjusted_target_pct:
-                            signal["target_pct"]     = gate.adjusted_target_pct
-                        signal["_gate_size_factor"]  = gate.size_factor
-                        signal["_gate_confidence"]   = gate.confidence
-
-                    # ── Compound size factors: event elevation + correlation ──
-                    _sf = signal.get("_gate_size_factor", 1.0)
-                    if _evt["size_factor"] < 1.0:
-                        _sf = round(_sf * _evt["size_factor"], 3)
-
-                    from correlation_guard import check as _corr_check
-                    _open_syms = [
-                        p["tradingsymbol"] for p in kite_client.positions().get("net", [])
-                        if p.get("quantity", 0) != 0
-                    ]
-                    _corr = _corr_check(snap.symbol, _open_syms)
-                    if not _corr["allowed"]:
-                        logger.debug("[{}] {} corr BLOCK: {}",
-                                     self.name, snap.symbol, _corr["reason"])
+                    # ── AI review of the signal (claude_trade_gate) ─────────────
+                    # Runs in its own task so a 5-25 s model call never stalls this loop
+                    # (a burst of opening-range signals would otherwise be reviewed one by
+                    # one and entered stale); the entry re-checks price drift afterwards.
+                    if self._gate_applies():
+                        task = asyncio.create_task(self._review_then_enter(snap, action, signal, _evt))
+                        self._review_tasks.add(task)
+                        task.add_done_callback(self._review_tasks.discard)
                         continue
-                    if _corr["size_factor"] < 1.0:
-                        _sf = round(_sf * _corr["size_factor"], 3)
-                    signal["_gate_size_factor"] = _sf
-
-                    await self._try_enter(snap, action, signal)
+                    await self._finish_entry(snap, action, signal, _evt)
             except Exception as exc:
                 err = f"{snap.symbol}: {str(exc)[:100]}"
                 self.state.errors.append(err)
@@ -518,6 +493,62 @@ class BaseAgent(ABC):
                 logger.opt(exception=exc).warning("[{}] entry path error on {} — signal dropped", self.name, snap.symbol)
 
     # ── Entry ───────────────────────────────────────────────────────────
+
+    def _gate_applies(self) -> bool:
+        """The AI review runs for the strategies where replay showed it adds value (gate_strategies),
+        and for every strategy on a day the allocator marked unusual."""
+        import allocator as _alloc
+        if _alloc.gate_required():
+            return True
+        if not settings.use_claude_trade_gate:
+            return False
+        allowed = {x.strip() for x in settings.gate_strategies.split(",") if x.strip()}
+        return not allowed or self.name in allowed
+
+    async def _review_then_enter(self, snap: MarketSnapshot, action: str, signal: dict, evt: dict) -> None:
+        sym = snap.symbol
+        try:
+            import allocator as _alloc
+            from claude_trade_gate import assess as gate_assess
+            from master_agent_v5 import record_gate_decision
+            gate = await gate_assess(snap, action, signal, self.name, force=_alloc.gate_required())
+            record_gate_decision(gate.enter)
+            if not gate.enter:
+                return self._skip(sym, f"AI review: {gate.reason[:100]}")
+            signal["_gate_size_factor"] = gate.size_factor
+            signal["_gate_confidence"] = gate.confidence
+            # the review took time: enter only if price has not run away or through the stop meanwhile
+            from tick_engine import tick_engine as _te
+            latest, _ = _te.latest(sym)
+            if latest and latest.ltp > 0 and snap.tick.ltp > 0:
+                drift = (latest.ltp / snap.tick.ltp - 1) * 100 * (1 if action == "BUY" else -1)
+                stop = signal.get("stop_loss")
+                through = stop and ((action == "BUY" and latest.ltp <= stop) or (action == "SELL" and latest.ltp >= stop))
+                if drift > settings.gate_max_drift_pct or through:
+                    return self._skip(sym, f"price moved {drift:+.2f}% during the AI review"
+                                           + (" through the stop" if through else ""))
+                import dataclasses as _dc
+                snap = _dc.replace(snap, tick=latest)
+            await self._finish_entry(snap, action, signal, evt)
+        except Exception as exc:
+            self.state.errors.append(f"{sym}: {str(exc)[:100]}")
+            logger.opt(exception=exc).warning("[{}] review/entry error on {} — signal dropped", self.name, sym)
+
+    async def _finish_entry(self, snap: MarketSnapshot, action: str, signal: dict, evt: dict) -> None:
+        """Compound the size factors (review, event elevation, correlation) and enter."""
+        _sf = signal.get("_gate_size_factor", 1.0)
+        if evt["size_factor"] < 1.0:
+            _sf = round(_sf * evt["size_factor"], 3)
+        from correlation_guard import check as _corr_check
+        _open_syms = [p["tradingsymbol"] for p in kite_client.positions().get("net", []) if p.get("quantity", 0) != 0]
+        _corr = _corr_check(snap.symbol, _open_syms)
+        if not _corr["allowed"]:
+            return self._skip(snap.symbol, f"correlation: {_corr['reason']}")
+        if _corr["size_factor"] < 1.0:
+            _sf = round(_sf * _corr["size_factor"], 3)
+        signal["_gate_size_factor"] = _sf
+        async with _ENTRY_LOCK:                 # concurrent reviews must not race for the same bucket room
+            await self._try_enter(snap, action, signal)
 
     def _skip(self, sym: str, reason: str) -> None:
         """Every signal that does not become an order says why (log + per-reason count in get_status)."""

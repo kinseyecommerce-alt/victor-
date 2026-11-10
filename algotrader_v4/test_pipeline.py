@@ -6664,6 +6664,48 @@ run("live path: validated signal reaches the paper broker at full size",  t_live
 run("exits: validated agents hold to stop/target; square-off at 15:15",    t_validated_agents_exit_policy_and_candle_depth)
 run("sizing: bucket remnants under 40% of a position are skipped",         t_min_position_value_skips_bucket_remnants)
 
+def t_review_runs_off_the_tick_loop_with_drift_check():
+    """The AI review runs as its own task (never stalls the agent loop), applies only to gate_strategies,
+    and the entry is skipped if price ran away or through the stop while the model was thinking."""
+    from agents.intraday_v2 import IntradayV2Agent
+    import claude_trade_gate as _g, allocator as _al
+    from tick_engine import tick_engine as _te
+    import dataclasses as _dc
+    prev = (_ai_settings.use_claude_trade_gate, _ai_settings.gate_strategies)
+    try:
+        _ai_settings.use_claude_trade_gate = True; _ai_settings.gate_strategies = "intraday,scalping"
+        with _patch.object(_al, "gate_required", return_value=False):
+            assert IntradayV2Agent()._gate_applies() and not SwingAgent()._gate_applies()
+        with _patch.object(_al, "gate_required", return_value=True):
+            assert SwingAgent()._gate_applies(), "an unusual day gates every strategy"
+        a = IntradayV2Agent(); snap = _live_snap("REVQ", 1000.0)
+        sig = {"symbol": "REVQ", "side": "BUY", "stop_loss": 990.0, "target": 1025.0}
+        entered = []
+        async def fake_finish(snap2, action, signal, evt): entered.append((snap2.tick.ltp, signal.get("_gate_size_factor")))
+        async def approve(*a_, **k): return _g.GateDecision(confidence=80, enter=True, size_factor=0.75, reason="ok")
+        async def veto(*a_, **k): return _g.GateDecision(confidence=30, enter=False, reason="chasing")
+        evt = {"size_factor": 1.0}
+        with _patch.object(a, "_finish_entry", fake_finish), _patch.object(_g, "assess", approve), \
+             _patch.object(_al, "gate_required", return_value=False):
+            _te._latest_tick["REVQ"] = _dc.replace(snap.tick, ltp=1001.0)            # +0.1 %: fine
+            asyncio.run(a._review_then_enter(snap, "BUY", dict(sig), evt))
+            assert entered == [(1001.0, 0.75)], entered                               # enters at the latest price
+            _te._latest_tick["REVQ"] = _dc.replace(snap.tick, ltp=1004.0)            # +0.4 %: ran away
+            asyncio.run(a._review_then_enter(snap, "BUY", dict(sig), evt))
+            assert len(entered) == 1 and "moved" in a.state.last_skip
+            _te._latest_tick["REVQ"] = _dc.replace(snap.tick, ltp=989.0)             # through the stop
+            asyncio.run(a._review_then_enter(snap, "BUY", dict(sig), evt))
+            assert len(entered) == 1 and "through the stop" in a.state.last_skip
+        with _patch.object(a, "_finish_entry", fake_finish), _patch.object(_g, "assess", veto), \
+             _patch.object(_al, "gate_required", return_value=False):
+            asyncio.run(a._review_then_enter(snap, "BUY", dict(sig), evt))
+            assert len(entered) == 1 and "AI review: chasing" in a.state.last_skip
+    finally:
+        _ai_settings.use_claude_trade_gate, _ai_settings.gate_strategies = prev
+        _te._latest_tick.pop("REVQ", None)
+
+run("AI review: own task, gate_strategies only, drift and stop checks", t_review_runs_off_the_tick_loop_with_drift_check)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
