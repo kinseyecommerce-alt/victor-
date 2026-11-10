@@ -5049,6 +5049,7 @@ def t_ai_replay_scripted_model():
     res = asyncio.run(rp.run())
     m = res["metrics"]
     assert res["status"] == "done" and len(res["days"]) == 2 and res["model"] == "gpt-5"
+    assert res["days"] == ["2026-01-22", "2026-01-23"], "weekend bars are not sessions"
     assert len(rp.decisions) == 22 and rp.llm["calls"] >= 22 and rp.llm["cost_usd"] > 0, (len(rp.decisions), rp.llm)
     t = [x for x in rp.trades if x["symbol"] == "AIA"]
     assert len(t) == 1 and t[0]["side"] == "BUY" and t[0]["qty"] >= 1 and t[0]["qty"] * t[0]["entry"] <= 50000

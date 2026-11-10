@@ -234,8 +234,11 @@ class AIReplay:
             raise RuntimeError("no bars for any symbol")
 
     def session_days(self) -> list[date]:
+        """The last N exchange trading days in the data (a Muhurat Sunday or a holiday with a few
+        bars is not a session and must not use up a day)."""
+        from ist_clock import is_trading_day
         days = sorted({b["ts"].date() for s in self.syms.values() for b in s.bars})
-        return days[-self.days:]
+        return [d for d in days if is_trading_day(d)][-self.days:]
 
     # ── simulation ───────────────────────────────────────────────────────
     def _qty(self, price: float, stop: float) -> int:
@@ -379,7 +382,7 @@ class AIReplay:
         if self.create is not None:
             return await self.create(messages=messages, system=SYSTEM_PROMPT, tools=TOOLS)
         from llm_provider import llm_router
-        return await llm_router.create(messages=messages, system=SYSTEM_PROMPT, tools=TOOLS, max_tokens=4000,
+        return await llm_router.create(messages=messages, system=SYSTEM_PROMPT, tools=TOOLS, max_tokens=12000,
                                        effort=settings.ai_agent_effort)
 
     def _account(self, resp) -> None:
