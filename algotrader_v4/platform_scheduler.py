@@ -63,6 +63,9 @@ class PlatformScheduler:
     # ── Jobs ──────────────────────────────────────────────────────────────────
 
     async def _pre_market_report(self) -> None:
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
         try:
             from pre_market_report import generate_pre_market_report
             await generate_pre_market_report()
@@ -71,6 +74,10 @@ class PlatformScheduler:
 
     async def _morning_data_refresh(self) -> None:
         """Refresh all static daily data: levels, events, institutional flow, correlation matrix."""
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            logger.info("[platform] Morning data refresh skipped — not a trading day")
+            return
         from tick_engine import tick_engine
         symbols = list(tick_engine._subscribers.keys()) if hasattr(tick_engine, "_subscribers") else []
         symbols = sorted(set(symbols) | set(getattr(tick_engine, "_symbols", [])))   # warm watchlist too
@@ -176,6 +183,13 @@ class PlatformScheduler:
     async def _auto_start_bot(self) -> None:
         if not settings.auto_start_strategies:
             logger.info("[platform] AUTO_START_STRATEGIES not set — skipping auto-start")
+            return
+        from ist_clock import is_trading_day, holiday_name, next_trading_day
+        if not is_trading_day():
+            logger.info("[platform] {} — exchange holiday, auto-start skipped; next session {}",
+                        holiday_name() or "weekend", next_trading_day())
+            await send_telegram(f"📅 <b>Exchange holiday</b> — {holiday_name() or 'no session'}. "
+                                f"Bot not started; next session {next_trading_day():%a %d %b}.")
             return
 
         from master_agent_v5 import master
