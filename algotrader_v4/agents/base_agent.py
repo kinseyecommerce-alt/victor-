@@ -511,6 +511,9 @@ class BaseAgent(ABC):
             import allocator as _alloc
             from claude_trade_gate import assess as gate_assess
             from master_agent_v5 import record_gate_decision
+            veto = await self._kronos_veto(snap, action)
+            if veto:
+                return self._skip(sym, veto)
             gate = await gate_assess(snap, action, signal, self.name, force=_alloc.gate_required())
             record_gate_decision(gate.enter)
             if not gate.enter:
@@ -533,6 +536,30 @@ class BaseAgent(ABC):
         except Exception as exc:
             self.state.errors.append(f"{sym}: {str(exc)[:100]}")
             logger.opt(exception=exc).warning("[{}] review/entry error on {} — signal dropped", self.name, sym)
+
+    async def _kronos_veto(self, snap: MarketSnapshot, action: str) -> Optional[str]:
+        """Skip a signal Kronos forecasts clearly against (settings.kronos_veto_pct). Replay of the 20-stock
+        signals, threshold from the first half: dropping forecasts ≤ −0.19 % in the trade direction raised
+        both halves (+₹7,828 → +₹9,720 and +₹1,428 → +₹4,253). Off by default; no model or an error never vetoes."""
+        if not settings.kronos_veto_enabled:
+            return None
+        try:
+            import kronos_forecast as _kf
+            from tick_engine import tick_engine as _te
+            buf = _te._bufs_1min.get(snap.symbol)
+            cs = buf.candles()[-300:] if buf else []
+            bars = [{"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume} for c in cs]
+            if len(bars) < 60:
+                return None
+            f = await asyncio.wait_for(asyncio.to_thread(_kf.forecast, snap.symbol, bars, None, 1, None, False), timeout=40)
+            if not f.get("available") or f.get("flag") or not str(f.get("source", "")).startswith("kronos"):
+                return None
+            with_pct = (f.get("expected_move_pct") or 0.0) * (1 if action == "BUY" else -1)
+            if with_pct <= settings.kronos_veto_pct:
+                return f"Kronos forecasts {with_pct:+.2f}% against the trade (≤ {settings.kronos_veto_pct}%)"
+        except Exception as exc:
+            logger.debug("[{}] Kronos veto check failed on {}: {}", self.name, snap.symbol, exc)
+        return None
 
     async def _finish_entry(self, snap: MarketSnapshot, action: str, signal: dict, evt: dict) -> None:
         """Compound the size factors (review, event elevation, correlation) and enter."""
