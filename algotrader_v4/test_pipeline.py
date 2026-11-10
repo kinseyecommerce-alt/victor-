@@ -5733,6 +5733,39 @@ def t_connection_status_endpoint():
 
 run("status: /status/connections + Claude health states",     t_connection_status_endpoint)
 
+def t_ai_providers_test_endpoint():
+    """POST /ai/providers/test makes one real call per configured provider and updates the AI icon state."""
+    import main as _main, llm_provider as _lpm
+    from llm_provider import llm_router as _rt
+    prev = (_ai_settings.anthropic_api_key, _ai_settings.openai_api_key, dict(_rt.health), _rt.last_used,
+            _rt.providers["openai"], _rt.providers["anthropic"])
+    try:
+        import httpx as _hx
+        def handler(req):
+            return _hx.Response(200, json={"id": "c", "object": "chat.completion", "created": 0, "model": "gpt-5",
+                                           "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}],
+                                           "usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+        _rt.providers["openai"] = _lpm.OpenAIProvider(http_client=_hx.AsyncClient(transport=_hx.MockTransport(handler)))
+        _ai_settings.anthropic_api_key = ""; _ai_settings.openai_api_key = "sk-oai"
+        for n in _rt.health: _rt.health[n] = {"state": "untested", "detail": "no call made yet", "at": None}
+        c = TestClient(_main.app)
+        r = c.post("/ai/providers/test"); assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["providers"]["anthropic"]["state"] == "no_key"
+        assert d["providers"]["openai"] == {"ok": True, "state": "ok", "model": "gpt-5", "reply": "OK"}, d["providers"]
+        assert _rt.health["openai"]["state"] == "ok" and d["status"]["providers"]["openai"]["state"] == "ok"
+        # a rejected key is reported, not raised
+        def bad(req): return _hx.Response(401, json={"error": {"message": "Incorrect API key provided", "type": "invalid_request_error"}})
+        _rt.providers["openai"] = _lpm.OpenAIProvider(http_client=_hx.AsyncClient(transport=_hx.MockTransport(bad)))
+        d = c.post("/ai/providers/test").json()
+        assert d["providers"]["openai"]["ok"] is False and d["providers"]["openai"]["state"] == "bad_key", d["providers"]
+    finally:
+        (_ai_settings.anthropic_api_key, _ai_settings.openai_api_key, h, _rt.last_used,
+         _rt.providers["openai"], _rt.providers["anthropic"]) = prev
+        _rt.health.update(h)
+
+run("status: POST /ai/providers/test calls each provider once", t_ai_providers_test_endpoint)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 section("22. TWO AI PROVIDERS: OPENAI ADAPTER + AUTOMATIC FAILOVER")

@@ -141,6 +141,7 @@ export const api = {
   kiteLoginUrl: () => ax().get('/auth/login-url'),
   kiteStatus: () => ax().get('/auth/kite/status'),
   kiteAutoLoginNow: () => ax().post('/auth/kite/auto-login'),
+  testAiProviders: () => ax().post('/ai/providers/test'),
 
   // App login
   updateAppPassword: (data: { username?: string; new_password: string }) =>

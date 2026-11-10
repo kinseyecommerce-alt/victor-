@@ -430,6 +430,33 @@ async def market_opportunities(top: int = 12, focus: str = "all", refresh: bool 
     return await asyncio.to_thread(opportunity_scanner.scan, max(1, min(top, 30)), focus, refresh)
 
 
+@app.post("/ai/providers/test", tags=["Status"])
+async def test_ai_providers():
+    """Send a one-word health prompt to every configured AI provider (Anthropic, OpenAI) so the
+    dashboard's AI icon reflects a real call instead of 'key saved — untested'. Costs a few tokens."""
+    from llm_provider import llm_router, ProviderError
+    out: dict = {}
+    for name in llm_router.providers:
+        prov = llm_router.providers[name]
+        if not prov.configured():
+            out[name] = {"ok": False, "state": "no_key", "detail": f"{name} API key not set"}
+            continue
+        try:
+            resp = await asyncio.wait_for(llm_router._create_with_step_down(prov, dict(
+                messages=[{"role": "user", "content": "Reply with the single word OK."}],
+                system="You are a connectivity check for a trading system.", tools=[], max_tokens=8)), timeout=45)
+            text = " ".join(b.get("text", "") for b in resp.content if b.get("type") == "text").strip()
+            llm_router._mark(name, "ok", f"{prov.model} responding")
+            out[name] = {"ok": True, "state": "ok", "model": resp.model or prov.model, "reply": text[:40]}
+        except ProviderError as exc:
+            llm_router._mark(name, exc.kind, exc.message, code=exc.code)
+            out[name] = {"ok": False, "state": exc.kind, "model": prov.model, "detail": exc.message[:300]}
+        except Exception as exc:
+            llm_router._mark(name, "connection", str(exc))
+            out[name] = {"ok": False, "state": "connection", "model": prov.model, "detail": str(exc)[:300]}
+    return {"providers": out, "status": llm_router.status()}
+
+
 @app.get("/status/connections", tags=["Status"])
 def connection_status():
     """One call for the dashboard's status icons: Kite session, Claude API, market data, WebSocket."""
