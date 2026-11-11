@@ -858,7 +858,7 @@ def set_agent_enables(req: AgentEnablesRequest):
 # ── Capital Allocation ──────────────────────────────────────────────────────────
 @app.get("/settings/capital-allocation", tags=["Settings"])
 def get_capital_allocation():
-    intraday_bucket = round(settings.total_capital * settings.intraday_capital_pct / 100)
+    intraday_bucket = round(risk_manager.bucket_total("intraday"))          # includes intraday_leverage
     swing_bucket    = round(settings.total_capital * settings.swing_capital_pct    / 100)
     options_bucket  = round(settings.total_capital * settings.options_capital_pct  / 100)
     futures_bucket  = round(settings.total_capital * settings.futures_capital_pct  / 100)
@@ -888,7 +888,9 @@ def get_capital_allocation():
         "agent_buckets": {
             "intraday": "intraday", "scalping": "intraday",
             "swing": "swing",       "fno": "options",
-        }
+        },
+        "intraday_leverage": settings.intraday_leverage,
+        "intraday_margin_rupees": round(settings.total_capital * settings.intraday_capital_pct / 100),
     }
 
 @app.patch("/settings/capital-allocation", tags=["Settings"])
