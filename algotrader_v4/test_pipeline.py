@@ -4538,9 +4538,9 @@ def t_costs_realistic():
     opt = _tc(100.0, 120.0, 75, "BUY", "NFO", "MIS", "NIFTY26JAN24000CE")
     fut = _tc(24000.0, 24050.0, 75, "BUY", "NFO", "MIS", "NIFTY26JANFUT")
     assert 40 <= mis <= 70, mis                                   # ~₹30 brokerage+GST, ₹12.6 STT, small exch/stamp
-    assert 100 <= cnc <= 130, cnc                                 # 0.1% STT both sides ≈ ₹100, no brokerage
-    assert 50 <= opt <= 70, opt                                   # ₹40 brokerage+GST, ₹9 STT on sell premium
-    assert 480 <= fut <= 560, fut                                 # 0.02% STT on ₹18 lakh ≈ ₹360 + exch/GST/stamp
+    assert 100 <= cnc <= 130, cnc                                 # 0.1% STT both sides ≈ ₹100 + ₹15.34 DP, no brokerage
+    assert 50 <= opt <= 75, opt                                   # ₹40 brokerage+GST, ₹13.5 STT (0.15%) on sell premium
+    assert 1000 <= fut <= 1130, fut                               # 2026: 0.05% STT on ₹18 lakh sell ≈ ₹902 + brokerage/exch/GST/stamp
     assert _rtc(0, 0, "equity_mis") == 0.0
 
 def t_perf_ledger_and_stats():
@@ -7430,16 +7430,16 @@ def t_sl_fill_next_open_with_slippage():
     a["o"][11] = 101.0; a["h"][11] = 101.0; a["c"][11] = 100.5; a["l"][11] = 100.5
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=99.0, target=110.0))
-    assert abs(fill - 101.0 * 1.0005) < 1e-9, fill               # next bar's open, 5 bps worse
+    assert abs(fill - 101.0 * (1 + _sls.SLIPPAGE)) < 1e-9, fill               # next bar's open, SLIPPAGE worse
     k2, fill2, _, _ = _sls.fill_intraday(s, _SlEntry(10, -1, stop=103.0, target=90.0))
-    assert abs(fill2 - 101.0 * 0.9995) < 1e-9, fill2
+    assert abs(fill2 - 101.0 * (1 - _sls.SLIPPAGE)) < 1e-9, fill2
     assert _sls.fill_intraday(s, _SlEntry(10, 1, stop=101.5)) is None      # stop already through at the open
     assert _sls.fill_intraday(s, _SlEntry(len(s) - 1, 1, stop=99.0)) is None  # no next bar
     rr = _sls.fill_intraday(s, _SlEntry(10, 1, stop=100.0, rr=2.0))
     assert rr is not None
 
 
-run("stratlab: entries fill at the next bar's open with 5 bps slippage", t_sl_fill_next_open_with_slippage)
+run("stratlab: entries fill at the next bar's open with the default (2 bps) slippage", t_sl_fill_next_open_with_slippage)
 
 
 def t_sl_stop_before_target_same_bar():
@@ -7447,9 +7447,9 @@ def t_sl_stop_before_target_same_bar():
     a["h"][20] = 103.0; a["l"][20] = 97.0                        # one bar touches target and stop
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
-    assert (k, reason) == (20, "stop") and abs(px - 98.0 * 0.9995) < 1e-9, (k, reason, px)
+    assert (k, reason) == (20, "stop") and abs(px - 98.0 * (1 - _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=98.0))
-    assert (k, reason) == (20, "stop") and abs(px - 102.0 * 1.0005) < 1e-9, (k, reason, px)
+    assert (k, reason) == (20, "stop") and abs(px - 102.0 * (1 + _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     a["l"][20] = 100.0                                           # target only
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
@@ -7457,7 +7457,7 @@ def t_sl_stop_before_target_same_bar():
     a["o"][30] = 95.0; a["l"][30] = 95.0; a["h"][20] = 100.0     # gap through the stop: filled at the open
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
-    assert (k, reason) == (30, "stop") and abs(px - 95.0 * 0.9995) < 1e-9, (k, reason, px)
+    assert (k, reason) == (30, "stop") and abs(px - 95.0 * (1 - _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, trail=("pct", 1.0)))
     assert (k, reason) == (30, "stop")
 
@@ -7471,7 +7471,7 @@ def t_sl_squareoff_and_time_stop():
     a["o"][sq] = 101.0
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, target=120.0))
-    assert (k, reason) == (sq, "squareoff") and abs(px - 101.0 * 0.9995) < 1e-9, (k, reason, px)
+    assert (k, reason) == (sq, "squareoff") and abs(px - 101.0 * (1 - _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     assert _sls.fill_intraday(s, _SlEntry(sq - 1, 1, stop=90.0)) is None      # no entries from 15:15
     assert _sls.fill_intraday(s, _SlEntry(sq - 2, 1, stop=90.0)) is not None
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, time_stop=15))
@@ -7534,8 +7534,8 @@ def t_sl_positional():
         return _SlSwing(1, stop_pct=5.0, target_pct=10.0, max_hold=10) if len(d) == 2 else None
     sw = _sl_spec(buy_day1, kind="swing")
     (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999)
-    assert tr[2] == days[2] and abs(tr[5] - 100.0 * 1.0005) < 1e-6, tr        # decided on day 1, filled next open
-    assert tr[13] == "stop" and tr[6] == days[4] and abs(tr[8] - 90.0 * 0.9995) < 1e-6, tr   # gap: fill at the open
+    assert tr[2] == days[2] and abs(tr[5] - 100.0 * (1 + _sls.SLIPPAGE)) < 1e-6, tr        # decided on day 1, filled next open
+    assert tr[13] == "stop" and tr[6] == days[4] and abs(tr[8] - 90.0 * (1 - _sls.SLIPPAGE)) < 1e-6, tr   # gap: fill at the open
     qty = tr[9]
     assert tr[11] == _sl_rtc(tr[5] * qty, tr[8] * qty, "equity_cnc") and tr[11] > 150, tr      # delivery costs
     assert seen[:2] == [1, 2] and max(seen) <= 8
@@ -8015,7 +8015,7 @@ def t_cs_pattern_complete_before_signal():
     e = ents[0]
     assert e.stop < 98.0 and abs(e.stop - min(98.0 - 0.05, 99.9 - 0.3 * cs.atr[1])) < 1e-9 and e.rr == 2.0
     trades, _ = _sls.sim_session(sp, s)
-    assert trades and trades[0][4] == "09:45" and abs(trades[0][5] - float(s.o[ents[0].i + 1]) * 1.0005) < 1e-3
+    assert trades and trades[0][4] == "09:45" and abs(trades[0][5] - float(s.o[ents[0].i + 1]) * (1 + _sls.SLIPPAGE)) < 1e-3
     # at the close of 09:43 the candle is not finished: no signal yet; at 09:44 it is
     assert sp.fn(s.view(int(np.searchsorted(s.t, 584))), sp.p) == []
     assert len(sp.fn(s.view(int(np.searchsorted(s.t, 584)) + 1), sp.p)) == 1
@@ -8092,7 +8092,7 @@ def t_cs_daily_rr_and_no_lookahead():
         return _SlSwing(1, stop=95.0, rr=2.0, max_hold=3) if len(d) == 2 else None
     tr, _ = _sls.sim_positional(_sl_spec(fn, kind="swing"), sd, 0, 99999999)
     assert tr and tr[0][-1] == "target", tr
-    fill = 100.0 * 1.0005
+    fill = 100.0 * (1 + _sls.SLIPPAGE)
     assert abs(tr[0][8] - (fill + 2 * (fill - 95.0))) < 1e-9 and tr[0][2] == days[2]
     # daily candlestick signal: a hammer on the decision day, unchanged by anything after it
     o, h, l, c = (np.array(x) for x in zip(*_cs_trend(-1, 40)))
@@ -8251,9 +8251,11 @@ def t_cs_costs_per_lab():
             assert abs(x[11] - _sl_rtc(bv, sv, sp.cost_kind)) < 0.011 and abs(x[12] - (x[10] - x[11])) < 0.02, x
             got.add(sp.cost_kind)
     assert got == {"equity_mis", "equity_cnc", "future"}, got
-    # magnitudes on Rs 1 lakh: delivery costs more than intraday, intraday more than futures
+    # magnitudes on Rs 1 lakh: delivery costs the most, then futures, then intraday
     m, d, f = (_sl_rtc(1e5, 1e5, k) for k in ("equity_mis", "equity_cnc", "future"))
-    assert 50 < m < 100 and 200 < d < 260 and f < m, (m, d, f)
+    # 2026 rates: futures STT 0.05% on the sell side makes a ₹1L futures round trip (~₹104) dearer than MIS (~₹83);
+    # delivery ~₹238 incl. the ₹15.34 DP charge
+    assert 50 < m < 100 and 200 < d < 260 and m < f < 2 * m, (m, d, f)
 
 
 run("candles: trades pay MIS (intraday), CNC (daily long) and futures (daily short) costs per the lab", t_cs_costs_per_lab)
@@ -8417,11 +8419,309 @@ def t_sl_final_ledger_per_dataset():
             led = _sl_json.load(fh)
         assert len(led) == 2 and sorted(e["dataset"] for e in led.values()) == ["/data/12m", "/data/3y"], led
         sp12, sp3 = _slp.split_sessions(cal12), _slp.split_sessions(cal3y)
-        assert _slp.ledger_key("good", sp12, 250, 5) in led and _slp.ledger_key("good", sp3, 750, 5) in led
+        cm = _sls.COST_MODEL
+        assert _slp.ledger_key("good", sp12, 250, 5, cm) in led and _slp.ledger_key("good", sp3, 750, 5, cm) in led
 
 
 run("stratlab: FINAL ledger has one once-only entry per strategy AND dataset (12m vs 3y)",
     t_sl_final_ledger_per_dataset)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# COSTS 2026 + STRATLAB honest fills (per-run slippage, gaps, ticks, index futures, cost-model ledger)
+# ══════════════════════════════════════════════════════════════════════════
+section("COSTS 2026 AND STRATLAB FILL MODEL")
+
+import costs as _costs26
+
+
+def t_costs_2026_rates():
+    G = _costs26.GST
+    # futures: 0.05 % STT on the sell side only; NSE 0.00183 %; brokerage min(0.03 %, ₹20) per side; stamp 0.002 % buy
+    bv = sv = 1e6
+    bro, exch, sebi = 40.0, 2e6 * 0.0000183, 2e6 * 1e-6
+    want = bro + sv * 0.0005 + exch + sebi + bv * 0.00002 + G * (bro + exch + sebi)
+    assert _rtc(bv, sv, "future") == round(want, 2), (_rtc(bv, sv, "future"), want)
+    assert _rtc(bv, 0, "future") < _rtc(0, bv, "future")                       # STT only when selling
+    # options: 0.15 % of the sell premium, flat ₹20 per order, NSE 0.03553 % of premium
+    bro, exch, sebi = 40.0, 20000 * 0.0003553, 20000 * 1e-6
+    want = bro + 10000 * 0.0015 + exch + sebi + 10000 * 0.00003 + G * (bro + exch + sebi)
+    assert _rtc(10000, 10000, "option") == round(want, 2)
+    assert _costs26.exercise_stt(10000) == 15.0 and _costs26.exercise_stt(-5) == 0.0
+    # equity: NSE 0.00307 %; delivery pays the ₹15.34 DP charge (GST included) on the sell, once
+    exch, sebi = 2e5 * 0.0000307, 2e5 * 1e-6
+    cnc = 2e5 * 0.001 + exch + sebi + 1e5 * 0.00015 + G * (exch + sebi) + 15.34
+    assert _rtc(1e5, 1e5, "equity_cnc") == round(cnc, 2), (_rtc(1e5, 1e5, "equity_cnc"), cnc)
+    assert abs(_rtc(1e5, 0, "equity_cnc") - round(1e5 * 0.001 + 1e5 * 0.0000307 + 1e5 * 1e-6 + 1e5 * 0.00015
+                                                  + G * (1e5 * 0.0000307 + 1e5 * 1e-6), 2)) < 0.011     # buy only: no DP
+    mis = 40.0 + 1e5 * 0.00025 + exch + sebi + 1e5 * 0.00003 + G * (40.0 + exch + sebi)
+    assert _rtc(1e5, 1e5, "equity_mis") == round(mis, 2)                      # intraday: no DP charge
+    assert _costs26.DP_CHARGE == 15.34 and _costs26.COST_MODEL_VERSION == "2026-11"
+    # trade_cost routes a CNC sell through the DP charge too
+    assert _tc(1000.0, 1010.0, 50, "BUY", "NSE", "CNC") - _tc(1000.0, 1010.0, 50, "BUY", "NSE", "MIS") > 15.0
+
+
+run("costs: 2026 F&O STT (fut 0.05% sell, opt 0.15% premium sell, exercise 0.15%), NSE 0.00307%, CNC DP ₹15.34",
+    t_costs_2026_rates)
+
+
+def t_sl_slippage_is_a_run_setting():
+    assert _sls.DEFAULT_SLIPPAGE_BPS == 2.0 and abs(_sls.SLIPPAGE - 0.0002) < 1e-12
+    assert _sls.SENSITIVITY_SLIPPAGE_BPS == 5.0 and _sls.INDEX_SLIPPAGE_BPS == 1.0
+    date, t, a, v = _sl_flat()
+    a["o"][11] = 101.0; a["h"][11] = 101.0; a["c"][11] = 100.5; a["l"][11] = 100.5
+    s = _sl_session(a, date, t, v)
+    e = _SlEntry(10, 1, stop=99.0, target=110.0)
+    k, fill, px, _ = _sls.fill_intraday(s, e)
+    assert abs(fill - 101.0 * 1.0002) < 1e-9 and abs(px - 100.0 * 0.9998) < 1e-9, (fill, px)    # default 2 bps
+    k, fill5, px5, _ = _sls.fill_intraday(s, e, 0.0005)
+    assert abs(fill5 - 101.0 * 1.0005) < 1e-9 and abs(px5 - 100.0 * 0.9995) < 1e-9
+    k, fill0, px0, _ = _sls.fill_intraday(s, e, 0.0)
+    assert fill0 == 101.0 and px0 == 100.0
+    sp = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=99.0)], id="t_slip")
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    r2 = _sls.run_symbol("", "SYN", [sp], 0, 99999999, sd=sd, audit=False)["t_slip"]["trades"][0]
+    r5 = _sls.run_symbol("", "SYN", [sp], 0, 99999999, sd=sd, audit=False, slippage=0.0005)["t_slip"]["trades"][0]
+    assert abs(r2[5] - 101.0 * 1.0002) < 1e-4 and abs(r5[5] - 101.0 * 1.0005) < 1e-4 and r5[12] < r2[12], (r2, r5)
+    # positional takes the run's slippage too
+    days = tuple(20260101 + d for d in range(6))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sw = _sl_spec(lambda d, p: _SlSwing(1, stop_pct=5.0, max_hold=2) if len(d) == 1 else None, kind="swing", id="t_sw")
+    (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999, slip=0.0005)
+    assert abs(tr[5] - 100.05) < 1e-6 and abs(tr[8] - 99.95) < 1e-6 and tr[13] == "max_hold", tr   # max-hold exit pays it
+
+
+run("stratlab: slippage is a per-run setting (default 2 bps, 5 bps sensitivity) for intraday and positional",
+    t_sl_slippage_is_a_run_setting)
+
+
+def t_sl_gap_through_stop_fills_at_open():
+    date, t, a, v = _sl_flat()
+    a["o"][30] = 104.0; a["h"][30] = 104.5; a["l"][30] = 103.5; a["c"][30] = 104.0     # short stopped by a gap up
+    s = _sl_session(a, date, t, v)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=95.0))
+    assert (k, reason) == (30, "stop") and abs(px - 104.0 * (1 + _sls.SLIPPAGE)) < 1e-9, (k, reason, px)   # not 102
+    # positional short: a daily gap through the stop fills at that day's open
+    days = tuple(20260101 + d for d in range(6))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    sl3 = slice(3 * 300, 4 * 300)
+    a["o"][sl3] = a["h"][sl3] = a["l"][sl3] = a["c"][sl3] = 110.0
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    fut = _sl_spec(lambda d, p: _SlSwing(-1, stop_pct=3.0, max_hold=5) if len(d) == 1 else None, kind="futures",
+                   horizon="positional", id="t_fgap")
+    (tr,), _ = _sls.sim_positional(fut, sd, 0, 99999999)
+    assert tr[13] == "stop" and tr[6] == days[3] and abs(tr[8] - 110.0 * (1 + _sls.SLIPPAGE)) < 1e-6, tr
+
+
+run("stratlab: a stop gapped through fills at the bar's (or day's) open plus slippage, not at the stop",
+    t_sl_gap_through_stop_fills_at_open)
+
+
+def t_sl_market_exits_pay_slippage():
+    date, t, a, v = _sl_flat()
+    a["o"][26] = 100.4
+    sq = 15 * 60 + 15 - 555
+    a["o"][sq] = 99.0
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, time_stop=15), 0.0003)
+    assert (k, reason) == (26, "time") and abs(px - 100.4 * 0.9997) < 1e-9, (k, reason, px)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, -1, stop=110.0), 0.0003)
+    assert (k, reason) == (sq, "squareoff") and abs(px - 99.0 * 1.0003) < 1e-9, (k, reason, px)     # short buys back worse
+    s360 = _sl_session({x: y[:360] for x, y in a.items()}, date[:360], t[:360], v[:360])         # data ends 15:14
+    k, _f, px, reason = _sls.fill_intraday(s360, _SlEntry(10, 1, stop=90.0), 0.0003)
+    assert reason == "squareoff" and abs(px - 100.0 * 0.9997) < 1e-9
+
+
+run("stratlab: time, square-off and data-end exits pay slippage (both sides)", t_sl_market_exits_pay_slippage)
+
+
+def t_sl_target_needs_a_tick_through():
+    assert _sls.equity_tick(500.0, 20240101) == 0.05 and _sls.equity_tick(200.0, 20240101) == 0.05
+    assert _sls.equity_tick(200.0, 20250616) == 0.01 and _sls.equity_tick(300.0, 20260101) == 0.05
+    date, t, a, v = _sl_flat()
+    a["h"][20] = 102.0                                                      # touches 102 exactly
+    a["h"][40] = 102.005                                                    # less than a tick (₹0.01 under ₹250 from 16-06-2025) through
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert reason == "squareoff", (k, reason, px)                           # a touch is not a fill
+    a["h"][60] = 102.01                                                     # one tick through
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert (k, reason, px) == (60, "target", 102.0), (k, reason, px)
+    a["o"][50] = a["h"][50] = a["l"][50] = a["c"][50] = 103.0               # gap beyond the target: fill at the open
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert (k, reason, px) == (50, "target", 103.0), (k, reason, px)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0, trail=("pct", 5.0)))
+    assert (k, reason, px) == (50, "target", 103.0), (k, reason, px)        # trailing path: same rule
+    # short side
+    date, t, a, v = _sl_flat()
+    a["l"][20] = 98.0
+    s = _sl_session(a, date, t, v)
+    assert _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=98.0))[3] == "squareoff"
+    a["l"][30] = 97.95
+    s = _sl_session(a, date, t, v)
+    assert _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=98.0))[2:] == (98.0, "target")
+    # positional: a daily high that only touches the target is not a fill
+    days = tuple(20260101 + d for d in range(6))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    a["h"][2 * 300 + 50] = 110.0
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sw = _sl_spec(lambda d, p: _SlSwing(1, stop=95.0, target=110.0, max_hold=3) if len(d) == 1 else None,
+                  kind="swing", id="t_ptgt")
+    (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999)
+    assert tr[13] == "max_hold", tr
+    a["h"][2 * 300 + 50] = 110.05
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999)
+    assert tr[13] == "target" and tr[8] == 110.0 and tr[6] == days[2], tr
+
+
+run("stratlab: a target fills only if traded through by a tick (a gap beyond fills at the open)",
+    t_sl_target_needs_a_tick_through)
+
+
+def _sl_index_sd(n_days=3, px=24000.0):
+    days = tuple(20260105 + d for d in range(n_days))
+    date, t, a, v = _sl_flat(days=days, px=px)
+    return days, date, t, a, np.zeros(len(date))
+
+
+def t_sl_index_futures():
+    from stratlab.api import strategy as _sl_strategy
+    for bad in (dict(kind="intraday", underlying="NIFTY"), dict(kind="futures", underlying="FINNIFTY")):
+        try:
+            _sl_strategy("t_bad_idx", bad["kind"], "x", "x", horizon="intraday", underlying=bad["underlying"])(lambda s, p: [])
+            raise AssertionError(f"accepted {bad}")
+        except ValueError:
+            pass
+    assert _sls.LOT_SIZES == {"NIFTY": 65, "BANKNIFTY": 30}
+    days, date, t, a, v = _sl_index_sd()
+    a["h"][100] = 24100.0
+    sd = _sld.from_arrays("_NIFTY50_min", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sp = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=23900.0, target=24050.0)], kind="futures", horizon="intraday",
+                  id="t_nifty_fut", underlying="NIFTY")
+    stock = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=23900.0)], id="t_stock_on_index")
+    out = _sls.run_symbol("", "_NIFTY50_min", [sp, stock], 0, 99999999, sd=sd, audit=False)
+    trs = out["t_nifty_fut"]["trades"]
+    assert len(trs) == len(days) and out["t_stock_on_index"]["trades"] == [], out
+    tr = trs[0]
+    assert tr[9] == 65 and abs(tr[5] - 24000.0 * 1.0001) < 1e-3 and tr[13] == "target" and tr[8] == 24050.0, tr
+    assert tr[11] == _sl_rtc(tr[5] * 65, 24050.0 * 65, "future") and abs(tr[10] - (24050.0 - tr[5]) * 65) < 0.01, tr
+    # index specs never run on stocks; BANKNIFTY uses its own data and lot size
+    assert _sls.run_symbol("", "RELIANCE", [sp], 0, 99999999, sd=sd, audit=False)["t_nifty_fut"]["trades"] == []
+    bn = _sl_spec(lambda s, p: [_SlEntry(10, -1, stop=24200.0)], kind="futures", horizon="intraday", id="t_bn",
+                  underlying="BANKNIFTY", lots=2)
+    assert _sls.run_symbol("", "_NIFTY50_min", [bn], 0, 99999999, sd=sd, audit=False)["t_bn"]["trades"] == []
+    tb = _sls.run_symbol("", "_NIFTYBANK_min", [bn], 0, 99999999, sd=sd, audit=False)["t_bn"]["trades"][0]
+    assert tb[9] == 60 and tb[13] == "squareoff" and abs(tb[8] - 24000.0 * 1.0001) < 1e-3, tb
+    # run slippage override for index futures; positional holds allowed on the index
+    tr5 = _sls.run_symbol("", "_NIFTY50_min", [sp], 0, 99999999, sd=sd, audit=False,
+                          index_slippage=0.00025)["t_nifty_fut"]["trades"][0]
+    assert abs(tr5[5] - 24000.0 * 1.00025) < 1e-3
+    pos = _sl_spec(lambda d, p: _SlSwing(-1, stop_pct=2.0, max_hold=2) if len(d) == 1 else None, kind="futures",
+                   horizon="positional", id="t_nifty_pos", underlying="NIFTY")
+    (tp,) = _sls.run_symbol("", "_NIFTY50_min", [pos], 0, 99999999, sd=sd, audit=False)["t_nifty_pos"]["trades"]
+    assert tp[3] == -1 and tp[9] == 65 and tp[13] == "max_hold" and tp[11] == _sl_rtc(tp[8] * 65, tp[5] * 65, "future")
+    # the screen's one-symbol concentration gate does not apply to a single-underlying strategy
+    cal = list(range(20260001, 20260201))
+    book = [x[:1] + ("_NIFTY50_min",) + x[2:] for x in _sl_book("t_nifty_fut", cal)]
+    split = _slp.split_sessions(cal)
+    assert not _slp.screen(book, split, "intraday")["passed"]
+    assert _slp.screen(book, split, "intraday", single_underlying=True)["passed"]
+
+
+run("stratlab: NIFTY/BANKNIFTY futures on index bars (lots 65/30, 1 bps, futures costs, positional, own screen)",
+    t_sl_index_futures)
+
+
+def t_sl_ledger_keyed_by_cost_model_and_screen_only():
+    cal = list(range(20260001, 20260251))
+    book = _sl_book("good", cal)
+    spec = _sl_spec(lambda s, p: [], id="good")
+    calls = []
+
+    def simulate(specs_, lo, hi):
+        calls.append((lo, hi))
+        return {s.id: {"trades": [x for x in book if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                       "error": None} for s in specs_}
+    split = _slp.split_sessions(cal)
+    with _sl_tmp.TemporaryDirectory() as td:
+        ledger = os.path.join(td, "final_ledger.json")
+        # screen only: FINAL is never simulated and nothing is written
+        res, trades = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, screen_only=True)
+        assert res[0]["verdict"] == "PASSED SCREEN" and res[0]["final"] is None and not os.path.exists(ledger)
+        assert all(hi <= split.discovery[1] for _lo, hi in calls) and all(x[2] <= split.discovery[1] for x in trades["good"])
+        # the old, unversioned key (cost model None) and a new cost model each get their own once-only FINAL
+        r_old, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, cost_model=None)
+        r_new, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, cost_model="2026-11/f2")
+        assert r_old[0]["verdict"] == "CONFIRMED" and r_new[0]["verdict"] == "CONFIRMED", r_new[0]["final_note"]
+        assert "also seen under cost model legacy" in r_new[0]["final_note"], r_new[0]["final_note"]
+        led = _sl_json.load(open(ledger))
+        assert set(led) == {_slp.ledger_key("good", split, 250, 5), _slp.ledger_key("good", split, 250, 5, "2026-11/f2")}
+        # default cost model = the simulator's current one
+        r_cur, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger)
+        assert _slp.ledger_key("good", split, 250, 5, _sls.COST_MODEL) in _sl_json.load(open(ledger))
+        # a strategy whose code changed after its FINAL was seen is still a RETEST under a new cost model
+        changed = _sl_spec(lambda s, p: [1], id="good")
+        r_chg, _ = _slp.evaluate([changed], cal, simulate, n_symbols=5, ledger_path=ledger, cost_model="2099-01/f9")
+        assert r_chg[0]["verdict"] == "RETEST (FINAL already used)", r_chg[0]
+        # and a peek under one cost model is not washed out by another
+        bad = _sl_spec(lambda s, p: [], id="bad")
+        badbook = _sl_book("bad", cal, win=100.0, loss=-300.0)
+
+        def sim_bad(specs_, lo, hi):
+            return {s.id: {"trades": [x for x in badbook if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                           "error": None} for s in specs_}
+        _slp.evaluate([bad], cal, sim_bad, n_symbols=5, ledger_path=ledger, peek_final=True, cost_model="A")
+        goodbook = _sl_book("bad", cal)                       # same id, now it would pass the screen
+
+        def sim_good(specs_, lo, hi):
+            return {s.id: {"trades": [x for x in goodbook if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                           "error": None} for s in specs_}
+        r_b, _ = _slp.evaluate([bad], cal, sim_good, n_symbols=5, ledger_path=ledger, cost_model="B")
+        assert r_b[0]["verdict"] == "RETEST (FINAL already used)" and "peeked" in r_b[0]["final_note"], r_b[0]
+        r_b2, _ = _slp.evaluate([bad], cal, sim_good, n_symbols=5, ledger_path=ledger, cost_model="B")
+        assert r_b2[0]["verdict"] == "RETEST (FINAL already used)", r_b2[0]          # the taint is remembered
+        try:
+            _slp.evaluate([spec], cal, simulate, screen_only=True, peek_final=True)
+            raise AssertionError("screen_only + peek_final accepted")
+        except ValueError:
+            pass
+
+
+run("stratlab: FINAL ledger keyed by cost model (a re-costed run is not a second look; peeks/code changes still are); "
+    "--screen-only never simulates FINAL", t_sl_ledger_keyed_by_cost_model_and_screen_only)
+
+
+def t_sl_cli_sensitivity_and_screen_only():
+    from stratlab import run as _slr
+    import contextlib, io, csv as _csv
+
+    def bars(sd):
+        return [[f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:]}T{m // 60:02d}:{m % 60:02d}:00", float(o), float(h), float(l), float(c), float(v)]
+                for d, m, o, h, l, c, v in zip(sd.date, sd.t, sd.o, sd.h, sd.l, sd.c, sd.v)]
+    with _sl_tmp.TemporaryDirectory() as td:
+        src, out = os.path.join(td, "bars"), os.path.join(td, "out"); os.makedirs(src)
+        for k, sym in enumerate(("AAA", "BBB")):
+            with open(os.path.join(src, sym + ".json"), "w") as fh:
+                _sl_json.dump({"symbol": sym, "interval": "minute", "bars": bars(_sl_walk(n_days=12, seed=30 + k, symbol=sym))}, fh)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = _slr.main(["--data", src, "--kind", "scalping", "--ids", "scalp_orb5", "--out", out, "--screen-only",
+                            "--cache", os.path.join(td, "cache"), "--jobs", "1"])
+        assert rc == 0
+        text = open(os.path.join(out, "summary.txt")).read()
+        assert "2.0 bps slippage" in text and "net@5" in text and "SCREEN ONLY" in text and _sls.COST_MODEL in text, text[:600]
+        row = list(_csv.DictReader(open(os.path.join(out, "results.csv"))))[0]
+        assert row["slippage_bps"] == "2.0" and row["sens_slippage_bps"] == "5.0" and row["cost_model"] == _sls.COST_MODEL
+        assert float(row["sens_disc_net"]) < float(row["disc_net"]) and int(row["sens_disc_trades"]) > 0, row
+        assert not os.path.exists(os.path.join(td, "cache", "final_ledger.json"))
+
+
+run("stratlab: CLI reports 2 bps by default, a 5 bps sensitivity column, the cost model, and --screen-only",
+    t_sl_cli_sensitivity_and_screen_only)
 
 
 # ══════════════════════════════════════════════════════════════════════════

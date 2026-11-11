@@ -78,8 +78,10 @@ def _in(trades, rng) -> list:
     return [t for t in trades if rng[0] <= t[_DATE] <= rng[1]]
 
 
-def screen(trades, split: Split, horizon: str) -> dict:
-    """The DISCOVERY screen. Returns {"passed", "reasons", "h1", "h2", "disc", "top_symbol", "top_share"}."""
+def screen(trades, split: Split, horizon: str, single_underlying: bool = False) -> dict:
+    """The DISCOVERY screen. Returns {"passed", "reasons", "h1", "h2", "disc", "top_symbol", "top_share"}.
+    single_underlying: an index-futures strategy trades one instrument by design, so gate 4 (no symbol > 35 % of
+    net, which guards a stock-universe result against one lucky stock) cannot apply; the other gates are unchanged."""
     disc = _in(trades, split.discovery)
     h1, h2, d = stats(_in(disc, split.h1)), stats(_in(disc, split.h2)), stats(disc)
     by_sym: dict = {}
@@ -97,7 +99,7 @@ def screen(trades, split: Split, horizon: str) -> dict:
         reasons.append(f"PF {d['pf']:.3f} < {SCREEN_MIN_PF}")
     if d["trades"] < need:
         reasons.append(f"{d['trades']} trades < {need}")
-    if d["net"] > 0 and share > SCREEN_MAX_SYMBOL_SHARE:
+    if d["net"] > 0 and share > SCREEN_MAX_SYMBOL_SHARE and not single_underlying:
         reasons.append(f"{top_sym} is {share:.0%} of net (> {SCREEN_MAX_SYMBOL_SHARE:.0%})")
     return {"passed": not reasons, "reasons": reasons, "h1": h1, "h2": h2, "disc": d,
             "top_symbol": top_sym, "top_share": share}
@@ -117,20 +119,46 @@ def _load_ledger(path):
         return {}
 
 
-def ledger_key(sp_id: str, split: Split, n_sessions: int, n_symbols: int) -> str:
-    """FINAL-ledger key: one entry per strategy AND dataset. A dataset is identified by its FINAL period, its
-    session count and its symbol count (and the ledger file itself lives in the per-data-directory cache), so a
-    12-month and a 3-year run never share an entry: each has its own, once-only FINAL."""
-    return f"{sp_id}|{split.final[0]}-{split.final[1]}|{n_sessions}s|{n_symbols}sym"
+def ledger_key(sp_id: str, split: Split, n_sessions: int, n_symbols: int, cost_model: str | None = None) -> str:
+    """FINAL-ledger key: one entry per strategy AND dataset AND cost/fill model. A dataset is identified by its
+    FINAL period, its session count and its symbol count (and the ledger file itself lives in the per-data-directory
+    cache), so a 12-month and a 3-year run never share an entry: each has its own, once-only FINAL.
+
+    `cost_model` (sim.COST_MODEL = costs.COST_MODEL_VERSION / sim.FILL_MODEL_VERSION) is part of the key so that a
+    run under corrected costs is not counted as a second look at the same strategy. Per-run slippage is NOT part of
+    it. Entries written before cost models were versioned have no suffix (`legacy_ledger_key`); a new-model result
+    for a strategy whose FINAL was already seen under an older model is still reported, with that fact in its note."""
+    base = f"{sp_id}|{split.final[0]}-{split.final[1]}|{n_sessions}s|{n_symbols}sym"
+    return base if cost_model is None else f"{base}|cm={cost_model}"
+
+
+def legacy_ledger_key(sp_id: str, split: Split, n_sessions: int, n_symbols: int) -> str:
+    return ledger_key(sp_id, split, n_sessions, n_symbols, None)
+
+
+def _other_models(ledger: dict, sp_id: str, split: Split, n_sessions: int, n_symbols: int, cost_model) -> list:
+    """Ledger entries for the same strategy and dataset under OTHER cost models (incl. the unversioned legacy one)."""
+    base = legacy_ledger_key(sp_id, split, n_sessions, n_symbols)
+    mine = ledger_key(sp_id, split, n_sessions, n_symbols, cost_model)
+    return [(k, v) for k, v in ledger.items() if (k == base or k.startswith(base + "|cm=")) and k != mine]
 
 
 def evaluate(specs, calendar, simulate, n_symbols: int = 0, ledger_path: str | None = None,
-             peek_final: bool = False, dataset: str = "") -> tuple[list, dict]:
+             peek_final: bool = False, dataset: str = "", screen_only: bool = False,
+             cost_model: str | None = "current") -> tuple[list, dict]:
     """Judge strategies. `simulate(specs, lo, hi)` must return, for entry dates in [lo, hi] only,
     {id: {"trades": [...], "skipped": n, "lookahead": str|None, "error": str|None}}.
 
+    screen_only: never simulate FINAL, not even for screen passers (verdict "PASSED SCREEN", FINAL hidden, nothing
+    written to the ledger). cost_model: the cost/fill model the ledger entry is keyed on; "current" = sim.COST_MODEL,
+    None = the unversioned legacy key.
+
     Returns (results, trades_by_id). trades_by_id holds DISCOVERY trades for everyone and FINAL trades only
     for strategies whose FINAL was legitimately (or, with peek_final, explicitly) evaluated."""
+    if cost_model == "current":
+        from .sim import COST_MODEL as cost_model
+    if screen_only and peek_final:
+        raise ValueError("screen_only and peek_final contradict each other")
     split = split_sessions(calendar)
     n_sessions = len(set(calendar))
     enough = split is not None and n_sessions >= MIN_SESSIONS
@@ -147,7 +175,7 @@ def evaluate(specs, calendar, simulate, n_symbols: int = 0, ledger_path: str | N
     for sp in specs:
         r = disc.get(sp.id, {"trades": [], "skipped": 0, "lookahead": None, "error": None})
         trades_by_id[sp.id] = list(r["trades"])
-        sc = screen(r["trades"], split, sp.horizon)
+        sc = screen(r["trades"], split, sp.horizon, single_underlying=bool(getattr(sp, "underlying", None)))
         res = {"id": sp.id, "spec": sp, "screen": sc, "final": None, "skipped": r.get("skipped", 0),
                "final_note": ""}
         if r.get("error"):
@@ -169,7 +197,7 @@ def evaluate(specs, calendar, simulate, n_symbols: int = 0, ledger_path: str | N
         by_id[sp.id] = res
         results.append(res)
 
-    want = list(passers)
+    want = [] if screen_only else list(passers)
     if peek_final and enough:
         want = [sp for sp in specs if by_id[sp.id]["verdict"] != "INVALID"]
     if want:
@@ -181,19 +209,36 @@ def evaluate(specs, calendar, simulate, n_symbols: int = 0, ledger_path: str | N
             ftr = list(fin.get(sp.id, {}).get("trades", []))
             fv = final_verdict(ftr)
             passed = sp in passers
-            key = ledger_key(sp.id, split, n_sessions, n_symbols)
+            key = ledger_key(sp.id, split, n_sessions, n_symbols, cost_model)
             old = ledger.get(key)
+            others = _other_models(ledger, sp.id, split, n_sessions, n_symbols, cost_model)
             if old is None:
                 ledger[key] = {"fingerprint": sp.fingerprint, "when": now, "peeked": not passed, "dataset": dataset,
+                               "cost_model": cost_model,
                                "final": {k: fv[k] for k in ("trades", "win_pct", "pf", "net", "confirmed")}}
                 clean = passed
-            elif old["fingerprint"] == sp.fingerprint and not old.get("peeked"):
+                # A FINAL seen under an older cost model with the SAME code and no peek does not burn this one:
+                # only the costs changed. A peek, or different code, still does.
+                tainted = [(k, v) for k, v in others if v.get("peeked") or v.get("fingerprint") != sp.fingerprint]
+                if tainted:
+                    clean = False
+                    ledger[key]["tainted"] = True               # stays a RETEST on every later run too
+                    v0 = tainted[0][1]
+                    res["final_note"] = (f"FINAL already seen on {v0['when']} under cost model "
+                                         f"{v0.get('cost_model') or 'legacy'} "
+                                         f"({'peeked' if v0.get('peeked') else 'earlier version'}); not a confirmation")
+                elif others:
+                    res["final_note"] = "; ".join(
+                        f"FINAL also seen under cost model {v.get('cost_model') or 'legacy (pre-2026-11)'} on "
+                        f"{v['when']} (net {v['final']['net']:,.0f}, PF {v['final']['pf']})" for _k, v in others)
+            elif old["fingerprint"] == sp.fingerprint and not old.get("peeked") and not old.get("tainted"):
                 clean = passed                               # same strategy, same data: the same single result
                 res["final_note"] = f"first reported {old['when']}"
             else:
                 clean = False                                # FINAL was already seen: this is not a fresh test
                 res["final_note"] = (f"FINAL already seen on {old['when']} "
-                                     f"({'peeked' if old.get('peeked') else 'earlier version'}); not a confirmation")
+                                     f"({'peeked' if old.get('peeked') else 'already seen under another cost model' if old.get('tainted') else 'earlier version'}); "
+                                     f"not a confirmation")
             res["final"] = fv
             trades_by_id[sp.id].extend(ftr)
             if not passed:

@@ -1,18 +1,37 @@
 """
 stratlab/sim.py — the one simulator every strategy in the lab is run through.
 
+Slippage is a per-run setting (`slippage=` on run_symbol / the CLI's --slippage-bps): default 2 bps per side
+for NIFTY-100 stocks and 1 bps for NIFTY / BANKNIFTY index futures. Why 2 bps: the cost audit estimated the quoted
+spread of the 97 NIFTY-100 stocks from 1-minute bars with the Abdi-Ranaldo close-high-low estimator: median
+2.78 bps (interquartile 2.33-3.05) over the last 12 months, and median 3.26 bps (2.87-3.72) over the 3-year
+data's DISCOVERY sessions alone (to 2025-12-16), i.e. a half-spread of 1.4-1.6 bps per side. A Rs 1 lakh order is
+a median 1.4 % of a minute's volume, well inside the top of book. 2 bps per side = that half-spread plus a margin
+for impact and latency; the old 5 bps was ~2.4x it. 5 bps is kept as a sensitivity column in every report, so a
+strategy that passes only at 2 bps is visibly fragile. Thinner names (spread estimate up to ~8 bps) pay more than
+2 bps in reality: the sensitivity column is the check for them.
+
 Intraday (kinds intraday, scalping, futures with horizon="intraday")
-  * a signal at the close of bar i is filled at the OPEN of bar i+1, 5 bps worse than the open
+  * a signal at the close of bar i is filled at the OPEN of bar i+1, `slippage` worse than the open
   * stop and target are checked on every later bar's low/high (the entry bar included);
-    if a bar touches both, the STOP is assumed; a bar that opens beyond the stop fills at its open
-  * stop / time / square-off exits pay 5 bps slippage; a target is a resting limit and fills at its price
+    if a bar touches both, the STOP is assumed; a bar that opens beyond the stop fills at its OPEN (not the stop)
+  * stop / time / square-off / data-end exits are market orders and pay `slippage`
+  * a target is a resting limit: it fills only if the bar trades THROUGH it by at least one tick (a bare touch
+    is not a fill: the queue at that price may not have been reached); if the bar opens beyond the target
+    by a tick or more it fills at that open (price improvement), otherwise at the target price
   * everything still open is squared off at the open of the 15:15 bar (or the last close if the data ends first)
   * ₹1,00,000 notional per trade, whole shares; one open position per symbol; `max_per_day` trades per day
+Index futures (kind="futures", underlying="NIFTY" | "BANKNIFTY")
+  * simulated on the index's own minute bars (_NIFTY50_min / _NIFTYBANK_min) with futures costs, `lots` x the
+    lot size (LOT_SIZES) per trade and `index_slippage` (default 1 bps); tick 0.05. Basis, roll and margin are
+    NOT modelled: the spot index stands in for the near-month future (the basis is a few tenths of a percent and
+    drifts slowly; a positional hold across expiry would really pay a roll spread and a second round trip).
 Positional (swing, futures with horizon="positional")
   * the strategy sees daily bars up to day d and is filled at the next session's open, or - when it declares a
     decision_time - sees day d only up to that minute and is filled at that minute's bar open
-  * stop / target are checked on daily high/low, stop first; a gap through the stop fills at the open
-  * closed at the close of the `max_hold`-th session
+  * stop / target are checked on daily high/low, stop first; a gap through the stop fills at the open;
+    a target needs a trade one tick through it (a gap beyond it fills at the open)
+  * closed at the close of the `max_hold`-th session (paying slippage)
 Costs: costs.round_trip_cost - equity_mis for intraday/scalping, equity_cnc for swing, future for futures
 (futures are simulated on the cash price: no basis, no lot size, no rollover).
 Swing is delivery and therefore long-only; shorts belong under futures.
@@ -30,13 +49,29 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import costs as _costs  # noqa: E402
 from costs import round_trip_cost  # noqa: E402
 
 from . import data as _data  # noqa: E402
 from .api import Entry, Spec, Swing  # noqa: E402
 from .indicators import DailyHist, Session, View, build_sessions  # noqa: E402
 
-SLIPPAGE = 0.0005               # 5 bps on every market fill
+DEFAULT_SLIPPAGE_BPS = 2.0      # per side, NIFTY-100 stocks at ₹1 lakh (see the module docstring)
+SENSITIVITY_SLIPPAGE_BPS = 5.0  # the old default, reported as a sensitivity column
+INDEX_SLIPPAGE_BPS = 1.0        # per side, NIFTY / BANKNIFTY futures
+SLIPPAGE = DEFAULT_SLIPPAGE_BPS / 1e4        # default fraction on every market fill (override per run)
+INDEX_SLIPPAGE = INDEX_SLIPPAGE_BPS / 1e4
+# NSE lot sizes from the January 2026 expiries (NSE circular FAOP70616, 3 Oct 2025): NIFTY 75 -> 65,
+# BANKNIFTY 35 -> 30. Used for every date: P&L per lot scales with the lot size, so older dates are simply
+# reported in 2026 lots. (The live app's _FON_LOT_SIZES still says NIFTY 75; the lab does not read it.)
+LOT_SIZES = {"NIFTY": 65, "BANKNIFTY": 30}
+INDEX_DATA = {"NIFTY": "_NIFTY50_min", "BANKNIFTY": "_NIFTYBANK_min"}
+INDEX_TICK = 0.05
+# Bump when a fill rule changes. Together with costs.COST_MODEL_VERSION it names the cost/fill model the FINAL
+# ledger is keyed on (protocol.ledger_key). Slippage is NOT part of it: choosing a different slippage after seeing
+# FINAL must not buy a fresh look.
+FILL_MODEL_VERSION = "f2"
+COST_MODEL = f"{_costs.COST_MODEL_VERSION}/{FILL_MODEL_VERSION}"
 NOTIONAL = 100_000.0            # ₹ per trade
 SQUAREOFF = 15 * 60 + 15        # 15:15
 AUDIT_EVERY = 29                # audit one session in this many (per symbol)
@@ -49,8 +84,36 @@ def _hm(minute: int) -> str:
     return f"{int(minute) // 60:02d}:{int(minute) % 60:02d}"
 
 
+def equity_tick(price: float, date: int = 0) -> float:
+    """NSE equity tick size: ₹0.05, and ₹0.01 for stocks under ₹250 from 16 June 2025 (NSE tick-size revision)."""
+    return 0.01 if (price < 250.0 and int(date) >= 20250616) else 0.05
+
+
+def spec_slippage(spec: Spec, slippage: float | None = None, index_slippage: float | None = None) -> float:
+    """The per-side slippage fraction a spec pays in this run."""
+    if getattr(spec, "underlying", None):
+        return INDEX_SLIPPAGE if index_slippage is None else float(index_slippage)
+    return SLIPPAGE if slippage is None else float(slippage)
+
+
+def _tick(spec, price, date) -> float:
+    return INDEX_TICK if getattr(spec, "underlying", None) else equity_tick(price, date)
+
+
+def target_fill(side: int, target: float, o: float, extreme: float, tick: float):
+    """A resting limit at `target`: None unless the bar trades at least one tick through it (`extreme` = the
+    bar's high for a long, its low for a short); fills at the open when the open is already a tick or more beyond."""
+    eps = 1e-9
+    if side * (extreme - target) < tick - eps:
+        return None
+    return float(o) if side * (o - target) >= tick - eps else float(target)
+
+
 def _settle(spec: Spec, symbol, date, side, entry_t, fill, exit_date, exit_t, exit_px, reason) -> tuple:
-    qty = max(1, int(NOTIONAL // fill))
+    if getattr(spec, "underlying", None):
+        qty = int(spec.lots) * LOT_SIZES[spec.underlying]
+    else:
+        qty = max(1, int(NOTIONAL // fill))
     gross = side * (exit_px - fill) * qty
     buy_v, sell_v = (fill * qty, exit_px * qty) if side > 0 else (exit_px * qty, fill * qty)
     cost = round_trip_cost(buy_v, sell_v, spec.cost_kind)
@@ -59,15 +122,18 @@ def _settle(spec: Spec, symbol, date, side, entry_t, fill, exit_date, exit_t, ex
 
 
 # ── intraday ────────────────────────────────────────────────────────────────
-def fill_intraday(s: Session, e: Entry):
-    """Simulate one entry. Returns (exit_index, fill, exit_price, reason) or None if it cannot be taken."""
+def fill_intraday(s: Session, e: Entry, slip: float | None = None, tick: float | None = None):
+    """Simulate one entry. Returns (exit_index, fill, exit_price, reason) or None if it cannot be taken.
+    slip = per-side slippage fraction (default SLIPPAGE); tick = price tick for the target rule (default: the
+    NSE equity tick at the target price on the session's date)."""
+    sl = SLIPPAGE if slip is None else float(slip)
     n = len(s.t)
     j = int(e.i) + 1
     if e.side not in (1, -1) or j < 1 or j >= n or s.t[j] >= SQUAREOFF:
         return None
     side = e.side
     raw = float(s.o[j])
-    fill = raw * (1.0 + side * SLIPPAGE)
+    fill = raw * (1.0 + side * sl)
     stop = float(e.stop) if e.stop is not None else np.nan
     if not np.isfinite(stop) or side * (raw - stop) <= 0:
         return None                                     # no stop, or already through it at the open
@@ -79,6 +145,8 @@ def fill_intraday(s: Session, e: Entry):
         target = float(target)
         if not np.isfinite(target) or side * (target - fill) <= 0:
             return None
+        if tick is None:
+            tick = equity_tick(target, s.date)
     lim = s.idx(SQUAREOFF)
     reason = "squareoff"
     if e.time_stop:
@@ -89,18 +157,18 @@ def fill_intraday(s: Session, e: Entry):
     if e.trail is None:
         if side > 0:
             hs = l[j:lim] <= stop
-            ht = h[j:lim] >= target if target is not None else np.zeros(max(lim - j, 0), bool)
+            ht = h[j:lim] >= target + tick - 1e-9 if target is not None else np.zeros(max(lim - j, 0), bool)
         else:
             hs = h[j:lim] >= stop
-            ht = l[j:lim] <= target if target is not None else np.zeros(max(lim - j, 0), bool)
+            ht = l[j:lim] <= target - tick + 1e-9 if target is not None else np.zeros(max(lim - j, 0), bool)
         hit = hs | ht
         if hit.size and hit.any():
             r = int(hit.argmax())
             k = j + r
             if hs[r]:                                   # stop wins when both are touched
                 px = min(stop, float(o[k])) if side > 0 else max(stop, float(o[k]))
-                return k, fill, px * (1.0 - side * SLIPPAGE), "stop"
-            return k, fill, target, "target"
+                return k, fill, px * (1.0 - side * sl), "stop"
+            return k, fill, target_fill(side, target, float(o[k]), float(h[k] if side > 0 else l[k]), tick), "target"
     else:
         mode, x = e.trail[0], float(e.trail[1])
         a = float(s.atr5[e.i]) if mode == "atr" else 0.0
@@ -110,9 +178,11 @@ def fill_intraday(s: Session, e: Entry):
         for k in range(j, lim):
             if side * (float(o[k]) - stop) <= 0 or (l[k] <= stop if side > 0 else h[k] >= stop):
                 px = min(stop, float(o[k])) if side > 0 else max(stop, float(o[k]))
-                return k, fill, px * (1.0 - side * SLIPPAGE), "stop"
-            if target is not None and (h[k] >= target if side > 0 else l[k] <= target):
-                return k, fill, target, "target"
+                return k, fill, px * (1.0 - side * sl), "stop"
+            if target is not None:
+                tp = target_fill(side, target, float(o[k]), float(h[k] if side > 0 else l[k]), tick)
+                if tp is not None:
+                    return k, fill, tp, "target"
             best = max(best, float(h[k])) if side > 0 else min(best, float(l[k]))     # effective next bar
             if mode == "pct":
                 new = best * (1.0 - side * x / 100.0)
@@ -125,12 +195,13 @@ def fill_intraday(s: Session, e: Entry):
             if side * (new - stop) > 0:
                 stop = new
     if lim < n:
-        return lim, fill, float(o[lim]) * (1.0 - side * SLIPPAGE), reason
-    return n - 1, fill, float(s.c[n - 1]) * (1.0 - side * SLIPPAGE), "squareoff"
+        return lim, fill, float(o[lim]) * (1.0 - side * sl), reason
+    return n - 1, fill, float(s.c[n - 1]) * (1.0 - side * sl), "squareoff"
 
 
-def _take(spec: Spec, s: Session, e: Entry, trades: list) -> int | None:
-    r = fill_intraday(s, e)
+def _take(spec: Spec, s: Session, e: Entry, trades: list, slip: float | None = None) -> int | None:
+    tick = INDEX_TICK if getattr(spec, "underlying", None) else None
+    r = fill_intraday(s, e, spec_slippage(spec) if slip is None else slip, tick)
     if r is None:
         return None
     k, fill, px, reason = r
@@ -138,8 +209,9 @@ def _take(spec: Spec, s: Session, e: Entry, trades: list) -> int | None:
     return k
 
 
-def sim_session(spec: Spec, s: Session) -> tuple[list, int]:
-    """All trades of one strategy in one symbol-session. Returns (trades, skipped_entries)."""
+def sim_session(spec: Spec, s: Session, slip: float | None = None) -> tuple[list, int]:
+    """All trades of one strategy in one symbol-session. Returns (trades, skipped_entries).
+    slip = per-side slippage fraction for this run (default: spec_slippage(spec))."""
     trades: list = []
     skipped = 0
     p = spec.p
@@ -151,7 +223,7 @@ def sim_session(spec: Spec, s: Session) -> tuple[list, int]:
                 break
             if e.i < free:
                 continue                                # a position was still open at this bar
-            k = _take(spec, s, e, trades)
+            k = _take(spec, s, e, trades, slip)
             if k is None:
                 skipped += 1
             else:
@@ -165,7 +237,7 @@ def sim_session(spec: Spec, s: Session) -> tuple[list, int]:
         e = spec.fn(View(s, i + 1), p)                  # the strategy cannot see past bar i
         if e is not None:
             e.i = i
-            k = _take(spec, s, e, trades)
+            k = _take(spec, s, e, trades, slip)
             if k is None:
                 skipped += 1
             else:
@@ -218,15 +290,16 @@ def _aligned(dates: np.ndarray, aux: dict | None):
 
 
 def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = None,
-                   vix_day: dict | None = None) -> tuple[list, int]:
-    """All trades of one positional strategy in one symbol; entries are taken only on dates in [lo, hi]."""
+                   vix_day: dict | None = None, slip: float | None = None) -> tuple[list, int]:
+    """All trades of one positional strategy in one symbol; entries are taken only on dates in [lo, hi].
+    slip = per-side slippage fraction for this run (default: spec_slippage(spec))."""
     d = sd.daily()
     nd = len(d["c"])
     nifty, vix = _aligned(d["date"], nifty_day), _aligned(d["date"], vix_day)
     trades: list = []
     skipped = 0
     p = spec.p
-    slip = SLIPPAGE
+    slip = spec_slippage(spec) if slip is None else float(slip)
     # A trade entered in a period is also EXITED inside it: at the latest at the close of the last session <= hi,
     # so DISCOVERY trades never use FINAL-period prices (reason "period_end").
     hi_day = int(np.searchsorted(d["date"], hi, side="right")) - 1
@@ -295,9 +368,12 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
                 px = min(stop, ko) if side > 0 else max(stop, ko)        # a gap through the stop fills at the open
                 out = (k, px * (1.0 - side * slip), "stop")
                 break
-            if target is not None and (kh >= target if side > 0 else kl <= target):
-                out = (k, float(target), "target")
-                break
+            if target is not None:
+                tp = target_fill(side, float(target), ko, kh if side > 0 else kl,
+                                 _tick(spec, float(target), d["date"][k]))
+                if tp is not None:
+                    out = (k, tp, "target")
+                    break
         if out is None:
             out = (last_day, float(d["c"][last_day]) * (1.0 - side * slip),
                    "max_hold" if last_day == natural else ("period_end" if last_day < nd - 1 else "data_end"))
@@ -310,15 +386,28 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
 
 
 # ── one symbol, many strategies ─────────────────────────────────────────────
+def applies(spec: Spec, symbol: str) -> bool:
+    """Index-futures specs run only on their index's minute bars; every other spec only on stocks."""
+    u = getattr(spec, "underlying", None)
+    if u:
+        return symbol == INDEX_DATA[u]
+    return symbol not in INDEX_DATA.values()
+
+
 def run_symbol(cache_dir: str, symbol: str, specs: list[Spec], lo: int, hi: int, audit: bool = True,
-               sd=None, index=None) -> dict:
-    """Run every spec on one symbol for entry dates in [lo, hi].
+               sd=None, index=None, slippage: float | None = None, index_slippage: float | None = None) -> dict:
+    """Run every spec that applies to `symbol` (see `applies`) for entry dates in [lo, hi].
+    slippage / index_slippage = per-side fractions for this run (default SLIPPAGE / INDEX_SLIPPAGE).
     Returns {id: {"trades": [...], "skipped": n, "lookahead": str|None, "error": str|None, "sessions": n}}."""
-    sd = sd if sd is not None else _data.load_symbol(cache_dir, symbol)
     out = {sp.id: {"trades": [], "skipped": 0, "lookahead": None, "error": None, "sessions": 0, "secs": 0.0}
            for sp in specs}
+    specs = [sp for sp in specs if applies(sp, symbol)]
+    if not specs:
+        return out
+    sd = sd if sd is not None else _data.load_symbol(cache_dir, symbol)
     if sd is None:
         return out
+    slip = {sp.id: spec_slippage(sp, slippage, index_slippage) for sp in specs}
     intr = [sp for sp in specs if sp.horizon == "intraday"]
     pos = [sp for sp in specs if sp.horizon == "positional"]
     if intr:
@@ -335,7 +424,7 @@ def run_symbol(cache_dir: str, symbol: str, specs: list[Spec], lo: int, hi: int,
                     if sp.needs_index and s.nifty is None:
                         continue
                     res["sessions"] += 1
-                    tr, sk = sim_session(sp, s)
+                    tr, sk = sim_session(sp, s, slip[sp.id])
                     res["trades"].extend(tr)
                     res["skipped"] += sk
                     if audit and res["lookahead"] is None and s.day_index % AUDIT_EVERY == 0:
@@ -350,7 +439,7 @@ def run_symbol(cache_dir: str, symbol: str, specs: list[Spec], lo: int, hi: int,
             res = out[sp.id]
             t0 = time.perf_counter()
             try:
-                tr, sk = sim_positional(sp, sd, lo, hi, nifty_day, vix_day)
+                tr, sk = sim_positional(sp, sd, lo, hi, nifty_day, vix_day, slip[sp.id])
                 res["trades"].extend(tr)
                 res["skipped"] += sk
                 res["sessions"] = int(((sd.days >= lo) & (sd.days <= hi)).sum())

@@ -157,19 +157,37 @@ What the candlestick results do and do not test (read before quoting a pass):
 
 * **Data**: 1-minute bars, 09:15–15:29 IST. Sessions with fewer than 200 bars (the Diwali muhurat hour, a
   half-downloaded day) are dropped entirely, so "yesterday" is always the last full session.
-* **Entry**: signal at the close of bar `i` → filled at the **open of bar i+1**, 5 bps worse. An entry whose
+* **Slippage** is a per-run setting: `--slippage-bps` (default **2 bps per side** for NIFTY-100 stocks) and
+  `--index-slippage-bps` (default **1 bps** for NIFTY / BANKNIFTY futures). 2 bps comes from the cost audit: the
+  effective half-spread of NIFTY-100 stocks for ₹1 lakh orders measured on 1-minute bars was about 2.4x below the
+  old 5 bps default. Every report also shows each strategy's DISCOVERY net at `--sens-bps` (default 5 bps; index
+  futures scaled in proportion, 2.5 bps) and whether it would still pass the screen there (`net@5`, `scr`).
+* **Entry**: signal at the close of bar `i` → filled at the **open of bar i+1**, `slippage` worse. An entry whose
   stop is already through at that open, or whose target is on the wrong side, is skipped (counted in
   `skipped_entries`). No fills at or after 15:15.
 * **Exit**: stop and target are checked on each later bar's low/high, the entry bar included. **If one bar
-  touches both, the stop is assumed.** A bar that opens beyond the stop fills at its open. Stop, time-stop and
-  square-off exits pay 5 bps slippage; a target is a resting limit order and fills at its price.
+  touches both, the stop is assumed.** A bar that opens beyond the stop fills at its **open**, not the stop.
+  Stop, time-stop, square-off and data-end exits are market orders and pay `slippage`. A target is a resting
+  limit order: it fills only when a bar trades **at least one tick through it** (a bare touch is not a fill);
+  if the bar opens a tick or more beyond it, it fills at that open. Tick = ₹0.05, or ₹0.01 for stocks under
+  ₹250 from 16 June 2025 (`sim.equity_tick`); index futures 0.05.
 * **Square-off** at the open of the 15:15 bar. If the day's data ends earlier, at the last available close.
 * **Size**: ₹1,00,000 notional per trade in whole shares. One open position per symbol; `max_per_day`
   trades per symbol per day. Strategies are simulated independently: no portfolio cap, no capital limit.
-* **Costs**: `costs.round_trip_cost` — `equity_mis` for intraday and scalping, `equity_cnc` for swing,
-  `future` for futures. On ₹1 lakh that is about ₹80 for an intraday round trip and about ₹230 for delivery,
-  plus about ₹100 of slippage: an intraday trade starts roughly 0.18 % behind.
-* **Futures** are simulated on the cash price with futures costs: no basis, lot size, margin or rollover.
+* **Costs**: `costs.round_trip_cost` (2026 Zerodha/NSE rates, `costs.COST_MODEL_VERSION`) — `equity_mis` for
+  intraday and scalping, `equity_cnc` for swing (incl. the ₹15.34 DP charge per sell), `future` for futures
+  (0.05 % STT on the sell side). On ₹1 lakh that is about ₹83 for an intraday round trip, ₹238 for delivery and
+  ₹104 for a futures round trip, plus about ₹40 of slippage at 2 bps (₹100 at 5 bps): an intraday trade starts
+  roughly 0.12 % behind (0.18 % at 5 bps).
+* **Stock futures** (`kind="futures"` without `underlying`) are simulated on the cash price with futures costs:
+  no basis, lot size, margin or rollover.
+* **Index futures** (`kind="futures", underlying="NIFTY"` or `"BANKNIFTY"`, optional `lots=`) run only on
+  `_NIFTY50_min.json` / `_NIFTYBANK_min.json`, with futures costs, `lots` × the 2026 lot size (NIFTY 65,
+  BANKNIFTY 30 — NSE circular FAOP70616, from the January 2026 expiries; used for every date) and index
+  slippage. Positional holds are allowed. The spot index stands in for the future: basis and expiry roll are
+  ignored (a hold across expiry would really pay a roll spread and another round trip). The screen's
+  "no symbol > 35 % of net" gate cannot apply to a one-instrument strategy and is skipped for them; every other
+  gate is unchanged.
 * **Positional**: stop/target checked on daily high/low (stop first); a gap through the stop fills at the
   open; the position is closed at the close of its `max_hold`-th session, or at the close of the last session of
   the period being simulated (`period_end`), so DISCOVERY trades never use FINAL-period prices. Delivery is long-only.
@@ -199,6 +217,14 @@ otherwise `REJECTED ON FINAL`.
   the entry records the data directory), so a 12-month and a 3-year run each have their own single FINAL. If
   the strategy's code or parameters change after its FINAL was seen, a later pass is reported as
   `RETEST (FINAL already used)`, not as a confirmation.
+* The ledger key also holds the **cost/fill model** (`sim.COST_MODEL` = `costs.COST_MODEL_VERSION` /
+  `sim.FILL_MODEL_VERSION`; entries from before versioning have no suffix and count as "legacy"). Re-running the
+  same, unchanged strategy under corrected costs is therefore not a second look: it gets its own FINAL, whose note
+  lists every earlier-model FINAL result. A FINAL that was peeked, or seen with different code, under any cost
+  model still makes a later pass a RETEST. Per-run slippage is deliberately NOT part of the key, so a slippage
+  chosen after seeing FINAL never buys a fresh look.
+* `--screen-only` never simulates FINAL, not even for passers (verdict `PASSED SCREEN`, FINAL hidden, nothing
+  written to the ledger): use it to compare cost models without spending the hold-out.
 * Below 100 sessions there is **no verdict** ("too few sessions"); the discovery numbers are shown for
   debugging only.
 * A strategy that raises, or fails the look-ahead audit, is `INVALID`.
@@ -213,4 +239,7 @@ otherwise `REJECTED ON FINAL`.
 bar i+1; changing future bars does not change earlier fills; the audit catches a cheating vector strategy;
 indicators are causal; next-open fills and slippage; stop-before-target; square-off and time stop; costs;
 the positional simulator; the protocol gates and that FINAL is never simulated for screen failures; both data
-layouts; every catalogue strategy runs and passes the audit; the CLI end to end.
+layouts; every catalogue strategy runs and passes the audit; the CLI end to end. The `COSTS 2026 AND STRATLAB
+FILL MODEL` section covers the 2026 cost rates, per-run slippage and the 5 bps sensitivity column, stops gapped
+through filling at the open, market exits paying slippage, the one-tick target rule, index futures, the
+cost-model-keyed FINAL ledger and `--screen-only`.
