@@ -214,14 +214,31 @@ def _trail_name(name: str) -> str:
     return name.replace("_v2", "").replace("_legacy", "")
 
 
+# Research agents (agents/research_agents.py, replay only): product, the strategy whose trailing config they use,
+# and the capital bucket they are sized from. swing_short mirrors swing as a stock-futures short (NRML).
+_PRODUCT = {"swing": "CNC", "swing_short": "NRML"}
+_TRAIL_AS = {"swing_short": "swing", "meanrev_v2": "intraday"}
+_SIZE_AS = {"swing_short": "swing", "meanrev_v2": "intraday"}
+
+
+def _cost(e: float, x: float, q: int, side: str, product: str, symbol: str) -> float:
+    """costs.trade_cost for the product: NRML is priced as a stock future (NFO, …FUT)."""
+    if product == "NRML":
+        return trade_cost(e, x, q, side, "NFO", "NRML", f"{symbol}FUT")
+    return trade_cost(e, x, q, side, "NSE", product, symbol)
+
+
 def _agent(name: str, params: Optional[dict]):
     from agents.strategy_agents import IntradayAgent, ScalpingAgent, SwingAgent
     from agents.intraday_v2 import IntradayV2Agent, ScalpV2Agent
+    from agents.research_agents import MeanRevV2Agent, SwingShortAgent
     cls = {"intraday": IntradayV2Agent, "scalping": ScalpV2Agent, "swing": SwingAgent,
            "intraday_v2": IntradayV2Agent, "scalping_v2": ScalpV2Agent,            # aliases
-           "intraday_legacy": IntradayAgent, "scalping_legacy": ScalpingAgent}.get(name)
+           "intraday_legacy": IntradayAgent, "scalping_legacy": ScalpingAgent,
+           "swing_short": SwingShortAgent, "meanrev_v2": MeanRevV2Agent}.get(name)  # research only
     if not cls:
-        raise ValueError(f"replay supports intraday, scalping, swing, intraday_legacy, scalping_legacy (not {name})")
+        raise ValueError(f"replay supports intraday, scalping, swing, intraday_legacy, scalping_legacy, "
+                         f"swing_short, meanrev_v2 (not {name})")
     a = cls()
     for k, v in (params or {}).items():       # instance attrs shadow the class defaults
         if not hasattr(a, k):
@@ -284,7 +301,7 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
             clock.now = ts
             if ts.date() != cur_day:
                 cur_day, day_open, day_high, day_low = ts.date(), b["open"], b["high"], b["low"]
-                if name == "swing" and hasattr(agent, "_last_eval"):
+                if name in ("swing", "swing_short") and hasattr(agent, "_last_eval"):
                     agent._last_eval.pop(alias, None)
             day_high, day_low = max(day_high, b["high"]), min(day_low, b["low"])
 
@@ -293,7 +310,7 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
                 px = b["open"] * (1 + slip if pending["side"] == "BUY" else 1 - slip)
                 qty = pending["qty"]
                 oid = f"BT-{len(trades)}"
-                pos = eng.register(symbol=alias, strategy=name, side=pending["side"], entry_price=px, quantity=qty,
+                pos = eng.register(symbol=alias, strategy=_TRAIL_AS.get(name, name), side=pending["side"], entry_price=px, quantity=qty,
                                    order_id=oid, atr=pending["atr"])
                 pos.current_sl = pending["stop"] if pending["side"] == "BUY" and pending["stop"] < px or \
                     pending["side"] == "SELL" and pending["stop"] > px else pos.current_sl
@@ -323,12 +340,12 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
                         reason, xpx = exits[0][0], b["close"]
                     elif product == "MIS" and ts.time() >= SQUARE_OFF:
                         reason, xpx = "SQUARE_OFF", b["close"]
-                    elif product == "CNC" and open_t["days_held"] >= MAX_CNC_SESSIONS:
+                    elif product in ("CNC", "NRML") and open_t["days_held"] >= MAX_CNC_SESSIONS:
                         reason, xpx = "TIME", b["close"]
                 if reason:
                     e, q = open_t["entry"], open_t["qty"]
                     gross = (xpx - e) * q * (1 if side == "BUY" else -1)
-                    cost = trade_cost(e, xpx, q, side, "NSE", product, symbol)
+                    cost = _cost(e, xpx, q, side, product, symbol)
                     trades.append(ReplayTrade(symbol, side, open_t["ts"], ts, round(e, 2), round(xpx, 2), q,
                                               round(gross, 2), cost, round(gross - cost, 2), reason,
                                               i - open_t["i"], open_t["signal"], open_t.get("stop"), open_t.get("target")))
@@ -355,7 +372,7 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
                     e, qq, side = open_t["entry"], open_t["qty"], open_t["side"]
                     xpx = b["close"] * (1 - slip if side == "BUY" else 1 + slip)
                     gross = (xpx - e) * qq * (1 if side == "BUY" else -1)
-                    cost = trade_cost(e, xpx, qq, side, "NSE", product, symbol)
+                    cost = _cost(e, xpx, qq, side, product, symbol)
                     trades.append(ReplayTrade(symbol, side, open_t["ts"], ts, round(e, 2), round(xpx, 2), qq,
                                               round(gross, 2), cost, round(gross - cost, 2), "RULE",
                                               i - open_t["i"], open_t["signal"], open_t.get("stop"), open_t.get("target")))
@@ -374,13 +391,15 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
             if action in ("BUY", "SELL") and sig:
                 if name == "swing" and action != "BUY":
                     continue
+                if name == "swing_short" and action != "SELL":
+                    continue
                 if LIVE_FILTERS.get("mtf"):        # the live pipeline's multi-timeframe veto (base_agent)
                     from multi_timeframe import check as _mtf_check
                     if not _mtf_check(snap, action).aligned:
                         FILTER_STATS["mtf_vetoed"] = FILTER_STATS.get("mtf_vetoed", 0) + 1
                         continue
                 from risk_manager import risk_manager
-                qty = risk_manager.calculate_quantity(b["close"], agent=name)
+                qty = risk_manager.calculate_quantity(b["close"], agent=_SIZE_AS.get(name, name))
                 cap_q = int(settings.total_capital * settings.risk_per_trade_pct / 100 // max(abs(b["close"] - sig.get("stop_loss", b["close"] * 0.99)), 0.01))
                 qty = max(1, min(qty, cap_q))
                 pending = {"side": action, "qty": qty, "stop": float(sig.get("stop_loss") or 0) or
@@ -391,7 +410,7 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
         if open_t:                                  # close whatever is left at the last bar
             b = bars[-1]; e, q, side = open_t["entry"], open_t["qty"], open_t["side"]
             gross = (b["close"] - e) * q * (1 if side == "BUY" else -1)
-            cost = trade_cost(e, b["close"], q, side, "NSE", product, symbol)
+            cost = _cost(e, b["close"], q, side, product, symbol)
             trades.append(ReplayTrade(symbol, side, open_t["ts"], b["ts"], round(e, 2), round(b["close"], 2), q,
                                       round(gross, 2), cost, round(gross - cost, 2), "END", len(bars) - open_t["i"], open_t["signal"],
                                       open_t.get("stop"), open_t.get("target")))
@@ -406,7 +425,7 @@ async def _replay_symbol(agent, name: str, symbol: str, bars: list[dict], slippa
 async def replay_async(agent_name: str, symbols: list[str], days: int = 30, slippage_bps: float = 5.0,
                        params: Optional[dict] = None, bars_by_symbol: Optional[dict[str, list[dict]]] = None) -> ReplayResult:
     agent = _agent(agent_name, params)
-    product = "CNC" if agent_name == "swing" else "MIS"
+    product = _PRODUCT.get(agent_name, "MIS")
     res = ReplayResult(agent=agent_name, symbols=list(symbols), days=days, source="", params=params or {})
     sources, first, last = set(), None, None
     for sym in symbols:

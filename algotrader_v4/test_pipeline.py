@@ -6997,6 +6997,127 @@ def t_deliberate_size_cuts_not_floored():
 
 run("sizing: allocator/review cuts are not floored; bucket remnants are", t_deliberate_size_cuts_not_floored)
 
+
+# ── Research agents (replay only): swing_short, meanrev_v2 ───────────────
+from agents.research_agents import SwingShortAgent, MeanRevV2Agent
+
+def _mr_bars(day, spikes=(), n=375):
+    """A range day: price alternates 995/1005 around 1000 from 09:15; each minute in `spikes` is a stretch
+    bar that reaches 1012 (σ ≈ 3.3, so beyond the ~1010 3σ band) and closes red at 1008, back inside — a fade setup."""
+    out = []
+    for i in range(n):
+        ts = datetime(day.year, day.month, day.day, 9, 15) + timedelta(minutes=i)
+        if ts.time() in spikes:
+            o, h, l, c = 1011.0, 1012.0, 1007.0, 1008.0
+        else:
+            c = 995.0 if i % 2 else 1005.0
+            o, h, l = 1000.0, max(c, 1000.0) + 0.5, min(c, 1000.0) - 0.5
+        out.append({"ts": ts, "open": o, "high": h, "low": l, "close": c, "volume": 10000})
+    return out
+
+def _mr_walk(agent, sym, bars):
+    """Feed bars one minute at a time like the tick loop (snapshot = last 60 candles); returns the signals."""
+    sigs, candles = [], []
+    for b in bars:
+        candles.append(Candle(b["open"], b["high"], b["low"], b["close"], b["volume"], b["ts"]))
+        snap = _make_snap(symbol=sym, ltp=b["close"])
+        snap.candles_1min = candles[-60:]
+        with _with_v2_clock(b["ts"], None):
+            action, sig = agent.evaluate_tick(snap)
+        if action in ("BUY", "SELL"):
+            sigs.append((b["ts"], action, sig))
+    return sigs
+
+def t_research_agents_not_live():
+    assert "swing_short" not in ALL_AGENTS and "meanrev_v2" not in ALL_AGENTS
+    assert not any(isinstance(a, (SwingShortAgent, MeanRevV2Agent)) for a in ALL_AGENTS.values())
+    assert isinstance(_rb._agent("swing_short", None), SwingShortAgent)
+    a = _rb._agent("meanrev_v2", {"K_SIGMA": 2.5})
+    assert isinstance(a, MeanRevV2Agent) and a.K_SIGMA == 2.5 and MeanRevV2Agent.K_SIGMA == 3.0
+    assert SwingShortAgent._last_eval is not SwingAgent._last_eval, "own throttle state"
+
+def t_swing_short_rejection_sell():
+    a = SwingShortAgent()
+    # downtrend (price under EMA200), rally into EMA50, RSI mid-range → short
+    snap = _make_snap(symbol="SWS1", ltp=1000.0, rsi=50.0, trend="DOWN", ema50=1005.0, ema200=1100.0)
+    action, sig = a.evaluate_tick(snap)
+    assert action == "SELL", action
+    assert sig["product"] == "NRML" and sig["exchange"] == "NFO" and "EMA50-REJECT" in sig["trigger"]
+    assert abs(sig["stop_loss"] - 1030.0) < 0.01 and abs(sig["target"] - 920.0) < 0.01, sig
+    assert a.evaluate_tick(snap)[0] == "HOLD", "throttled to once a minute like swing"
+    # the long setup's mirror image must not short: price above EMA200
+    b = SwingShortAgent()
+    assert b.evaluate_tick(_make_snap(symbol="SWS2", ltp=1000.0, rsi=50.0, ema50=1005.0, ema200=900.0))[0] == "HOLD"
+    # nor with RSI outside 40-60
+    c = SwingShortAgent()
+    assert c.evaluate_tick(_make_snap(symbol="SWS3", ltp=1000.0, rsi=25.0, ema50=1005.0, ema200=1100.0))[0] == "HOLD"
+
+def t_swing_short_exit_rule_and_cost_model():
+    a = SwingShortAgent()
+    ind = _make_snap(ltp=1031.0).indicators
+    should, why = a.should_exit_position({"average_price": 1000.0, "quantity": -10}, ind)
+    assert should and "SL" in why
+    assert a.rule_exit({"average_price": 1000.0, "quantity": -10}, ind) == (False, ""), "no rule exits (NRML)"
+    fut = _rb._cost(1000.0, 980.0, 40, "SELL", "NRML", "SBIN")
+    cnc = _rb._cost(1000.0, 980.0, 40, "SELL", "CNC", "SBIN")
+    from costs import round_trip_cost
+    assert fut == round_trip_cost(980.0 * 40, 1000.0 * 40, "future") and fut < cnc, (fut, cnc)
+
+def t_meanrev_v2_fades_stretch_to_vwap():
+    day = datetime(2026, 1, 15)
+    a = MeanRevV2Agent()
+    sigs = _mr_walk(a, "MR1", _mr_bars(day, spikes=(time(11, 0),), n=120))
+    assert len(sigs) == 1, sigs
+    ts, action, sig = sigs[0]
+    assert ts.time() == time(11, 0) and action == "SELL"
+    assert 999.0 < sig["target"] < 1001.5, sig                     # target = session VWAP (~1000)
+    assert sig["target_pct"] >= 0.5 and sig["stop_loss"] > 1008.0 > sig["target"]
+    assert "VWAP_FADE" in sig["trigger"] and sig["product"] == "MIS"
+    # mirror: a stretch down that closes green → long
+    b = MeanRevV2Agent()
+    bars = _mr_bars(day, n=120)
+    k = next(i for i, x in enumerate(bars) if x["ts"].time() == time(11, 0))
+    bars[k] = {**bars[k], "open": 989.0, "high": 993.0, "low": 988.0, "close": 992.0}
+    sigs = _mr_walk(b, "MR1B", bars)
+    assert len(sigs) == 1 and sigs[0][1] == "BUY" and sigs[0][2]["stop_loss"] < 992.0 < sigs[0][2]["target"], sigs
+
+def t_meanrev_v2_time_window():
+    day = datetime(2026, 1, 15)
+    a = MeanRevV2Agent()                                       # 10:00 and 14:45 stretches are outside 10:30-14:30
+    assert _mr_walk(a, "MR2", _mr_bars(day, spikes=(time(10, 0), time(14, 45)))) == []
+    b = MeanRevV2Agent()                                       # an agent that joined mid-session has no session VWAP
+    late = [x for x in _mr_bars(day, spikes=(time(11, 30),)) if x["ts"].time() >= time(10, 0)]
+    assert _mr_walk(b, "MR3", late) == []
+    c = MeanRevV2Agent(); c.MIN_TGT_PCT = 2.0                  # VWAP too close to pay: skipped
+    assert _mr_walk(c, "MR4", _mr_bars(day, spikes=(time(11, 0),), n=120)) == []
+
+def t_meanrev_v2_one_trade_per_symbol_per_day():
+    a = MeanRevV2Agent()
+    d1, d2 = datetime(2026, 1, 15), datetime(2026, 1, 16)
+    spikes = (time(11, 0), time(12, 0), time(13, 0))
+    s1 = _mr_walk(a, "MR5", _mr_bars(d1, spikes=spikes))
+    s2 = _mr_walk(a, "MR5", _mr_bars(d2, spikes=spikes))
+    assert len(s1) == 1 and len(s2) == 1 and s2[0][0].date() == d2.date(), (s1, s2)
+    # through the replay: three setups a day for three days → at most one trade per symbol per day
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = [b for d in range(3) for b in _mr_bars(datetime(2026, 1, 12 + d), spikes=spikes)]
+        res = _rb.replay("meanrev_v2", ["RMR"], days=3, slippage_bps=0.0, bars_by_symbol={"RMR": bars})
+        per_day = {}
+        for t in res.trades:
+            per_day[t.entry_ts.date()] = per_day.get(t.entry_ts.date(), 0) + 1
+        assert res.trades and max(per_day.values()) == 1, per_day
+        assert all(t.signal.startswith("MR2-") and time(10, 30) <= t.entry_ts.time() <= time(14, 31) for t in res.trades)
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+run("research: swing_short / meanrev_v2 replay-only, not in ALL_AGENTS", t_research_agents_not_live)
+run("research: swing_short shorts an EMA50 rejection in an EMA200 downtrend", t_swing_short_rejection_sell)
+run("research: swing_short exits by stop only; priced as stock futures", t_swing_short_exit_rule_and_cost_model)
+run("research: meanrev_v2 fades a 3σ stretch to the session VWAP", t_meanrev_v2_fades_stretch_to_vwap)
+run("research: meanrev_v2 silent outside 10:30-14:30 / without session", t_meanrev_v2_time_window)
+run("research: meanrev_v2 at most one trade per symbol per day",         t_meanrev_v2_one_trade_per_symbol_per_day)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
