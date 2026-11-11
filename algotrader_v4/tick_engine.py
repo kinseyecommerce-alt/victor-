@@ -78,6 +78,7 @@ class LiveIndicators:
     bid:         float = 0.0
     ask:         float = 0.0
     spread:      float = 0.0
+    bars:        int = 0       # 1-minute candles the indicators were computed from (0 = defaults only)
     # EMA
     ema9:        float = 0.0
     ema21:       float = 0.0
@@ -393,6 +394,7 @@ class IndicatorCalc:
         )
         if df.empty or len(df) < 5:
             return ind
+        ind.bars = len(df)
 
         close  = df["close"]
         high   = df["high"]

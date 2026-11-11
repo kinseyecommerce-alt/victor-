@@ -6,6 +6,7 @@ from the TickEngine queue. Strategies evaluate on every live tick.
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -314,6 +315,8 @@ class BaseAgent(ABC):
         self._task:  Optional[asyncio.Task]  = None
         self._approved: set[str] = set()
         self._review_tasks: set = set()           # in-flight AI reviews (keep references)
+        self._reviewing: set = set()              # symbols with a review in flight
+        self._reviewed_at: dict = {}              # symbol → monotonic time of its last review attempt
         # Instruments this agent holds but doesn't trade signals on (F&O option legs):
         # their ticks only drive exits
         self._exit_only: set[str] = set()
@@ -481,9 +484,23 @@ class BaseAgent(ABC):
                     # (a burst of opening-range signals would otherwise be reviewed one by
                     # one and entered stale); the entry re-checks price drift afterwards.
                     if self._gate_applies():
+                        sym = snap.symbol
+                        # one review per symbol at a time, and none again within gate_review_cooldown_s:
+                        # agents re-signal every tick/minute, and each review is a paid model call
+                        if sym in self._reviewing or (time.monotonic() - self._reviewed_at.get(sym, -1e9)
+                                                      < settings.gate_review_cooldown_s):
+                            continue
+                        self._reviewed_at[sym] = time.monotonic()
+                        # never pay for a review of a trade the sizing/risk checks would refuse anyway
+                        why = self._entry_precheck(snap, action, signal)
+                        if why:
+                            self._skip(sym, f"{why} (no AI review)")
+                            continue
+                        self._reviewing.add(sym)
                         task = asyncio.create_task(self._review_then_enter(snap, action, signal, _evt))
                         self._review_tasks.add(task)
                         task.add_done_callback(self._review_tasks.discard)
+                        task.add_done_callback(lambda _t, _s=sym: self._reviewing.discard(_s))
                         continue
                     await self._finish_entry(snap, action, signal, _evt)
             except Exception as exc:
@@ -536,6 +553,35 @@ class BaseAgent(ABC):
         except Exception as exc:
             self.state.errors.append(f"{sym}: {str(exc)[:100]}")
             logger.opt(exception=exc).warning("[{}] review/entry error on {} — signal dropped", self.name, sym)
+
+    def _entry_precheck(self, snap: MarketSnapshot, action: str, signal: dict) -> Optional[str]:
+        """The side-effect-free part of _try_enter's sizing and risk checks for an equity entry: the reason
+        it would be refused, or None. Run before the AI review so refused trades cost no model call."""
+        if signal.get("exchange", "NSE") != "NSE" or type(self)._try_enter is not BaseAgent._try_enter:
+            return None                              # options/overridden entry paths size differently
+        try:
+            sym, ltp = snap.symbol, snap.tick.ltp
+            qty, why = allocate_quantity(self.name, risk_manager.calculate_quantity(ltp, agent=self.name), ltp)
+            if qty < 1:
+                return why
+            import portfolio_risk
+            pct = signal.get("stop_loss_pct", settings.stop_loss_pct) / 100
+            stop_px = signal.get("stop_loss") or (ltp * (1 - pct) if action == "BUY" else ltp * (1 + pct))
+            pr = portfolio_risk.pre_entry(sym, action, qty, ltp, stop_px, kind="equity",
+                                          underlying=signal.get("underlying"))
+            if not pr["ok"]:
+                return f"portfolio risk: {pr['reason']}"
+            floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(self.name)
+            if min(qty, pr["max_quantity"]) * ltp < floor:
+                return f"portfolio risk cut it to ₹{min(qty, pr['max_quantity']) * ltp:,.0f}, under the ₹{floor:,.0f} minimum"
+            if order_guard.is_symbol_active_anywhere(sym):
+                return "symbol already active in another agent"
+            ok, reason = order_guard.can_place(sym, self.name, action)
+            if not ok:
+                return f"order guard: {reason}"
+        except Exception as exc:                     # a broken pre-check must not block the review
+            logger.debug("[{}] entry pre-check failed on {}: {}", self.name, snap.symbol, exc)
+        return None
 
     async def _kronos_veto(self, snap: MarketSnapshot, action: str) -> Optional[str]:
         """Skip a signal Kronos forecasts clearly against (settings.kronos_veto_pct). Replay of the 20-stock

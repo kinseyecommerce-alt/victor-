@@ -6918,6 +6918,40 @@ def t_live_ticks_throttled_and_coalesced():
 
 run("live ticks: indicators throttled, ticks coalesced (open-time freeze)", t_live_ticks_throttled_and_coalesced)
 
+
+def t_fno_no_exit_on_cold_option_and_gate_precheck():
+    from unittest.mock import patch as _patch
+    from datetime import datetime as _dt
+    from tick_engine import LiveIndicators, MarketSnapshot, Tick
+    from agents.strategy_agents import ALL_AGENTS
+    import agents.base_agent as _ba
+    fno = ALL_AGENTS["fno"]
+    pos = {"average_price": 20.0, "quantity": 500}
+    # a just-subscribed option: default RSI 50 / NEUTRAL momentum must not trigger the theta exit (11 Nov churn)
+    cold = LiveIndicators(symbol="X26NOV100CE", ltp=19.8)
+    assert cold.bars == 0 and fno.should_exit_position(pos, cold) == (False, "")
+    warm = LiveIndicators(symbol="X26NOV100CE", ltp=19.8, bars=30)
+    assert fno.should_exit_position(pos, warm)[0], "warmed indicators still use the theta rule"
+    crash = LiveIndicators(symbol="X26NOV100CE", ltp=13.0)   # price rules apply from the first tick
+    assert fno.should_exit_position(pos, crash)[0]
+    # the pre-review check refuses what sizing would refuse, so no paid review is spent on it
+    sw = ALL_AGENTS["swing"]
+    t = Tick(symbol="PRECHK", ltp=100.0, bid=0, ask=0, volume=0, change=0, change_pct=0, high=0, low=0, open=100,
+             timestamp=_dt(2026, 11, 11, 10, 0))
+    snap = MarketSnapshot(symbol="PRECHK", tick=t, indicators=LiveIndicators(symbol="PRECHK", ltp=100.0))
+    with _patch.object(_ba, "allocate_quantity", return_value=(0, "capital bucket full")):
+        assert sw._entry_precheck(snap, "BUY", {"stop_loss": 97.0}) == "capital bucket full"
+    with _patch.object(_ba, "allocate_quantity", return_value=(5000, "ok")), \
+         _patch("portfolio_risk.pre_entry", return_value={"ok": True, "max_quantity": 1, "reason": "VaR"}):
+        why = sw._entry_precheck(snap, "BUY", {"stop_loss": 97.0})
+        assert why and "minimum" in why, why
+    with _patch.object(_ba, "allocate_quantity", return_value=(5000, "ok")), \
+         _patch("portfolio_risk.pre_entry", return_value={"ok": True, "max_quantity": 5000, "reason": ""}):
+        assert sw._entry_precheck(snap, "BUY", {"stop_loss": 97.0}) is None
+    assert fno._entry_precheck(snap, "BUY", {"exchange": "NFO"}) is None   # options size their own way
+
+run("fno: no exit on a cold option; gate pre-check skips refused trades", t_fno_no_exit_on_cold_option_and_gate_precheck)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
