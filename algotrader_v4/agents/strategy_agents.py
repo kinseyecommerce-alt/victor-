@@ -925,6 +925,13 @@ class FnOAgent(BaseAgent):
         if chg >= 50 and ind.momentum in ("WEAK_UP", "NEUTRAL", "WEAK_DOWN"):
             return True, f"Option +50% momentum fading"
 
+        # The rules below read the option's own indicators. A freshly subscribed option has no candles yet:
+        # its RSI/momentum are the neutral defaults, which fired the theta rule on the first tick and sold
+        # every option the second it was bought (11 Nov). Until RSI-14 has its bars, only the price rules
+        # above, the exchange stop and the trailing engine apply.
+        if getattr(ind, "bars", 0) < 15:
+            return False, ""
+
         # Theta decay protection: direction lost, RSI neutral
         if 44 < ind.rsi_14 < 56 and ind.momentum == "NEUTRAL":
             return True, "RSI+momentum neutral — exit before theta decay"

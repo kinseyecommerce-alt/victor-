@@ -276,6 +276,7 @@ class KiteClient:
 
     def positions(self) -> dict:
         if settings.trading_mode == "PAPER":
+            self._mark_paper_positions()
             return {"net": self._paper_positions, "day": self._paper_positions}
         return _with_retry(self.kite.positions, label="positions")
 
@@ -648,13 +649,27 @@ class KiteClient:
         tick, _ = tick_engine.latest(symbol)
         return float(tick.ltp) if tick else 0.0
 
+    def _mark_paper_positions(self) -> None:
+        """Mark the paper book to market the way Kite reports it: last_price from the tick engine and
+        pnl = sell value − buy value + quantity × last price (realised + unrealised). Before this the
+        paper book kept the fill price as last_price and pnl at 0 for the whole session."""
+        for pos in self._paper_positions:
+            px = self._paper_ltp(pos["tradingsymbol"])
+            if px > 0:
+                pos["last_price"] = px
+            if "buy_value" in pos:
+                pos["pnl"] = round(pos["sell_value"] - pos["buy_value"] + pos["quantity"] * pos["last_price"], 2)
+
     def _update_paper_position(self, order: dict) -> None:
         sym       = order["tradingsymbol"]
         px        = order["price"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
+        value     = px * order["quantity"]
         for pos in self._paper_positions:
             if pos["tradingsymbol"] == sym:
+                pos.setdefault("buy_value", 0.0); pos.setdefault("sell_value", 0.0)
+                pos["buy_value" if qty_delta > 0 else "sell_value"] += value
                 old_q = pos["quantity"]
                 new_q = old_q + qty_delta
                 if old_q == 0 or (new_q != 0 and (old_q > 0) != (new_q > 0)):
@@ -673,6 +688,8 @@ class KiteClient:
             "average_price": px,
             "last_price":    px,
             "pnl":           0.0,
+            "buy_value":     value if qty_delta > 0 else 0.0,
+            "sell_value":    value if qty_delta < 0 else 0.0,
         })
 
 

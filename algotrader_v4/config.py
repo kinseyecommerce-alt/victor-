@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     claude_gate_timeout_s: float = 25.0   # reviewer budget per signal; on timeout the trade proceeds unreviewed
     gate_strategies: str = "intraday,scalping"   # replay on real signals: +₹2.8k intraday, +₹2.2k scalping, swing none
     gate_max_drift_pct: float = 0.3       # skip the entry if price ran this far in the trade's favour during the review
+    gate_review_cooldown_s: float = 180.0   # seconds before the same agent re-reviews the same symbol (each review is a paid model call)
     regime_pause_mode: Literal["extreme_only", "plan", "off"] = "extreme_only"   # see MasterAgent._regime_pauses
     master_ai_review:     bool = False    # per-minute AI regime review (superseded by the twice-daily allocator)
     master_ai_review_min: int  = 30       # when on: at most one AI review per this many minutes
