@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     gate_strategies: str = "intraday,scalping"   # replay on real signals: +₹2.8k intraday, +₹2.2k scalping, swing none
     gate_max_drift_pct: float = 0.3       # skip the entry if price ran this far in the trade's favour during the review
     gate_review_cooldown_s: float = 180.0   # seconds before the same agent re-reviews the same symbol (each review is a paid model call)
+    # regime routing (regime_v2): sizes each strategy by its tested result on today's predicted market type;
+    # a no-op (1.0) until research writes data/regime_model.json and data/regime_scorecard.json
+    use_regime_routing: bool = True
+    regime_boost: float = 1.25          # strategy made money on this day type in both halves of the history
+    regime_cut: float = 0.5             # strategy lost on this day type in both halves
+    regime_min_trades: int = 20         # fewer trades on a day type than this → no adjustment
     regime_pause_mode: Literal["extreme_only", "plan", "off"] = "extreme_only"   # see MasterAgent._regime_pauses
     master_ai_review:     bool = False    # per-minute AI regime review (superseded by the twice-daily allocator)
     master_ai_review_min: int  = 30       # when on: at most one AI review per this many minutes

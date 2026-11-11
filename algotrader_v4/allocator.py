@@ -100,10 +100,18 @@ def today() -> dict:
 
 
 def size_factor(agent: str) -> float:
+    """The AI allocator's factor for today × the regime factor (regime_v2: this strategy's tested result on
+    today's predicted market type), capped at MAX_FACTOR. A 0 from the allocator stays 0."""
     try:
-        return float(today()["factors"].get(agent, 1.0))
+        f = float(today()["factors"].get(agent, 1.0))
     except Exception:
-        return 1.0
+        f = 1.0
+    try:
+        import regime_v2
+        f *= regime_v2.factor(agent)
+    except Exception as exc:
+        logger.debug("[allocator] regime factor unavailable: {}", exc)
+    return round(min(MAX_FACTOR, max(0.0, f)), 3)
 
 
 def gate_required() -> bool:
@@ -131,6 +139,12 @@ def _yesterday_pnl() -> dict[str, float]:
 def evidence() -> dict:
     """Everything the allocator sees. Each block fails soft so one broken source never blocks the day."""
     ev: dict = {"date": now_ist().date().isoformat(), "time": now_ist().strftime("%H:%M")}
+    try:
+        import regime_v2
+        ev["market_type"] = {"today": regime_v2.current(),
+                             "note": "learned day-type read; its per-strategy size factors are applied on top of yours"}
+    except Exception as exc:
+        ev["market_type"] = {"error": str(exc)[:80]}
     try:
         from market_context import regime_block
         ev["regime"] = regime_block()

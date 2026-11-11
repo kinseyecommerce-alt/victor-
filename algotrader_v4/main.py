@@ -1697,6 +1697,21 @@ async def backtest_bars(symbols: str, days: int = 45):
     return out
 
 
+@app.get("/market-type", tags=["Market Regime"])
+def regime_status():
+    """Today's market-type read (pre-open / first hour), the learned model and each strategy's size factor."""
+    import regime_v2
+    return regime_v2.status()
+
+
+@app.post("/market-type/refresh", tags=["Market Regime"])
+async def regime_refresh(stage: str = "first_hour"):
+    if stage not in ("preopen", "first_hour"):
+        raise HTTPException(400, "stage must be preopen or first_hour")
+    import regime_v2
+    return await asyncio.to_thread(regime_v2.refresh, stage)
+
+
 @app.get("/backtest/history-bars", tags=["Backtest"])
 async def backtest_history_bars(symbol: str, start: str, end: str, interval: str = "minute", exchange: str = "NSE"):
     """Kite history for one symbol over any date range (research data for the regime study): minute bars

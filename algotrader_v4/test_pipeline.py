@@ -7023,6 +7023,51 @@ def t_history_bars_endpoint():
 
 run("research: history bars over any date range", t_history_bars_endpoint)
 
+
+def t_regime_v2_routing():
+    import regime_v2 as rv
+    from unittest.mock import patch as _patch
+    import allocator as _al
+    # outcome labels against the normal range
+    flat = [["t", 100, 100.3, 99.8, 100.1]]
+    assert rv.label(flat, 1.0) == "RANGE"
+    assert rv.label([["t", 100, 101.0, 99.9, 100.9]], 1.0) == "TREND_UP"
+    assert rv.label([["t", 100, 102.0, 99.0, 100.5]], 1.0) == "VOLATILE"
+    # learned rule applied to features; no rule → None
+    model = {"first_hour": {"feature": "fh_rng", "cuts": [0.4, 0.7], "rule": {"0": "RANGE", "1": "TREND_UP", "2": "VOLATILE"}},
+             "preopen": None}
+    assert rv.classify({"fh_rng": 0.2}, "first_hour", model) == "RANGE"
+    assert rv.classify({"fh_rng": 0.9}, "first_hour", model) == "VOLATILE"
+    assert rv.classify({"gap": 1.0}, "preopen", model) is None
+    assert rv.classify({}, "first_hour", model) is None
+    # scorecard → factor: both halves positive boost, both negative cut, mixed / thin → 1.0
+    card = {"intraday": {"VOLATILE": {"h1": 5000, "h2": 3000, "trades": 80}, "RANGE": {"h1": -4000, "h2": -2000, "trades": 60},
+                         "TREND_UP": {"h1": 2000, "h2": -500, "trades": 50}, "TREND_DOWN": {"h1": -900, "h2": -800, "trades": 5}}}
+    assert rv.regime_factor("intraday", "VOLATILE", card)[0] == _ai_settings.regime_boost
+    assert rv.regime_factor("intraday", "RANGE", card)[0] == _ai_settings.regime_cut
+    assert rv.regime_factor("intraday", "TREND_UP", card)[0] == 1.0
+    assert rv.regime_factor("intraday", "TREND_DOWN", card)[0] == 1.0          # too few trades
+    assert rv.regime_factor("intraday", None, card)[0] == 1.0
+    prev = _ai_settings.use_regime_routing
+    try:
+        _ai_settings.use_regime_routing = False
+        assert rv.regime_factor("intraday", "RANGE", card)[0] == 1.0
+    finally:
+        _ai_settings.use_regime_routing = prev
+    # allocator size = AI factor × regime factor, capped
+    with _patch.object(_al, "today", return_value={"factors": {"intraday": 1.4, "swing": 0.0, "scalping": 0.8}}), \
+         _patch.object(rv, "factor", side_effect=lambda s: {"intraday": 1.25, "swing": 1.25, "scalping": 0.5}[s]):
+        assert _al.size_factor("intraday") == _al.MAX_FACTOR
+        assert _al.size_factor("swing") == 0.0
+        assert _al.size_factor("scalping") == 0.4
+    # without research files nothing changes
+    rv.reset()
+    with _patch.object(rv, "MODEL_FILE", Path("/nonexistent/m.json")), _patch.object(rv, "SCORECARD_FILE", Path("/nonexistent/s.json")):
+        assert rv.factor("intraday") == 1.0
+        assert rv.status()["factors"]["intraday"][0] == 1.0
+
+run("regime routing: learned day type → per-strategy size from the per-half scorecard", t_regime_v2_routing)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
