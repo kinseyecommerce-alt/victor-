@@ -584,6 +584,8 @@ class BaseAgent(ABC):
     async def _finish_entry(self, snap: MarketSnapshot, action: str, signal: dict, evt: dict) -> None:
         """Compound the size factors (review, event elevation, correlation) and enter."""
         _sf = signal.get("_gate_size_factor", 1.0)
+        if signal.pop("_extended", False):       # outside the replay-validated window (intraday_all_day)
+            _sf = round(_sf * settings.extended_window_size_factor, 3)
         if evt["size_factor"] < 1.0:
             _sf = round(_sf * evt["size_factor"], 3)
         from correlation_guard import check as _corr_check

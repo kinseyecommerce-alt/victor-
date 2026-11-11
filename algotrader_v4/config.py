@@ -92,6 +92,10 @@ class Settings(BaseSettings):
     # regime routing (regime_v2): sizes each strategy by its tested result on today's predicted market type;
     # a no-op (1.0) until research writes data/regime_model.json and data/regime_scorecard.json
     indicator_min_interval_s: float = 5.0   # live indicators: recompute on candle close or this often
+    # intraday/scalping past their validated windows (VWAP_TREND to 14:30, ORB retests to 14:30): off = as replay-validated
+    intraday_all_day: bool = False
+    extended_window_end_min: int = 870          # 14:30
+    extended_window_size_factor: float = 0.5    # size of trades outside the validated windows
     use_regime_routing: bool = True
     regime_boost: float = 1.25          # strategy made money on this day type in both halves of the history
     regime_cut: float = 0.5             # strategy lost on this day type in both halves

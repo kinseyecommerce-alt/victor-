@@ -6991,6 +6991,33 @@ def t_market_type_research_upload():
 
 run("regime routing: research files installed through the API, validated", t_market_type_research_upload)
 
+
+def t_intraday_all_day_mode():
+    from unittest.mock import patch as _patch
+    from agents.intraday_v2 import IntradayV2Agent, ScalpV2Agent
+    import agents.base_agent as _ba
+    a, sc = IntradayV2Agent(), ScalpV2Agent()
+    assert not a.USE_VWAP_TREND and a.VERSION == "v2" and sc.RT_END_MIN == 750, "off by default: as validated"
+    prev = _ai_settings.intraday_all_day
+    try:
+        _ai_settings.intraday_all_day = True
+        a, sc = IntradayV2Agent(), ScalpV2Agent()
+        assert a.USE_VWAP_TREND and a.VWAP_WINDOW_END_MIN == 870 and a.VERSION == "v2-allday"
+        assert sc.RT_END_MIN == 870 and sc.VERSION == "v2-allday"
+        assert IntradayV2Agent.VERSION == "v2", "the class (replay default) is untouched"
+        # extended trades are sized by extended_window_size_factor
+        seen = {}
+        async def fake_try(snap, action, signal): seen["sf"] = signal.get("_gate_size_factor")
+        with _patch.object(a, "_try_enter", fake_try), \
+             _patch("correlation_guard.check", return_value={"allowed": True, "size_factor": 1.0, "reason": ""}):
+            asyncio.run(a._finish_entry(_make_snap(symbol="ALLD", ltp=100.0), "BUY",
+                                        {"_gate_size_factor": 0.8, "_extended": True}, {"size_factor": 1.0}))
+        assert seen["sf"] == 0.4, seen
+    finally:
+        _ai_settings.intraday_all_day = prev
+
+run("intraday all-day mode: opt-in, own version, extended trades half size", t_intraday_all_day_mode)
+
 # ══════════════════════════════════════════════════════════════════════════
 section("25. OPTIONS REPLAY (research only: Black-Scholes on index minute bars)")
 # ══════════════════════════════════════════════════════════════════════════
