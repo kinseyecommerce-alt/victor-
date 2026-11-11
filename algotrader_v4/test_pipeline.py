@@ -8870,6 +8870,142 @@ run("stratlab: CLI reports 2 bps by default, a 5 bps sensitivity column, the cos
     t_sl_cli_sensitivity_and_screen_only)
 
 
+# ── stratlab/options_vrp_vix: pre-registered VIX-regime filter on the winged weekly strangle ──
+from stratlab import options_vrp_vix as _vx
+
+
+def _vx_vix():
+    """VIX on weekdays (no 2026-10-20 holiday) ending 2026-10-23: 13 everywhere, except 10-06 = 14 (above the
+    median, +7.7 % over 5 sessions -> take the 10-07 week), 10-13 = 12 (below median -> skip 10-14) and
+    10-19 = 16 (+23 % vs 10-12 -> spike, skip 10-21)."""
+    days, d = [], _ordate(2026, 10, 23)
+    while len(days) < 320:
+        if d.weekday() < 5 and d != _ordate(2026, 10, 20):
+            days.append(d)
+        d -= _ortd(days=1)
+    v = {x: 13.0 for x in days}
+    v[_ordate(2026, 10, 6)], v[_ordate(2026, 10, 13)], v[_ordate(2026, 10, 19)] = 14.0, 12.0, 16.0
+    return v
+
+
+def _vx_spec(vix):
+    sp = _vx.VixOptSpec("T-HV", "t", dict(_vx.HIGHVIX.params), lots=2)
+    sp.vix = vix
+    return sp
+
+
+def t_vx_filter_rules_and_past_only():
+    v = _vx_vix()
+    f = _vx.vix_filter(v, _ordate(2026, 10, 7))
+    assert f["take"] and f["prev"] == _ordate(2026, 10, 6) and f["median"] == 13.0 and abs(f["chg5"] - 1 / 13) < 1e-9
+    assert _vx.vix_filter(v, _ordate(2026, 10, 14))["why"] == "below_median"
+    f = _vx.vix_filter(v, _ordate(2026, 10, 21))
+    assert f["why"] == "spike" and f["prev"] == _ordate(2026, 10, 19) and abs(f["chg5"] - 3 / 13) < 1e-9
+    # strictly greater than the median: equal is not taken
+    assert _vx.vix_filter(v, _ordate(2026, 10, 8))["why"] == "below_median"              # prev 10-07 = 13 = median
+    # exactly +15 % over 5 sessions is a spike (>=, float-safe); just under is taken
+    w = dict(v); w[_ordate(2026, 10, 19)] = 14.95                                       # 14.95 / 13 - 1 = 0.15
+    assert _vx.vix_filter(w, _ordate(2026, 10, 21))["why"] == "spike"
+    w[_ordate(2026, 10, 12)], w[_ordate(2026, 10, 19)] = 13.0, 13.0 * 1.1499
+    assert _vx.vix_filter(w, _ordate(2026, 10, 21))["take"]
+    # the median is over the 250 sessions BEFORE prev, not including it
+    days = sorted(v)
+    i = days.index(_ordate(2026, 10, 6))
+    w = dict(v)
+    for x in days[:i - 250]:
+        w[x] = 99.0                                                                     # outside the window
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7)) == _vx.vix_filter(v, _ordate(2026, 10, 7))
+    w = dict(v)
+    for x in days[i - 250:i - 124]:
+        w[x] = 99.0                                                                     # 126 of 250 inside: median moves
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7))["median"] == 99.0
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7))["why"] == "below_median"
+    # no look-ahead: closes on/after the entry day are never read
+    w = dict(v)
+    for x in days:
+        if x >= _ordate(2026, 10, 7):
+            w[x] = 500.0
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7)) == _vx.vix_filter(v, _ordate(2026, 10, 7))
+    # fewer than 250 closes before prev: no trade
+    short = {x: 13.0 for x in days[i - 249:i + 1]}
+    short[_ordate(2026, 10, 6)] = 14.0
+    assert _vx.vix_filter(short, _ordate(2026, 10, 7))["why"] == "no_history"
+    short[days[i - 250]] = 13.0
+    assert _vx.vix_filter(short, _ordate(2026, 10, 7))["take"]
+
+
+def t_vx_replay_trades_only_taken_weeks_identical_to_baseline():
+    v = _vx_vix()
+    bars = _or_bars(_VRP_DAYS, lambda i: 20 * _ormath.sin(i / 60.0))
+    sp = _vx_spec(v)
+    res, strat = _vrp._run_replay(sp, bars, v, 20261023)
+    base, _ = _vrp._run_replay(_vrp.BY_ID["VRP-STRANGLE-016-WINGED"], bars, v, 20261023)
+    assert [t.entry_ts.date() for t in base.trades] == [_ordate(2026, 10, 7), _ordate(2026, 10, 14), _ordate(2026, 10, 21)]
+    assert [t.entry_ts.date() for t in res.trades] == [_ordate(2026, 10, 7)]
+    assert [(d, f["why"]) for d, f in strat.filter_log] == [(_ordate(2026, 10, 7), "take"),
+                                                           (_ordate(2026, 10, 14), "below_median"),
+                                                           (_ordate(2026, 10, 21), "spike")]
+    a, b = res.trades[0], base.trades[0]
+    # exactly the winged structure: same legs, fills, 2 lots, costs, haircut, net; margin rule unchanged
+    assert [(l.opt, l.strike, l.side, l.entry_px, l.exit_px) for l in a.legs] == \
+           [(l.opt, l.strike, l.side, l.entry_px, l.exit_px) for l in b.legs]
+    assert len(a.legs) == 4 and a.qty == 2 * 65 and (a.costs, a.slippage, a.net) == (b.costs, b.slippage, b.net)
+    assert sp.margin(a) == _vrp.BY_ID["VRP-STRANGLE-016-WINGED"].margin(b)
+    # the fingerprint covers the filter's parameters
+    q = _vx_spec(v); q.params = dict(q.params, spike_pct=0.2)
+    assert q.fingerprint != sp.fingerprint and sp.fingerprint != _vrp.BY_ID["VRP-STRANGLE-016-WINGED"].fingerprint
+
+
+def t_vx_no_lookahead():
+    v = _vx_vix()
+    path = lambda i: 25 * _ormath.sin(i / 70.0)
+    base = _or_bars(_VRP_DAYS, path)
+    sp = _vx_spec(v)
+    a, _ = _vrp._run_replay(sp, base, v, 20261023)
+    # future bars and future VIX closes changed wildly: the same week, legs and entry fills
+    t0 = a.trades[0].entry_ts
+    wild = [(b[0], b[1] + 700, b[2] + 700, b[3] + 700, b[4] + 700) if b[0] > t0 else b for b in base]
+    w = dict(v)
+    for x in list(w):
+        if x >= _ordate(2026, 10, 7):
+            w[x] = w[x] * 3
+    b, _ = _vrp._run_replay(_vx_spec(w), wild, w, 20261013)
+    key = lambda r: [(t.entry_ts, [(l.opt, l.strike, l.side, l.entry_px) for l in t.legs]) for t in r.trades]
+    assert key(a)[:1] == key(b) and len(key(b)) == 1 and a.trades[0].net != b.trades[0].net
+    assert _vrp.audit_lookahead(sp, base, v, a.trades) is None
+    # a DISCOVERY-style simulation up to `hi` never reads later bars
+    poisoned = base + [(x[0] + _ortd(days=28), float("nan"), float("nan"), float("nan"), float("nan"))
+                       for x in _or_bars(_VRP_DAYS[-5:])]
+    s1 = _vrp.make_simulator(base, v)([sp], 20261001, 20261016)
+    s2 = _vrp.make_simulator(poisoned, v)([sp], 20261001, 20261016)
+    assert s1 == s2 and len(s1["T-HV"]["trades"]) == 1 and s1["T-HV"]["lookahead"] is None
+
+
+def t_vx_merge_vix_and_compare():
+    import tempfile as _t, json as _j, os as _o
+    with _t.TemporaryDirectory() as td:
+        pth = _o.path.join(td, "v.json")
+        with open(pth, "w") as fh:
+            _j.dump({"symbol": "INDIA VIX", "interval": "day",
+                     "bars": [["2022-01-03T00:00:00", 1, 1, 1, 16.45, 0], ["2022-11-10T00:00:00", 1, 1, 1, 99.0, 0]]}, fh)
+        m = _vx.merge_vix({_ordate(2022, 11, 10): 15.57}, [pth])
+    assert m == {_ordate(2022, 1, 3): 16.45, _ordate(2022, 11, 10): 15.57}               # base wins on overlap
+    bd = {1: {"net": 100.0, "bps": 10.0}, 2: {"net": -50.0, "bps": -5.0}, 3: {"net": 30.0, "bps": 3.0}}
+    cd = {1: {"net": 100.0, "bps": 10.0}}
+    dec = {1: {"take": True, "why": "take"}, 2: {"take": False, "why": "spike"}, 3: {"take": False, "why": "below_median"}}
+    c = _vx._week_compare(bd, cd, dec, (1, 3))
+    assert c["weeks"] == 3 and c["taken"] == 1 and c["cond_bps"] == 10.0 and abs(c["uncond_bps"] - 8 / 3) < 1e-9
+    assert c["rest_bps"] == -1.0 and c["spike_bps"] == -5.0 and not c["mismatch"] and not c["missing"]
+
+
+run("options VRP x VIX: strict median of the 250 prior sessions, >=15 % 5-session spike, past closes only",
+    t_vx_filter_rules_and_past_only)
+run("options VRP x VIX: trades only taken weeks, each identical to the unconditional winged trade",
+    t_vx_replay_trades_only_taken_weeks_identical_to_baseline)
+run("options VRP x VIX: no look-ahead (future bars and VIX, audit, DISCOVERY run)", t_vx_no_lookahead)
+run("options VRP x VIX: older VIX merged without overwriting, per-week comparison", t_vx_merge_vix_and_compare)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 section("STRATLAB OPENING-AUCTION FADE (stratlab/auction.py)")
 # ══════════════════════════════════════════════════════════════════════════
