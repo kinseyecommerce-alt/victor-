@@ -269,3 +269,21 @@ layouts; every catalogue strategy runs and passes the audit; the CLI end to end.
 FILL MODEL` section covers the 2026 cost rates, per-run slippage and the 5 bps sensitivity column, stops gapped
 through filling at the open, market exits paying slippage, the one-tick target rule, index futures, the
 cost-model-keyed FINAL ledger and `--screen-only`.
+
+## Cross-sectional baskets (`ltr.py`)
+
+`ltr.py` runs a portfolio strategy that the per-symbol simulator cannot express: LTR-12-1-LOSERS-CNC, the 10 NIFTY-100
+stocks with the lowest 12-1 month return (C[t-21]/C[t-252]-1), long-only CNC, Rs 1 lakh each from Rs 10 lakh,
+rebalanced every 21 sessions at the 15:14 bar, kept names not topped up, pre-registered CNC costs (DP 15.34 + GST)
+and 2.1 bps slippage (5 bps sensitivity). Known unadjusted corporate-action gaps (`CA_GAPS`: SIEMENS 2025-04-07,
+VEDL 2026-04-30) are removed. It goes through the SAME `protocol.evaluate` (70/30 split, H1/H2 screen, PF >= 1.15,
+>= 60 trades, 35 % symbol cap, FINAL once, same `final_ledger.json`) with one "trade" = one name over one period and
+its net = EXCESS over the equal-weight universe; the per-period table (portfolio level, idle cash included) and its
+t statistic are printed next to the verdict. `--hist` adds read-only history-bars day files for lookback only
+(days before each stock's first minute day). Tests: `tests_ltr.py`, run by `test_pipeline.py`.
+
+```
+python -m stratlab.ltr --data <bars3y> --hist <day files> --out <scratch dir> [--screen-only]
+```
+
+Result on the 3-year data (DISCOVERY only; FINAL never simulated): FAILED SCREEN - PAYTM is 52 % of the excess net.
