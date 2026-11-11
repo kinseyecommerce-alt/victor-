@@ -6998,6 +6998,176 @@ def t_deliberate_size_cuts_not_floored():
 run("sizing: allocator/review cuts are not floored; bucket remnants are", t_deliberate_size_cuts_not_floored)
 
 # ══════════════════════════════════════════════════════════════════════════
+section("25. OPTIONS REPLAY (research only: Black-Scholes on index minute bars)")
+# ══════════════════════════════════════════════════════════════════════════
+import math as _ormath
+from datetime import date as _ordate, datetime as _ordt, time as _ortime, timedelta as _ortd
+import options_replay as _orp
+
+
+def _or_bars(days: list, path=lambda i: 0.0, base: float = 24000.0) -> list:
+    """Synthetic minute bars 09:15-15:29 for each date; close = base + path(global minute index)."""
+    out, k = [], 0
+    for d in days:
+        t0 = _ordt.combine(d, _ortime(9, 15))
+        for m in range(375):
+            c = base + path(k)
+            prev = base + path(k - 1) if k else c
+            out.append((t0 + _ortd(minutes=m), prev, max(prev, c) + 1, min(prev, c) - 1, c))
+            k += 1
+    return out
+
+
+_OR_DAYS = [_ordate(2026, 10, d) for d in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16)]
+_OR_VIX = {_ordate(2026, 10, 2) + _ortd(days=i): 13.0 for i in range(-5, 20)}
+
+
+def t_or_put_call_parity():
+    r = _orp.RISK_FREE
+    for S, K, T, sig in ((24000, 24000, 5 / 365, 0.13), (24000, 24500, 30 / 365, 0.2),
+                         (52000, 50000, 2 / 365, 0.35), (24000, 23000, 0.5, 0.1)):
+        c, p = _orp.bs(S, K, T, sig, "CE"), _orp.bs(S, K, T, sig, "PE")
+        assert abs((c - p) - (S - K * _ormath.exp(-r * T))) < 1e-6, (S, K, c, p)
+        assert c > 0 and p > 0
+
+
+def t_or_delta_range():
+    T, sig = 6 / 365, 0.14
+    for K in range(22000, 26001, 250):
+        dc, dp = _orp.bs_delta(24000, K, T, sig, "CE"), _orp.bs_delta(24000, K, T, sig, "PE")
+        assert 0.0 <= dc <= 1.0 and -1.0 <= dp <= 0.0, (K, dc, dp)
+        assert abs((dc - dp) - 1.0) < 1e-9
+    assert abs(_orp.bs_delta(24000, 24000, T, sig, "CE") - 0.5) < 0.05       # ATM call ~0.5
+    v = _orp.MarketView("NIFTY", _ordt(2026, 10, 14, 10, 20), 24013.0, [], [], 0.13,
+                        _ordate(2026, 10, 19), 50, _orp.years_between(_ordt(2026, 10, 14, 10, 20), _ordate(2026, 10, 19)))
+    kc, kp = v.strike_for_delta("CE", 0.175), v.strike_for_delta("PE", 0.175)
+    assert kc % 50 == 0 and kp % 50 == 0 and kc > 24013 > kp, (kc, kp)
+    assert 0.1 < v.delta("CE", kc) < 0.25 and -0.25 < v.delta("PE", kp) < -0.1
+
+
+def t_or_expiry_calendar():
+    td = lambda d: d.weekday() < 5 and d != _ordate(2026, 10, 20)           # Dussehra (Tue) closed
+    assert _orp.next_expiry("NIFTY", _ordate(2026, 10, 7), td) == _ordate(2026, 10, 13)       # Tuesday
+    assert _orp.next_expiry("NIFTY", _ordate(2026, 10, 13), td) == _ordate(2026, 10, 19)      # skip today; holiday → Mon
+    assert _orp.next_expiry("NIFTY", _ordate(2026, 10, 13), td, skip_today=False) == _ordate(2026, 10, 13)
+    assert _orp.next_expiry("NIFTY", _ordate(2025, 6, 2), td) == _ordate(2025, 6, 5)          # Thursday era
+    assert _orp.next_expiry("BANKNIFTY", _ordate(2026, 10, 7), td) == _ordate(2026, 10, 27)   # monthly, last Tue
+    assert _orp.next_expiry("BANKNIFTY", _ordate(2026, 10, 28), td) == _ordate(2026, 11, 24)
+    assert _orp.round_strike(24026, 50) == 24050 and _orp.round_strike(52049, 100) == 52000
+
+
+class _OrSpy(_orp.OptionStrategy):
+    name = "SPY"
+
+    def __init__(self):
+        self.decision_times = [_ortime(10, 20)]
+        self.hold = "intraday"
+        self.seen = []
+
+    def decide(self, v):
+        self.seen.append((v.now, v.spot, max(b[0] for b in v.bars), len(v.bars), v.today_bars()[-1][4]))
+        return _orp.IronCondor().decide(v)
+
+
+def t_or_no_lookahead():
+    days = _OR_DAYS[:3]
+    path = lambda i: 40 * _ormath.sin(i / 50.0)
+    cfg = _orp.ReplayConfig(underlying="NIFTY")
+    spy = _OrSpy()
+    res = _orp.Replay(_or_bars(days, path), spy, cfg, _OR_VIX).run()
+    assert len(spy.seen) == 3 and len(res.trades) == 3
+    for now, spot, last_ts, n, last_close in spy.seen:
+        assert last_ts < now and last_ts == now - _ortd(minutes=1), (now, last_ts)
+    # the same past with a wildly different future must give the same decisions and fills
+    wild = lambda i: path(i) if (i % 375) < 65 else path(i) + (900 if (i // 375) % 2 else -900)
+    spy2 = _OrSpy()
+    res2 = _orp.Replay(_or_bars(days, wild), spy2, cfg, _OR_VIX).run()
+    assert [s[:4] for s in spy.seen] == [s[:4] for s in spy2.seen]
+    for a, b in zip(res.trades, res2.trades):
+        assert [(l.opt, l.strike, l.side, l.entry_px) for l in a.legs] == \
+               [(l.opt, l.strike, l.side, l.entry_px) for l in b.legs]
+    assert any(a.net != b.net for a, b in zip(res.trades, res2.trades))   # ...but different outcomes
+    # the trend20 / first-hour signals use only prior sessions and today's bars before 10:15
+    cs = _orp.CreditSpread(direction="first_hour")
+    v = _orp.MarketView("NIFTY", _ordt(2026, 10, 5, 10, 15), 24000.0,
+                        [b for b in _or_bars([_OR_DAYS[0]], lambda i: i * 1.0) if b[0].time() < _ortime(10, 15)],
+                        [], 0.13, _ordate(2026, 10, 6), 50, 1 / 365)
+    assert cs.signal(v) == 1 and cs.decide(v)[0].opt == "PE"                   # up first hour → bull put
+
+
+def t_or_costs_per_leg():
+    days = _OR_DAYS[:2]
+    res = _orp.Replay(_or_bars(days, lambda i: 30 * _ormath.sin(i / 40.0)), _orp.IronCondor(),
+                      _orp.ReplayConfig(underlying="NIFTY"), _OR_VIX).run()
+    assert res.trades, "no trade"
+    for tr in res.trades:
+        assert len(tr.legs) == 4 and tr.qty == _orp.LOT_SIZE["NIFTY"]
+        manual = 0.0
+        for l in tr.legs:
+            ev, xv = l.entry_px * tr.qty, l.exit_px * tr.qty
+            buy_v, sell_v = (ev, xv) if l.side > 0 else (xv, ev)
+            exp = _orp.round_trip_cost(buy_v, sell_v, "option")
+            assert abs(l.cost - exp) < 0.02, (l, exp)
+            manual += exp
+        assert abs(tr.costs - manual) < 0.05 and tr.costs >= 4 * 2 * 20 * 1.18   # ₹20 per order per leg + GST
+        gross = sum((l.exit_px - l.entry_px) * l.side * tr.qty for l in tr.legs)
+        assert abs(tr.gross - gross) < 0.05 and abs(tr.net - (tr.gross - tr.costs)) < 1e-6
+        assert tr.max_risk > 0 and tr.entry_net > 0                                # defined-risk credit
+
+
+def t_or_haircut_and_settlement():
+    assert _orp.fill_price(100.0, +1, "NIFTY") == 102.0 and _orp.fill_price(100.0, -1, "NIFTY") == 98.0
+    assert _orp.fill_price(10.0, +1, "NIFTY") == 11.0 and _orp.fill_price(0.3, -1, "NIFTY") == _orp.TICK
+    # a long ITM leg settled at expiry pays exercise STT on top of round_trip_cost
+    plain = _orp.leg_cost(50.0, 120.0, +1, 75)
+    assert abs(_orp.leg_cost(50.0, 120.0, +1, 75, settled=True) - plain - 120 * 75 * 0.00025) < 0.02
+    # hold-to-expiry condor settles at intrinsic of the 15:00-15:29 mean on expiry day
+    days = [_ordate(2026, 10, 9), _ordate(2026, 10, 12), _ordate(2026, 10, 13)]
+    ic = _orp.IronCondor(hold="expiry", target_frac=99, stop_mult=99)
+    res = _orp.Replay(_or_bars(days, lambda i: 0.0), ic, _orp.ReplayConfig(underlying="NIFTY"), _OR_VIX).run()
+    tr = res.trades[0]
+    assert tr.expiry == _ordate(2026, 10, 13) and tr.reason == "expiry", (tr.expiry, tr.reason)
+    assert all(l.exit_px == 0.0 for l in tr.legs) and tr.gross > 0                # flat market: all OTM
+    assert len(res.trades) == 1                                                    # one position at a time
+
+
+def t_or_metrics_and_loader():
+    import json as _j
+    T = lambda d, n: _orp.Trade("X", "X", "NIFTY", _ordt.combine(d, _ortime(10)), d, 0, 0, "", 1, [], 0,
+                                exit_ts=_ordt.combine(d, _ortime(15)), gross=n, costs=0)
+    res = _orp.ReplayResult([T(_OR_DAYS[0], 100), T(_OR_DAYS[1], -300), T(_OR_DAYS[6], 200)], _OR_DAYS)
+    m = _orp.metrics(res)
+    assert m["all"]["trades"] == 3 and m["all"]["net"] == 0 and m["all"]["max_drawdown"] == 300
+    assert abs(m["all"]["profit_factor"] - 1.0) < 1e-9 and m["all"]["win_rate"] == 66.7
+    assert m["first_half"]["trades"] == 2 and m["second_half"]["trades"] == 1
+    bars = [[b[0].isoformat(), *b[1:], 0] for b in _or_bars(_OR_DAYS[:1])]
+    with _tmp0.TemporaryDirectory() as dd:
+        with open(_os.path.join(dd, "index.json"), "w") as fh:
+            _j.dump({"NIFTY 50": {"bars": bars}, "NIFTY BANK": {"bars": bars}}, fh)
+        u, vix = _orp.load_data(_os.path.join(dd, "index.json"))
+        assert set(u) == {"NIFTY", "BANKNIFTY"} and vix is None and len(u["NIFTY"]) == 375
+        d2 = _os.path.join(dd, "m"); _os.mkdir(d2)
+        for nm, sym in (("_NIFTY50_min.json", "NIFTY 50"), ("_NIFTYBANK_min.json", "NIFTY BANK")):
+            with open(_os.path.join(d2, nm), "w") as fh:
+                _j.dump({"symbol": sym, "interval": "minute", "bars": bars}, fh)
+        with open(_os.path.join(d2, "_VIX_day.json"), "w") as fh:
+            _j.dump({"symbol": "INDIA VIX", "interval": "day",
+                     "bars": [["2026-10-02T00:00:00", 12, 13, 11, 12.5, 0]]}, fh)
+        u, vix = _orp.load_data(d2)
+        assert set(u) == {"NIFTY", "BANKNIFTY"} and vix == {_ordate(2026, 10, 2): 12.5}
+    rv = _orp.realised_vol([24000 * (1.01 if i % 2 else 1.0) for i in range(21)])
+    assert rv is not None and 0.1 < rv < 0.3 and _orp.realised_vol([1.0] * 5) is None
+
+
+run("options replay: Black-Scholes put-call parity",                       t_or_put_call_parity)
+run("options replay: deltas in range, delta-picked strikes on the grid",   t_or_delta_range)
+run("options replay: NIFTY weekly Tue / BANKNIFTY monthly expiry, holidays", t_or_expiry_calendar)
+run("options replay: no look-ahead (decisions see only earlier bars)",     t_or_no_lookahead)
+run("options replay: NSE costs charged per leg via round_trip_cost",       t_or_costs_per_leg)
+run("options replay: haircut direction, expiry settlement, exercise STT",  t_or_haircut_and_settlement)
+run("options replay: metrics, halves and both data layouts load",          t_or_metrics_and_loader)
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
