@@ -6952,6 +6952,32 @@ def t_fno_no_exit_on_cold_option_and_gate_precheck():
 
 run("fno: no exit on a cold option; gate pre-check skips refused trades", t_fno_no_exit_on_cold_option_and_gate_precheck)
 
+
+def t_paper_book_marked_to_market():
+    from unittest.mock import patch as _patch
+    from kite_client import KiteClient, kite_client as _kc
+    from config import settings as _s
+    prev = (_s.trading_mode, list(_kc._paper_positions), list(_kc._paper_orders))
+    px = {"MTM": 100.0}
+    try:
+        _s.trading_mode = "PAPER"
+        with _patch.object(KiteClient, "_paper_ltp", staticmethod(lambda sym: px.get(sym, 0.0))):
+            _kc.place_order(tradingsymbol="MTM", exchange="NSE", transaction_type="BUY", quantity=10,
+                            order_type="MARKET", product="MIS")
+            px["MTM"] = 103.0
+            p = next(x for x in _kc.positions()["net"] if x["tradingsymbol"] == "MTM")
+            assert p["last_price"] == 103.0 and p["pnl"] == 30.0, p        # unrealised
+            _kc.place_order(tradingsymbol="MTM", exchange="NSE", transaction_type="SELL", quantity=10,
+                            order_type="MARKET", product="MIS")
+            px["MTM"] = 90.0                                                  # flat: later moves don't count
+            p = next(x for x in _kc.positions()["net"] if x["tradingsymbol"] == "MTM")
+            assert p["quantity"] == 0 and p["pnl"] == 30.0, p                 # realised
+    finally:
+        _s.trading_mode = prev[0]
+        _kc._paper_positions[:] = prev[1]; _kc._paper_orders[:] = prev[2]
+
+run("paper book: positions marked to market (last price, realised + unrealised pnl)", t_paper_book_marked_to_market)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
