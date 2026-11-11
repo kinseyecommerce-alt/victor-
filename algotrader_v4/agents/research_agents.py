@@ -29,6 +29,16 @@ MeanRevV2Agent  (name "meanrev_v2")
     • stop = STOP_SIGMA·σ beyond the entry (a fixed multiple); if the rejection bar already traded beyond
       that stop, the setup is skipped
   Three tunables (K_SIGMA, STOP_SIGMA, MIN_TGT_PCT) plus the time window. MIS, squared off like intraday.
+
+Replay, 97 NIFTY-100 stocks × 30 sessions (Sep 28 – Nov 2026), 5 bps slippage, after costs — every setting tried:
+  swing_short default          278 trades, win 39.6 %, PF 0.69, net −₹40,808 (H1 −₹14,888, H2 −₹45,217)
+  swing_short TGT_PCT=4        277 trades, win 40.1 %, PF 0.68, net −₹42,622 (H1 −₹14,683, H2 −₹46,746)
+  meanrev_v2 K=3, STOP=1.5σ    329 trades, win 30.7 %, PF 0.56, net −₹53,855 (H1 −₹26,453, H2 −₹27,402)
+  meanrev_v2 K=2.5, STOP=1.5σ  889 trades, win 34.4 %, PF 0.57, net −₹145,415 (H1 −₹76,591, H2 −₹70,269)
+  meanrev_v2 K=3, STOP=1.0σ    322 trades, win 23.6 %, PF 0.50, net −₹52,365 (H1 −₹28,093, H2 −₹24,272)
+  Neither has an edge on this data: meanrev_v2 loses before costs (gross ≈ −costs), so cost control was not the
+  problem; it lost on RANGE days too. swing_short was positive only on the few TREND_DOWN/RANGE days. 30 days is
+  far too little to accept or reject either; rerun on the 12-month bars before drawing conclusions.
 """
 from __future__ import annotations
 
