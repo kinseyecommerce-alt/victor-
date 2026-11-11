@@ -233,6 +233,19 @@ otherwise `REJECTED ON FINAL`.
   lucky confirmations are expected from strategies with no edge. A confirmation earns a paper-trading trial,
   nothing more.
 
+## Opening-auction fade (`auction.py`)
+
+`python -m stratlab.auction --data <bars dir> --out <scratch dir> [--screen-only]` runs the two pre-registered
+strategies AUC-FADE-2PCT and AUC-FADE-3PCT: fade the 09:15 call-auction print when |auction / previous close - 1|
+exceeds 2 % (3 %), up to 20 %; enter AT the 09:15 open (live: a pre-open market order at 09:07), exit at the 09:20
+open; Rs 1 lakh per trade, at most the 10 largest |gap| per day. The intraday simulator fills at the bar after a
+signal and cannot express an auction fill, so this module has its own fill model (`FILL_MODEL`, part of the FINAL
+ledger key) and goes through `protocol.evaluate` unchanged (same split, screen and ledger; no `--peek-final`).
+Slippage defaults to the family's pre-registered 2.1 bps per side; every report adds a 5 bps stress column on
+DISCOVERY (and on FINAL, re-costing the same FINAL trades, only for screen passers), the net without the best five
+dates, a date-clustered t on the gross and quarterly nets. Caveat: the backtest uses the final auction price, a
+mild look-ahead against the 09:07 indicative price used live. 3 % is a nested subset of 2 %: one effect.
+
 ## Tests
 
 `cd algotrader_v4 && python test_pipeline.py` — the `STRATLAB` section covers: the per-bar view cannot read

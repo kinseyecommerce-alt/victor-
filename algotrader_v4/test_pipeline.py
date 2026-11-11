@@ -8725,6 +8725,92 @@ run("stratlab: CLI reports 2 bps by default, a 5 bps sensitivity column, the cos
 
 
 # ══════════════════════════════════════════════════════════════════════════
+section("STRATLAB OPENING-AUCTION FADE (stratlab/auction.py)")
+# ══════════════════════════════════════════════════════════════════════════
+from stratlab import auction as _sla  # noqa: E402
+
+
+def _auc_sd(symbol="AUC", gaps=(0.0, 0.05, -0.03, 0.25, 0.01), n=375, seed=3):
+    """One synthetic symbol: day k opens at prev close x (1 + gaps[k]) (gaps[0] ignored), flat-ish walk after."""
+    rng = np.random.default_rng(seed)
+    date, t, o, c = [], [], [], []
+    px = 1000.0
+    for k, g in enumerate(gaps):
+        op = px * (1 + g) if k else px
+        cl = op * np.exp(np.cumsum(rng.normal(0, 0.0008, n)))
+        oo = np.concatenate(([op], cl[:-1]))
+        date += [20260105 + k] * n; t += list(555 + np.arange(n)); o += list(oo); c += list(cl)
+        px = float(cl[-1])
+    o, c = np.array(o), np.array(c)
+    return _sld.from_arrays(symbol, date, t, o, np.maximum(o, c) * 1.0002, np.minimum(o, c) * 0.9998, c,
+                            np.full(len(c), 1000.0))
+
+
+def t_auc_rule_and_features():
+    assert _sla.auction_rule(100, 103, 0.02)[0] == -1 and _sla.auction_rule(100, 97, 0.02)[0] == 1
+    assert _sla.auction_rule(100, 102, 0.02) is None            # |gap| must be > 2 %, not >=
+    assert _sla.auction_rule(100, 125, 0.02) is None            # > 20 %: corporate action / circuit excluded
+    sd = _auc_sd()
+    f = _sla.session_features(sd)
+    assert not np.isfinite(f[0][1])                             # no previous session -> no prev_close
+    for k in range(1, len(f)):
+        assert abs(f[k][1] - float(sd.c[sd.ends[k - 1] - 1])) < 1e-9 and abs(f[k][2] - float(sd.o[sd.starts[k]])) < 1e-9
+        assert f[k][3] == 560 and abs(f[k][4] - float(sd.o[sd.starts[k] + 5])) < 1e-9
+    rows = _sla.candidates_for("AUC", f, 0.02)
+    assert [(r[0], r[2]) for r in rows] == [(20260106, -1), (20260107, 1)], rows   # 25 % gap and 1 % gap dropped
+
+
+def t_auc_no_lookahead():
+    """Changing anything after the 09:20 open of day d, or any later day, leaves day d's trade unchanged; changing
+    the 09:16-09:19 bars changes nothing either (the hold has no stop)."""
+    base = _sla.candidates_for("AUC", _sla.session_features(_auc_sd()), 0.02)
+    sd = _auc_sd()
+    a = int(sd.starts[1])
+    for arr in (sd.o, sd.h, sd.l, sd.c):
+        arr[a + 1:a + 5] *= 1.03                                # 09:16-09:19 of day 1
+        arr[a + 6:] *= 0.9                                      # after the 09:20 open, and all later days
+    pert = _sla.candidates_for("AUC", _sla.session_features(sd), 0.02)
+    assert pert[0] == base[0], (pert[0], base[0])
+
+
+def t_auc_ranking_cap_and_costs():
+    rows = [(20260105, f"S{i:02d}", -1, 0.021 + i * 0.0006, 500.0, 560, 499.0) for i in range(14)]
+    pick = _sla.select(rows, _sla.SPECS[0], 0, 99999999)
+    assert len(pick) == 10 and {r[1] for r in pick} == {f"S{i:02d}" for i in range(4, 14)}   # 10 largest |gap|
+    assert len(_sla.select(rows, _sla.SPECS[1], 0, 99999999)) == 0        # all gaps <= 3 %
+    tr = _sla.settle("X", rows[0], 2.1e-4)
+    qty = 200                                                             # floor(1e5 / 500)
+    fill, ex = 500.0 * (1 - 2.1e-4), 499.0 * (1 + 2.1e-4)                 # short: sell lower, buy back higher
+    assert tr[9] == qty and abs(tr[5] - fill) < 1e-3 and abs(tr[8] - ex) < 1e-3 and tr[3] == -1
+    assert abs(tr[10] - (fill - ex) * qty) < 0.01
+    from costs import round_trip_cost as _rtc
+    assert abs(tr[11] - _rtc(ex * qty, fill * qty, "equity_mis")) < 1e-6 and abs(tr[12] - (tr[10] - tr[11])) < 0.01
+    fr = (_rtc(1e5, 1e5, "equity_mis") + 2 * 2.1e-4 * 1e5) / 1e5 * 1e4  # pre-registered friction ~12.3 bps
+    assert 11.8 < fr < 12.8, fr
+
+
+def t_auc_protocol_final_never_for_failures():
+    """Through protocol.evaluate: FINAL is never simulated for screen failures; default slippage is 2.1 bps."""
+    seen = []
+    rows = [(20240101 + (d % 28) + (d // 28) * 100, "A", 1, -0.03, 100.0, 560, 99.0) for d in range(200)]   # always loses
+    base = _sla.make_simulator(rows)
+
+    def sim_(specs, lo, hi):
+        seen.append((lo, hi))
+        return base(specs, lo, hi)
+    cal = sorted({r[0] for r in rows})
+    res, _tr = _slp.evaluate(_sla.SPECS, cal, sim_, n_symbols=1, ledger_path=None, cost_model=_sla.COST_MODEL)
+    assert all(r["verdict"] == "FAILED SCREEN" for r in res) and len(seen) == 1, (seen, [r["why"] for r in res])
+    assert _sla.DEFAULT_SLIPPAGE_BPS == 2.1 and _sla.COST_MODEL.startswith(_sls.COST_MODEL)
+
+
+run("auction: signal rule, prev_close / 09:15 / 09:20 features, 20 % exclusion", t_auc_rule_and_features)
+run("auction: later bars cannot change an earlier signal or fill (look-ahead)", t_auc_no_lookahead)
+run("auction: top-10 |gap| per day, 3 % subset, qty, slippage and costs", t_auc_ranking_cap_and_costs)
+run("auction: protocol never simulates FINAL for screen failures", t_auc_protocol_final_never_for_failures)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
