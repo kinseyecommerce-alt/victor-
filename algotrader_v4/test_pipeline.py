@@ -6998,6 +6998,482 @@ def t_deliberate_size_cuts_not_floored():
 run("sizing: allocator/review cuts are not floored; bucket remnants are", t_deliberate_size_cuts_not_floored)
 
 # ══════════════════════════════════════════════════════════════════════════
+# STRATLAB — strategy screening lab (research only)
+# ══════════════════════════════════════════════════════════════════════════
+section("STRATLAB: simulator, protocol, catalogue")
+
+import tempfile as _sl_tmp, json as _sl_json
+from stratlab import data as _sld, sim as _sls, protocol as _slp, indicators as _sli
+from stratlab.api import Entry as _SlEntry, Swing as _SlSwing, Spec as _SlSpec, REGISTRY as _SL_REG
+import stratlab.catalog  # noqa: F401  (registers the strategies)
+from costs import round_trip_cost as _sl_rtc
+
+
+def _sl_flat(days=(20260105,), n=375, px=100.0, symbol="SYN"):
+    """Flat sessions (every bar o=h=l=c=px) to which a test adds the bars it needs."""
+    date = np.repeat(np.array(days, np.int32), n)
+    t = np.tile(555 + np.arange(n), len(days)).astype(np.int16)
+    a = {k: np.full(len(date), px) for k in "ohlc"}
+    return date, t, a, np.full(len(date), 1000.0)
+
+
+def _sl_session(a, date, t, v, k=0):
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    return _sli.build_sessions(sd)[k]
+
+
+def _sl_walk(n_days=6, seed=7, symbol="RW", n=375):
+    rng = np.random.default_rng(seed)
+    days = [20260100 + d for d in range(1, n_days + 1)]
+    date = np.repeat(np.array(days, np.int32), n)
+    t = np.tile(555 + np.arange(n), n_days).astype(np.int16)
+    c = 500.0 * np.exp(np.cumsum(rng.normal(0, 0.0012, n * n_days)))
+    o = np.concatenate(([500.0], c[:-1]))
+    h = np.maximum(o, c) * (1 + np.abs(rng.normal(0, 0.0004, len(c))))
+    l = np.minimum(o, c) * (1 - np.abs(rng.normal(0, 0.0004, len(c))))
+    v = rng.integers(500, 5000, len(c)).astype(float)
+    v[rng.random(len(c)) < 0.02] *= 8
+    return _sld.from_arrays(symbol, date, t, o, h, l, c, v)
+
+
+def _sl_spec(fn, kind="intraday", style="vector", horizon=None, **kw):
+    hz = horizon or ("positional" if kind == "swing" else "intraday")
+    return _SlSpec(id=kw.pop("id", "t_" + fn.__name__), kind=kind, family="test", desc="test", fn=fn, style=style,
+                   horizon=hz, **kw)
+
+
+def t_sl_bar_view_cannot_see_ahead():
+    date, t, a, v = _sl_flat()
+    s = _sl_session(a, date, t, v)
+    seen = []
+
+    def peeker(view, p):
+        i = len(view) - 1
+        seen.append((i, len(view.c), len(view.vwap), len(view.ema21), int(view.t[-1])))
+        try:
+            view.c[i + 1]
+            raise AssertionError("bar i+1 was readable")
+        except IndexError:
+            pass
+        return None
+    _sls.sim_session(_sl_spec(peeker, style="bar"), s)
+    assert len(seen) > 300
+    for i, nc, nv, ne, tl in seen:
+        assert nc == nv == ne == i + 1 and tl == 555 + i, (i, nc, nv, ne, tl)
+    v10 = s.view(10)
+    assert len(v10) == 10 and len(v10.h) == 10 and v10.idx(700) == 10
+    assert v10.orb(15)[2] == 10 and s.orb(15)[2] == 15          # an unfinished range is visibly unfinished
+    assert len(v10.bars5().c) == 2 and len(s.view(9).bars5().c) == 1   # only completed 5-minute bars
+
+
+run("stratlab: a per-bar strategy receives bars 0..i only (bar i+1 is unreadable)", t_sl_bar_view_cannot_see_ahead)
+
+
+def t_sl_future_bars_do_not_change_earlier_fills():
+    ids = ["orb15_break", "vwap_reclaim", "scalp_ema9_21_cross", "scalp_range20_break", "inside_bar_5m"]
+    specs = [_SL_REG[i] for i in ids]
+    sd = _sl_walk()
+    base = _sls.run_symbol("", "RW", specs, 0, 99999999, sd=sd)
+    cut_day, cut_min = int(sd.days[-1]), 12 * 60
+    sd2 = _sl_walk()
+    m = (sd2.date == cut_day) & (sd2.t >= cut_min)
+    for arr in (sd2.o, sd2.h, sd2.l, sd2.c):
+        arr[m] *= 1.07                                           # rewrite the future: everything from 12:00
+    sd2.v[m] *= 3
+    alt = _sls.run_symbol("", "RW", specs, 0, 99999999, sd=sd2)
+    n_before = 0
+    for i in ids:
+        early = lambda tr: [x for x in tr if x[6] < cut_day or x[7] < "12:00"]
+        a, b = early(base[i]["trades"]), early(alt[i]["trades"])
+        assert a == b, f"{i}: trades closed before 12:00 changed when later bars changed"
+        n_before += len(a)
+        assert base[i]["error"] is None and base[i]["lookahead"] is None, (i, base[i])
+    assert n_before >= 10, n_before
+
+
+run("stratlab: changing future bars does not change earlier fills", t_sl_future_bars_do_not_change_earlier_fills)
+
+
+def t_sl_lookahead_audit_disqualifies_cheats():
+    sd = _sl_walk(n_days=3)
+    s = _sli.build_sessions(sd)[1]
+
+    def cheat(s, p):                                             # at 09:25 it already knows the day's low
+        return [_SlEntry(10, 1, stop=float(s.l.min()) * 0.999)]
+
+    def honest(s, p):
+        return [_SlEntry(10, 1, stop=float(s.c[10]) * 0.99)] if len(s) > 10 else []
+    assert _sls.audit_lookahead(_sl_spec(honest), s) is None
+    msg = _sls.audit_lookahead(_sl_spec(cheat), s)
+    assert msg and "differ" in msg, msg
+    res = {"t_cheat": {"trades": [], "skipped": 0, "lookahead": msg, "error": None}}
+    out, _ = _slp.evaluate([_sl_spec(cheat)], range(20260001, 20260201), lambda specs, lo, hi: res)
+    assert out[0]["verdict"] == "INVALID" and "LOOK-AHEAD" in out[0]["why"] and out[0]["final"] is None
+
+
+run("stratlab: look-ahead audit catches a vector strategy that reads the future", t_sl_lookahead_audit_disqualifies_cheats)
+
+
+def t_sl_fill_next_open_with_slippage():
+    date, t, a, v = _sl_flat()
+    a["o"][11] = 101.0; a["h"][11] = 101.0; a["c"][11] = 100.5; a["l"][11] = 100.5
+    s = _sl_session(a, date, t, v)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=99.0, target=110.0))
+    assert abs(fill - 101.0 * 1.0005) < 1e-9, fill               # next bar's open, 5 bps worse
+    k2, fill2, _, _ = _sls.fill_intraday(s, _SlEntry(10, -1, stop=103.0, target=90.0))
+    assert abs(fill2 - 101.0 * 0.9995) < 1e-9, fill2
+    assert _sls.fill_intraday(s, _SlEntry(10, 1, stop=101.5)) is None      # stop already through at the open
+    assert _sls.fill_intraday(s, _SlEntry(len(s) - 1, 1, stop=99.0)) is None  # no next bar
+    rr = _sls.fill_intraday(s, _SlEntry(10, 1, stop=100.0, rr=2.0))
+    assert rr is not None
+
+
+run("stratlab: entries fill at the next bar's open with 5 bps slippage", t_sl_fill_next_open_with_slippage)
+
+
+def t_sl_stop_before_target_same_bar():
+    date, t, a, v = _sl_flat()
+    a["h"][20] = 103.0; a["l"][20] = 97.0                        # one bar touches target and stop
+    s = _sl_session(a, date, t, v)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert (k, reason) == (20, "stop") and abs(px - 98.0 * 0.9995) < 1e-9, (k, reason, px)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=98.0))
+    assert (k, reason) == (20, "stop") and abs(px - 102.0 * 1.0005) < 1e-9, (k, reason, px)
+    a["l"][20] = 100.0                                           # target only
+    s = _sl_session(a, date, t, v)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert (k, reason, px) == (20, "target", 102.0), (k, reason, px)
+    a["o"][30] = 95.0; a["l"][30] = 95.0; a["h"][20] = 100.0     # gap through the stop: filled at the open
+    s = _sl_session(a, date, t, v)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert (k, reason) == (30, "stop") and abs(px - 95.0 * 0.9995) < 1e-9, (k, reason, px)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, trail=("pct", 1.0)))
+    assert (k, reason) == (30, "stop")
+
+
+run("stratlab: stop is assumed when stop and target are hit in one bar; gaps fill at the open", t_sl_stop_before_target_same_bar)
+
+
+def t_sl_squareoff_and_time_stop():
+    date, t, a, v = _sl_flat()
+    sq = 15 * 60 + 15 - 555                                      # index of the 15:15 bar
+    a["o"][sq] = 101.0
+    s = _sl_session(a, date, t, v)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, target=120.0))
+    assert (k, reason) == (sq, "squareoff") and abs(px - 101.0 * 0.9995) < 1e-9, (k, reason, px)
+    assert _sls.fill_intraday(s, _SlEntry(sq - 1, 1, stop=90.0)) is None      # no entries from 15:15
+    assert _sls.fill_intraday(s, _SlEntry(sq - 2, 1, stop=90.0)) is not None
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, time_stop=15))
+    assert (k, reason) == (26, "time"), (k, reason)              # filled at bar 11, out 15 minutes later
+    s360 = _sl_session({x: y[:360] for x, y in a.items()}, date[:360], t[:360], v[:360])   # data ends 15:14
+    k, fill, px, reason = _sls.fill_intraday(s360, _SlEntry(10, 1, stop=90.0))
+    assert (k, reason) == (359, "squareoff")
+    two = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=90.0), _SlEntry(50, 1, stop=90.0)], max_per_day=3)
+    trades, _ = _sls.sim_session(two, s)
+    assert len(trades) == 1, trades                              # one open position per symbol
+
+
+run("stratlab: square-off at 15:15, time stop, one open position per symbol", t_sl_squareoff_and_time_stop)
+
+
+def t_sl_costs_applied():
+    date, t, a, v = _sl_flat()
+    a["h"][20] = 102.5
+    s = _sl_session(a, date, t, v)
+    for kind, hz, ck in (("intraday", None, "equity_mis"), ("scalping", None, "equity_mis"),
+                         ("futures", "intraday", "future")):
+        sp = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=98.0, target=102.0)], kind=kind, horizon=hz)
+        (tr,), _ = _sls.sim_session(sp, s)
+        qty = int(100_000 // tr[5])
+        assert tr[9] == qty and abs(tr[5] * qty - 100_000) < tr[5], tr       # ₹1L notional, whole shares
+        gross = round((102.0 - tr[5]) * qty, 2)
+        cost = _sl_rtc(tr[5] * qty, 102.0 * qty, ck)
+        assert tr[10] == gross and tr[11] == cost and cost > 0, (kind, tr, cost)
+        assert abs(tr[12] - (gross - cost)) < 0.011, tr
+
+
+run("stratlab: costs from costs.round_trip_cost are charged (MIS for intraday/scalping, future for futures)", t_sl_costs_applied)
+
+
+def t_sl_costs_applied_short():
+    date, t, a, v = _sl_flat()
+    a["l"][40] = 98.0
+    s = _sl_session(a, date, t, v)
+    sh = _sl_spec(lambda s, p: [_SlEntry(10, -1, stop=103.0, target=99.0)])
+    (tr,), _ = _sls.sim_session(sh, s)
+    qty = tr[9]
+    assert tr[13] == "target" and tr[10] == round((tr[5] - 99.0) * qty, 2), tr
+    assert tr[11] == _sl_rtc(99.0 * qty, tr[5] * qty, "equity_mis") and tr[12] < tr[10], tr
+
+
+run("stratlab: costs from costs.round_trip_cost are charged on every trade (short side)", t_sl_costs_applied_short)
+
+
+def t_sl_positional():
+    days = tuple(20260101 + d for d in range(8))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    def day(k):
+        return slice(k * 300, (k + 1) * 300)
+    a["o"][day(4)] = a["h"][day(4)] = a["l"][day(4)] = a["c"][day(4)] = 90.0     # day 4 gaps down through the stop
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    seen = []
+
+    def buy_day1(d, p):
+        seen.append(len(d))
+        return _SlSwing(1, stop_pct=5.0, target_pct=10.0, max_hold=10) if len(d) == 2 else None
+    sw = _sl_spec(buy_day1, kind="swing")
+    (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999)
+    assert tr[2] == days[2] and abs(tr[5] - 100.0 * 1.0005) < 1e-6, tr        # decided on day 1, filled next open
+    assert tr[13] == "stop" and tr[6] == days[4] and abs(tr[8] - 90.0 * 0.9995) < 1e-6, tr   # gap: fill at the open
+    qty = tr[9]
+    assert tr[11] == _sl_rtc(tr[5] * qty, tr[8] * qty, "equity_cnc") and tr[11] > 150, tr      # delivery costs
+    assert seen[:2] == [1, 2] and max(seen) <= 8
+    hold = _sl_spec(lambda d, p: _SlSwing(1, stop_pct=20.0, max_hold=2) if len(d) == 1 else None, kind="swing",
+                    id="t_hold")
+    (tr,), _ = _sls.sim_positional(hold, sd, 0, 99999999)
+    assert tr[13] == "max_hold" and tr[2] == days[1] and tr[6] == days[2], tr
+    try:
+        _sls.sim_positional(_sl_spec(lambda d, p: _SlSwing(-1, stop_pct=5.0), kind="swing", id="t_short"), sd, 0, 99999999)
+        raise AssertionError("swing short was accepted")
+    except ValueError as exc:
+        assert "long-only" in str(exc)
+    fut = _sl_spec(lambda d, p: _SlSwing(-1, stop_pct=5.0, target_pct=8.0, max_hold=10) if len(d) == 2 else None, kind="futures",
+                   horizon="positional", id="t_fut")
+    (tr,), _ = _sls.sim_positional(fut, sd, 0, 99999999)
+    assert tr[3] == -1 and tr[13] == "target" and tr[6] == days[4] and tr[12] > 0 and tr[11] == _sl_rtc(tr[8] * tr[9], tr[5] * tr[9], "future"), tr
+    # a decision_time strategy sees today's bar only up to that minute and is filled at that minute
+    a["c"][day(6)][-1] = 150.0; a["h"][day(6)][-1] = 150.0                    # a late spike it must not see
+    sd2 = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    highs = []
+
+    def at_1100(d, p):
+        highs.append(float(d.h[-1]))
+        return None
+    _sls.sim_positional(_sl_spec(at_1100, kind="swing", decision_time=11 * 60, id="t_dt"), sd2, 0, 99999999)
+    assert max(highs) <= 100.0, highs
+    assert _sls.sim_positional(sw, sd, days[5], 99999999)[0] == []           # entries only inside the window
+
+
+run("stratlab: positional sim (next-open fill, gap through stop, max hold, long-only swing, decision time)", t_sl_positional)
+
+
+def _sl_tr(sid, sym, date, net):
+    return (sid, sym, date, 1, "10:00", 100.0, date, "11:00", 101.0, 1000, net + 80.0, 80.0, net, "target")
+
+
+def _sl_book(sid, cal, per_day=2, syms=("A", "B", "C", "D", "E"), win=300.0, loss=-200.0):
+    out, k = [], 0
+    for d in cal:
+        for j in range(per_day):
+            j_, r_ = k % len(syms), k // len(syms)           # every symbol wins 3 rounds in 5
+            out.append(_sl_tr(sid, syms[j_], d, win if (r_ + j_) % 5 < 3 else loss))
+            k += 1
+    return out
+
+
+def t_sl_protocol_gates_and_final_hidden():
+    cal = list(range(20260001, 20260201))                        # 200 sessions: 140 discovery (70 + 70), 60 final
+    sp = _slp.split_sessions(cal)
+    assert (sp.n_discovery, sp.n_final) == (140, 60) and sp.h1 == (cal[0], cal[69]) and sp.h2 == (cal[70], cal[139])
+    assert sp.final == (cal[140], cal[199]) and sp.h2[1] < sp.final[0]
+    good = _sl_book("good", cal)
+    sc = _slp.screen(good, sp, "intraday")
+    assert sc["passed"] and sc["disc"]["trades"] == 280 and sc["disc"]["pf"] >= 1.15, sc
+    books = {
+        "good": good,
+        "h2_loses": [x if x[2] <= sp.h1[1] or x[2] > sp.h2[1] else _sl_tr("h2_loses", x[1], x[2], -abs(x[12])) for x in _sl_book("h2_loses", cal)],
+        "low_pf": _sl_book("low_pf", cal, win=140.0, loss=-200.0),
+        "few": _sl_book("few", cal[::3], per_day=1),
+        "one_symbol": _sl_book("one_symbol", cal, syms=("A", "B")) + [_sl_tr("one_symbol", "Z", cal[5], 30000.0),
+                                                                    _sl_tr("one_symbol", "Z", cal[90], 30000.0)],
+        "final_loses": [x if x[2] < sp.final[0] else _sl_tr("final_loses", x[1], x[2], -150.0) for x in _sl_book("final_loses", cal)],
+    }
+    expect = {"h2_loses": "H2 net <= 0", "low_pf": "PF ", "few": "trades <", "one_symbol": "of net"}
+    specs = [_sl_spec(lambda s, p: [], id=i) for i in books]
+    calls = []
+
+    def simulate(specs_, lo, hi):
+        calls.append(([s.id for s in specs_], lo, hi))
+        return {s.id: {"trades": [x for x in books[s.id] if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                       "error": None} for s in specs_}
+    with _sl_tmp.TemporaryDirectory() as td:
+        ledger = os.path.join(td, "ledger.json")
+        res, trades = _slp.evaluate(specs, cal, simulate, n_symbols=5, ledger_path=ledger)
+        by = {r["id"]: r for r in res}
+        assert by["good"]["verdict"] == "CONFIRMED" and by["good"]["final"]["trades"] == 120, by["good"]
+        assert by["final_loses"]["verdict"] == "REJECTED ON FINAL" and by["final_loses"]["final"]["net"] < 0
+        for i, why in expect.items():
+            assert by[i]["verdict"] == "FAILED SCREEN" and why in by[i]["why"], (i, by[i]["why"])
+            assert by[i]["final"] is None, i                                  # FINAL hidden...
+            assert all(x[2] < sp.final[0] for x in trades[i]), i              # ...and its trades never produced
+        assert len(calls) == 2 and calls[0][1:] == sp.discovery and calls[1][1:] == sp.final
+        assert sorted(calls[1][0]) == ["final_loses", "good"], calls[1]       # FINAL simulated for passers only
+        assert all(lo >= sp.final[0] or hi <= sp.h2[1] for _, lo, hi in calls)
+        text = _slp.luck_reminder(res)
+        assert "Tested 6 strategies" in text and "2 passed the screen" in text and "1 confirmed" in text, text
+        assert "5%" in text and "luck" in text
+        # the same strategy again: the same single FINAL result; a changed strategy: not a fresh confirmation
+        res2, _ = _slp.evaluate(specs[:1], cal, simulate, n_symbols=5, ledger_path=ledger)
+        assert res2[0]["verdict"] == "CONFIRMED" and "first reported" in res2[0]["final_note"]
+        changed = _sl_spec(lambda s, p: None, id="good")
+        res3, _ = _slp.evaluate([changed], cal, simulate, n_symbols=5, ledger_path=ledger)
+        assert res3[0]["verdict"].startswith("RETEST") and "not a confirmation" in res3[0]["final_note"], res3[0]
+        # --peek-final shows FINAL for failures, labelled, and burns them
+        calls.clear()
+        res4, _ = _slp.evaluate([s for s in specs if s.id == "low_pf"], cal, simulate, n_symbols=5,
+                                ledger_path=ledger, peek_final=True)
+        assert res4[0]["verdict"] == "FAILED SCREEN" and res4[0]["final"] is not None
+        assert "PEEK" in res4[0]["final_note"] and len(calls) == 2
+    # too few sessions: no verdict, FINAL never simulated even for a book that would pass
+    calls.clear()
+    short = cal[:30]
+    res5, _ = _slp.evaluate(specs[:1], short, simulate)
+    assert res5[0]["verdict"] == "NO VERDICT" and "too few sessions" in res5[0]["why"] and res5[0]["final"] is None
+    assert len(calls) == 1
+    assert (_slp.DISCOVERY_FRAC, _slp.SCREEN_MIN_PF, _slp.SCREEN_MAX_SYMBOL_SHARE, _slp.FINAL_MIN_PF) == (0.70, 1.15, 0.35, 1.05)
+    assert _slp.SCREEN_MIN_TRADES == {"intraday": 150, "positional": 60}
+
+
+run("stratlab: protocol gates; FINAL is hidden (never simulated) for screen failures", t_sl_protocol_gates_and_final_hidden)
+
+
+def t_sl_data_layouts_and_cache():
+    def bars(day, n=375, px=100.0, start=555):
+        return [[f"{day}T{(start + i) // 60:02d}:{(start + i) % 60:02d}:00", px, px + 1, px - 1, px, 10 + i]
+                for i in range(n)]
+    with _sl_tmp.TemporaryDirectory() as td:
+        src = os.path.join(td, "bars"); os.makedirs(src)
+        one = bars("2026-01-05") + bars("2026-01-06", px=101.0) + bars("2026-01-07", n=55)   # + a short session
+        one += [["2026-01-06T15:45:00", 1, 1, 1, 1, 1], ["2026-01-06T09:00:00", 1, 1, 1, 1, 1]]  # outside hours
+        with open(os.path.join(src, "AAA.json"), "w") as fh:
+            _sl_json.dump({"symbol": "AAA", "interval": "minute", "bars": one}, fh)
+        with open(os.path.join(src, "_NIFTY50_min.json"), "w") as fh:
+            _sl_json.dump({"symbol": "NIFTY 50", "interval": "minute", "bars": bars("2026-01-05", px=25000.0)}, fh)
+        with open(os.path.join(src, "_VIX_day.json"), "w") as fh:
+            _sl_json.dump({"symbol": "INDIA VIX", "interval": "day", "bars": [["2026-01-05T00:00:00", 14, 15, 13, 14.5, 0]]}, fh)
+        with open(os.path.join(src, "b_0.json"), "w") as fh:
+            _sl_json.dump({"BBB": {"source": "kite:1m", "bars": bars("2026-01-05", n=360)},
+                           "CCC": {"bars": bars("2026-01-05", n=360, px=50.0)}, "EMPTY": {"bars": []}}, fh)
+        with open(os.path.join(src, "half.json"), "w") as fh:
+            fh.write('{"symbol": "HALF", "bars": [[')                          # a download in progress
+        cache = os.path.join(td, "cache")
+        man = _sld.prepare(src, cache)
+        assert sorted(man["symbols"]) == ["AAA", "BBB", "CCC"], man["symbols"]
+        assert sorted(man["aux"]) == ["_NIFTY50_min", "_VIX_day"], man["aux"]
+        assert any("half.json" in x for x in man["problems"]) and any("EMPTY" in x for x in man["problems"])
+        sd = _sld.load_symbol(cache, "AAA")
+        assert sd.n_sessions == 2 and list(sd.days) == [20260105, 20260106] and sd.dropped == [20260107]
+        assert sd.t.min() == 555 and sd.t.max() == 929 and len(sd.c) == 750
+        d = sd.daily()
+        assert list(d["c"]) == [100.0, 101.0] and list(d["h"]) == [101.0, 102.0] and d["v"][0] == sum(10 + i for i in range(375))
+        assert _sld.load_symbol(cache, "BBB").t.max() == 914 and _sld.load_daily_aux(cache, "_VIX_day")["c"][0] == 14.5
+        idx = _sld.load_symbol(cache, "_NIFTY50_min")
+        ss = _sli.build_sessions(sd, idx)
+        assert ss[0].nifty is not None and ss[0].nifty[0] == 25000.0 and ss[1].nifty is None
+        assert ss[1].pdc == 100.0 and ss[1].pdh == 101.0 and abs(ss[1].gap - 0.01) < 1e-12 and np.isnan(ss[0].pdc)
+        sig = dict(_sl_json.load(open(os.path.join(cache, "_manifest.json")))["files"])
+        man2 = _sld.prepare(src, cache)                                        # unchanged files are not re-parsed
+        assert dict(_sl_json.load(open(os.path.join(cache, "_manifest.json")))["files"]) == sig
+        assert sorted(man2["symbols"]) == ["AAA", "BBB", "CCC"]
+    for inside in (os.path.dirname(os.path.abspath(__file__)), os.path.join(os.path.dirname(os.path.abspath(__file__)), "stratlab", "out")):
+        try:
+            _sld.assert_outside_repo(inside)
+            raise AssertionError("a path inside the repository was accepted")
+        except ValueError:
+            pass
+
+
+run("stratlab: both bar layouts load, cache, drop short sessions; outputs refused inside the repo", t_sl_data_layouts_and_cache)
+
+
+def t_sl_indicators_causal():
+    sd = _sl_walk(n_days=3, seed=3)
+    full = _sli.build_sessions(sd)
+    cut = int(sd.starts[2]) + 200                                # truncate the data mid-way through day 3
+    sd_cut = _sld.from_arrays("RW", sd.date[:cut], sd.t[:cut], sd.o[:cut], sd.h[:cut], sd.l[:cut], sd.c[:cut], sd.v[:cut])
+    part = _sli.build_sessions(sd_cut)
+    for name in ("vwap", "vsd", "ema9", "ema21", "ema50", "rsi", "atr", "e9_5", "e21_5", "e50_5", "rsi5", "atr5",
+                 "vr", "day_hi", "day_lo"):
+        a, b = getattr(full[2], name)[:195], getattr(part[2], name)[:195]
+        assert np.allclose(a, b, equal_nan=True), name           # values do not depend on later bars
+    s = full[1]
+    tp = (s.h + s.l + s.c) / 3
+    assert abs(s.vwap[99] - (tp[:100] * s.v[:100]).sum() / s.v[:100].sum()) < 1e-9
+    assert s.day_hi[50] == s.h[:51].max() and s.pdc == full[0].c[-1] and len(s.prev) == 1
+
+
+run("stratlab: indicators are causal (unchanged when later bars are removed)", t_sl_indicators_causal)
+
+
+def t_sl_catalogue_first_batch():
+    kinds = {}
+    for sp in _SL_REG.values():
+        kinds.setdefault(sp.kind, []).append(sp.id)
+        assert sp.desc and "\n" not in sp.desc and sp.family and len(sp.params) <= 5, sp.id
+    assert len(kinds["intraday"]) >= 12 and len(kinds["scalping"]) >= 8, {k: len(v) for k, v in kinds.items()}
+    assert len(set(_SL_REG)) == len(_SL_REG)
+    sd = _sl_walk(n_days=30, seed=11)
+    rng = np.random.default_rng(1)
+    idx = _sld.from_arrays("_NIFTY50_min", sd.date, sd.t, sd.c * 50, sd.c * 50, sd.c * 50,
+                           25000 * np.exp(np.cumsum(rng.normal(0, 0.0004, len(sd.c)))), sd.v * 0)
+    specs = [sp for sp in _SL_REG.values() if sp.horizon == "intraday"]
+    sessions = _sli.build_sessions(sd, idx)
+    traded = 0
+    for sp in specs:
+        n = 0
+        for s in sessions:
+            tr, _ = _sls.sim_session(sp, s)
+            n += len(tr)
+            assert len(tr) <= sp.max_per_day, sp.id
+            for x in tr:
+                assert x[4] < "15:15" and x[7] <= "15:15" and x[4] <= x[7], (sp.id, x)
+            bad = _sls.audit_lookahead(sp, s, cuts=(20, 46, 75, 110, 170, 226, 290, 330))
+            assert bad is None, f"{sp.id}: {bad}"
+        traded += n > 0
+    assert traded >= len(specs) - 3, traded                      # nearly every strategy trades on a random walk
+    out = _sls.run_symbol("", "RW", list(_SL_REG.values()), 0, 99999999, sd=sd, index=idx)
+    assert all(r["error"] is None and r["lookahead"] is None for r in out.values()), \
+        {k: (r["error"], r["lookahead"]) for k, r in out.items() if r["error"] or r["lookahead"]}
+
+
+run("stratlab: catalogue has 12+ intraday and 8+ scalping strategies; all run and pass the look-ahead audit", t_sl_catalogue_first_batch)
+
+
+def t_sl_cli_end_to_end():
+    from stratlab import run as _slr
+    import contextlib, io
+
+    def bars(sd):
+        return [[f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:]}T{m // 60:02d}:{m % 60:02d}:00", float(o), float(h), float(l), float(c), float(v)]
+                for d, m, o, h, l, c, v in zip(sd.date, sd.t, sd.o, sd.h, sd.l, sd.c, sd.v)]
+    with _sl_tmp.TemporaryDirectory() as td:
+        src, out = os.path.join(td, "bars"), os.path.join(td, "out"); os.makedirs(src)
+        for k, sym in enumerate(("AAA", "BBB")):
+            with open(os.path.join(src, sym + ".json"), "w") as fh:
+                _sl_json.dump({"symbol": sym, "interval": "minute", "bars": bars(_sl_walk(n_days=12, seed=20 + k, symbol=sym))}, fh)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = _slr.main(["--data", src, "--kind", "scalping", "--ids", "scalp_orb5,scalp_ema9_21_cross",
+                            "--out", out, "--cache", os.path.join(td, "cache"), "--jobs", "1"])
+        assert rc == 0
+        text = open(os.path.join(out, "summary.txt")).read()
+        assert "too few sessions" in text and "NO VERDICT" in text and "REMINDER" in text and "hidden" in text, text[:400]
+        rows = list(__import__("csv").DictReader(open(os.path.join(out, "results.csv"))))
+        assert [r["id"] for r in rows] == ["scalp_ema9_21_cross", "scalp_orb5"] and rows[0]["final_trades"] == ""
+        tr = list(__import__("csv").DictReader(open(os.path.join(out, "trades", "scalp_ema9_21_cross.csv"))))
+        final_from = _slp.split_sessions(range(20260101, 20260113)).final[0]
+        assert tr and all(int(x["date"]) < final_from for x in tr)             # no FINAL trades on disk
+        try:
+            _slr.main(["--data", src, "--kind", "scalping", "--out", os.path.join(os.path.dirname(os.path.abspath(__file__)), "x")])
+            raise AssertionError("--out inside the repository was accepted")
+        except ValueError:
+            pass
+
+
+run("stratlab: CLI end to end (results.csv, summary.txt, trade CSVs without FINAL trades)", t_sl_cli_end_to_end)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
