@@ -28,8 +28,10 @@ Assumptions (all overridable from the CLI, none fitted to data):
               Expiry settles at intrinsic against the mean close of 15:00-15:29 (NSE settles on a
               last-30-minute average), with no haircut.
   costs       costs.round_trip_cost(..., "option") per leg (brokerage, STT, exchange, SEBI, stamp,
-              GST). A long leg settled in the money also pays exercise STT (0.125 % of intrinsic
-              instead of 0.1 % of premium, so +0.025 %).
+              GST). A long leg settled in the money pays exercise STT of 0.15 % of intrinsic (2026),
+              the same rate round_trip_cost already charges on the settlement value, so nothing extra.
+  lot sizes   one lot size for every date (--lot-size), or ReplayConfig.lot_schedule = ((from_date, lot), ...)
+              for the size in force on each entry date.
 
 Usage:
   python options_replay.py --strategy IRON_CONDOR --data <index.json | bars12m dir>
@@ -58,7 +60,9 @@ TICK = 0.05
 MINUTES_PER_YEAR = 365 * 24 * 60
 EXPIRY_CLOSE = time(15, 30)
 SETTLE_FROM = time(15, 0)
-EXERCISE_STT_EXTRA = 0.00125 - 0.001          # exercise STT 0.125 % vs 0.1 % already in round_trip_cost
+# Exercise STT (costs.STT_OPTION_EXERCISE, 0.15 % of intrinsic) minus the option sell-side STT that
+# round_trip_cost already charges on the settlement value (0.15 % since Budget 2026) = 0.
+EXERCISE_STT_EXTRA = 0.0015 - 0.0015
 WEEKLY_SWITCH = date(2025, 9, 1)              # NSE moved index expiries from Thursday to Tuesday
 
 STRIKE_STEP = {"NIFTY": 50, "BANKNIFTY": 100}
@@ -188,14 +192,16 @@ def _last_weekday_of_month(y: int, m: int, wd: int) -> date:
 
 def next_expiry(und: str, today: date, is_td: Callable[[date], bool], skip_today: bool = True) -> date:
     """NIFTY → next weekly expiry; BANKNIFTY → next monthly expiry; holiday-adjusted."""
-    for k in range(0, 120):
+    for k in range(0, 120 if und == "BANKNIFTY" else 400):
         if und == "BANKNIFTY":
             y, m = today.year + (today.month - 1 + k) // 12, (today.month - 1 + k) % 12 + 1
             nominal = _last_weekday_of_month(y, m, _expiry_weekday(date(y, m, 28)))
         else:
-            base = today + timedelta(days=7 * k)
-            wd = _expiry_weekday(base)
-            nominal = base + timedelta(days=(wd - base.weekday()) % 7)
+            # day by day, so the weekday rule is read on the expiry date itself: from Fri 2025-08-29 the
+            # next expiry is Tue 2025-09-02 (the first Tuesday expiry), not Thu 2025-09-04
+            nominal = today + timedelta(days=k)
+            if nominal.weekday() != _expiry_weekday(nominal):
+                continue
         exp = _adjust_back(nominal, is_td)
         if exp > today or (exp == today and not skip_today):
             return exp
@@ -291,6 +297,7 @@ class MarketView:
     step: int
     T: float                         # years to expiry on the replay's clock
     r: float = RISK_FREE
+    is_td: Optional[Callable[[date], bool]] = None    # the replay's trading-day calendar
 
     def today_bars(self) -> list:
         return [b for b in self.bars if b[0].date() == self.now.date()]
@@ -339,6 +346,7 @@ class OptionStrategy:
     target_frac = 0.5
     stop_mult = 2.0
     stop_frac = 0.5
+    exits_early = True               # False: hold to expiry, never checked for stop/target (faster)
 
     def decide(self, view: MarketView) -> Optional[list[LegSpec]]:
         raise NotImplementedError
@@ -437,6 +445,90 @@ class LongStraddle(OptionStrategy):
         return [LegSpec("CE", k, +1), LegSpec("PE", k, +1)]
 
 
+class ShortStraddle(OptionStrategy):
+    """Sell the ATM call and put (undefined risk). stop_mult / target_frac as for any credit position;
+    pass a large stop and target (e.g. 99) for a pure hold to expiry / time exit."""
+    name = "SHORT_STRADDLE"
+
+    def __init__(self, entry: time = time(10, 20), hold: str = "expiry", target_frac: float = 0.5,
+                 stop_mult: float = 2.0, time_exit: time = time(15, 15)):
+        self.decision_times = [entry]
+        self.hold, self.target_frac, self.stop_mult, self.time_exit = hold, target_frac, stop_mult, time_exit
+
+    def decide(self, v: MarketView):
+        k = v.atm()
+        return [LegSpec("CE", k, -1), LegSpec("PE", k, -1)]
+
+
+def previous_trading_day(d: date, is_td: Callable[[date], bool]) -> date:
+    p = d - timedelta(days=1)
+    for _ in range(15):
+        if is_td(p):
+            return p
+        p -= timedelta(days=1)
+    return p
+
+
+def trading_days_left(d: date, expiry: date, is_td: Callable[[date], bool]) -> int:
+    """Trading sessions after `d` up to and including `expiry`."""
+    n, x = 0, d + timedelta(days=1)
+    while x <= expiry:
+        n += bool(is_td(x))
+        x += timedelta(days=1)
+    return n
+
+
+class ShortStrangle(OptionStrategy):
+    """Sell the OTM call and put whose |delta| is closest to short_delta (undefined risk).
+
+    wing_pts:      also buy the CE at (short CE + wing_pts) and the PE at (short PE - wing_pts): a defined-risk
+                   iron condor with far wings.
+    weekly_cycle:  enter only on the first trading day after an expiry (the previous trading day was an expiry
+                   of this underlying), and skip that week when fewer than `min_days_left` trading days remain
+                   after the entry day up to and including the expiry. A skipped week is not entered later.
+    target_frac / stop_mult = None: no target / no stop (hold to expiry settlement)."""
+    name = "SHORT_STRANGLE"
+
+    def __init__(self, entry: time = time(10, 20), hold: str = "expiry", short_delta: float = 0.16,
+                 target_frac: Optional[float] = 0.5, stop_mult: Optional[float] = 2.0,
+                 time_exit: time = time(15, 15), wing_pts: Optional[float] = None,
+                 weekly_cycle: bool = False, min_days_left: int = 0):
+        self.decision_times = [entry]
+        self.hold, self.short_delta = hold, short_delta
+        self.target_frac, self.stop_mult, self.time_exit = target_frac, stop_mult, time_exit
+        self.wing_pts, self.weekly_cycle, self.min_days_left = wing_pts, weekly_cycle, min_days_left
+        self.exits_early = not (hold == "expiry" and target_frac is None and stop_mult is None)
+        self.skipped_short_weeks: list = []
+
+    def exit_reason(self, entry_net, pnl_close, close_cost_worst, pnl_worst):
+        if self.stop_mult is not None and close_cost_worst >= self.stop_mult * entry_net:
+            return "stop"
+        if self.target_frac is not None and pnl_close >= self.target_frac * entry_net:
+            return "target"
+        return None
+
+    def in_cycle(self, v: MarketView) -> bool:
+        is_td = v.is_td or _calendar_trading_day
+        d = v.now.date()
+        prev = previous_trading_day(d, is_td)
+        if next_expiry(v.underlying, prev, is_td, skip_today=False) != prev:
+            return False                                   # not the first session after an expiry
+        if trading_days_left(d, v.expiry, is_td) < self.min_days_left:
+            self.skipped_short_weeks.append(d)
+            return False
+        return True
+
+    def decide(self, v: MarketView):
+        if self.weekly_cycle and not self.in_cycle(v):
+            return None
+        kc = v.strike_for_delta("CE", self.short_delta)
+        kp = v.strike_for_delta("PE", self.short_delta)
+        legs = [LegSpec("CE", kc, -1), LegSpec("PE", kp, -1)]
+        if self.wing_pts:
+            legs += [LegSpec("CE", kc + self.wing_pts, +1), LegSpec("PE", kp - self.wing_pts, +1)]
+        return legs
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Engine
 # ══════════════════════════════════════════════════════════════════════════
@@ -490,6 +582,17 @@ class ReplayConfig:
     rv_min_returns: int = 10
     rv_mult: float = 1.1
     time_basis: str = "calendar"     # "calendar" | "trading"
+    lot_schedule: Optional[tuple] = None   # ((from_date, lot size), ...): the size in force on the entry date
+
+
+def lot_size_on(schedule: tuple, d: date) -> int:
+    """Lot size in force on `d` from ((from_date, lot), ...); the earliest entry also applies before its date."""
+    sch = sorted(schedule)
+    lot = sch[0][1]
+    for frm, n in sch:
+        if d >= frm:
+            lot = n
+    return int(lot)
 
 
 @dataclass
@@ -604,7 +707,7 @@ class Replay:
                         continue
                     exp = next_expiry(self.und, d, is_td, skip_today=not self.cfg.allow_0dte)
                     view = MarketView(self.und, ts, o, list(history), list(prior), sigma, exp, self.step,
-                                      self._T(ts, exp), self.cfg.r)
+                                      self._T(ts, exp), self.cfg.r, is_td)
                     specs = self.strat.decide(view)
                     if specs:
                         pos = self._open(specs, view, vsrc)
@@ -625,16 +728,18 @@ class Replay:
 
     def _open(self, specs: list[LegSpec], v: MarketView, vsrc: str) -> Trade:
         legs, net, slip = [], 0.0, 0.0
+        qty = (self.cfg.lots * lot_size_on(self.cfg.lot_schedule, v.now.date())
+               if self.cfg.lot_schedule else self.qty)
         for s in specs:
             m = self._model(s.opt, s.strike, v.spot, v.T, v.sigma)
             px = fill_price(m, s.side, self.und, self.cfg.slip_min, self.cfg.slip_pct)
             legs.append(Leg(s.opt, s.strike, s.side, px))
             net += -s.side * px
-            slip += abs(px - m) * self.qty
+            slip += abs(px - m) * qty
         kind = getattr(self.strat, "last_kind", "") or self.strat.name
         tr = Trade(self.strat.name, kind, self.und, v.now, v.expiry, v.spot, v.sigma, vsrc,
-                   self.qty, legs, round(net, 4))
-        tr.max_risk = round(_max_risk(legs, net, self.qty), 2)
+                   qty, legs, round(net, 4))
+        tr.max_risk = round(_max_risk(legs, net, qty), 2)
         tr.slippage = slip
         return tr
 
@@ -651,6 +756,8 @@ class Replay:
         if self.strat.hold == "intraday" and ts.time() >= self.strat.time_exit:
             _, fills = self._close_value(tr, o, ts, sig)
             self._close(tr, ts, o, fills, "time")
+            return
+        if not getattr(self.strat, "exits_early", True):          # pure hold to expiry: nothing to check
             return
         # stop: worst executable value inside the bar
         candidates = {h, lo, c} | {l.strike for l in tr.legs if lo <= l.strike <= h}
@@ -762,13 +869,21 @@ def build_strategy(a) -> OptionStrategy:
             ev = set()
         return LongStraddle(event_dates=ev, entry=_t(a.entry or "09:20"), hold=a.hold,
                             target_frac=a.target or 0.5, stop_frac=a.stop or 0.4, time_exit=_t(a.time_exit))
+    if s == "SHORT_STRADDLE":
+        return ShortStraddle(entry=_t(a.entry or "10:20"), hold=a.hold, target_frac=a.target or 0.5,
+                             stop_mult=a.stop or 2.0, time_exit=_t(a.time_exit))
+    if s == "SHORT_STRANGLE":
+        return ShortStrangle(entry=_t(a.entry or "10:20"), hold=a.hold, short_delta=a.short_delta or 0.16,
+                             target_frac=a.target or 0.5, stop_mult=a.stop or 2.0, time_exit=_t(a.time_exit),
+                             wing_pts=a.width)
     raise SystemExit(f"unknown strategy {a.strategy}")
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Index-option strategy replay (Black-Scholes on real index bars)")
     p.add_argument("--strategy", required=True,
-                   help="IRON_CONDOR | CREDIT_SPREAD (BULL_PUT/BEAR_CALL by signal) | LONG_STRADDLE")
+                   help="IRON_CONDOR | CREDIT_SPREAD (BULL_PUT/BEAR_CALL by signal) | LONG_STRADDLE | "
+                        "SHORT_STRADDLE | SHORT_STRANGLE (--width adds long wings that far out)")
     p.add_argument("--data", required=True, help="index.json file or a bars12m-style directory")
     p.add_argument("--underlying", default="NIFTY", choices=["NIFTY", "BANKNIFTY"])
     p.add_argument("--hold", default="intraday", choices=["intraday", "expiry"])
