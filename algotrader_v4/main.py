@@ -1540,59 +1540,6 @@ def market_context_view(symbol: str):
     return market_context.context_for(INDEX_QUOTE[und] if und else symbol.upper())
 
 
-@app.get("/forecast/status", tags=["Forecast"])
-def forecast_status():
-    """Is the Kronos model loaded, or is the labelled statistical fallback in use?"""
-    import kronos_forecast
-    return {**kronos_forecast.available(), "horizon_bars": settings.kronos_horizon_bars, "samples": settings.kronos_samples}
-
-
-@app.get("/forecast/{symbol}", tags=["Forecast"])
-def forecast_symbol(symbol: str, horizon: int | None = None):
-    """Next-bars forecast for a streamed symbol (expected move, p(up), p10/p90 band, median path)."""
-    import kronos_forecast
-    f = kronos_forecast.forecast(symbol.upper(), horizon=horizon)
-    if not f.get("available"):
-        raise HTTPException(404, f.get("reason", "no forecast"))
-    return f
-
-
-@app.get("/backtest/forecast-skill", tags=["Backtest"])
-async def forecast_skill(symbol: str, days: int = 20, horizon: int | None = None):
-    """Walk forward through past bars and measure the forecaster's directional hit-rate against a coin flip."""
-    import kronos_forecast, replay_backtest as rb
-    bars, src = await asyncio.to_thread(rb.load_bars, symbol.upper(), max(5, min(days, 60)))
-    if not bars:
-        raise HTTPException(404, f"no bar data for {symbol}")
-    res = await asyncio.to_thread(kronos_forecast.skill_check, symbol.upper(), bars, horizon)
-    return {**res, "data": src, "days": days}
-
-
-class ForecastSignalsRequest(BaseModel):
-    signals: list[dict] = Field(min_length=1, max_length=600)   # {symbol, ts (signal bar ISO), side, net, agent?}
-    samples: int = Field(default=8, ge=1, le=32)
-
-
-@app.post("/backtest/forecast-signals", tags=["Backtest"])
-async def backtest_forecast_signals(req: ForecastSignalsRequest):
-    """Kronos forecast at each given signal time from the bars before it (background; poll the GET)."""
-    import ai_replay
-    if ai_replay._FC_LAST.get("status") == "running":
-        return {k: v for k, v in ai_replay._FC_LAST.items() if k != "rows"}
-    asyncio.create_task(ai_replay.run_forecast_signals_and_record(req.signals, req.samples))
-    await asyncio.sleep(0)
-    return {"status": "running", "total": len(req.signals)}
-
-
-@app.get("/backtest/forecast-signals", tags=["Backtest"])
-def backtest_forecast_signals_status(rows: bool = False):
-    import ai_replay
-    st = dict(ai_replay._FC_LAST)
-    if not rows:
-        st.pop("rows", None)
-    return st
-
-
 @app.get("/market/trend-filter", tags=["Market Regime"])
 def trend_filter(refresh: bool = False):
     return market_filter.state(refresh=refresh)
@@ -1959,9 +1906,6 @@ async def on_startup():
         _optimizer.apply_params()           # walk-forward-chosen agent parameters, if any
     except Exception as exc:
         logger.error("Parameter apply failed: {}", exc)
-    if settings.kronos_model:
-        import kronos_forecast
-        asyncio.create_task(kronos_forecast.refresher())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
     try:

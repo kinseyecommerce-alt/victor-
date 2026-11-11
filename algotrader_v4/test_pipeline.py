@@ -5385,7 +5385,6 @@ def t_research_evidence_shape():
 
 # ── Bull-vs-bear debate gate ──────────────────────────────────────────────
 import debate_gate as _dg
-import kronos_forecast as _kf
 
 class _FakeDebateClient:
     def __init__(self, verdict=None, fail=False):
@@ -5462,72 +5461,8 @@ def t_debate_gates_ai_entries():
     globals()["_noop_async_returning"] = _noop_async_returning
     _with_ai_env(lambda: _with_swing_file(lambda p: body()))
 
-# ── Kronos forecasts (fallback path; the real model is optional) ──────────
-def t_forecast_fallback_shape_and_cache():
-    bars = _trend_bars("KFC", days=2)
-    f = _kf.forecast("KFC", bars=bars, horizon=16, samples=50, use_cache=False)
-    assert f["available"] and f["source"].startswith("fallback") and f["model_available"] is False
-    assert f["horizon_bars"] == 16 and len(f["path_p50"]) == 16 and f["samples"] == 50
-    assert f["p10_pct"] <= f["p50_pct"] <= f["p90_pct"] and 0.0 <= f["p_up"] <= 1.0
-    assert f["expected_move_pct"] > 0, "an uptrending series forecasts up (shrunk drift)"
-    _ai_tick("KFC", bars[-1]["close"])
-    assert _kf.forecast("KFC", bars=bars[:20])["available"] is False
-    a = _kf.forecast("KFC", bars=bars); b = _kf.forecast("KFC", bars=bars)
-    assert a is b, "cached"
-    assert _kf.forecast("KFC", bars=bars, cached_only=True) is a
-    assert _kf.forecast("NOFC", bars=bars[-40:], cached_only=True)["available"] is True, "fallback is cheap: computed inline"
-    st = _kf.available(); assert st["kronos"] is False and st["fallback"]
-    from tick_engine import tick_engine as _tk
-    for b in bars[-60:]:
-        _tk._bufs_1min["KFC"].push(b["close"], b["volume"], b["ts"])
-    c = _kf.compact("KFC"); assert set(c) >= {"expected_move_pct", "p_up", "source"}, c
-
-def t_forecast_in_context_and_skill_check():
-    bars = _trend_bars("KFS", days=4, drift=0.002, seed=5)
-    _ai_tick("KFS", bars[-1]["close"])
-    from tick_engine import tick_engine as _tk
-    for b in bars[-90:]:
-        _tk._bufs_1min["KFS"].push(b["close"], b["volume"], b["ts"])
-    ctx = _mc.context_for("KFS")
-    assert "forecast" in ctx and ctx["forecast"].get("source", "").startswith("fallback")
-    assert "forecast" in _mc.compact_for_alert("KFS")
-    sk = _kf.skill_check("KFS", bars, horizon=16, step=25, lookback=120, samples=20)
-    assert sk["forecasts"] >= 20 and 0 <= sk["hit_rate"] <= 1 and len(sk["coin_flip_95pct_band"]) == 2
-    assert sk["verdict"] and sk["source"].startswith("fallback")
-    assert sk["hit_rate"] > 0.5, "on a strongly trending synthetic series even the drift fallback beats a coin"
-
-def t_kronos_vendored_package():
-    """The vendored Kronos package imports and exposes the predictor API the adapter uses
-    (skipped without torch; weights are never downloaded in tests)."""
-    try:
-        import torch  # noqa: F401
-    except ImportError:
-        return
-    from kronos_model import Kronos, KronosPredictor, KronosTokenizer
-    import inspect
-    sig = inspect.signature(KronosPredictor.predict)
-    for p in ("df", "x_timestamp", "y_timestamp", "pred_len", "T", "top_p", "sample_count"):
-        assert p in sig.parameters, p
-    assert hasattr(Kronos, "from_pretrained") and hasattr(KronosTokenizer, "from_pretrained")
-    assert (_SFPath(__file__).resolve().parent / "kronos_model" / "LICENSE").exists()
-
-def t_forecast_flags_implausible():
-    bars = _trend_bars("KFZ", days=2, drift=0.0006)
-    f = _kf.forecast("KFZ", bars=bars, horizon=16, samples=20, use_cache=False)
-    assert "z_score" in f and "realised_sigma_pct" in f and f["realised_sigma_pct"] > 0
-    assert f["flag"] in (None, "implausible: ignore")
-    with _patch.object(_kf, "_fallback", return_value={"last": 1000.0, "expected_move_pct": 9.0, "p_up": 1.0, "p10_pct": 8.0,
-                                                       "p50_pct": 9.0, "p90_pct": 10.0, "samples": 1, "source": "x", "path_p50": []}):
-        g = _kf.forecast("KFZ", bars=bars, horizon=16, samples=1, use_cache=False)
-    assert g["flag"] == "implausible: ignore" and abs(g["z_score"]) > 4
-    assert "flag" in _kf.compact("KFZ") or True
-
-run("Kronos: vendored package exposes the predictor API",      t_kronos_vendored_package)
-run("Forecast: implausible forecasts are flagged",              t_forecast_flags_implausible)
 run("Debate: verdicts, thresholds, size floor, fail-open",     t_debate_verdicts)
 run("Debate: gates every AI entry; momentum exempt",           t_debate_gates_ai_entries)
-run("Forecast: fallback shape, cache, cached_only, status",    t_forecast_fallback_shape_and_cache)
-run("Forecast: in market context; skill check vs coin flip",   t_forecast_in_context_and_skill_check)
 run("Research: proposals validated against the grid",          t_research_validate_proposals)
 run("Research: A/B verdicts (adopt / not better / thin / DD)",  t_research_ab_test_verdicts)
 run("Research: cycle adopts a winner, rejects a loser, logs",   t_research_cycle_adopts_and_logs)
@@ -6743,21 +6678,6 @@ def t_rolling_universe_select_and_persist():
 
 run("universe: rolling pick of profitable stocks, persisted per session", t_rolling_universe_select_and_persist)
 
-def t_forecast_at_signal_times_no_lookahead():
-    import ai_replay as _ar, kronos_forecast as _kf, replay_backtest as _rbm
-    bars = _trend_bars("FCS", days=3)
-    sig_ts = bars[500]["ts"]
-    seen = {}
-    def fake_fc(sym, hist, horizon, step, samples, use_cache):
-        seen["last"] = hist[-1]["ts"]; seen["n"] = len(hist)
-        return {"available": True, "expected_move_pct": -0.2, "p_up": 0.3, "flag": None, "source": "test", "z_score": -1.0}
-    with _patch.object(_rbm, "load_bars", return_value=(bars, "test")), _patch.object(_kf, "forecast", fake_fc):
-        res = asyncio.run(_ar.forecast_signals([{"symbol": "FCS", "ts": sig_ts.isoformat(), "side": "SELL", "net": 120.0}], lookback=300))
-    r = res["rows"][0]
-    assert seen["last"] < sig_ts and seen["n"] == 300, "only bars before the signal"
-    assert r["agrees"] is True and r["move_with_pct"] == 0.2 and r["net"] == 120.0
-
-run("forecast at signal times: bars before the signal only", t_forecast_at_signal_times_no_lookahead)
 
 def t_live_kite_ticks_become_ist_candles_the_agent_can_use():
     """Regression: the server stamps ticks with its UTC clock and Kite sends the day's running volume.
@@ -6825,31 +6745,6 @@ def t_live_kite_ticks_become_ist_candles_the_agent_can_use():
 
 run("live ticks: IST candles, per-minute volume, history first, ORB found", t_live_kite_ticks_become_ist_candles_the_agent_can_use)
 
-def t_kronos_veto_is_opt_in_and_fails_open():
-    from agents.intraday_v2 import IntradayV2Agent
-    import kronos_forecast as _kf
-    from tick_engine import tick_engine as _te, TickBuffer, Candle
-    a = IntradayV2Agent(); snap = _live_snap("KVETO", 1000.0)
-    prev = (_ai_settings.kronos_veto_enabled, _ai_settings.kronos_veto_pct)
-    try:
-        _te._bufs_1min["KVETO"] = TickBuffer(60, maxlen=400)
-        _te._bufs_1min["KVETO"].prepend_history([Candle(1000, 1001, 999, 1000, 10, datetime(2026, 11, 10, 10, 0) + timedelta(minutes=i)) for i in range(120)])
-        against = lambda *a_, **k: {"available": True, "expected_move_pct": -0.3, "source": "kronos:Kronos-small", "flag": None}
-        with _patch.object(_kf, "forecast", against):
-            _ai_settings.kronos_veto_enabled = False
-            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None, "off by default"
-            _ai_settings.kronos_veto_enabled = True; _ai_settings.kronos_veto_pct = -0.19
-            assert "against" in asyncio.run(a._kronos_veto(snap, "BUY"))
-            assert asyncio.run(a._kronos_veto(snap, "SELL")) is None, "a forecast down supports a short"
-        with _patch.object(_kf, "forecast", lambda *a_, **k: {"available": True, "expected_move_pct": -0.3, "source": "fallback", "flag": None}):
-            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None, "the statistical fallback never vetoes"
-        with _patch.object(_kf, "forecast", side_effect=RuntimeError("model down")):
-            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None
-    finally:
-        _ai_settings.kronos_veto_enabled, _ai_settings.kronos_veto_pct = prev
-        _te._bufs_1min.pop("KVETO", None)
-
-run("Kronos veto: opt-in, direction-aware, never vetoes on fallback or error", t_kronos_veto_is_opt_in_and_fails_open)
 
 def t_intraday_leverage_scales_only_the_mis_bucket():
     from risk_manager import risk_manager as _rmx

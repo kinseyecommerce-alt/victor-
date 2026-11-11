@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     gate_review_cooldown_s: float = 180.0   # seconds before the same agent re-reviews the same symbol (each review is a paid model call)
     # regime routing (regime_v2): sizes each strategy by its tested result on today's predicted market type;
     # a no-op (1.0) until research writes data/regime_model.json and data/regime_scorecard.json
+    indicator_min_interval_s: float = 5.0   # live indicators: recompute on candle close or this often
     use_regime_routing: bool = True
     regime_boost: float = 1.25          # strategy made money on this day type in both halves of the history
     regime_cut: float = 0.5             # strategy lost on this day type in both halves
@@ -212,20 +213,6 @@ class Settings(BaseSettings):
     ai_agent_debate_enabled:      bool  = True
     ai_agent_debate_min_confidence: float = 0.55  # below this the entry is rejected
     ai_agent_debate_effort:       Literal["low", "medium", "high", "xhigh", "max"] = "low"
-    # ── Kronos candlestick forecasts (kronos_forecast.py) — optional model ──
-    kronos_model:                 str   = ""       # e.g. NeoQuasar/Kronos-small; empty = statistical fallback
-    kronos_tokenizer:             str   = "NeoQuasar/Kronos-Tokenizer-base"
-    kronos_dir:                   str   = ""       # path to a clone of github.com/shiyu-coder/Kronos (its model/ package)
-    kronos_device:                str   = "cpu"    # or cuda:0
-    kronos_horizon_bars:          int   = 16       # 1-minute bars ahead
-    kronos_lookback:              int   = 400      # bars of context (model max 512)
-    kronos_samples:               int   = 8        # sampled paths per forecast
-    kronos_temperature:           float = 1.0
-    kronos_cache_s:               int   = 300      # reuse a forecast for this long per symbol/bar
-    indicator_min_interval_s:     float = 5.0      # live indicators: recompute on candle close or this often
-    kronos_veto_enabled:          bool  = False    # skip intraday/scalping signals Kronos forecasts against
-    kronos_veto_pct:              float = -0.19    # forecast move in the trade direction at or below this → skip
-    kronos_max_symbols:           int   = 12       # background refresher covers at most this many symbols
     # ── Execution ───────────────────────────────────────────────────────────
     use_limit_entries:            bool  = True     # equity entries as marketable LIMIT (ask/bid ± buffer), never raw MARKET
     entry_limit_buffer_pct:       float = 0.10     # how far past the touch the limit may fill (protects against a bad print)
