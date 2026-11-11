@@ -6978,6 +6978,25 @@ def t_paper_book_marked_to_market():
 
 run("paper book: positions marked to market (last price, realised + unrealised pnl)", t_paper_book_marked_to_market)
 
+
+def t_deliberate_size_cuts_not_floored():
+    from unittest.mock import patch as _patch
+    import agents.base_agent as _ba
+    from risk_manager import risk_manager as _rm
+    with _patch("allocator.size_factor", return_value=0.3), \
+         _patch.object(_rm, "bucket_room", return_value=10_000_000), \
+         _patch.object(_rm, "max_capital_for_agent", return_value=1_000_000):
+        qty, why = _ba.allocate_quantity("scalping", 1000, 1000.0)    # ₹10L → ₹3L by the allocator alone
+        assert qty == 300, (qty, why)
+    with _patch("allocator.size_factor", return_value=1.0), \
+         _patch.object(_rm, "bucket_room", return_value=100_000), \
+         _patch.object(_rm, "bucket_exposure", return_value=1_900_000), \
+         _patch.object(_rm, "max_capital_for_agent", return_value=1_000_000):
+        qty, why = _ba.allocate_quantity("scalping", 1000, 1000.0)    # a ₹1L bucket remnant is still skipped
+        assert qty == 0 and "minimum" in why, (qty, why)
+
+run("sizing: allocator/review cuts are not floored; bucket remnants are", t_deliberate_size_cuts_not_floored)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
