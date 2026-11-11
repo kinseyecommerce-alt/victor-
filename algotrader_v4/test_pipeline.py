@@ -6851,6 +6851,26 @@ def t_kronos_veto_is_opt_in_and_fails_open():
 
 run("Kronos veto: opt-in, direction-aware, never vetoes on fallback or error", t_kronos_veto_is_opt_in_and_fails_open)
 
+def t_intraday_leverage_scales_only_the_mis_bucket():
+    from risk_manager import risk_manager as _rmx
+    prev = (_ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.intraday_leverage,
+            _ai_settings.max_intraday_positions, _ai_settings.swing_capital_pct)
+    try:
+        _ai_settings.total_capital, _ai_settings.intraday_capital_pct = 1_000_000, 40
+        _ai_settings.max_intraday_positions, _ai_settings.swing_capital_pct = 2, 25
+        _ai_settings.intraday_leverage = 1.0
+        assert _rmx.bucket_total("intraday") == 400_000 and _rmx.max_capital_for_agent("intraday") == 200_000
+        _ai_settings.intraday_leverage = 2.0
+        assert _rmx.bucket_total("scalping") == 800_000 and _rmx.max_capital_for_agent("intraday") == 400_000
+        assert _rmx.bucket_total("swing") == 250_000, "delivery is never leveraged"
+        _ai_settings.intraday_leverage = 9.0
+        assert _rmx.bucket_total("intraday") == 2_000_000, "capped at the broker's 5x"
+    finally:
+        (_ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.intraday_leverage,
+         _ai_settings.max_intraday_positions, _ai_settings.swing_capital_pct) = prev
+
+run("leverage: MIS bucket only, capped at 5x", t_intraday_leverage_scales_only_the_mis_bucket)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

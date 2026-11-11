@@ -228,6 +228,7 @@ class Settings(BaseSettings):
     # Daily capital allocation by trading type
     total_capital:          float = 500000.0   # total account capital (₹)
     intraday_capital_pct:   float = 40.0       # % for equity intraday MIS (intraday + scalping)
+    intraday_leverage:      float = 1.0        # MIS margin multiple on that bucket (1-5); multiplies P&L both ways
     swing_capital_pct:      float = 25.0       # % for equity delivery CNC (swing)
     options_capital_pct:    float = 25.0       # % for options premium NRML (fno)
     futures_capital_pct:    float = 10.0       # % for futures margin NRML (reserved)

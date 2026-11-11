@@ -118,9 +118,7 @@ class RiskManager:
 
     def max_capital_for_agent(self, agent_name: str) -> float:
         """Return per-symbol capital (₹) for an agent: bucket total ÷ max concurrent positions."""
-        bucket      = _AGENT_TO_BUCKET.get(agent_name, "intraday")
-        pct_attr    = _BUCKET_PCT_ATTR.get(bucket, "intraday_capital_pct")
-        bucket_total = settings.total_capital * getattr(settings, pct_attr, 25.0) / 100
+        bucket_total = self.bucket_total(agent_name)
 
         max_pos_attr = _AGENT_MAX_POS.get(agent_name)
         if max_pos_attr:
@@ -142,9 +140,15 @@ class RiskManager:
         return total
 
     def bucket_total(self, agent_name: str) -> float:
+        """₹ exposure the bucket may carry. The MIS (intraday) bucket is its capital × intraday_leverage:
+        the broker's intraday margin lets ₹1 of capital carry several rupees of position. Leverage
+        multiplies profit and loss alike; the daily loss limit and risk-per-trade still apply."""
         bucket = _AGENT_TO_BUCKET.get(agent_name, "intraday")
         pct_attr = _BUCKET_PCT_ATTR.get(bucket, "intraday_capital_pct")
-        return settings.total_capital * getattr(settings, pct_attr, 25.0) / 100
+        total = settings.total_capital * getattr(settings, pct_attr, 25.0) / 100
+        if bucket == "intraday":
+            total *= max(1.0, min(5.0, settings.intraday_leverage))
+        return total
 
     def bucket_room(self, agent_name: str) -> float:
         """₹ still deployable in this agent's bucket. Fewer, larger positions (max 2 per agent) can
