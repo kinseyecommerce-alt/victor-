@@ -31,6 +31,12 @@ class KiteTicker:
         self._callback: Optional[Callable] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._connected = False
+        # Coalescing: while the event loop is busy, keep only the newest tick per symbol instead of
+        # queueing a coroutine per tick (a backlog grew to 4 GB and froze the server on 11 Nov).
+        import threading
+        self._pending: dict[str, object] = {}
+        self._pending_lock = threading.Lock()
+        self._drain_scheduled = False
 
     def load_instruments(self, symbols: list[str]) -> None:
         """Fetch instrument tokens for symbols from Kite instruments API."""
@@ -134,9 +140,24 @@ class KiteTicker:
                 timestamp  = datetime.now(),
             )
 
-            asyncio.run_coroutine_threadsafe(
-                self._callback(sym, tick), self._loop
-            )
+            with self._pending_lock:
+                self._pending[sym] = tick
+                schedule = not self._drain_scheduled
+                self._drain_scheduled = True
+            if schedule:
+                asyncio.run_coroutine_threadsafe(self._drain(), self._loop)
+
+    async def _drain(self) -> None:
+        """Process the newest pending tick of every symbol (runs on the event loop)."""
+        with self._pending_lock:
+            items = list(self._pending.items())
+            self._pending.clear()
+            self._drain_scheduled = False
+        for sym, tick in items:
+            try:
+                await self._callback(sym, tick)
+            except Exception as exc:
+                logger.debug("[ticker] callback {}: {}", sym, exc)
 
     @property
     def is_connected(self) -> bool:

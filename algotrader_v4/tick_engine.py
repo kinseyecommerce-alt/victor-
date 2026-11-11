@@ -691,6 +691,7 @@ class TickEngine:
 
         self._latest_tick: dict[str, Tick]            = {}
         self._last_cum_vol: dict[str, int]            = {}
+        self._ind_at: dict[str, float]                = {}
         self._latest_ind:  dict[str, LiveIndicators]  = {}
 
         self._subscribers:  dict[str, asyncio.Queue]  = {}
@@ -908,11 +909,23 @@ class TickEngine:
             prev = self._last_cum_vol.get(symbol)
             vol = cum - prev if prev is not None and cum >= prev else 0
             self._last_cum_vol[symbol] = cum
-        self._bufs_1min[symbol].push(tick.ltp, vol, ts)
+        closed = self._bufs_1min[symbol].push(tick.ltp, vol, ts)
         self._bufs_5min[symbol].push(tick.ltp, vol, ts)
 
-        df  = self._bufs_1min[symbol].as_dataframe()
-        ind = IndicatorCalc.compute(symbol, tick, df)
+        # Indicators over a full day of candles cost tens of ms; recomputing them on every tick of
+        # 20+ symbols saturated the loop. Recompute when a minute candle closes (what the replay
+        # evaluates on) or at most every indicator_min_interval_s; otherwise refresh the price only.
+        prev_ind = self._latest_ind.get(symbol)
+        now_m = time.monotonic()
+        if (prev_ind is None or closed is not None
+                or now_m - self._ind_at.get(symbol, 0.0) >= settings.indicator_min_interval_s):
+            df  = self._bufs_1min[symbol].as_dataframe()
+            ind = IndicatorCalc.compute(symbol, tick, df)
+            self._ind_at[symbol] = now_m
+        else:
+            import dataclasses as _dc
+            ind = _dc.replace(prev_ind, ltp=tick.ltp, bid=tick.bid, ask=tick.ask,
+                              spread=round(tick.ask - tick.bid, 2) if tick.ask and tick.bid else prev_ind.spread)
 
         self._latest_tick[symbol] = tick
         self._latest_ind[symbol]  = ind

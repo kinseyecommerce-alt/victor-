@@ -6871,6 +6871,53 @@ def t_intraday_leverage_scales_only_the_mis_bucket():
 
 run("leverage: MIS bucket only, capped at 5x", t_intraday_leverage_scales_only_the_mis_bucket)
 
+def t_live_ticks_throttled_and_coalesced():
+    """Regression (11 Nov): per-tick indicator recomputation over a day of candles and one queued
+    coroutine per Kite tick froze the server at the open. Indicators recompute on candle close or every
+    indicator_min_interval_s; ticks are coalesced to the newest per symbol."""
+    from tick_engine import tick_engine as _te, Tick, TickBuffer, Candle, IndicatorCalc
+    from datetime import timezone as _tz
+    import kite_ticker as _kt
+    sym = "THROT"
+    prev = (_ai_settings.trading_mode, _ai_settings.paper_data_source, _ai_settings.indicator_min_interval_s)
+    calls = {"n": 0}
+    real = IndicatorCalc.compute
+    def counting(*a, **k): calls["n"] += 1; return real(*a, **k)
+    try:
+        _ai_settings.trading_mode, _ai_settings.paper_data_source, _ai_settings.indicator_min_interval_s = "PAPER", "KITE", 5.0
+        _te._bufs_1min[sym] = TickBuffer(60, maxlen=400); _te._bufs_5min[sym] = TickBuffer(300, maxlen=200); _te._exchange[sym] = "NSE"
+        _te._bufs_1min[sym].prepend_history([Candle(100, 100.5, 99.5, 100, 1000, datetime(2026, 11, 10, 14, 0) + timedelta(minutes=i)) for i in range(80)])
+        with _patch("tick_engine.is_market_open", return_value=True), _patch.object(IndicatorCalc, "compute", staticmethod(counting)):
+            for k in range(30):                                   # 30 ticks inside one minute
+                t = Tick(symbol=sym, ltp=100.0 + k * 0.01, bid=99.9, ask=100.1, volume=1000 + k, change=0, change_pct=0,
+                         high=0, low=0, open=100, timestamp=datetime(2026, 11, 11, 4, 0, 1 + k, tzinfo=_tz.utc))
+                asyncio.run(_te._process_tick(sym, t, source="KITE_WS"))
+            assert calls["n"] == 1, calls                         # first tick only (5 s throttle, real time)
+            assert _te._latest_ind[sym].ltp == 100.29, "price refreshed on every tick"
+            t = Tick(symbol=sym, ltp=100.5, bid=0, ask=0, volume=2000, change=0, change_pct=0, high=0, low=0, open=100,
+                     timestamp=datetime(2026, 11, 11, 4, 1, 2, tzinfo=_tz.utc))   # next minute → candle closed
+            asyncio.run(_te._process_tick(sym, t, source="KITE_WS"))
+            assert calls["n"] == 2, calls
+    finally:
+        _ai_settings.trading_mode, _ai_settings.paper_data_source, _ai_settings.indicator_min_interval_s = prev
+        for d in (_te._bufs_1min, _te._bufs_5min, _te._exchange, _te._latest_tick, _te._latest_ind, _te._last_cum_vol, _te._ind_at):
+            d.pop(sym, None)
+    # coalescing: many ticks while the loop is busy → one drain with the newest tick per symbol
+    kt = _kt.KiteTicker()
+    seen = []
+    async def cb(s_, tick): seen.append((s_, tick))
+    async def body():
+        kt._callback, kt._loop = cb, asyncio.get_running_loop()
+        kt._reverse_map = {1: "AAA", 2: "BBB"}
+        for i in range(50):
+            kt._on_ticks(None, [{"instrument_token": 1 if i % 2 else 2, "last_price": float(i), "volume_traded": i}])
+        for _ in range(20): await asyncio.sleep(0)
+    asyncio.run(body())
+    assert len(seen) == 2 and {x[0] for x in seen} == {"AAA", "BBB"}, seen
+    assert max(t.ltp for _, t in seen) == 49.0 and min(t.ltp for _, t in seen) == 48.0
+
+run("live ticks: indicators throttled, ticks coalesced (open-time freeze)", t_live_ticks_throttled_and_coalesced)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

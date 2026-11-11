@@ -215,6 +215,7 @@ class Settings(BaseSettings):
     kronos_samples:               int   = 8        # sampled paths per forecast
     kronos_temperature:           float = 1.0
     kronos_cache_s:               int   = 300      # reuse a forecast for this long per symbol/bar
+    indicator_min_interval_s:     float = 5.0      # live indicators: recompute on candle close or this often
     kronos_veto_enabled:          bool  = False    # skip intraday/scalping signals Kronos forecasts against
     kronos_veto_pct:              float = -0.19    # forecast move in the trade direction at or below this → skip
     kronos_max_symbols:           int   = 12       # background refresher covers at most this many symbols
