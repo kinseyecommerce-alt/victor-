@@ -8113,6 +8113,152 @@ def t_cs_daily_rr_and_no_lookahead():
 run("candles: daily patterns: Swing rr=2 target from the fill, hammer signal on the decision day only", t_cs_daily_rr_and_no_lookahead)
 
 
+def _cs_perturb(sd, mask, seed):
+    """A copy of sd whose bars under `mask` are randomly moved (OHLC kept consistent, volume tripled)."""
+    r = np.random.default_rng(seed)
+    o, h, l, c = (np.asarray(x, float).copy() for x in (sd.o, sd.h, sd.l, sd.c))
+    k = int(mask.sum())
+    f = np.exp(r.normal(0, 0.004, k))
+    o[mask] *= f
+    c[mask] *= f * np.exp(r.normal(0, 0.004, k))
+    h[mask] = np.maximum(np.maximum(o[mask], c[mask]), h[mask] * f * (1 + np.abs(r.normal(0, 0.002, k))))
+    l[mask] = np.minimum(np.minimum(o[mask], c[mask]), l[mask] * f * (1 - np.abs(r.normal(0, 0.002, k))))
+    return _sld.from_arrays(sd.symbol, sd.date, sd.t, o, h, l, c, np.asarray(sd.v, float) * np.where(mask, 3.0, 1.0))
+
+
+_CS_PERTURB_PATTERNS = ("outside_bar", "inside_bar", "bull_engulfing", "bear_engulfing", "tweezer_bottom",
+                        "tweezer_top", "bull_marubozu", "bear_marubozu")
+
+
+def t_cs_future_bars_change_nothing_intraday():
+    """Perturb every bar from a cut minute onward (and every later session): signals decided before the cut and
+    fills before the cut must not change, on 5m, 15m and 60m; every fill is at or after its candle's end."""
+    sd = _sl_walk(n_days=24, seed=11, symbol="PERT")
+    sessions = _sli.build_sessions(sd)
+    compared = {}
+    for k in (6, 11, 17, 22):
+        s = sessions[k]
+        for T in (600, 690, 780, 870):                       # 10:00, 11:30, 13:00, 14:30
+            sd2 = _cs_perturb(sd, (sd.date > s.date) | ((sd.date == s.date) & (sd.t >= T)), k * 1000 + T)
+            s2 = _sli.build_sessions(sd2)[k]
+            cut = int(np.searchsorted(s.t, T))               # bars 0..cut-1 are identical in s and s2
+            assert np.array_equal(s.c[:cut], s2.c[:cut]) and not np.array_equal(s.c[cut:], s2.c[cut:])
+            for tf in ("5m", "15m", "60m"):
+                for pat in _CS_PERTURB_PATTERNS:
+                    sp = _SL_REG[f"cs_{pat}_{tf}"]
+                    canon = lambda ents: sorted((int(e.i), int(e.side), round(float(e.stop), 9), e.rr)
+                                                for e in ents if e.i <= cut - 1)
+                    a, b = canon(sp.fn(s, sp.p)), canon(sp.fn(s2, sp.p))
+                    assert a == b, (sp.id, s.date, T, a, b)
+                    compared[sp.id] = compared.get(sp.id, 0) + len(a)
+                    cs = _cdl.session_candles(s, sp.p.tf)
+                    for e in sp.fn(s, sp.p):                 # the fill is never before the candle has closed
+                        d = int(np.flatnonzero(cs.sig == e.i)[0])
+                        assert e.i + 1 >= len(s.t) or int(s.t[e.i + 1]) >= int(cs.end[d]), (sp.id, e.i)
+                    ta, tb = _sls.sim_session(sp, s)[0], _sls.sim_session(sp, s2)[0]
+                    before = lambda tr: [x[3:6] for x in tr if int(x[4][:2]) * 60 + int(x[4][3:]) < T]
+                    assert before(ta) == before(tb), (sp.id, s.date, T, before(ta), before(tb))
+    for tf in ("5m", "15m", "60m"):
+        hit = [p for p in _CS_PERTURB_PATTERNS if compared.get(f"cs_{p}_{tf}", 0) > 0]
+        assert len(hit) >= 3, (tf, compared)                  # at least 3 strategies per timeframe really compared
+    # signal-anchored: for EVERY intraday candlestick strategy, move every bar after each signal bar i; the signal
+    # (bar, side, stop) must survive. Moving every bar after the fill bar i+1 must leave the fill (time, price)
+    # unchanged.
+    perturbed = {}
+
+    def moved(k, s, first_bar):
+        if (k, first_bar) not in perturbed:
+            T = int(s.t[first_bar]) if first_bar < len(s.t) else 930
+            sd2 = _cs_perturb(sd, (sd.date > s.date) | ((sd.date == s.date) & (sd.t >= T)), k * 7919 + first_bar)
+            perturbed[(k, first_bar)] = _sli.build_sessions(sd2)[k]
+        return perturbed[(k, first_bar)]
+    survived = {"5m": set(), "15m": set(), "60m": set()}
+    for k in (6, 13, 20):
+        s = sessions[k]
+        for sp in (x for x in _SL_REG.values() if x.family == "candlestick" and x.horizon == "intraday"):
+            for e in sorted(sp.fn(s, sp.p), key=lambda x: x.i)[:2]:
+                s2 = moved(k, s, e.i + 1)
+                same = lambda ents: sorted((int(x.i), int(x.side), round(float(x.stop), 9), x.rr)
+                                           for x in ents if x.i <= e.i)
+                assert same(sp.fn(s, sp.p)) == same(sp.fn(s2, sp.p)), (sp.id, s.date, e.i)
+                ta = _sls.sim_session(sp, s)[0]
+                if ta and ta[0][4] == _sls._hm(s.t[e.i + 1]):
+                    tb = _sls.sim_session(sp, moved(k, s, e.i + 2))[0]
+                    assert tb and tb[0][3:6] == ta[0][3:6], (sp.id, s.date, ta[:1], tb[:1])
+                survived[f"{sp.p.tf}m"].add(sp.id)
+    assert all(len(v) >= 3 for v in survived.values()), {k: len(v) for k, v in survived.items()}
+
+
+run("candles: perturbing future bars changes no earlier 5m/15m/60m signal or fill; fills at/after candle end",
+    t_cs_future_bars_change_nothing_intraday)
+
+
+def t_cs_future_days_change_nothing_daily():
+    """Daily patterns: perturb every day after D; decisions up to D and trades entered up to D are unchanged.
+    Entries are filled at the next session's open; exits are never before the entry day."""
+    sd = _sl_walk(n_days=90, seed=12, symbol="PERTD")
+    dd = sd.daily()
+    ids = [f"cs_{p}_d" for p in _CS_PERTURB_PATTERNS]
+    seen = {i: 0 for i in ids}
+
+    def view(dct, upto):
+        v = _sls.DailyView(dct["date"][:upto + 1], *(dct[x][:upto + 1] for x in "ohlcv"))
+        v.symbol, v.nifty, v.vix = "PERTD", None, None
+        return v
+    for j in (40, 55, 70, 82):
+        D = int(sd.days[j])
+        sd2 = _cs_perturb(sd, sd.date > D, j)
+        dd2 = sd2.daily()
+        for i in ids:
+            sp = _SL_REG[i]
+            for day in range(25, j + 1):
+                a, b = sp.fn(view(dd, day), sp.p), sp.fn(view(dd2, day), sp.p)
+                assert (a is None) == (b is None) and (a is None or (a.side, round(a.stop, 9), a.rr) ==
+                                                       (b.side, round(b.stop, 9), b.rr)), (i, day)
+                seen[i] += a is not None
+            ta, tb = _sls.sim_positional(sp, sd, 0, 99999999)[0], _sls.sim_positional(sp, sd2, 0, 99999999)[0]
+            assert [x[2:6] for x in ta if x[2] <= D] == [x[2:6] for x in tb if x[2] <= D], (i, D)
+            for x in ta:
+                e_day = int(np.searchsorted(dd["date"], x[2]))
+                sig = sp.fn(view(dd, e_day - 1), sp.p)       # the signal came from the previous session
+                assert sig is not None and sig.side == x[3], (i, x)
+                assert abs(x[5] - dd["o"][e_day] * (1 + x[3] * _sls.SLIPPAGE)) < 1e-3 and x[4] == "09:15", (i, x)   # trade rows round to 4 dp
+                assert x[6] >= x[2], (i, x)
+    assert sum(v > 0 for v in seen.values()) >= 3, ("seen", seen)
+
+
+run("candles: daily patterns: perturbing later days changes no decision or entry; fill at next session open",
+    t_cs_future_days_change_nothing_daily)
+
+
+def t_cs_costs_per_lab():
+    """Candlestick trades pay the lab's costs: MIS for intraday, CNC for swing (daily bullish), futures for daily
+    shorts / two-sided patterns; net = gross - cost."""
+    kinds = {"intraday": "equity_mis", "swing": "equity_cnc", "futures": "future"}
+    sd = _sl_walk(n_days=60, seed=13, symbol="COST")
+    ids = ["cs_outside_bar_5m", "cs_bull_engulfing_15m", "cs_outside_bar_60m", "cs_bull_engulfing_d",
+           "cs_bear_engulfing_d", "cs_outside_bar_d"]
+    want = {"cs_bull_engulfing_d": "equity_cnc", "cs_bear_engulfing_d": "future", "cs_outside_bar_d": "future"}
+    got = set()
+    for i in ids:
+        sp = _SL_REG[i]
+        assert sp.cost_kind == kinds[sp.kind] == want.get(i, "equity_mis"), i
+        res = _sls.run_symbol("", "COST", [sp], 0, 99999999, sd=sd, index=None, audit=False)[i]
+        assert res["error"] is None, res["error"]
+        for x in res["trades"]:
+            side, fill, px, qty = x[3], x[5], x[8], x[9]
+            bv, sv = (fill * qty, px * qty) if side > 0 else (px * qty, fill * qty)
+            assert abs(x[11] - _sl_rtc(bv, sv, sp.cost_kind)) < 0.011 and abs(x[12] - (x[10] - x[11])) < 0.02, x
+            got.add(sp.cost_kind)
+    assert got == {"equity_mis", "equity_cnc", "future"}, got
+    # magnitudes on Rs 1 lakh: delivery costs more than intraday, intraday more than futures
+    m, d, f = (_sl_rtc(1e5, 1e5, k) for k in ("equity_mis", "equity_cnc", "future"))
+    assert 50 < m < 100 and 200 < d < 260 and f < m, (m, d, f)
+
+
+run("candles: trades pay MIS (intraday), CNC (daily long) and futures (daily short) costs per the lab", t_cs_costs_per_lab)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
