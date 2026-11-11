@@ -1704,6 +1704,34 @@ def regime_status():
     return regime_v2.status()
 
 
+@app.put("/market-type/research", tags=["Market Regime"])
+def market_type_research(payload: dict):
+    """Install the research outputs the router reads: {"model": regime_model.json, "scorecard": regime_scorecard.json}.
+    Either may be omitted; null removes it (routing falls back to 1.0)."""
+    import regime_v2, json as _json
+    def _check_model(m):
+        for stage, e in (m or {}).items():
+            if stage not in ("preopen", "first_hour"):
+                raise HTTPException(422, f"unknown stage {stage}")
+            if e is not None and not ({"feature", "rule"} <= set(e) and all(v in regime_v2.TYPES for v in e["rule"].values())):
+                raise HTTPException(422, f"bad {stage} entry")
+    def _check_card(c):
+        for strat, regs in (c or {}).items():
+            for reg, v in regs.items():
+                if reg not in regime_v2.TYPES or not {"h1", "h2", "trades"} <= set(v):
+                    raise HTTPException(422, f"bad scorecard entry {strat}/{reg}")
+    out = {}
+    for key, path, check in (("model", regime_v2.MODEL_FILE, _check_model), ("scorecard", regime_v2.SCORECARD_FILE, _check_card)):
+        if key not in payload:
+            continue
+        if payload[key] is None:
+            path.unlink(missing_ok=True); out[key] = "removed"; continue
+        check(payload[key])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(payload[key])); out[key] = "installed"
+    return {**out, "status": regime_v2.status()}
+
+
 @app.post("/market-type/refresh", tags=["Market Regime"])
 async def regime_refresh(stage: str = "first_hour"):
     if stage not in ("preopen", "first_hour"):

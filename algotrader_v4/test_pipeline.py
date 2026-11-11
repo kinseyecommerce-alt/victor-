@@ -7068,6 +7068,31 @@ def t_regime_v2_routing():
 
 run("regime routing: learned day type → per-strategy size from the per-half scorecard", t_regime_v2_routing)
 
+
+def t_market_type_research_upload():
+    import tempfile
+    from unittest.mock import patch as _patch
+    from fastapi.testclient import TestClient
+    import main as _main, regime_v2 as rv
+    c = TestClient(_main.app)
+    prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+    d = Path(tempfile.mkdtemp())
+    try:
+        with _patch.object(rv, "MODEL_FILE", d / "m.json"), _patch.object(rv, "SCORECARD_FILE", d / "s.json"):
+            good = {"model": {"preopen": {"feature": "gap", "cuts": [0, 1], "rule": {"0": "RANGE"}}, "first_hour": None},
+                    "scorecard": {"intraday": {"RANGE": {"h1": -1, "h2": -2, "trades": 40}}}}
+            r = c.put("/market-type/research", json=good, headers=H)
+            assert r.status_code == 200 and (d / "m.json").exists() and (d / "s.json").exists(), r.text
+            assert c.put("/market-type/research", json={"model": {"preopen": {"feature": "gap", "rule": {"0": "BOOM"}}}}, headers=H).status_code == 422
+            assert c.put("/market-type/research", json={"scorecard": {"x": {"RANGE": {"h1": 1}}}}, headers=H).status_code == 422
+            assert c.put("/market-type/research", json={"model": None}, headers=H).json()["model"] == "removed"
+            assert not (d / "m.json").exists()
+            assert c.put("/market-type/research", json=good).status_code == 401
+    finally:
+        _ai_settings.api_key = prev
+
+run("regime routing: research files installed through the API, validated", t_market_type_research_upload)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
