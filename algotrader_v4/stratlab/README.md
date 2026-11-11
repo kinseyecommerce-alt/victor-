@@ -233,6 +233,19 @@ otherwise `REJECTED ON FINAL`.
   lucky confirmations are expected from strategies with no edge. A confirmation earns a paper-trading trial,
   nothing more.
 
+## Index options: weekly NIFTY short strangles (`options_vrp.py`)
+
+`sim.py` cannot hold option legs, so `python -m stratlab.options_vrp --data <bars dir> --out <scratch dir>` runs the
+two pre-registered volatility-risk-premium strategies (VRP-STRANGLE-016-NAKED, 1 lot; VRP-STRANGLE-016-WINGED,
++/-400-point wings, 2 lots) through `options_replay.ShortStrangle` (Black-Scholes on the NIFTY 50 minute bars, India
+VIX previous close as one flat vol) and judges them with `protocol.evaluate`: same DISCOVERY / FINAL split, H1 / H2
+screen, PF >= 1.15, >= 60 trades, FINAL once through the data directory's `final_ledger.json` (keyed by cost model
+`2026-11/o1`), no `--peek-final`. Entry 10:20 on the first session after each weekly expiry (week skipped if fewer
+than 3 sessions remain to expiry), 0.16-delta strikes, held to expiry settlement, no stop or target; lot 75, 65 from
+2025-12-31. Reports rupees, rupees per lot, bps of margin (naked 12 % of notional; winged max loss + 2 %), worst week
+and max drawdown, plus DISCOVERY-only sensitivities: the haircut x2.5 ("net@5") and approximate historical lot sizes.
+The credit is a model value (no skew); treat a pass as a reason to paper-trade, not as a fill record.
+
 ## Tests
 
 `cd algotrader_v4 && python test_pipeline.py` — the `STRATLAB` section covers: the per-bar view cannot read
