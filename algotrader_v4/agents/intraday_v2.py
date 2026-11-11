@@ -75,6 +75,25 @@ def daily_bias(sym: str, day) -> Optional[str]:
         return None
 
 
+VALIDATED_SCALP_END_MIN = 750      # 12:30 — the scalping window the replay validated
+
+
+def _apply_all_day(agent, intraday: bool) -> None:
+    """settings.intraday_all_day: trade past the validated windows (user request, 11 Nov). Intraday adds its
+    VWAP_TREND pattern until extended_window_end_min; scalping keeps looking for retests until then. Those
+    extra trades are marked _extended (sized by extended_window_size_factor) and the agent runs under its own
+    VERSION, so the ledger, pruning and allocator judge the all-day variant on its own results."""
+    from config import settings
+    if not settings.intraday_all_day:
+        return
+    if intraday:
+        agent.USE_VWAP_TREND = 1
+        agent.VWAP_WINDOW_END_MIN = settings.extended_window_end_min
+    else:
+        agent.RT_END_MIN = settings.extended_window_end_min
+    agent.VERSION = "v2-allday"
+
+
 class IntradayV2Agent(BaseAgent):
     name = "intraday"
     validated_by_replay = True
@@ -116,6 +135,7 @@ class IntradayV2Agent(BaseAgent):
         self._fired: dict = {}        # (sym, day) → {"ORB": bool, "VWAP_TREND": bool}
         self._prev_close: dict = {}   # sym → last close
         self._prev_vwap_side: dict = {}
+        _apply_all_day(self, intraday=True)
 
     # ── helpers ───────────────────────────────────────────────────────────
     def _range(self, sym, snap, now):
@@ -211,10 +231,10 @@ class IntradayV2Agent(BaseAgent):
             lo10, hi10 = min(c.low for c in recent), max(c.high for c in recent)
             if (not prev_side) and ltp > ind.vwap and ind.plus_di > ind.minus_di and ind.ema9 > ind.ema21:
                 fired["VWAP_TREND"] = True
-                return self._signal(sym, "BUY", ltp, min(lo10, ltp - atr), "VWAP_TREND", f"adx {ind.adx_14:.0f} vol {ind.volume_ratio:.1f}x")
+                return self._signal(sym, "BUY", ltp, min(lo10, ltp - atr), "VWAP_TREND", f"adx {ind.adx_14:.0f} vol {ind.volume_ratio:.1f}x", {"_extended": True})
             if prev_side and ltp < ind.vwap and ind.minus_di > ind.plus_di and ind.ema9 < ind.ema21:
                 fired["VWAP_TREND"] = True
-                return self._signal(sym, "SELL", ltp, max(hi10, ltp + atr), "VWAP_TREND", f"adx {ind.adx_14:.0f} vol {ind.volume_ratio:.1f}x")
+                return self._signal(sym, "SELL", ltp, max(hi10, ltp + atr), "VWAP_TREND", f"adx {ind.adx_14:.0f} vol {ind.volume_ratio:.1f}x", {"_extended": True})
         return "HOLD", None
 
 
@@ -256,6 +276,7 @@ class ScalpV2Agent(BaseAgent):
         self._losses: dict = {}      # (sym, day) → losses
         self._orb: dict = {}         # (sym, day) → {"h","l","done","broke": None|"UP"|"DOWN","retested": bool}
         self._prev_close: dict = {}
+        _apply_all_day(self, intraday=False)
 
     @staticmethod
     def _t(minutes) -> time:
@@ -330,12 +351,14 @@ class ScalpV2Agent(BaseAgent):
 
     def _sig(self, side, sym, ltp, dist, note, rr=None):
         rr = rr or self.RT_RR
+        late = now_ist().replace(tzinfo=None).time() > self._t(VALIDATED_SCALP_END_MIN)
         stop = ltp - dist if side == "BUY" else ltp + dist
         target = ltp + dist * rr if side == "BUY" else ltp - dist * rr
         return side, {"symbol": sym, "exchange": "NSE", "side": side, "price": ltp,
                       "stop_loss": round(stop, 2), "target": round(target, 2),
                       "stop_loss_pct": round(dist / ltp * 100, 3), "target_pct": round(dist * rr / ltp * 100, 3),
-                      "product": self.product, "_gate_size_factor": 1.0, "trigger": f"SCALP2-{side} [{note}]"}
+                      "product": self.product, "_gate_size_factor": 1.0, "trigger": f"SCALP2-{side} [{note}]" + (" late" if late else ""),
+                      **({"_extended": True} if late else {})}
 
     def record_result(self, sym: str, pnl: float, now: Optional[datetime] = None) -> None:
         """Called by the executor/replay when a trade closes, so a losing day stops early."""
