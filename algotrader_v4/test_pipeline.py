@@ -8723,6 +8723,11 @@ def t_sl_cli_sensitivity_and_screen_only():
 run("stratlab: CLI reports 2 bps by default, a 5 bps sensitivity column, the cost model, and --screen-only",
     t_sl_cli_sensitivity_and_screen_only)
 
+section("STRATLAB: long-term reversal basket (stratlab/ltr.py)")
+from stratlab import tests_ltr as _tltr  # noqa: E402
+for _n, _f in _tltr.TESTS:
+    run(_n, _f)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
