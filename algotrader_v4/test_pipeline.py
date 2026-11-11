@@ -7139,9 +7139,12 @@ def t_or_costs_per_leg():
 def t_or_haircut_and_settlement():
     assert _orp.fill_price(100.0, +1, "NIFTY") == 102.0 and _orp.fill_price(100.0, -1, "NIFTY") == 98.0
     assert _orp.fill_price(10.0, +1, "NIFTY") == 11.0 and _orp.fill_price(0.3, -1, "NIFTY") == _orp.TICK
-    # a long ITM leg settled at expiry pays exercise STT on top of round_trip_cost
+    # a long ITM leg settled at expiry pays exercise STT (0.15 % of intrinsic, 2026), which is exactly the
+    # sell-side option STT round_trip_cost already charges on the settlement value: nothing extra
     plain = _orp.leg_cost(50.0, 120.0, +1, 75)
-    assert abs(_orp.leg_cost(50.0, 120.0, +1, 75, settled=True) - plain - 120 * 75 * 0.00025) < 0.02
+    assert _orp.EXERCISE_STT_EXTRA == 0.0
+    assert abs(_orp.leg_cost(50.0, 120.0, +1, 75, settled=True) - plain) < 0.02
+    assert plain >= 120 * 75 * 0.0015                                    # the 0.15 % is in there
     # hold-to-expiry condor settles at intrinsic of the 15:00-15:29 mean on expiry day
     days = [_ordate(2026, 10, 9), _ordate(2026, 10, 12), _ordate(2026, 10, 13)]
     ic = _orp.IronCondor(hold="expiry", target_frac=99, stop_mult=99)
@@ -7187,6 +7190,149 @@ run("options replay: no look-ahead (decisions see only earlier bars)",     t_or_
 run("options replay: NSE costs charged per leg via round_trip_cost",       t_or_costs_per_leg)
 run("options replay: haircut direction, expiry settlement, exercise STT",  t_or_haircut_and_settlement)
 run("options replay: metrics, halves and both data layouts load",          t_or_metrics_and_loader)
+
+
+# ── stratlab/options_vrp: pre-registered weekly NIFTY short strangles (VRP) ──
+from stratlab import options_vrp as _vrp
+from stratlab import protocol as _vrp_P
+
+# Oct 2026 weekdays; 2026-10-20 (Tue) is a holiday, so that week's expiry moves to Mon 10-19.
+_VRP_DAYS = [_ordate(2026, 10, d) for d in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 19, 21, 22, 23)]
+_VRP_VIX = {_ordate(2026, 9, 20) + _ortd(days=i): 13.0 for i in range(60)}
+
+
+def _vrp_spec(wing=None, lots=1, min_days=3):
+    return _vrp.OptSpec("T-" + str(wing), "t", {"short_delta": 0.16, "min_days_left": min_days, "wing_pts": wing},
+                        lots=lots)
+
+
+def t_vrp_expiry_transition_and_cycle():
+    td = _orp._calendar_trading_day
+    # the first Tuesday expiry: from Fri 2025-08-29 the next weekly expiry is Tue 2025-09-02 (not Thu 09-04)
+    assert _orp.next_expiry("NIFTY", _ordate(2025, 8, 29), td) == _ordate(2025, 9, 2)
+    assert _orp.next_expiry("NIFTY", _ordate(2025, 8, 26), td) == _ordate(2025, 8, 28)
+    # entries only on the first trading day after an expiry, never re-entered later in the week
+    res, strat = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS, lambda i: 20 * _ormath.sin(i / 60.0)),
+                                  _VRP_VIX, 20261023)
+    ent = [(t.entry_ts.date(), t.expiry, t.reason) for t in res.trades]
+    assert [e[0] for e in ent] == [_ordate(2026, 10, 7), _ordate(2026, 10, 14), _ordate(2026, 10, 21)], ent
+    assert ent[0][1] == _ordate(2026, 10, 13) and ent[1][1] == _ordate(2026, 10, 19)
+    assert ent[0][2] == ent[1][2] == "expiry" and ent[2][2] == "data_end"
+    assert all(t.entry_ts.time() == _ortime(10, 20) for t in res.trades)
+    # with 10-15 and 10-16 also closed only 10-19 is left after 10-14 (< 3 days): that week is skipped, not entered later
+    days = [d for d in _VRP_DAYS if d not in (_ordate(2026, 10, 15), _ordate(2026, 10, 16))]
+    res, strat = _vrp._run_replay(_vrp_spec(), _or_bars(days), _VRP_VIX, 20261023)
+    assert [t.entry_ts.date() for t in res.trades] == [_ordate(2026, 10, 7), _ordate(2026, 10, 21)]
+    assert strat.skipped_short_weeks == [_ordate(2026, 10, 14)]
+    assert _orp.trading_days_left(_ordate(2026, 10, 7), _ordate(2026, 10, 13), lambda d: d.weekday() < 5) == 4
+
+
+def t_vrp_strikes_wings_lots_margin():
+    res, _ = _vrp._run_replay(_vrp_spec(wing=400.0, lots=2), _or_bars(_VRP_DAYS), _VRP_VIX, 20261023)
+    tr = res.trades[0]
+    ce = [l for l in tr.legs if l.opt == "CE"]; pe = [l for l in tr.legs if l.opt == "PE"]
+    sc, lc = [l for l in ce if l.side < 0][0], [l for l in ce if l.side > 0][0]
+    sp_, lp = [l for l in pe if l.side < 0][0], [l for l in pe if l.side > 0][0]
+    assert lc.strike == sc.strike + 400 and lp.strike == sp_.strike - 400 and sc.strike % 50 == 0
+    T = _orp.years_between(tr.entry_ts, tr.expiry)
+    for l, want in ((sc, 0.16), (sp_, 0.16)):                              # closest to 0.16 on the 50-pt grid
+        d0 = abs(abs(_orp.bs_delta(tr.spot_in, l.strike, T, 0.13, l.opt)) - want)
+        for k in (l.strike - 50, l.strike + 50):
+            assert d0 <= abs(abs(_orp.bs_delta(tr.spot_in, k, T, 0.13, l.opt)) - want) + 1e-12
+    assert tr.qty == 2 * 65 and tr.max_risk > 0                             # 2026 dates: lot 65
+    sp = _vrp_spec(wing=400.0, lots=2)
+    assert abs(tr.max_risk - (400 - tr.entry_net) * tr.qty) < 0.05
+    assert abs(sp.margin(tr) - (tr.max_risk + 0.02 * tr.spot_in * tr.qty)) < 1e-6
+    tr.max_risk = 0.0
+    assert abs(_vrp_spec().margin(tr) - 0.12 * tr.spot_in * tr.qty) < 1e-6
+    # the pre-registered lot size in force on the entry date: 75, then 65 from 2025-12-31
+    assert _orp.lot_size_on(_vrp.LOT_SCHEDULE, _ordate(2025, 12, 30)) == 75
+    assert _orp.lot_size_on(_vrp.LOT_SCHEDULE, _ordate(2025, 12, 31)) == 65
+    assert _orp.lot_size_on(_vrp.LOT_SCHEDULE, _ordate(2023, 11, 10)) == 75
+    res, _ = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS), _VRP_VIX, 20261023)
+    assert all(t.qty == 65 for t in res.trades)                             # 2026 dates: 65
+
+
+def t_vrp_no_lookahead():
+    path = lambda i: 25 * _ormath.sin(i / 70.0)
+    base = _or_bars(_VRP_DAYS, path)
+    # 1) a wildly different future (every bar after the 10:20 entry bar) leaves that entry unchanged
+    a, _ = _vrp._run_replay(_vrp_spec(400.0), base, _VRP_VIX, 20261023)
+    key = lambda r: [(t.entry_ts, [(l.opt, l.strike, l.side, l.entry_px) for l in t.legs]) for t in r.trades]
+    assert len(a.trades) == 3
+    for k, t in enumerate(a.trades):
+        wild = [(x[0], x[1] + 700, x[2] + 700, x[3] + 700, x[4] + 700) if x[0] > t.entry_ts else x for x in base]
+        b, _ = _vrp._run_replay(_vrp_spec(400.0), wild, _VRP_VIX, 20261023)
+        assert key(b)[k] == key(a)[k] and b.trades[k].net != t.net
+    # 2) today's VIX (not yet closed at 10:20) is never used: only the previous close
+    vx = dict(_VRP_VIX); vx[_ordate(2026, 10, 7)] = 80.0
+    c, _ = _vrp._run_replay(_vrp_spec(), base, vx, 20261023)
+    assert key(c)[0] == key(_vrp._run_replay(_vrp_spec(), base, _VRP_VIX, 20261023)[0])[0]
+    assert c.trades[0].sigma == 0.13
+    # 3) the runtime audit agrees, and a DISCOVERY-style run up to `hi` never reads a later bar
+    assert _vrp.audit_lookahead(_vrp_spec(400.0), base, _VRP_VIX, a.trades) is None
+    assert _vrp.audit_lookahead(_vrp_spec(), base, _VRP_VIX, a.trades) is not None      # wrong legs are caught
+    poisoned = base + [(b[0] + _ortd(days=28), float("nan"), float("nan"), float("nan"), float("nan"))
+                       for b in _or_bars(_VRP_DAYS[-5:])]
+    sim1 = _vrp.make_simulator(base, _VRP_VIX)([_vrp_spec()], 20261001, 20261016)
+    sim2 = _vrp.make_simulator(poisoned, _VRP_VIX)([_vrp_spec()], 20261001, 20261016)
+    assert sim1 == sim2 and len(sim1["T-None"]["trades"]) == 2 and sim1["T-None"]["lookahead"] is None
+
+
+def t_vrp_costs_and_haircut():
+    # flat market: both shorts expire worthless; fees = 2 sell orders at the 2026 option rates, no settlement haircut
+    res, _ = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS[:7]), _VRP_VIX, 20261013)
+    tr = res.trades[0]
+    assert tr.reason == "expiry" and all(l.exit_px == 0.0 for l in tr.legs)
+    man = 0.0
+    for l in tr.legs:
+        prem = l.entry_px * tr.qty
+        bro, stt, exch, sebi = 20.0, 0.0015 * prem, 0.0003553 * prem, prem * 10 / 1e7
+        man += bro + stt + exch + sebi + 0.18 * (bro + exch + sebi)
+    assert abs(tr.costs - man) < 0.05, (tr.costs, man)
+    # haircut: max(1 pt, 2 %) per leg at entry only (settlement is not a fill)
+    T = _orp.years_between(tr.entry_ts, tr.expiry)
+    for l in tr.legs:
+        m = _orp.bs(tr.spot_in, l.strike, T, 0.13, l.opt)
+        assert abs(l.entry_px - max(_orp.TICK, m - max(1.0, 0.02 * m))) < 1e-9
+    assert abs(tr.slippage - sum(max(1.0, 0.02 * _orp.bs(tr.spot_in, l.strike, T, 0.13, l.opt)) for l in tr.legs) * tr.qty) < 0.05
+    assert abs(tr.net - (tr.entry_net * tr.qty - tr.costs)) < 0.05
+    # the 2.5x sensitivity haircut costs more and changes nothing else
+    s5, _ = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS[:7]), _VRP_VIX, 20261013, haircut_mult=2.5)
+    assert [l.strike for l in s5.trades[0].legs] == [l.strike for l in tr.legs] and s5.trades[0].net < tr.net
+    # a short leg settled in the money is bought back at intrinsic: gross loss, STT only on the sale
+    up = _or_bars(_VRP_DAYS[:7], lambda i: 0.0 if i < 2 * 375 + 65 else 900.0)
+    tr2 = _vrp._run_replay(_vrp_spec(), up, _VRP_VIX, 20261013)[0].trades[0]
+    ce = [l for l in tr2.legs if l.opt == "CE"][0]
+    assert ce.exit_px > 0 and abs(ce.exit_px - (24900.0 - ce.strike)) < 1e-6 and tr2.net < 0
+
+
+def t_vrp_protocol_ledger():
+    import tempfile as _t, os as _o
+    days = [d for d in (_ordate(2026, 1, 1) + _ortd(days=i) for i in range(400)) if d.weekday() < 5][:150]
+    vix = {days[0] - _ortd(days=5) + _ortd(days=i): 13.0 for i in range(260)}
+    bars = _or_bars(days, lambda i: 30 * _ormath.sin(i / 300.0))
+    cal = _vrp.calendar_of(bars)
+    sp = _vrp_P.split_sessions(cal)
+    with _t.TemporaryDirectory() as td:
+        led = _o.path.join(td, "final_ledger.json")
+        seen = []
+        sim = _vrp.make_simulator(bars, vix)
+        spy = lambda specs, lo, hi: (seen.append((lo, hi)), sim(specs, lo, hi))[1]
+        res, _ = _vrp_P.evaluate([_vrp_spec()], cal, spy, n_symbols=1, ledger_path=led, screen_only=True,
+                                 cost_model=_vrp.COST_MODEL)
+        assert seen == [sp.discovery] and not _o.path.exists(led)              # screen only: FINAL never simulated
+        assert res[0]["screen"]["disc"]["trades"] > 0
+        assert all(sp.discovery[0] <= t[2] <= sp.discovery[1] for t in sim([_vrp_spec()], *sp.discovery)["T-None"]["trades"])
+    assert _vrp.COST_MODEL == _vrp._costs.COST_MODEL_VERSION + "/o1"
+
+
+run("options VRP: first Tuesday expiry 2025-09-02; entries only the day after an expiry; short weeks skipped",
+    t_vrp_expiry_transition_and_cycle)
+run("options VRP: 0.16-delta strikes on the grid, +/-400 wings, lot 75 then 65, margin rules", t_vrp_strikes_wings_lots_margin)
+run("options VRP: no look-ahead (future bars, same-day VIX, DISCOVERY run never reads later bars)", t_vrp_no_lookahead)
+run("options VRP: 2026 option fees per order, entry-only haircut, ITM settlement, 2.5x sensitivity", t_vrp_costs_and_haircut)
+run("options VRP: lab protocol on DISCOVERY only with --screen-only, no ledger write", t_vrp_protocol_ledger)
 
 # ── Research agents (replay only): swing_short, meanrev_v2 ───────────────
 from agents.research_agents import SwingShortAgent, MeanRevV2Agent
@@ -8722,6 +8868,142 @@ def t_sl_cli_sensitivity_and_screen_only():
 
 run("stratlab: CLI reports 2 bps by default, a 5 bps sensitivity column, the cost model, and --screen-only",
     t_sl_cli_sensitivity_and_screen_only)
+
+
+# ── stratlab/options_vrp_vix: pre-registered VIX-regime filter on the winged weekly strangle ──
+from stratlab import options_vrp_vix as _vx
+
+
+def _vx_vix():
+    """VIX on weekdays (no 2026-10-20 holiday) ending 2026-10-23: 13 everywhere, except 10-06 = 14 (above the
+    median, +7.7 % over 5 sessions -> take the 10-07 week), 10-13 = 12 (below median -> skip 10-14) and
+    10-19 = 16 (+23 % vs 10-12 -> spike, skip 10-21)."""
+    days, d = [], _ordate(2026, 10, 23)
+    while len(days) < 320:
+        if d.weekday() < 5 and d != _ordate(2026, 10, 20):
+            days.append(d)
+        d -= _ortd(days=1)
+    v = {x: 13.0 for x in days}
+    v[_ordate(2026, 10, 6)], v[_ordate(2026, 10, 13)], v[_ordate(2026, 10, 19)] = 14.0, 12.0, 16.0
+    return v
+
+
+def _vx_spec(vix):
+    sp = _vx.VixOptSpec("T-HV", "t", dict(_vx.HIGHVIX.params), lots=2)
+    sp.vix = vix
+    return sp
+
+
+def t_vx_filter_rules_and_past_only():
+    v = _vx_vix()
+    f = _vx.vix_filter(v, _ordate(2026, 10, 7))
+    assert f["take"] and f["prev"] == _ordate(2026, 10, 6) and f["median"] == 13.0 and abs(f["chg5"] - 1 / 13) < 1e-9
+    assert _vx.vix_filter(v, _ordate(2026, 10, 14))["why"] == "below_median"
+    f = _vx.vix_filter(v, _ordate(2026, 10, 21))
+    assert f["why"] == "spike" and f["prev"] == _ordate(2026, 10, 19) and abs(f["chg5"] - 3 / 13) < 1e-9
+    # strictly greater than the median: equal is not taken
+    assert _vx.vix_filter(v, _ordate(2026, 10, 8))["why"] == "below_median"              # prev 10-07 = 13 = median
+    # exactly +15 % over 5 sessions is a spike (>=, float-safe); just under is taken
+    w = dict(v); w[_ordate(2026, 10, 19)] = 14.95                                       # 14.95 / 13 - 1 = 0.15
+    assert _vx.vix_filter(w, _ordate(2026, 10, 21))["why"] == "spike"
+    w[_ordate(2026, 10, 12)], w[_ordate(2026, 10, 19)] = 13.0, 13.0 * 1.1499
+    assert _vx.vix_filter(w, _ordate(2026, 10, 21))["take"]
+    # the median is over the 250 sessions BEFORE prev, not including it
+    days = sorted(v)
+    i = days.index(_ordate(2026, 10, 6))
+    w = dict(v)
+    for x in days[:i - 250]:
+        w[x] = 99.0                                                                     # outside the window
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7)) == _vx.vix_filter(v, _ordate(2026, 10, 7))
+    w = dict(v)
+    for x in days[i - 250:i - 124]:
+        w[x] = 99.0                                                                     # 126 of 250 inside: median moves
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7))["median"] == 99.0
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7))["why"] == "below_median"
+    # no look-ahead: closes on/after the entry day are never read
+    w = dict(v)
+    for x in days:
+        if x >= _ordate(2026, 10, 7):
+            w[x] = 500.0
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7)) == _vx.vix_filter(v, _ordate(2026, 10, 7))
+    # fewer than 250 closes before prev: no trade
+    short = {x: 13.0 for x in days[i - 249:i + 1]}
+    short[_ordate(2026, 10, 6)] = 14.0
+    assert _vx.vix_filter(short, _ordate(2026, 10, 7))["why"] == "no_history"
+    short[days[i - 250]] = 13.0
+    assert _vx.vix_filter(short, _ordate(2026, 10, 7))["take"]
+
+
+def t_vx_replay_trades_only_taken_weeks_identical_to_baseline():
+    v = _vx_vix()
+    bars = _or_bars(_VRP_DAYS, lambda i: 20 * _ormath.sin(i / 60.0))
+    sp = _vx_spec(v)
+    res, strat = _vrp._run_replay(sp, bars, v, 20261023)
+    base, _ = _vrp._run_replay(_vrp.BY_ID["VRP-STRANGLE-016-WINGED"], bars, v, 20261023)
+    assert [t.entry_ts.date() for t in base.trades] == [_ordate(2026, 10, 7), _ordate(2026, 10, 14), _ordate(2026, 10, 21)]
+    assert [t.entry_ts.date() for t in res.trades] == [_ordate(2026, 10, 7)]
+    assert [(d, f["why"]) for d, f in strat.filter_log] == [(_ordate(2026, 10, 7), "take"),
+                                                           (_ordate(2026, 10, 14), "below_median"),
+                                                           (_ordate(2026, 10, 21), "spike")]
+    a, b = res.trades[0], base.trades[0]
+    # exactly the winged structure: same legs, fills, 2 lots, costs, haircut, net; margin rule unchanged
+    assert [(l.opt, l.strike, l.side, l.entry_px, l.exit_px) for l in a.legs] == \
+           [(l.opt, l.strike, l.side, l.entry_px, l.exit_px) for l in b.legs]
+    assert len(a.legs) == 4 and a.qty == 2 * 65 and (a.costs, a.slippage, a.net) == (b.costs, b.slippage, b.net)
+    assert sp.margin(a) == _vrp.BY_ID["VRP-STRANGLE-016-WINGED"].margin(b)
+    # the fingerprint covers the filter's parameters
+    q = _vx_spec(v); q.params = dict(q.params, spike_pct=0.2)
+    assert q.fingerprint != sp.fingerprint and sp.fingerprint != _vrp.BY_ID["VRP-STRANGLE-016-WINGED"].fingerprint
+
+
+def t_vx_no_lookahead():
+    v = _vx_vix()
+    path = lambda i: 25 * _ormath.sin(i / 70.0)
+    base = _or_bars(_VRP_DAYS, path)
+    sp = _vx_spec(v)
+    a, _ = _vrp._run_replay(sp, base, v, 20261023)
+    # future bars and future VIX closes changed wildly: the same week, legs and entry fills
+    t0 = a.trades[0].entry_ts
+    wild = [(b[0], b[1] + 700, b[2] + 700, b[3] + 700, b[4] + 700) if b[0] > t0 else b for b in base]
+    w = dict(v)
+    for x in list(w):
+        if x >= _ordate(2026, 10, 7):
+            w[x] = w[x] * 3
+    b, _ = _vrp._run_replay(_vx_spec(w), wild, w, 20261013)
+    key = lambda r: [(t.entry_ts, [(l.opt, l.strike, l.side, l.entry_px) for l in t.legs]) for t in r.trades]
+    assert key(a)[:1] == key(b) and len(key(b)) == 1 and a.trades[0].net != b.trades[0].net
+    assert _vrp.audit_lookahead(sp, base, v, a.trades) is None
+    # a DISCOVERY-style simulation up to `hi` never reads later bars
+    poisoned = base + [(x[0] + _ortd(days=28), float("nan"), float("nan"), float("nan"), float("nan"))
+                       for x in _or_bars(_VRP_DAYS[-5:])]
+    s1 = _vrp.make_simulator(base, v)([sp], 20261001, 20261016)
+    s2 = _vrp.make_simulator(poisoned, v)([sp], 20261001, 20261016)
+    assert s1 == s2 and len(s1["T-HV"]["trades"]) == 1 and s1["T-HV"]["lookahead"] is None
+
+
+def t_vx_merge_vix_and_compare():
+    import tempfile as _t, json as _j, os as _o
+    with _t.TemporaryDirectory() as td:
+        pth = _o.path.join(td, "v.json")
+        with open(pth, "w") as fh:
+            _j.dump({"symbol": "INDIA VIX", "interval": "day",
+                     "bars": [["2022-01-03T00:00:00", 1, 1, 1, 16.45, 0], ["2022-11-10T00:00:00", 1, 1, 1, 99.0, 0]]}, fh)
+        m = _vx.merge_vix({_ordate(2022, 11, 10): 15.57}, [pth])
+    assert m == {_ordate(2022, 1, 3): 16.45, _ordate(2022, 11, 10): 15.57}               # base wins on overlap
+    bd = {1: {"net": 100.0, "bps": 10.0}, 2: {"net": -50.0, "bps": -5.0}, 3: {"net": 30.0, "bps": 3.0}}
+    cd = {1: {"net": 100.0, "bps": 10.0}}
+    dec = {1: {"take": True, "why": "take"}, 2: {"take": False, "why": "spike"}, 3: {"take": False, "why": "below_median"}}
+    c = _vx._week_compare(bd, cd, dec, (1, 3))
+    assert c["weeks"] == 3 and c["taken"] == 1 and c["cond_bps"] == 10.0 and abs(c["uncond_bps"] - 8 / 3) < 1e-9
+    assert c["rest_bps"] == -1.0 and c["spike_bps"] == -5.0 and not c["mismatch"] and not c["missing"]
+
+
+run("options VRP x VIX: strict median of the 250 prior sessions, >=15 % 5-session spike, past closes only",
+    t_vx_filter_rules_and_past_only)
+run("options VRP x VIX: trades only taken weeks, each identical to the unconditional winged trade",
+    t_vx_replay_trades_only_taken_weeks_identical_to_baseline)
+run("options VRP x VIX: no look-ahead (future bars and VIX, audit, DISCOVERY run)", t_vx_no_lookahead)
+run("options VRP x VIX: older VIX merged without overwriting, per-week comparison", t_vx_merge_vix_and_compare)
 
 
 # ══════════════════════════════════════════════════════════════════════════
