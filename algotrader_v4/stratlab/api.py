@@ -45,6 +45,7 @@ class Swing:
     """A multi-day entry decided on the latest daily bar of the view.
 
     Give stops/targets as a percentage of the fill price (stop_pct=3 means 3 % against you) or as prices.
+    rr (with no target): target = fill ± rr × |fill − stop|, like Entry.rr.
     max_hold = number of sessions the position may be held; it is closed at that session's close."""
     side: int = LONG
     stop_pct: float | None = None
@@ -52,6 +53,7 @@ class Swing:
     stop: float | None = None
     target: float | None = None
     max_hold: int = 10
+    rr: float | None = None
 
 
 @dataclass

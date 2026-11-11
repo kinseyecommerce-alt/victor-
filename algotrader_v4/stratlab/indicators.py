@@ -225,6 +225,7 @@ def build_sessions(sd: SymbolData, index: SymbolData | None = None) -> list[Sess
         a, b = int(starts[k]), int(ends[k])
         s = Session()
         s.symbol, s.date, s.day_index = sd.symbol, int(sd.days[k]), k
+        s._sd = sd                  # candles of EARLIER sessions (stratlab.candles); never read bars >= starts[k]
         for name, arr in flat.items():
             setattr(s, name, arr[a:b])
         s.prev = DailyHist(d["date"][:k], d["o"][:k], d["h"][:k], d["l"][:k], d["c"][:k], d["v"][:k])

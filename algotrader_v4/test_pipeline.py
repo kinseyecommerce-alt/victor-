@@ -7729,6 +7729,7 @@ def t_sl_catalogue_first_batch():
                            25000 * np.exp(np.cumsum(rng.normal(0, 0.0004, len(sd.c)))), sd.v * 0)
     specs = [sp for sp in _SL_REG.values() if sp.horizon == "intraday"]
     sessions = _sli.build_sessions(sd, idx)
+    rare = {sp.id for sp in specs if sp.family == "candlestick"}   # textbook patterns may not occur in 30 days
     traded = 0
     for sp in specs:
         n = 0
@@ -7740,8 +7741,8 @@ def t_sl_catalogue_first_batch():
                 assert x[4] < "15:15" and x[7] <= "15:15" and x[4] <= x[7], (sp.id, x)
             bad = _sls.audit_lookahead(sp, s, cuts=(20, 46, 75, 110, 170, 226, 290, 330))
             assert bad is None, f"{sp.id}: {bad}"
-        traded += n > 0
-    assert traded >= len(specs) - 3, traded                      # nearly every strategy trades on a random walk
+        traded += n > 0 and sp.id not in rare
+    assert traded >= len(specs) - len(rare) - 3, traded                      # nearly every strategy trades on a random walk
     out = _sls.run_symbol("", "RW", list(_SL_REG.values()), 0, 99999999, sd=sd, index=idx)
     assert all(r["error"] is None and r["lookahead"] is None for r in out.values()), \
         {k: (r["error"], r["lookahead"]) for k, r in out.items() if r["error"] or r["lookahead"]}
@@ -7782,6 +7783,334 @@ def t_sl_cli_end_to_end():
 
 
 run("stratlab: CLI end to end (results.csv, summary.txt, trade CSVs without FINAL trades)", t_sl_cli_end_to_end)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# STRATLAB — candlestick patterns (stratlab/candles.py, catalog/candlestick.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("STRATLAB: candlestick patterns")
+
+from stratlab import candles as _cdl
+from stratlab.catalog import candlestick as _cdlcat
+
+# 12 ordinary candles (alternating white / black, body 1, range 2) so avgB = 1 and avgR = 2 before a pattern
+_CS_BASE = [(100.0, 101.5, 99.5, 101.0) if k % 2 == 0 else (101.0, 101.5, 99.5, 100.0) for k in range(12)]
+
+
+def _cs(*rows):
+    """OHLC arrays: the 12 ordinary candles followed by `rows` (each (o, h, l, c))."""
+    a = np.array(_CS_BASE + list(rows), float)
+    return a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+
+
+def _cs_hit(fn, *rows) -> bool:
+    return bool(fn(*_cs(*rows))[-1])
+
+
+def t_cs_single_candle_detectors():
+    D = _cdl
+    hammer = (100.5, 101.0, 98.5, 101.0)            # B .5, lower shadow 2.0, no upper shadow
+    assert _cs_hit(D.hammer, hammer) and _cs_hit(D.hanging_man, hammer)
+    assert not _cs_hit(D.hammer, (100.5, 101.6, 98.5, 101.0))      # upper shadow .6 > 10 % of range
+    assert not _cs_hit(D.hammer, (100.5, 101.0, 99.6, 101.0))      # lower shadow .9 < 2 x body
+    assert not _cs_hit(D.hammer, (100.95, 101.0, 98.5, 101.0))     # body .05: a doji, not a hammer
+    assert not _cs_hit(D.hammer, (100.0, 100.1, 99.85, 100.1))     # range .25 < .5 x average range
+    inv = (99.5, 102.0, 99.5, 100.0)                # B .5, upper shadow 2.0, no lower shadow
+    assert _cs_hit(D.inverted_hammer, inv) and _cs_hit(D.shooting_star, inv)
+    assert not _cs_hit(D.inverted_hammer, (99.5, 102.0, 99.0, 100.0)) and not _cs_hit(D.shooting_star, hammer)
+    assert _cs_hit(D.bullish_marubozu, (99.0, 101.55, 99.0, 101.5))
+    assert not _cs_hit(D.bullish_marubozu, (99.0, 102.0, 99.0, 101.5))            # upper shadow .5
+    assert not _cs_hit(D.bullish_marubozu, (100.0, 100.8, 100.0, 100.8))           # body .8 not long
+    assert _cs_hit(D.bearish_marubozu, (101.5, 101.5, 98.95, 99.0))
+    assert not _cs_hit(D.bearish_marubozu, (99.0, 101.55, 99.0, 101.5))
+    assert _cs_hit(D.doji, (100.0, 101.0, 99.0, 100.05)) and not _cs_hit(D.doji, (100.0, 101.0, 99.0, 100.5))
+    assert _cs_hit(D.dragonfly_doji, (101.0, 101.0, 99.0, 101.0))
+    assert not _cs_hit(D.dragonfly_doji, (101.0, 101.5, 99.0, 101.0))              # upper shadow .5 of 2.5
+    assert _cs_hit(D.gravestone_doji, (99.0, 101.0, 99.0, 99.0))
+    assert not _cs_hit(D.gravestone_doji, (101.0, 101.0, 99.0, 101.0))
+    assert _cs_hit(D.long_legged_doji, (100.0, 101.0, 99.0, 100.0))
+    assert not _cs_hit(D.long_legged_doji, (101.0, 101.0, 99.0, 101.0))            # dragonfly, not long-legged
+    assert _cs_hit(D.spinning_top, (100.0, 101.5, 99.0, 100.5))
+    assert not _cs_hit(D.spinning_top, hammer)
+    assert "doji" in _cdl.CONTEXT_ONLY and "spinning_top" in _cdl.CONTEXT_ONLY
+    assert not any(k in _cdl.PATTERNS for k in ("doji", "spinning_top"))
+
+
+run("candles: single-candle detectors on textbook examples (positive and negative)", t_cs_single_candle_detectors)
+
+
+def t_cs_two_candle_detectors():
+    D = _cdl
+    black, white = (101.0, 101.5, 99.5, 100.0), (100.0, 101.5, 99.5, 101.0)
+    assert _cs_hit(D.bullish_engulfing, black, (99.9, 101.3, 99.8, 101.2))
+    assert not _cs_hit(D.bullish_engulfing, black, (100.2, 101.0, 100.1, 100.8))      # inside, not engulfing
+    assert not _cs_hit(D.bullish_engulfing, white, (99.9, 101.3, 99.8, 101.2))        # first candle not black
+    assert _cs_hit(D.bearish_engulfing, white, (101.1, 101.2, 99.7, 99.8))
+    assert not _cs_hit(D.bearish_engulfing, white, (100.8, 100.9, 100.1, 100.2))
+    long_black, long_white = (102.0, 102.1, 99.9, 100.0), (100.0, 102.1, 99.9, 102.0)
+    assert _cs_hit(D.piercing_line, long_black, (99.8, 101.4, 99.7, 101.3))
+    assert not _cs_hit(D.piercing_line, long_black, (100.1, 101.4, 100.0, 101.3))     # did not open below the low
+    assert not _cs_hit(D.piercing_line, long_black, (99.8, 100.9, 99.7, 100.8))       # closed below the midpoint
+    assert not _cs_hit(D.piercing_line, long_black, (99.8, 102.3, 99.7, 102.2))       # above the open: engulfing
+    assert _cs_hit(D.dark_cloud_cover, long_white, (102.2, 102.3, 100.6, 100.7))
+    assert not _cs_hit(D.dark_cloud_cover, long_white, (101.9, 102.0, 100.6, 100.7))  # did not open above the high
+    assert not _cs_hit(D.dark_cloud_cover, long_white, (102.2, 102.3, 99.7, 99.8))
+    assert _cs_hit(D.bullish_harami, (102.0, 102.1, 98.9, 99.0), (100.0, 100.6, 99.9, 100.5))
+    assert not _cs_hit(D.bullish_harami, (102.0, 102.1, 98.9, 99.0), (98.5, 99.6, 98.4, 99.5))   # body outside
+    assert not _cs_hit(D.bullish_harami, (100.0, 101.5, 99.5, 100.5), (100.2, 100.4, 100.1, 100.3))  # 1st not black
+    assert _cs_hit(D.bearish_harami, (99.0, 102.1, 98.9, 102.0), (101.0, 101.1, 100.4, 100.5))
+    assert not _cs_hit(D.bearish_harami, (99.0, 102.1, 98.9, 102.0), (101.0, 102.6, 100.4, 102.5))
+    assert _cs_hit(D.tweezer_bottom, black, (100.0, 101.5, 99.5, 101.0))
+    assert not _cs_hit(D.tweezer_bottom, black, (100.0, 101.5, 99.2, 101.0))          # lows .3 apart
+    assert _cs_hit(D.tweezer_top, white, (101.0, 101.5, 99.5, 100.0))
+    assert not _cs_hit(D.tweezer_top, white, (101.0, 101.9, 99.5, 100.0))
+    assert _cs_hit(D.inside_bar, (100.0, 102.0, 98.0, 101.0), (100.5, 101.0, 99.0, 100.0))
+    assert not _cs_hit(D.inside_bar, (100.0, 102.0, 98.0, 101.0), (100.5, 102.0, 99.0, 100.0))  # equal high
+    assert _cs_hit(D.outside_bar, (100.0, 101.0, 99.0, 100.5), (100.5, 101.5, 98.5, 99.0))
+    assert not _cs_hit(D.outside_bar, (100.0, 101.0, 99.0, 100.5), (100.5, 101.5, 99.2, 99.5))
+
+
+run("candles: two-candle detectors on textbook examples (positive and negative)", t_cs_two_candle_detectors)
+
+
+def t_cs_three_candle_detectors():
+    D = _cdl
+    ms = [(102.0, 102.1, 99.4, 99.5), (99.2, 99.3, 98.8, 99.0)]
+    assert _cs_hit(D.morning_star, *ms, (99.3, 101.3, 99.2, 101.2))
+    assert not _cs_hit(D.morning_star, *ms, (99.3, 100.6, 99.2, 100.5))              # below candle 1's midpoint
+    assert not _cs_hit(D.morning_star, ms[0], (99.6, 99.8, 99.3, 99.7), (99.3, 101.3, 99.2, 101.2))  # no gap
+    es = [(99.5, 102.1, 99.4, 102.0), (102.3, 102.7, 102.2, 102.5)]
+    assert _cs_hit(D.evening_star, *es, (102.2, 102.3, 100.4, 100.5))
+    assert not _cs_hit(D.evening_star, *es, (102.2, 102.3, 100.9, 101.0))
+    sold = [(100.0, 101.6, 99.9, 101.5), (101.0, 102.6, 100.9, 102.5), (102.0, 103.6, 101.9, 103.5)]
+    assert _cs_hit(D.three_white_soldiers, *sold)
+    assert not _cs_hit(D.three_white_soldiers, *sold[:2], (103.0, 104.6, 102.9, 104.5))   # opened above body 2
+    assert not _cs_hit(D.three_white_soldiers, *sold[:2], (102.0, 104.5, 101.9, 103.5))   # far from its high
+    crows = [(101.0, 101.1, 99.4, 99.5), (100.0, 100.1, 98.4, 98.5), (99.0, 99.1, 97.4, 97.5)]
+    assert _cs_hit(D.three_black_crows, *crows)
+    assert not _cs_hit(D.three_black_crows, *crows[:2], (98.0, 98.1, 96.4, 96.5))         # opened below body 2
+    har_up = [(102.0, 102.1, 98.9, 99.0), (100.0, 100.6, 99.9, 100.5)]
+    assert _cs_hit(D.three_inside_up, *har_up, (100.5, 102.6, 100.4, 102.5))
+    assert not _cs_hit(D.three_inside_up, *har_up, (100.5, 101.6, 100.4, 101.5))          # not above candle 1's open
+    har_dn = [(99.0, 102.1, 98.9, 102.0), (101.0, 101.1, 100.4, 100.5)]
+    assert _cs_hit(D.three_inside_down, *har_dn, (100.5, 100.6, 98.4, 98.5))
+    assert not _cs_hit(D.three_inside_down, *har_dn, (100.5, 100.6, 99.4, 99.5))
+    eng_up = [(101.0, 101.5, 99.5, 100.0), (99.9, 101.3, 99.8, 101.2)]
+    assert _cs_hit(D.three_outside_up, *eng_up, (101.2, 101.9, 101.1, 101.8))
+    assert not _cs_hit(D.three_outside_up, *eng_up, (101.2, 101.3, 100.9, 101.0))         # lower close
+    eng_dn = [(100.0, 101.5, 99.5, 101.0), (101.1, 101.2, 99.7, 99.8)]
+    assert _cs_hit(D.three_outside_down, *eng_dn, (99.8, 99.9, 99.2, 99.3))
+    assert not _cs_hit(D.three_outside_down, *eng_dn, (99.8, 100.2, 99.7, 100.1))
+
+
+run("candles: three-candle detectors on textbook examples (positive and negative)", t_cs_three_candle_detectors)
+
+
+def _cs_trend(direction: int, n: int = 30):
+    """n candles trending by 0.5 per candle (body .4, range .8)."""
+    rows = []
+    for k in range(n):
+        m = 100.0 + direction * 0.5 * k
+        rows.append((m - direction * 0.2, m + 0.4, m - 0.4, m + direction * 0.2))
+    return rows
+
+
+def t_cs_trend_context_once_for_all():
+    down, up = _cs_trend(-1), _cs_trend(1)
+    last_dn, last_up = down[-1][3], up[-1][3]
+    ham_dn = (last_dn - 0.3, last_dn + 0.2, last_dn - 2.0, last_dn + 0.2)       # hammer after the decline
+    ham_up = (last_up - 0.3, last_up + 0.2, last_up - 2.0, last_up + 0.2)       # same shape after the rise
+    for rows, want_long, want_short in ((down + [ham_dn], True, False), (up + [ham_up], False, True)):
+        o, h, l, c = (np.array(x) for x in zip(*rows))
+        sig = _cdl.signals(o, h, l, c, ["hammer", "hanging_man", "inside_bar", "outside_bar"])
+        assert bool(sig["hammer"][0][-1]) is want_long, ("hammer", want_long)
+        assert bool(sig["hanging_man"][1][-1]) is want_short, ("hanging man", want_short)
+        assert not sig["hammer"][1].any() and not sig["hanging_man"][0].any()
+    o, h, l, c = (np.array(x) for x in zip(*_cs_trend(-1)))
+    dn, upm = _cdl.trend_context(c)
+    assert dn[-1] and not upm[-1] and not dn[:_cdl.EMA_N].any()
+    assert not _cdl.trend_context(c[:_cdl.EMA_N])[0].any()                       # too short for EMA20
+    # the context is the candle BEFORE the pattern's first candle
+    assert _cdl.PATTERNS["morning_star"].n == 3 and _cdl.PATTERNS["hammer"].n == 1
+    # every traded pattern has a direction rule; reversals need the opposite trend
+    for name, p in _cdl.PATTERNS.items():
+        if p.context in ("down", "up"):
+            assert (p.side > 0) == (p.context == "down"), name
+
+
+run("candles: one prior-trend rule (EMA20 + 5-candle close) gates every reversal pattern", t_cs_trend_context_once_for_all)
+
+
+def t_cs_resample_alignment():
+    n = 375
+    t = 555 + np.arange(n)
+    o = 100.0 + np.arange(n) * 0.01
+    c = o + 0.005
+    h, l, v = c + 0.02, o - 0.02, np.ones(n)
+    for tf, count, starts in ((5, 75, [555, 560, 565]), (15, 25, [555, 570, 585]), (60, 7, [555, 615, 675])):
+        cd = _cdl.resample(t, o, h, l, c, v, tf)
+        assert len(cd.o) == count and list(cd.start[:3]) == starts, (tf, len(cd.o), cd.start[:3])
+        assert (cd.end - cd.start <= tf).all() and cd.sig[0] == tf - 1 and (cd.sig == cd.last).all()
+    cd = _cdl.resample(t, o, h, l, c, v, 60)
+    assert list(cd.start) == [555, 615, 675, 735, 795, 855, 915] and list(cd.end)[-2:] == [915, 930]
+    assert cd.last[-1] - cd.first[-1] + 1 == 15                                  # short last candle 15:15-15:29
+    cd = _cdl.resample(t, o, h, l, c, v, 15)
+    k = 1                                                                         # 09:30-09:45 = bars 15..29
+    assert cd.o[k] == o[15] and cd.c[k] == c[29] and cd.h[k] == h[15:30].max() and cd.l[k] == l[15:30].min()
+    assert cd.v[k] == 15 and _cdl.SESSION_END == 930
+    # a candle is complete only when its last minute (end-1) is known
+    part = _cdl.resample(t[:29], o[:29], h[:29], l[:29], c[:29], v[:29], 15)   # bars up to 09:43
+    assert len(part.o) == 1 and part.end[-1] == 570
+    full = _cdl.resample(t[:30], o[:30], h[:30], l[:30], c[:30], v[:30], 15)   # bar 09:44 known
+    assert len(full.o) == 2 and full.sig[-1] == 29 and t[29] == 584
+    raw = _cdl.resample(t[:29], o[:29], h[:29], l[:29], c[:29], v[:29], 15, complete_only=False)
+    assert len(raw.o) == 2 and raw.sig[-1] == -1
+    # the 09:44 bar is missing: the candle is known complete only at the close of the 09:45 bar
+    keep = t != 584
+    gap = _cdl.resample(t[keep], o[keep], h[keep], l[keep], c[keep], v[keep], 15)
+    assert t[keep][gap.sig[1]] == 585 and gap.last[1] == 28
+    g29 = _cdl.resample(t[keep][:29], o[keep][:29], h[keep][:29], l[keep][:29], c[keep][:29], v[keep][:29], 15)
+    assert len(g29.o) == 1                                                       # 09:43 known, 09:44 missing: not yet
+
+
+run("candles: 5m / 15m / 60m candles aligned at 09:15, short 15:15 candle, complete only at minute end-1", t_cs_resample_alignment)
+
+
+def _cs_hammer_day(shift_after: float = 1.0, drop_944: bool = False):
+    """Day 1: a steady decline (120 -> 100). Day 2: the decline continues to 09:29, the 09:30-09:44 candle is a
+    hammer (open 99.5, low 98.0, close 99.9 at 09:44), then flat. `shift_after` rescales every bar from 09:45."""
+    n = 375
+    p1 = np.linspace(120.0, 100.0, n + 1)
+    o1, c1 = p1[:-1], p1[1:]
+    p2 = np.concatenate((np.linspace(100.0, 99.5, 16), np.full(n - 15, 99.9)))
+    o2, c2 = p2[:-1].copy(), p2[1:].copy()
+    o2[15:30] = 99.5; c2[15:30] = 99.5
+    o2[20], c2[20] = 99.5, 98.2                                              # the dip at 09:35
+    o2[21], c2[21] = 98.2, 99.5
+    o2[29], c2[28], c2[29] = 99.9, 99.9, 99.9                                # the candle closes at 99.9
+    o = np.concatenate((o1, o2)); c = np.concatenate((c1, c2))
+    h = np.maximum(o, c) + 0.01; l = np.minimum(o, c) - 0.01
+    a2 = n
+    l[a2 + 20] = 98.0; h[a2 + 29] = 99.95
+    for k in range(a2 + 15, a2 + 30):                                         # keep the candle's high at 99.95
+        h[k] = min(h[k], 99.95)
+    date = np.repeat(np.array([20260105, 20260106], np.int32), n)
+    t = np.tile(555 + np.arange(n), 2).astype(np.int16)
+    after = (date == 20260106) & (t >= 585)
+    for arr in (o, h, l, c):
+        arr[after] *= shift_after
+    keep = np.ones(len(t), bool)
+    if drop_944:
+        keep &= ~((date == 20260106) & (t == 584))
+    return _sld.from_arrays("HAM", date[keep], t[keep], o[keep], h[keep], l[keep], c[keep], np.full(keep.sum(), 1000.0))
+
+
+def t_cs_pattern_complete_before_signal():
+    sp = _SL_REG["cs_hammer_15m"]
+    s = _sli.build_sessions(_cs_hammer_day())[1]
+    cs = _cdl.session_candles(s, 15)
+    assert cs.start[1] == 570 and bool(cs.sigs["hammer"][0][1]), "the 09:30-09:45 candle should be a hammer"
+    ents = sp.fn(s, sp.p)
+    assert len(ents) == 1 and ents[0].side == 1 and int(s.t[ents[0].i]) == 584, [(e.i, e.side) for e in ents]
+    e = ents[0]
+    assert e.stop < 98.0 and abs(e.stop - min(98.0 - 0.05, 99.9 - 0.3 * cs.atr[1])) < 1e-9 and e.rr == 2.0
+    trades, _ = _sls.sim_session(sp, s)
+    assert trades and trades[0][4] == "09:45" and abs(trades[0][5] - float(s.o[ents[0].i + 1]) * 1.0005) < 1e-3
+    # at the close of 09:43 the candle is not finished: no signal yet; at 09:44 it is
+    assert sp.fn(s.view(int(np.searchsorted(s.t, 584))), sp.p) == []
+    assert len(sp.fn(s.view(int(np.searchsorted(s.t, 584)) + 1), sp.p)) == 1
+    # changing every bar after the pattern candle changes neither the signal nor its fill time
+    s2 = _sli.build_sessions(_cs_hammer_day(shift_after=1.02))[1]
+    e2 = sp.fn(s2, sp.p)
+    assert [(x.i, x.side, round(x.stop, 9), x.rr) for x in e2] == [(e.i, e.side, round(e.stop, 9), e.rr)]
+    tr2, _ = _sls.sim_session(sp, s2)
+    assert tr2 and tr2[0][4] == "09:45"
+    assert _sls.audit_lookahead(sp, s, cuts=(20, 29, 30, 31, 60, 200)) is None
+    # with the 09:44 bar missing the candle is known complete at the close of 09:45: fill at 09:46
+    s3 = _sli.build_sessions(_cs_hammer_day(drop_944=True))[1]
+    e3 = sp.fn(s3, sp.p)
+    assert len(e3) == 1 and int(s3.t[e3[0].i]) == 585
+    tr3, _ = _sls.sim_session(sp, s3)
+    assert tr3 and tr3[0][4] == "09:46"
+    # confirmation variant: the next candle (09:45-10:00) closes above 99.9 only when the rest of the day is higher
+    spc = _SL_REG["cs_hammer_15m_conf"]
+    assert spc.fn(s, spc.p) == []                                            # flat at 99.9: not confirmed
+    ec = spc.fn(s2, spc.p)
+    cs2 = _cdl.session_candles(s2, 15)
+    assert len(ec) == 1 and int(s2.t[ec[0].i]) == 599                         # after the 09:45-10:00 candle
+    assert abs(ec[0].stop - min(98.0 - 0.05, float(cs2.c[2]) - 0.3 * float(cs2.atr[2]))) < 1e-9
+
+
+run("candles: pattern candle must be complete (15m candle to 09:45 fills at 09:45 open); later bars change nothing", t_cs_pattern_complete_before_signal)
+
+
+def t_cs_catalogue_and_windows():
+    ids = [i for i, sp in _SL_REG.items() if sp.family == "candlestick"]
+    assert len(ids) == _cdlcat.N_REGISTERED == 152 == len(_cdlcat.IDS) == len(set(_cdlcat.IDS))
+    n_conf = sum(i.endswith("_conf") for i in ids)
+    assert n_conf == 4 * len(_cdlcat.CONFIRM) == 44
+    for pat in _cdl.PATTERNS:
+        for tf in ("5m", "15m", "60m", "d"):
+            assert f"cs_{pat}_{tf}" in _SL_REG, (pat, tf)
+    for i in ids:
+        sp = _SL_REG[i]
+        if i.split("_")[-1] in ("d",) or i.endswith("_d_conf"):
+            side = _cdl.PATTERNS[sp.params["pattern"]].side
+            assert sp.kind == ("swing" if side > 0 else "futures") and sp.horizon == "positional", i
+        else:
+            assert sp.kind == "intraday" and sp.max_per_day == 1, i
+    # windows: 5m / 15m decisions on candles ending 09:30-14:30; 60m by 14:15; stops on the losing side
+    sd = _sl_walk(n_days=8, seed=5)
+    sessions = _sli.build_sessions(sd)
+    seen = {5: 0, 15: 0, 60: 0}
+    for s in sessions[1:]:
+        for pat in _cdl.PATTERNS:
+            for tf in (5, 15, 60):
+                for conf in (False, True):
+                    for e in _cdlcat.candle_entries(s, pat, tf, conf):
+                        seen[tf] += 1
+                        tt = int(s.t[e.i])
+                        assert (569 <= tt <= 869) if tf != 60 else (614 <= tt <= 854), (pat, tf, tt)
+                        assert e.side * (float(s.c[e.i]) - e.stop) > 0, (pat, tf)
+    assert seen[5] > 0 and seen[15] > 0, seen
+
+
+run("candles: 152 strategies cs_<pattern>_<tf>[_conf], right kinds, entry windows and stop sides", t_cs_catalogue_and_windows)
+
+
+def t_cs_daily_rr_and_no_lookahead():
+    # Swing(rr=2): target = fill + 2 x (fill - stop), as for intraday entries
+    days = [20260105 + k for k in range(5)]
+    date, t, a, v = _sl_flat(days=days)
+    m = date == days[3]
+    a["h"][m] = 120.0
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    calls = []
+
+    def fn(d, p):
+        calls.append(len(d))
+        return _SlSwing(1, stop=95.0, rr=2.0, max_hold=3) if len(d) == 2 else None
+    tr, _ = _sls.sim_positional(_sl_spec(fn, kind="swing"), sd, 0, 99999999)
+    assert tr and tr[0][-1] == "target", tr
+    fill = 100.0 * 1.0005
+    assert abs(tr[0][8] - (fill + 2 * (fill - 95.0))) < 1e-9 and tr[0][2] == days[2]
+    # daily candlestick signal: a hammer on the decision day, unchanged by anything after it
+    o, h, l, c = (np.array(x) for x in zip(*_cs_trend(-1, 40)))
+    last = c[-1]
+    ham = (last - 0.3, last + 0.2, last - 2.0, last + 0.2)
+
+    cols = [np.append(x, y) for x, y in zip((o, h, l, c), ham)]
+    d = _sls.DailyView(np.arange(len(cols[0])), *cols, np.ones(len(cols[0])))
+    d.symbol, d.nifty, d.vix = "X", None, None
+    sw = _cdlcat.daily_signal(d, "hammer", False, (1,))
+    assert sw is not None and sw.side == 1 and sw.rr == 2.0 and sw.max_hold == 10 and sw.stop <= ham[2] - 0.05
+    assert _cdlcat.daily_signal(d, "hanging_man", False, (-1,)) is None                  # wrong trend
+    assert _cdlcat.daily_signal(d, "hammer", True, (1,)) is None                         # no confirmation day yet
+    sp = _SL_REG["cs_hammer_d"]
+    assert sp.kind == "swing" and isinstance(sp.fn(d, sp.p), _SlSwing)
+
+
+run("candles: daily patterns: Swing rr=2 target from the fill, hammer signal on the decision day only", t_cs_daily_rr_and_no_lookahead)
 
 
 # ══════════════════════════════════════════════════════════════════════════

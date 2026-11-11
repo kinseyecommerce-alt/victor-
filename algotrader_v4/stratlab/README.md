@@ -121,6 +121,20 @@ By default the fill is the next session's open. With `decision_time="15:20"` in 
 bar is the day *so far* at that minute and the fill is that minute's bar open.
 `kind="swing"` is delivery and long-only; shorts go under `kind="futures", horizon="positional"`.
 
+## Candlestick patterns (`candles.py`, `catalog/candlestick.py`)
+
+`candles.resample()` turns a session's 1-minute bars into 5m / 15m / 60m candles aligned at 09:15 (the 60m day
+ends with a short 15:15-15:30 candle); daily candles are the lab's daily bars. A candle is usable only once it is
+complete — at the close of its last minute (the 09:44 bar for the 09:30-09:45 candle), so the earliest fill is
+the open of the 09:45 bar. `session_candles(s, tf)` prepends up to 100 candles of earlier sessions (read through
+`s._sd`, never at or after today's first bar) for EMA20 / ATR / average body. The detectors are pure functions
+with their textbook definitions (Nison / Bulkowski) and fixed ratios in docstrings and module constants; one
+prior-trend rule (close vs EMA20 and vs the close 5 candles earlier, on the candle before the pattern) gates every
+reversal. The catalogue registers 152 strategies `cs_<pattern>_<tf>[_conf]` with one fixed plan (next-open
+entry, stop beyond the pattern extreme and >= 0.3 ATR, 2R, square-off 15:15 / 10 sessions) — count all 152 when
+judging how many screen passes luck alone would give. `Swing(rr=...)` sets a positional target at rr × the risk
+from the fill.
+
 ## Simulator assumptions (`sim.py`)
 
 * **Data**: 1-minute bars, 09:15–15:29 IST. Sessions with fewer than 200 bars (the Diwali muhurat hour, a

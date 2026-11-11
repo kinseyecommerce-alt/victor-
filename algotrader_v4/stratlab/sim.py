@@ -269,6 +269,8 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
         stop = sig.stop if sig.stop is not None else (fill * (1 - side * sig.stop_pct / 100.0) if sig.stop_pct else None)
         target = sig.target if sig.target is not None else (
             fill * (1 + side * sig.target_pct / 100.0) if sig.target_pct else None)
+        if target is None and sig.rr and stop is not None:
+            target = fill + side * sig.rr * abs(fill - stop)
         if (stop is not None and side * (raw - stop) <= 0) or (target is not None and side * (target - fill) <= 0) \
                 or sig.max_hold < 1:
             skipped += 1
