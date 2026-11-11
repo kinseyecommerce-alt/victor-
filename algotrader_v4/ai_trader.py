@@ -922,7 +922,11 @@ class AITrader:
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
-            reject(f"quantity {qty} too large: {pr['reason']} → use at most {pr['max_quantity']}")
+            # take the risk-adjusted size instead of rejecting: the correlation/event factor applies to the
+            # requested quantity, so "use at most N" shrank on every retry and the model burnt its steps
+            # chasing it (BANKNIFTY/BHARTIARTL, 11 Nov)
+            logger.info("[ai] {} size {} → {} ({})", sym, qty, pr["max_quantity"], pr["reason"])
+            qty = pr["max_quantity"]
         ok, msg = order_guard.can_place(sym, AGENT, side)
         if not ok:
             reject(msg)
@@ -1299,7 +1303,11 @@ class AITrader:
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
-            reject(f"quantity {qty} too large: {pr['reason']} → use at most {pr['max_quantity']}")
+            # take the risk-adjusted size instead of rejecting: the correlation/event factor applies to the
+            # requested quantity, so "use at most N" shrank on every retry and the model burnt its steps
+            # chasing it (BANKNIFTY/BHARTIARTL, 11 Nov)
+            logger.info("[ai] {} size {} → {} ({})", sym, qty, pr["max_quantity"], pr["reason"])
+            qty = pr["max_quantity"]
         ok, msg = order_guard.can_place(sym, _strategy, "BUY")
         if not ok:
             reject(msg)

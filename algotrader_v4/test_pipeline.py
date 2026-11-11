@@ -4908,11 +4908,10 @@ def t_risk_applied_to_ai_and_agents():
         ai = _rt_ai(); _ai_tick("PRA1", 1000.0)
         with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
                            return_value={"ok": True, "reason": "risk per trade 0.5% → max qty 7", "max_quantity": 7, "size_factor": 1.0}):
-            try:
-                asyncio.run(ai._place_trade(_trade_args("PRA1", qty=10))); raise AssertionError("oversize accepted")
-            except ToolRejected as e:
-                assert "use at most 7" in str(e)
-            asyncio.run(ai._place_trade(_trade_args("PRA1", qty=7)))
+            n = len(_te_kite_client._paper_orders)
+            asyncio.run(ai._place_trade(_trade_args("PRA1", qty=10)))   # oversize → trimmed, not rejected
+            ent = [o for o in _te_kite_client._paper_orders[n:] if o["tradingsymbol"] == "PRA1" and o["order_type"] not in ("SL", "SL-M")]
+            assert ent and ent[0]["quantity"] == 7, ent
         with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
                            return_value={"ok": False, "reason": "event block: results in 0.5h", "max_quantity": 0, "size_factor": 0.0}):
             _ai_tick("PRA2", 1000.0)
