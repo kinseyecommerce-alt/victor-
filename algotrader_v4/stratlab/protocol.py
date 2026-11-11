@@ -117,8 +117,15 @@ def _load_ledger(path):
         return {}
 
 
+def ledger_key(sp_id: str, split: Split, n_sessions: int, n_symbols: int) -> str:
+    """FINAL-ledger key: one entry per strategy AND dataset. A dataset is identified by its FINAL period, its
+    session count and its symbol count (and the ledger file itself lives in the per-data-directory cache), so a
+    12-month and a 3-year run never share an entry: each has its own, once-only FINAL."""
+    return f"{sp_id}|{split.final[0]}-{split.final[1]}|{n_sessions}s|{n_symbols}sym"
+
+
 def evaluate(specs, calendar, simulate, n_symbols: int = 0, ledger_path: str | None = None,
-             peek_final: bool = False) -> tuple[list, dict]:
+             peek_final: bool = False, dataset: str = "") -> tuple[list, dict]:
     """Judge strategies. `simulate(specs, lo, hi)` must return, for entry dates in [lo, hi] only,
     {id: {"trades": [...], "skipped": n, "lookahead": str|None, "error": str|None}}.
 
@@ -174,10 +181,10 @@ def evaluate(specs, calendar, simulate, n_symbols: int = 0, ledger_path: str | N
             ftr = list(fin.get(sp.id, {}).get("trades", []))
             fv = final_verdict(ftr)
             passed = sp in passers
-            key = f"{sp.id}|{split.final[0]}-{split.final[1]}|{n_sessions}s|{n_symbols}sym"
+            key = ledger_key(sp.id, split, n_sessions, n_symbols)
             old = ledger.get(key)
             if old is None:
-                ledger[key] = {"fingerprint": sp.fingerprint, "when": now, "peeked": not passed,
+                ledger[key] = {"fingerprint": sp.fingerprint, "when": now, "peeked": not passed, "dataset": dataset,
                                "final": {k: fv[k] for k in ("trades", "win_pct", "pf", "net", "confirmed")}}
                 clean = passed
             elif old["fingerprint"] == sp.fingerprint and not old.get("peeked"):

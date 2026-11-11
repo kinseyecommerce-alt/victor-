@@ -8259,6 +8259,171 @@ def t_cs_costs_per_lab():
 run("candles: trades pay MIS (intraday), CNC (daily long) and futures (daily short) costs per the lab", t_cs_costs_per_lab)
 
 
+def t_cs_float_ties_resolve_the_same_way():
+    """B == avgB up to floating-point noise: neither long nor short, whatever history went into the cumsum.
+    Same for the ratio tests (e.g. U == 10 % of R): a tie satisfies '<=' every time."""
+    # ten candles with body 1.65 and a last candle with body 1.65, at price levels that make the sums inexact
+    tail = [(2162.10 + 0.05 * k, 2164.0 + 0.05 * k, 2161.0 + 0.05 * k, 2163.75 + 0.05 * k) for k in range(11)]
+    rng = np.random.default_rng(3)
+    seen, raw = set(), set()
+    for n_hist in (0, 1, 7, 37, 250, 1000, 3000):
+        hist = [(x, x + 3.3, x - 2.7, x + rng.choice([-1, 1]) * rng.integers(1, 60) * 0.05)
+                for x in 2000.0 + 0.05 * rng.integers(0, 40000, n_hist)]
+        a = np.array(hist + tail, float)
+        k = _cdl._K(a[:, 0], a[:, 1], a[:, 2], a[:, 3])
+        assert abs(k.B[-1] - k.avgB[-1]) < 1e-8, (n_hist, k.B[-1], k.avgB[-1])
+        seen.add((bool(k.long[-1]), bool(k.short[-1])))
+        raw.add((bool(k.B[-1] > k.avgB[-1]), bool(k.B[-1] < k.avgB[-1])))
+    assert seen == {(False, False)}, (seen, raw)          # raw comparisons may flip with the history; these do not
+    # a ratio tie: upper shadow exactly 10 % of the range counts as "very little" (hammer)
+    rows = _cs_trend(-1, 40)
+    last = rows[-1][3]
+    lo_, hi_ = last - 2.0, last + 0.2                     # R = 2.2 -> 10 % = 0.22
+    ham = (hi_ - 0.22 - 0.5, hi_, lo_, hi_ - 0.22)       # U = 0.22 (a tie up to float noise), B = 0.5, L = 1.48
+    o, h, l, c = (np.array(x) for x in zip(*(rows + [ham])))
+    assert bool(_cdl.hammer(o, h, l, c)[-1])
+
+
+run("candles: exact body / ratio ties resolve the same way whatever the cumsum history (tolerance EPS)",
+    t_cs_float_ties_resolve_the_same_way)
+
+
+def t_cs_confirmation_beyond_the_body():
+    """_conf: the confirmation candle must close beyond the pattern candle's REAL BODY (Nison's hanging-man rule),
+    not merely beyond its close: a close inside a white hanging man's body is no confirmation."""
+    rows = _cs_trend(1, 40)
+    last = rows[-1][3]
+    hm = (last + 0.1, last + 0.42, last - 1.5, last + 0.4)       # white hanging man: body 0.1..0.4 at the top
+
+    def view(extra):
+        cols = [np.array(x, float) for x in zip(*(rows + [hm] + extra))]
+        d = _sls.DailyView(np.arange(len(cols[0])), *cols, np.ones(len(cols[0])))
+        d.symbol, d.nifty, d.vix = "HM", None, None
+        return d
+    assert _cdlcat.daily_signal(view([]), "hanging_man", False, (-1,)) is not None
+    inside = (last + 0.4, last + 0.45, last + 0.2, last + 0.25)  # closes below the HM close but inside its body
+    below = (last + 0.4, last + 0.45, last - 0.2, last + 0.0)    # closes below the HM body (below its open)
+    assert _cdlcat.daily_signal(view([inside]), "hanging_man", True, (-1,)) is None
+    sw = _cdlcat.daily_signal(view([below]), "hanging_man", True, (-1,))
+    assert sw is not None and sw.side == -1
+    # the same helper decides intraday (candle_entries)
+    mk = lambda o, c: _cdl.SessionCandles(np.array(o), None, None, np.array(c), None, None, None, None, None, None,
+                                          None)
+    assert _cdlcat._confirmed(mk([1.0, 2.0], [1.3, 0.5]), -1, 0, 1)
+    assert not _cdlcat._confirmed(mk([1.0, 2.0], [1.3, 1.2]), -1, 0, 1)      # 1.2 is inside the body 1.0..1.3
+    assert not _cdlcat._confirmed(mk([1.3, 1.0], [1.0, 1.2]), 1, 0, 1)       # black hammer: must close above 1.3
+    assert _cdlcat._confirmed(mk([1.3, 1.0], [1.0, 1.35]), 1, 0, 1)
+
+
+run("candles: _conf needs a close beyond the pattern candle's real body (white hanging man: below its open)",
+    t_cs_confirmation_beyond_the_body)
+
+
+def t_cs_60m_history_skips_short_last_candle():
+    """60m: the short 15:15-15:30 candle of earlier sessions is not in the history used for averages / EMA / ATR:
+    moving those 15 minutes of earlier days changes no 60m measurement of a later day (it does on 15m)."""
+    sd = _sl_walk(n_days=8, seed=21, symbol="H60")
+    ho, hh, hl, hc, hs, hf = _cdl._symbol_candles(sd, 60)
+    assert np.all(np.bincount(hs) == 6), np.bincount(hs)          # 09:15 ... 14:15, no 15:15 candle
+    m = (sd.date < sd.days[-1]) & (sd.t >= 915)
+    r = np.random.default_rng(4)
+    f = np.exp(r.normal(0, 0.02, int(m.sum())))
+    o, h, l, c = (np.asarray(x, float).copy() for x in (sd.o, sd.h, sd.l, sd.c))
+    o[m] *= f
+    c[m] *= f
+    h[m] = np.maximum(np.maximum(o[m], c[m]), h[m] * f * 1.01)
+    l[m] = np.minimum(np.minimum(o[m], c[m]), l[m] * f * 0.99)
+    sd2 = _sld.from_arrays(sd.symbol, sd.date, sd.t, o, h, l, c, np.asarray(sd.v, float))
+    s1, s2 = _sli.build_sessions(sd)[-1], _sli.build_sessions(sd2)[-1]
+    a, b = _cdl.session_candles(s1, 60), _cdl.session_candles(s2, 60)
+    assert np.allclose(a.atr, b.atr, equal_nan=True)
+    assert all(np.array_equal(a.sigs[k][j], b.sigs[k][j]) for k in a.sigs for j in (0, 1))
+    a15, b15 = _cdl.session_candles(s1, 15), _cdl.session_candles(s2, 15)
+    assert not np.allclose(a15.atr, b15.atr, equal_nan=True)       # the 15m history does contain those bars
+
+
+run("candles: 60m history leaves out the short 15:15-15:30 candle of earlier sessions",
+    t_cs_60m_history_skips_short_last_candle)
+
+
+def t_cs_daily_full_history():
+    """Daily candles are measured on the whole history up to the decision day: a day's values equal those of
+    the full series at that day (no moving 150-day window), and nothing after the day is read."""
+    r = np.random.default_rng(8)
+    n = 320
+    c = 100 * np.exp(np.cumsum(r.normal(0, 0.015, n)))
+    o = np.concatenate(([100.0], c[:-1])) * np.exp(r.normal(0, 0.004, n))
+    h = np.maximum(o, c) * (1 + np.abs(r.normal(0, 0.006, n)))
+    l = np.minimum(o, c) * (1 - np.abs(r.normal(0, 0.006, n)))
+
+    def view(k):
+        d = _sls.DailyView(np.arange(k), o[:k], h[:k], l[:k], c[:k], np.ones(k))
+        d.symbol, d.nifty, d.vix = "FH", None, None
+        return d
+    full = _cdl.daily_candles(view(n))
+    for k in (40, 151, 200, 260, 319):
+        got = _cdl.daily_candles(view(k))
+        assert len(got.c) == k
+        assert np.isclose(got.atr[-1], full.atr[k - 1]), k
+        for name, (lm, sm) in got.sigs.items():
+            assert lm[-1] == full.sigs[name][0][k - 1] and sm[-1] == full.sigs[name][1][k - 1], (name, k)
+    assert len(_cdl.daily_candles(view(300), lookback=150).c) == 150      # the old window is still available
+
+
+run("candles: daily patterns use the whole history up to the decision day (no moving window)", t_cs_daily_full_history)
+
+
+def t_sl_positional_exit_stays_in_period():
+    """A positional trade entered in a period is closed by the end of that period: DISCOVERY trades never use
+    FINAL-period prices (reason period_end, at that session's close)."""
+    days = tuple(20260101 + d for d in range(10))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    for k in range(10):
+        a["c"][k * 300:(k + 1) * 300] = 100.0 + k                 # each day closes higher; no stop / target hit
+        a["h"][k * 300:(k + 1) * 300] = 100.0 + k
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sp = _sl_spec(lambda d, p: _SlSwing(1, stop_pct=50.0, max_hold=6) if len(d) == 1 else None, kind="swing",
+                  id="t_period")
+    (tr,), _ = _sls.sim_positional(sp, sd, 0, days[3])
+    assert tr[2] == days[1] and tr[6] == days[3] and tr[13] == "period_end", tr
+    assert abs(tr[8] - 103.0 * (1 - _sls.SLIPPAGE)) < 1e-6, tr
+    (tr,), _ = _sls.sim_positional(sp, sd, 0, 99999999)
+    assert tr[6] == days[6] and tr[13] == "max_hold", tr
+
+
+run("stratlab: positional exits never walk past the simulated period (DISCOVERY never uses FINAL prices)",
+    t_sl_positional_exit_stays_in_period)
+
+
+def t_sl_final_ledger_per_dataset():
+    """The FINAL ledger is keyed by dataset: a 12-month and a 3-year run of the same strategy each get their own
+    once-only FINAL (neither is a RETEST of the other), and each entry records its dataset."""
+    cal12 = list(range(20260001, 20260251))
+    cal3y = list(range(20240001, 20240751))
+    books = {"12m": _sl_book("good", cal12), "3y": _sl_book("good", cal3y)}
+    spec = _sl_spec(lambda s, p: [], id="good")
+    cur = {}
+
+    def simulate(specs_, lo, hi):
+        return {s.id: {"trades": [x for x in books[cur["ds"]] if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                       "error": None} for s in specs_}
+    with _sl_tmp.TemporaryDirectory() as td:
+        ledger = os.path.join(td, "final_ledger.json")
+        for ds, cal in (("12m", cal12), ("3y", cal3y), ("12m", cal12)):
+            cur["ds"] = ds
+            res, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, dataset="/data/" + ds)
+            assert res[0]["verdict"] == "CONFIRMED", (ds, res[0]["verdict"], res[0]["final_note"])
+        with open(ledger) as fh:
+            led = _sl_json.load(fh)
+        assert len(led) == 2 and sorted(e["dataset"] for e in led.values()) == ["/data/12m", "/data/3y"], led
+        sp12, sp3 = _slp.split_sessions(cal12), _slp.split_sessions(cal3y)
+        assert _slp.ledger_key("good", sp12, 250, 5) in led and _slp.ledger_key("good", sp3, 750, 5) in led
+
+
+run("stratlab: FINAL ledger has one once-only entry per strategy AND dataset (12m vs 3y)",
+    t_sl_final_ledger_per_dataset)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

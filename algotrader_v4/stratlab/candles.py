@@ -21,6 +21,10 @@ Everything here was written down BEFORE any backtest of the candlestick catalogu
    "Long" body:  B >  LONG_BODY_K  x avgB        (Nison: a real body clearly longer than recent ones;
    "Short" body: B <  SHORT_BODY_K x avgB         numerically the 10-candle averages codified by TA-Lib)
    "Meaningful" single candle: R > 0 and R >= MIN_RANGE_K x avgR (a dead, near-flat candle is no signal).
+   Every such ratio comparison has a tolerance EPS (1e-6 rupees) so that exact ties, which are frequent with 0.05
+   ticks, always resolve the same way: a tie is neither long nor short, and satisfies "<=" / ">=".
+   NOTE: with K = 1.0 "long" means "above the 10-candle average" (about 39 % of 15m candles), looser than Nison's
+   "distinctly long" body; the ratio is TA-Lib's default and is kept as pre-registered.
 
 3. Prior trend (defined once, the same for every reversal pattern; measured on the candle p just BEFORE the
    pattern's first candle):  down-trend  close[p] < EMA20(close)[p]  and  close[p] < close[p-5]
@@ -34,6 +38,7 @@ Everything here was written down BEFORE any backtest of the candlestick catalogu
 """
 from __future__ import annotations
 
+import hashlib
 import weakref
 from collections import namedtuple
 
@@ -59,6 +64,11 @@ SOLDIER_SHADOW_FRAC = 0.25     # three soldiers / crows: close in the top (botto
 EMA_N = 20                     # prior trend: EMA20 ...
 TREND_N = 5                    # ... and a lower (higher) close than 5 candles earlier
 ATR_N = 14                     # ATR for the minimum stop distance (same timeframe as the pattern)
+EPS = 1e-6                     # rupees: comparisons of a measurement with a ratio x another one (B vs avgB,
+                               # U vs 10 % of R, ...) are made with this tolerance so that exact ties (frequent:
+                               # prices move in 0.05 ticks) resolve the same way whatever the floating-point
+                               # noise of the cumulative sums: a tie is NOT "long", NOT "short", but IS "<= x"
+                               # and ">= x". Far below the 0.05 tick, so it changes no genuine comparison.
 
 TIMEFRAMES = (5, 15, 60)       # intraday candle sizes in minutes; daily candles come from the lab's daily bars
 SESSION_END = 15 * 60 + 30     # 15:30 (end of the last candle)
@@ -105,6 +115,24 @@ def resample(t, o, h, l, c, v, tf: int, complete_only: bool = True) -> Candles:
 
 
 # ── measurements ────────────────────────────────────────────────────────────
+def _gt(a, b):
+    """a > b beyond floating-point noise (a tie is False)."""
+    return a > b + EPS
+
+
+def _lt(a, b):
+    return a < b - EPS
+
+
+def _ge(a, b):
+    """a >= b, a tie up to floating-point noise counts (True)."""
+    return a >= b - EPS
+
+
+def _le(a, b):
+    return a <= b + EPS
+
+
 def _prior_mean(x: np.ndarray, n: int = AVG_N) -> np.ndarray:
     """Mean of the n values BEFORE each index (NaN until n exist)."""
     out = np.full(len(x), np.nan)
@@ -140,29 +168,29 @@ class _K:
         self.bull, self.bear = c > o, c < o
         self.avgB, self.avgR = _prior_mean(self.B), _prior_mean(self.R)
         with np.errstate(invalid="ignore"):
-            self.long = self.B > LONG_BODY_K * self.avgB
-            self.short = self.B < SHORT_BODY_K * self.avgB
+            self.long = _gt(self.B, LONG_BODY_K * self.avgB)
+            self.short = _lt(self.B, SHORT_BODY_K * self.avgB)
         self.mid = (o + c) / 2.0
 
 
 def _meaningful(k: _K) -> np.ndarray:
     with np.errstate(invalid="ignore"):
-        return (k.R > 0) & (k.R >= MIN_RANGE_K * k.avgR)
+        return _gt(k.R, 0.0) & _ge(k.R, MIN_RANGE_K * k.avgR)
 
 
 # ── single-candle detectors ─────────────────────────────────────────────────
 def _hammer_shape(o, h, l, c):
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return (_meaningful(k) & (k.B > DOJI_BODY_FRAC * k.R) & (k.L >= HAMMER_SHADOW_MULT * k.B)
-                & (k.U <= HAMMER_OTHER_FRAC * k.R))
+        return (_meaningful(k) & _gt(k.B, DOJI_BODY_FRAC * k.R) & _ge(k.L, HAMMER_SHADOW_MULT * k.B)
+                & _le(k.U, HAMMER_OTHER_FRAC * k.R))
 
 
 def _inverted_shape(o, h, l, c):
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return (_meaningful(k) & (k.B > DOJI_BODY_FRAC * k.R) & (k.U >= HAMMER_SHADOW_MULT * k.B)
-                & (k.L <= HAMMER_OTHER_FRAC * k.R))
+        return (_meaningful(k) & _gt(k.B, DOJI_BODY_FRAC * k.R) & _ge(k.U, HAMMER_SHADOW_MULT * k.B)
+                & _le(k.L, HAMMER_OTHER_FRAC * k.R))
 
 
 def hammer(o, h, l, c):
@@ -195,14 +223,14 @@ def bullish_marubozu(o, h, l, c):
     White candle with a long body (B > avgB) and (almost) no shadows: U and L each <= 5 % of R."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return (k.bull & k.long & (k.U <= MARUBOZU_SHADOW_FRAC * k.R) & (k.L <= MARUBOZU_SHADOW_FRAC * k.R))
+        return (k.bull & k.long & _le(k.U, MARUBOZU_SHADOW_FRAC * k.R) & _le(k.L, MARUBOZU_SHADOW_FRAC * k.R))
 
 
 def bearish_marubozu(o, h, l, c):
     """Bearish (black) marubozu — weakness, no trend context. Black, long body, U and L each <= 5 % of R."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return (k.bear & k.long & (k.U <= MARUBOZU_SHADOW_FRAC * k.R) & (k.L <= MARUBOZU_SHADOW_FRAC * k.R))
+        return (k.bear & k.long & _le(k.U, MARUBOZU_SHADOW_FRAC * k.R) & _le(k.L, MARUBOZU_SHADOW_FRAC * k.R))
 
 
 def doji(o, h, l, c):
@@ -210,7 +238,7 @@ def doji(o, h, l, c):
     own; the dragonfly / gravestone / long-legged variants are."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return _meaningful(k) & (k.B <= DOJI_BODY_FRAC * k.R)
+        return _meaningful(k) & _le(k.B, DOJI_BODY_FRAC * k.R)
 
 
 def dragonfly_doji(o, h, l, c):
@@ -218,7 +246,7 @@ def dragonfly_doji(o, h, l, c):
     A doji whose open and close are at (or very near) the high: U <= 10 % of R, so the lower shadow is long."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return doji(o, h, l, c) & (k.U <= DOJI_SIDE_FRAC * k.R)
+        return doji(o, h, l, c) & _le(k.U, DOJI_SIDE_FRAC * k.R)
 
 
 def gravestone_doji(o, h, l, c):
@@ -226,7 +254,7 @@ def gravestone_doji(o, h, l, c):
     A doji whose open and close are at (or very near) the low: L <= 10 % of R, so the upper shadow is long."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return doji(o, h, l, c) & (k.L <= DOJI_SIDE_FRAC * k.R)
+        return doji(o, h, l, c) & _le(k.L, DOJI_SIDE_FRAC * k.R)
 
 
 def long_legged_doji(o, h, l, c):
@@ -234,7 +262,7 @@ def long_legged_doji(o, h, l, c):
     UP-trend. A doji with long upper AND lower shadows: U >= 30 % of R and L >= 30 % of R."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return doji(o, h, l, c) & (k.U >= LONGLEG_SHADOW_FRAC * k.R) & (k.L >= LONGLEG_SHADOW_FRAC * k.R)
+        return doji(o, h, l, c) & _ge(k.U, LONGLEG_SHADOW_FRAC * k.R) & _ge(k.L, LONGLEG_SHADOW_FRAC * k.R)
 
 
 def spinning_top(o, h, l, c):
@@ -242,8 +270,8 @@ def spinning_top(o, h, l, c):
     and a lower shadow each longer than the body; meaningful range."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        return (_meaningful(k) & (k.B > DOJI_BODY_FRAC * k.R) & (k.B <= SPIN_BODY_FRAC * k.R)
-                & (k.U > k.B) & (k.L > k.B))
+        return (_meaningful(k) & _gt(k.B, DOJI_BODY_FRAC * k.R) & _le(k.B, SPIN_BODY_FRAC * k.R)
+                & _gt(k.U, k.B) & _gt(k.L, k.B))
 
 
 # ── two-candle detectors (True at the second candle) ────────────────────────
@@ -312,7 +340,7 @@ def tweezer_bottom(o, h, l, c):
     k = _K(o, h, l, c)
     l1, b1 = _sh(k.l), _sh(k.bear)
     with np.errstate(invalid="ignore"):
-        return b1 & k.bull & (np.abs(k.l - l1) <= TWEEZER_TOL * k.avgR)
+        return b1 & k.bull & _le(np.abs(k.l - l1), TWEEZER_TOL * k.avgR)
 
 
 def tweezer_top(o, h, l, c):
@@ -321,7 +349,7 @@ def tweezer_top(o, h, l, c):
     k = _K(o, h, l, c)
     h1, w1 = _sh(k.h), _sh(k.bull)
     with np.errstate(invalid="ignore"):
-        return w1 & k.bear & (np.abs(k.h - h1) <= TWEEZER_TOL * k.avgR)
+        return w1 & k.bear & _le(np.abs(k.h - h1), TWEEZER_TOL * k.avgR)
 
 
 def inside_bar(o, h, l, c):
@@ -371,7 +399,7 @@ def three_white_soldiers(o, h, l, c):
     (U <= 25 % of R)."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        one = k.bull & k.long & (k.U <= SOLDIER_SHADOW_FRAC * k.R)
+        one = k.bull & k.long & _le(k.U, SOLDIER_SHADOW_FRAC * k.R)
         opens_in = (k.o >= _sh(k.o)) & (k.o <= _sh(k.c)) & (k.c > _sh(k.c))
         return one & _sh(one) & _sh(one, 2) & opens_in & _sh(opens_in)
 
@@ -382,7 +410,7 @@ def three_black_crows(o, h, l, c):
     (close1 <= open2 <= open1, ...); each closes at or near its low (L <= 25 % of R)."""
     k = _K(o, h, l, c)
     with np.errstate(invalid="ignore"):
-        one = k.bear & k.long & (k.L <= SOLDIER_SHADOW_FRAC * k.R)
+        one = k.bear & k.long & _le(k.L, SOLDIER_SHADOW_FRAC * k.R)
         opens_in = (k.o <= _sh(k.o)) & (k.o >= _sh(k.c)) & (k.c < _sh(k.c))
         return one & _sh(one) & _sh(one, 2) & opens_in & _sh(opens_in)
 
@@ -431,8 +459,8 @@ def trend_context(c) -> tuple[np.ndarray, np.ndarray]:
         c5 = _sh(c, TREND_N)
         ok = np.arange(n) >= EMA_N
         with np.errstate(invalid="ignore"):
-            down = ok & (c < e) & (c < c5)
-            up = ok & (c > e) & (c > c5)
+            down = ok & _lt(c, e) & (c < c5)
+            up = ok & _gt(c, e) & (c > c5)
     return down, up
 
 
@@ -524,7 +552,9 @@ _SESS = weakref.WeakKeyDictionary()               # Session -> {(tf, n): Session
 
 
 def _symbol_candles(sd, tf: int):
-    """All complete candles of every session of a symbol: o h l c, session index, first-of-session flag."""
+    """History candles of every session of a symbol: o h l c, session index, first-of-session flag.
+    The short last candle of a 60m day (15:15-15:30) is left out: with a quarter of a full candle's time its body
+    and range would drag the 10-candle averages (and the EMA / ATR) used for the next morning's candles."""
     ent = _HIST.get(id(sd))
     if ent is None or ent[0]() is not sd:
         if len(_HIST) > 64:
@@ -542,8 +572,10 @@ def _symbol_candles(sd, tf: int):
         sess = sess_of[st]
         first = np.ones(len(st), bool)
         first[1:] = sess[1:] != sess[:-1]
+        full = SESSION_OPEN + ((sd.t[st].astype(np.int64) - SESSION_OPEN) // tf) * tf + tf <= SESSION_END
         got = (sd.o[st].astype(float), np.maximum.reduceat(sd.h, st).astype(float),
                np.minimum.reduceat(sd.l, st).astype(float), sd.c[en].astype(float), sess, first)
+        got = tuple(x[full] for x in got)
         ent[1][tf] = got
     return got
 
@@ -597,11 +629,15 @@ def session_candles(s, tf: int):
 _DAILY: dict = {}
 
 
-def daily_candles(d, lookback: int = 150):
-    """Signals / ATR / extremes on the last `lookback` daily bars of a DailyView (index -1 = decision day).
+def daily_candles(d, lookback: int | None = None):
+    """Signals / ATR / extremes on the daily bars of a DailyView (index -1 = decision day). By default the WHOLE
+    history up to the decision day is used (still causal: the view ends there), so a given day's EMA20 / ATR do
+    not depend on a moving window start. `lookback` keeps only the last n bars (tests / debugging).
     Cached by content, shared by every daily candlestick strategy."""
-    o, h, l, c = (np.asarray(x[-lookback:], float) for x in (d.o, d.h, d.l, d.c))
-    key = (getattr(d, "symbol", ""), len(d), o.tobytes() + h.tobytes() + l.tobytes() + c.tobytes())
+    sl = slice(-lookback, None) if lookback else slice(None)
+    o, h, l, c = (np.ascontiguousarray(np.asarray(x, float)[sl]) for x in (d.o, d.h, d.l, d.c))
+    key = (getattr(d, "symbol", ""), len(o),
+           hashlib.blake2b(o.tobytes() + h.tobytes() + l.tobytes() + c.tobytes(), digest_size=16).digest())
     got = _DAILY.get(key)
     if got is None:
         a14 = np.array(_atr(h, l, c, ATR_N), float)

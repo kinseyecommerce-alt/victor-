@@ -227,6 +227,9 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
     skipped = 0
     p = spec.p
     slip = SLIPPAGE
+    # A trade entered in a period is also EXITED inside it: at the latest at the close of the last session <= hi,
+    # so DISCOVERY trades never use FINAL-period prices (reason "period_end").
+    hi_day = int(np.searchsorted(d["date"], hi, side="right")) - 1
     day = 0
     while day < nd:
         intr = spec.decision_time is not None
@@ -276,7 +279,8 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
             skipped += 1
             day += 1
             continue
-        last_day = min(e_day + sig.max_hold - (0 if intr else 1), nd - 1)
+        natural = e_day + sig.max_hold - (0 if intr else 1)
+        last_day = min(natural, nd - 1, hi_day)         # never walks past the period being simulated
         out = None
         for k in range(e_day, last_day + 1):
             if k == e_day:
@@ -296,11 +300,11 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
                 break
         if out is None:
             out = (last_day, float(d["c"][last_day]) * (1.0 - side * slip),
-                   "max_hold" if last_day == e_day + sig.max_hold - (0 if intr else 1) else "data_end")
+                   "max_hold" if last_day == natural else ("period_end" if last_day < nd - 1 else "data_end"))
         k, px, reason = out
         et = _hm(sd.t[m]) if intr else "09:15"
         trades.append(_settle(spec, sd.symbol, d["date"][e_day], side, et, fill, d["date"][k],
-                              "15:29" if reason in ("max_hold", "data_end") else "", px, reason))
+                              "15:29" if reason in ("max_hold", "data_end", "period_end") else "", px, reason))
         day = max(k, day + 1)                           # flat again from the exit day's close
     return trades, skipped
 

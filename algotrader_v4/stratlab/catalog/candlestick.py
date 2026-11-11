@@ -13,8 +13,9 @@ with ONE fixed trade plan decided before any backtest (not tuned):
   * daily: bullish patterns are kind "swing" (delivery, long only); bearish patterns are kind "futures",
     horizon "positional" (short); the three two-sided patterns (long-legged doji, inside bar, outside bar)
     are "futures" positional in both directions;
-  * `_conf` variants wait for one confirmation candle: the candle after the pattern must close beyond the pattern
-    candle's close in the trade direction; the entry is then at the open after the confirmation candle (stop
+  * `_conf` variants wait for one confirmation candle: the candle after the pattern must close beyond the REAL
+    BODY of the pattern's last candle in the trade direction (Nison's hanging-man rule: a close below the body,
+    i.e. below min(open, close), for shorts; above max(open, close) for longs); the entry is then at the open after the confirmation candle (stop
     still beyond the pattern's extreme, minimum distance measured from the confirmation close). Confirmation
     variants exist only for the patterns Nison says need confirmation (hammer family, doji family, harami,
     tweezers).
@@ -71,6 +72,12 @@ def _stop(cs, side: int, npat: int, q: int, d: int) -> float | None:
     return max(ext + TICK, float(cs.c[d]) + MIN_STOP_ATR * a) if np.isfinite(ext) else None
 
 
+def _confirmed(cs, side: int, q: int, d: int) -> bool:
+    """Candle d closes beyond the real body of the pattern's last candle q in the trade direction."""
+    edge = max(cs.o[q], cs.c[q]) if side > 0 else min(cs.o[q], cs.c[q])
+    return bool(side * (float(cs.c[d]) - float(edge)) > 0)
+
+
 def candle_entries(s, pattern: str, tf: int, confirm: bool, rr: float = RR) -> list:
     """Entries of one pattern on tf-minute candles of session s (a Session or a truncated View)."""
     cs = session_candles(s, tf)
@@ -88,7 +95,7 @@ def candle_entries(s, pattern: str, tf: int, confirm: bool, rr: float = RR) -> l
             d = q + 1 if confirm else q
             if d >= m or not (w0 <= int(cs.end[d]) <= w1):
                 continue
-            if confirm and not side * (cs.c[d] - cs.c[q]) > 0:
+            if confirm and not _confirmed(cs, side, q, d):
                 continue
             stop = _stop(cs, side, npat, q, d)
             if stop is not None:
@@ -108,7 +115,7 @@ def daily_signal(d, pattern: str, confirm: bool, sides: tuple, rr: float = RR):
     for side, mask in ((LONG, lm), (SHORT, sm)):
         if side not in sides or not mask[q]:
             continue
-        if confirm and not side * (cs.c[k] - cs.c[q]) > 0:
+        if confirm and not _confirmed(cs, side, q, k):
             continue
         stop = _stop(cs, side, npat, q, k)
         if stop is not None:

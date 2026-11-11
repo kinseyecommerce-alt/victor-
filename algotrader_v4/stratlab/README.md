@@ -135,6 +135,24 @@ entry, stop beyond the pattern extreme and >= 0.3 ATR, 2R, square-off 15:15 / 10
 judging how many screen passes luck alone would give. `Swing(rr=...)` sets a positional target at rr × the risk
 from the fill.
 
+What the candlestick results do and do not test (read before quoting a pass):
+
+* "Long" body means B > 1.0 × the average body of the previous 10 candles (TA-Lib's default, pre-registered), i.e.
+  "above average" — about 39 % of 15m candles — not Nison's "distinctly long". "Short" is below average.
+* Ratio comparisons use a 1e-6 rupee tolerance (`candles.EPS`) so exact ties (frequent with 0.05 ticks) resolve
+  the same way whatever the floating-point noise: a tie is neither long nor short and satisfies "<=" / ">=".
+* Intraday piercing line, dark cloud cover, morning star and evening star need all their candles in today's
+  session, so their "gap" is only the tick-level jump between consecutive intraday candles, not Nison's
+  overnight gap. A pass by these intraday variants is not evidence for the textbook pattern.
+* `_conf` = the next candle closes beyond the pattern candle's REAL BODY in the trade direction (Nison's
+  hanging-man rule, applied to every confirmation variant).
+* Daily candles are built from 1-minute bars: open = the 09:15 minute's open, close = the 15:29 minute's close,
+  not NSE's official close (a 30-minute VWAP); borderline gap / engulfing conditions can differ from an official
+  chart. Daily EMA20 / ATR use the whole history up to the decision day.
+* 60m: the short 15:15-15:30 candle of earlier sessions is left out of the history (averages, EMA, ATR).
+* Some daily patterns fire only a handful of times a year (piercing line, three black crows, stars, ...): they
+  fail the minimum-trades gate on count alone — report them as "insufficient trades", not "no edge".
+
 ## Simulator assumptions (`sim.py`)
 
 * **Data**: 1-minute bars, 09:15–15:29 IST. Sessions with fewer than 200 bars (the Diwali muhurat hour, a
@@ -153,7 +171,8 @@ from the fill.
   plus about ₹100 of slippage: an intraday trade starts roughly 0.18 % behind.
 * **Futures** are simulated on the cash price with futures costs: no basis, lot size, margin or rollover.
 * **Positional**: stop/target checked on daily high/low (stop first); a gap through the stop fills at the
-  open; the position is closed at the close of its `max_hold`-th session. Delivery is long-only.
+  open; the position is closed at the close of its `max_hold`-th session, or at the close of the last session of
+  the period being simulated (`period_end`), so DISCOVERY trades never use FINAL-period prices. Delivery is long-only.
 * **Not modelled**: order-book depth, partial fills, circuit limits, short-selling bans, corporate actions
   (the bars are used as given — check `data_quality.json` for unadjusted splits), options.
 
@@ -175,7 +194,9 @@ otherwise `REJECTED ON FINAL`.
 * FINAL for screen failures is not hidden by formatting — it is **never simulated**, and their trade CSVs
   contain DISCOVERY trades only. The one way to see it is `--peek-final`, which labels the result `PEEK`
   and records it, so that strategy can never be reported as CONFIRMED on that data.
-* FINAL is reported once per strategy: the first result is kept in `final_ledger.json` in the data cache. If
+* FINAL is reported once per strategy AND dataset: the first result is kept in `final_ledger.json` in the
+  data cache (one cache per data directory; the key also holds the FINAL dates, session and symbol counts, and
+  the entry records the data directory), so a 12-month and a 3-year run each have their own single FINAL. If
   the strategy's code or parameters change after its FINAL was seen, a later pass is reported as
   `RETEST (FINAL already used)`, not as a confirmation.
 * Below 100 sessions there is **no verdict** ("too few sessions"); the discovery numbers are shown for

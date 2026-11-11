@@ -246,7 +246,7 @@ def main(argv=None) -> int:
         simulate = make_simulator(pool, symbols, timing)
         results, trades_by_id = P.evaluate(specs, calendar, simulate, n_symbols=len(symbols),
                                            ledger_path=os.path.join(cache, "final_ledger.json"),
-                                           peek_final=a.peek_final)
+                                           peek_final=a.peek_final, dataset=os.path.realpath(a.data))
     has_index = "_NIFTY50_min" in man["aux"]
     for r in results:
         if r["spec"].needs_index and not has_index:
