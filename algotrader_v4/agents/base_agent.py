@@ -570,9 +570,8 @@ class BaseAgent(ABC):
                                           underlying=signal.get("underlying"))
             if not pr["ok"]:
                 return f"portfolio risk: {pr['reason']}"
-            floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(self.name)
-            if min(qty, pr["max_quantity"]) * ltp < floor:
-                return f"portfolio risk cut it to ₹{min(qty, pr['max_quantity']) * ltp:,.0f}, under the ₹{floor:,.0f} minimum"
+            if min(qty, pr["max_quantity"]) * ltp < settings.min_position_value_abs:
+                return f"portfolio risk cut it to ₹{min(qty, pr['max_quantity']) * ltp:,.0f}, under the ₹{settings.min_position_value_abs:,.0f} minimum"
             if order_guard.is_symbol_active_anywhere(sym):
                 return "symbol already active in another agent"
             ok, reason = order_guard.can_place(sym, self.name, action)
@@ -636,9 +635,11 @@ class BaseAgent(ABC):
         if qty > pr["max_quantity"]:
             logger.info("[{}] {} size {} → {} ({})", self.name, sym, qty, pr["max_quantity"], pr["reason"])
             qty = pr["max_quantity"]
-            floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(self.name)
-            if exch == "NSE" and qty * ltp < floor:
-                return self._skip(sym, f"portfolio risk cut it to ₹{qty * ltp:,.0f}, under the ₹{floor:,.0f} minimum")
+            # Risk sizing is deliberate (₹ at risk per trade ÷ stop distance: a 3 % swing stop caps a position
+            # at a third of the 1 %-risk budget's ₹10L); only a position too small to cover its flat costs is
+            # skipped. The %-of-normal-size floor stopped every swing entry on 11 Nov.
+            if exch == "NSE" and qty * ltp < settings.min_position_value_abs:
+                return self._skip(sym, f"portfolio risk cut it to ₹{qty * ltp:,.0f}, under the ₹{settings.min_position_value_abs:,.0f} minimum")
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
             return self._skip(sym, f"order guard: {reason}")

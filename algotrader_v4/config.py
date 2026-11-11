@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     max_futures_order_value: float = 2_500_000.0  # per-order contract value cap for index futures
     max_open_positions: int = 8        # ≥ sum of per-agent caps (intraday 2 + scalping 2 + swing 3 + fno 1)
     min_position_value_pct: float = 40.0   # skip equity entries smaller than this % of the agent's per-position capital
+    min_position_value_abs: float = 25000.0   # risk-cut equity positions below this ₹ value are skipped (flat costs)
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
     squareoff_time: str = "15:15"     # MIS flatten time; the agents were validated with 15:15 (broker auto square-off ~15:20-15:25)

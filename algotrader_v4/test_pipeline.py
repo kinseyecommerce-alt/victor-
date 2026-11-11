@@ -6843,6 +6843,10 @@ def t_fno_no_exit_on_cold_option_and_gate_precheck():
     with _patch.object(_ba, "allocate_quantity", return_value=(5000, "ok")), \
          _patch("portfolio_risk.pre_entry", return_value={"ok": True, "max_quantity": 5000, "reason": ""}):
         assert sw._entry_precheck(snap, "BUY", {"stop_loss": 97.0}) is None
+    # a deliberate risk cut (1 % risk at a 3 % swing stop → ₹3.3L of a ₹10L budget) still trades (11 Nov)
+    with _patch.object(_ba, "allocate_quantity", return_value=(10000, "ok")), \
+         _patch("portfolio_risk.pre_entry", return_value={"ok": True, "max_quantity": 3300, "reason": "risk per trade"}):
+        assert sw._entry_precheck(snap, "BUY", {"stop_loss": 97.0}) is None
     assert fno._entry_precheck(snap, "BUY", {"exchange": "NFO"}) is None   # options size their own way
 
 run("fno: no exit on a cold option; gate pre-check skips refused trades", t_fno_no_exit_on_cold_option_and_gate_precheck)
