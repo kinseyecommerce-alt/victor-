@@ -556,6 +556,12 @@ class BaseAgent(ABC):
     def _entry_precheck(self, snap: MarketSnapshot, action: str, signal: dict) -> Optional[str]:
         """The side-effect-free part of _try_enter's sizing and risk checks for an equity entry: the reason
         it would be refused, or None. Run before the AI review so refused trades cost no model call."""
+        try:                                         # trade limits / cooldowns apply to every entry path
+            ok, reason = order_guard.can_place(snap.symbol, self.name, action)
+            if not ok:
+                return f"order guard: {reason}"
+        except Exception as exc:
+            logger.debug("[{}] order-guard pre-check failed on {}: {}", self.name, snap.symbol, exc)
         if signal.get("exchange", "NSE") != "NSE" or type(self)._try_enter is not BaseAgent._try_enter:
             return None                              # options/overridden entry paths size differently
         try:
