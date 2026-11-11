@@ -1697,6 +1697,36 @@ async def backtest_bars(symbols: str, days: int = 45):
     return out
 
 
+@app.get("/backtest/history-bars", tags=["Backtest"])
+async def backtest_history_bars(symbol: str, start: str, end: str, interval: str = "minute", exchange: str = "NSE"):
+    """Kite history for one symbol over any date range (research data for the regime study): minute bars
+    are fetched in 60-day chunks. Indices use their Kite names ("NIFTY 50", "INDIA VIX").
+    → {symbol, interval, bars: [[ts, o, h, l, c, v], ...]}"""
+    from datetime import datetime as _dt
+    from kite_client import kite_client
+    if interval not in ("minute", "3minute", "5minute", "15minute", "60minute", "day"):
+        raise HTTPException(400, "interval must be minute, 3/5/15/60minute or day")
+    try:
+        d0, d1 = _dt.fromisoformat(start), _dt.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(400, "start/end must be YYYY-MM-DD")
+    if d1 <= d0 or (d1 - d0).days > 800:
+        raise HTTPException(400, "end must be after start, at most 800 days apart")
+    sym = symbol.strip().upper()
+    def _load():
+        tok = kite_client.get_instrument_tokens([sym], exchange).get(sym)
+        if not tok:
+            return None
+        return kite_client.historical_data(tok, d0, d1.replace(hour=23, minute=59), interval)
+    rows = await asyncio.to_thread(_load)
+    if rows is None:
+        raise HTTPException(404, f"no instrument token for {exchange}:{sym}")
+    def _ts(d):
+        return (d.replace(tzinfo=None) if getattr(d, "tzinfo", None) else d).isoformat()
+    return {"symbol": sym, "interval": interval,
+            "bars": [[_ts(r["date"]), r["open"], r["high"], r["low"], r["close"], r.get("volume") or 0] for r in rows]}
+
+
 @app.get("/backtest/replay/last", tags=["Backtest"])
 def backtest_replay_last():
     import replay_backtest as rb

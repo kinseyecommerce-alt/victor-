@@ -6997,6 +6997,32 @@ def t_deliberate_size_cuts_not_floored():
 
 run("sizing: allocator/review cuts are not floored; bucket remnants are", t_deliberate_size_cuts_not_floored)
 
+
+def t_history_bars_endpoint():
+    from unittest.mock import patch as _patch
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from fastapi.testclient import TestClient
+    import main as _main
+    from kite_client import kite_client as _kc
+    c = TestClient(_main.app)
+    prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+    ist = _tz(_td(hours=5, minutes=30))
+    rows = [{"date": _dt(2026, 1, 5, 9, 15, tzinfo=ist), "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 10}]
+    try:
+        with _patch.object(_kc, "get_instrument_tokens", return_value={"INDIA VIX": 264969}), \
+             _patch.object(_kc, "historical_data", return_value=rows) as hd:
+            r = c.get("/backtest/history-bars", params={"symbol": "india vix", "start": "2026-01-01", "end": "2026-03-31", "interval": "day"}, headers=H)
+            assert r.status_code == 200, r.text
+            assert r.json()["bars"] == [["2026-01-05T09:15:00", 1, 2, 0.5, 1.5, 10]]
+            assert hd.call_args.args[3] == "day"
+        assert c.get("/backtest/history-bars", params={"symbol": "X", "start": "2026-03-01", "end": "2026-01-01"}, headers=H).status_code == 400
+        with _patch.object(_kc, "get_instrument_tokens", return_value={}):
+            assert c.get("/backtest/history-bars", params={"symbol": "NOPE", "start": "2026-01-01", "end": "2026-02-01"}, headers=H).status_code == 404
+    finally:
+        _ai_settings.api_key = prev
+
+run("research: history bars over any date range", t_history_bars_endpoint)
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
