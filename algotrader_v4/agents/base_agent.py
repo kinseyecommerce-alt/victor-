@@ -138,11 +138,13 @@ def allocate_quantity(agent: str, qty: int, ltp: float) -> tuple[int, str]:
     why = "ok" if f == 1.0 else f"allocator {f:g}×"
     if qty > cap:
         qty, why = cap, f"capped by bucket room ₹{room:,.0f}"
-    # A remnant of the bucket funds a position whose flat costs (~₹40 a round trip) eat the edge:
-    # skip anything under half the agent's normal position value.
-    floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(agent)
-    if qty * ltp < floor:
-        return 0, f"position ₹{qty * ltp:,.0f} under the ₹{floor:,.0f} minimum ({why})"
+        # A remnant of the bucket funds a position whose flat costs (~₹40 a round trip) eat the edge:
+        # skip a bucket-capped position under min_position_value_pct of the agent's normal size. Only
+        # here: deliberate cuts (allocator, AI review, correlation) multiply together — 0.6 × 0.75 × 0.75
+        # left scalping at a third of its size, under the floor, and it could not trade at all (11 Nov).
+        floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(agent)
+        if qty * ltp < floor:
+            return 0, f"position ₹{qty * ltp:,.0f} under the ₹{floor:,.0f} minimum ({why})"
     return max(0, qty), why
 
 
