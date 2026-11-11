@@ -530,9 +530,6 @@ class BaseAgent(ABC):
             import allocator as _alloc
             from claude_trade_gate import assess as gate_assess
             from master_agent_v5 import record_gate_decision
-            veto = await self._kronos_veto(snap, action)
-            if veto:
-                return self._skip(sym, veto)
             gate = await gate_assess(snap, action, signal, self.name, force=_alloc.gate_required())
             record_gate_decision(gate.enter)
             if not gate.enter:
@@ -573,9 +570,8 @@ class BaseAgent(ABC):
                                           underlying=signal.get("underlying"))
             if not pr["ok"]:
                 return f"portfolio risk: {pr['reason']}"
-            floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(self.name)
-            if min(qty, pr["max_quantity"]) * ltp < floor:
-                return f"portfolio risk cut it to ₹{min(qty, pr['max_quantity']) * ltp:,.0f}, under the ₹{floor:,.0f} minimum"
+            if min(qty, pr["max_quantity"]) * ltp < settings.min_position_value_abs:
+                return f"portfolio risk cut it to ₹{min(qty, pr['max_quantity']) * ltp:,.0f}, under the ₹{settings.min_position_value_abs:,.0f} minimum"
             if order_guard.is_symbol_active_anywhere(sym):
                 return "symbol already active in another agent"
             ok, reason = order_guard.can_place(sym, self.name, action)
@@ -583,30 +579,6 @@ class BaseAgent(ABC):
                 return f"order guard: {reason}"
         except Exception as exc:                     # a broken pre-check must not block the review
             logger.debug("[{}] entry pre-check failed on {}: {}", self.name, snap.symbol, exc)
-        return None
-
-    async def _kronos_veto(self, snap: MarketSnapshot, action: str) -> Optional[str]:
-        """Skip a signal Kronos forecasts clearly against (settings.kronos_veto_pct). Replay of the 20-stock
-        signals, threshold from the first half: dropping forecasts ≤ −0.19 % in the trade direction raised
-        both halves (+₹7,828 → +₹9,720 and +₹1,428 → +₹4,253). Off by default; no model or an error never vetoes."""
-        if not settings.kronos_veto_enabled:
-            return None
-        try:
-            import kronos_forecast as _kf
-            from tick_engine import tick_engine as _te
-            buf = _te._bufs_1min.get(snap.symbol)
-            cs = buf.candles()[-300:] if buf else []
-            bars = [{"ts": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close, "volume": c.volume} for c in cs]
-            if len(bars) < 60:
-                return None
-            f = await asyncio.wait_for(asyncio.to_thread(_kf.forecast, snap.symbol, bars, None, 1, None, False), timeout=40)
-            if not f.get("available") or f.get("flag") or not str(f.get("source", "")).startswith("kronos"):
-                return None
-            with_pct = (f.get("expected_move_pct") or 0.0) * (1 if action == "BUY" else -1)
-            if with_pct <= settings.kronos_veto_pct:
-                return f"Kronos forecasts {with_pct:+.2f}% against the trade (≤ {settings.kronos_veto_pct}%)"
-        except Exception as exc:
-            logger.debug("[{}] Kronos veto check failed on {}: {}", self.name, snap.symbol, exc)
         return None
 
     async def _finish_entry(self, snap: MarketSnapshot, action: str, signal: dict, evt: dict) -> None:
@@ -663,9 +635,11 @@ class BaseAgent(ABC):
         if qty > pr["max_quantity"]:
             logger.info("[{}] {} size {} → {} ({})", self.name, sym, qty, pr["max_quantity"], pr["reason"])
             qty = pr["max_quantity"]
-            floor = settings.min_position_value_pct / 100 * risk_manager.max_capital_for_agent(self.name)
-            if exch == "NSE" and qty * ltp < floor:
-                return self._skip(sym, f"portfolio risk cut it to ₹{qty * ltp:,.0f}, under the ₹{floor:,.0f} minimum")
+            # Risk sizing is deliberate (₹ at risk per trade ÷ stop distance: a 3 % swing stop caps a position
+            # at a third of the 1 %-risk budget's ₹10L); only a position too small to cover its flat costs is
+            # skipped. The %-of-normal-size floor stopped every swing entry on 11 Nov.
+            if exch == "NSE" and qty * ltp < settings.min_position_value_abs:
+                return self._skip(sym, f"portfolio risk cut it to ₹{qty * ltp:,.0f}, under the ₹{settings.min_position_value_abs:,.0f} minimum")
         allowed, reason = order_guard.can_place(sym, self.name, action)
         if not allowed:
             return self._skip(sym, f"order guard: {reason}")

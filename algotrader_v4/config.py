@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     max_futures_order_value: float = 2_500_000.0  # per-order contract value cap for index futures
     max_open_positions: int = 8        # ≥ sum of per-agent caps (intraday 2 + scalping 2 + swing 3 + fno 1)
     min_position_value_pct: float = 40.0   # skip equity entries smaller than this % of the agent's per-position capital
+    min_position_value_abs: float = 25000.0   # risk-cut equity positions below this ₹ value are skipped (flat costs)
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
     squareoff_time: str = "15:15"     # MIS flatten time; the agents were validated with 15:15 (broker auto square-off ~15:20-15:25)
@@ -88,6 +89,13 @@ class Settings(BaseSettings):
     gate_strategies: str = "intraday,scalping"   # replay on real signals: +₹2.8k intraday, +₹2.2k scalping, swing none
     gate_max_drift_pct: float = 0.3       # skip the entry if price ran this far in the trade's favour during the review
     gate_review_cooldown_s: float = 180.0   # seconds before the same agent re-reviews the same symbol (each review is a paid model call)
+    # regime routing (regime_v2): sizes each strategy by its tested result on today's predicted market type;
+    # a no-op (1.0) until research writes data/regime_model.json and data/regime_scorecard.json
+    indicator_min_interval_s: float = 5.0   # live indicators: recompute on candle close or this often
+    use_regime_routing: bool = True
+    regime_boost: float = 1.25          # strategy made money on this day type in both halves of the history
+    regime_cut: float = 0.5             # strategy lost on this day type in both halves
+    regime_min_trades: int = 20         # fewer trades on a day type than this → no adjustment
     regime_pause_mode: Literal["extreme_only", "plan", "off"] = "extreme_only"   # see MasterAgent._regime_pauses
     master_ai_review:     bool = False    # per-minute AI regime review (superseded by the twice-daily allocator)
     master_ai_review_min: int  = 30       # when on: at most one AI review per this many minutes
@@ -206,20 +214,6 @@ class Settings(BaseSettings):
     ai_agent_debate_enabled:      bool  = True
     ai_agent_debate_min_confidence: float = 0.55  # below this the entry is rejected
     ai_agent_debate_effort:       Literal["low", "medium", "high", "xhigh", "max"] = "low"
-    # ── Kronos candlestick forecasts (kronos_forecast.py) — optional model ──
-    kronos_model:                 str   = ""       # e.g. NeoQuasar/Kronos-small; empty = statistical fallback
-    kronos_tokenizer:             str   = "NeoQuasar/Kronos-Tokenizer-base"
-    kronos_dir:                   str   = ""       # path to a clone of github.com/shiyu-coder/Kronos (its model/ package)
-    kronos_device:                str   = "cpu"    # or cuda:0
-    kronos_horizon_bars:          int   = 16       # 1-minute bars ahead
-    kronos_lookback:              int   = 400      # bars of context (model max 512)
-    kronos_samples:               int   = 8        # sampled paths per forecast
-    kronos_temperature:           float = 1.0
-    kronos_cache_s:               int   = 300      # reuse a forecast for this long per symbol/bar
-    indicator_min_interval_s:     float = 5.0      # live indicators: recompute on candle close or this often
-    kronos_veto_enabled:          bool  = False    # skip intraday/scalping signals Kronos forecasts against
-    kronos_veto_pct:              float = -0.19    # forecast move in the trade direction at or below this → skip
-    kronos_max_symbols:           int   = 12       # background refresher covers at most this many symbols
     # ── Execution ───────────────────────────────────────────────────────────
     use_limit_entries:            bool  = True     # equity entries as marketable LIMIT (ask/bid ± buffer), never raw MARKET
     entry_limit_buffer_pct:       float = 0.10     # how far past the touch the limit may fill (protects against a bad print)

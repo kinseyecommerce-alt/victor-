@@ -4908,11 +4908,10 @@ def t_risk_applied_to_ai_and_agents():
         ai = _rt_ai(); _ai_tick("PRA1", 1000.0)
         with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
                            return_value={"ok": True, "reason": "risk per trade 0.5% → max qty 7", "max_quantity": 7, "size_factor": 1.0}):
-            try:
-                asyncio.run(ai._place_trade(_trade_args("PRA1", qty=10))); raise AssertionError("oversize accepted")
-            except ToolRejected as e:
-                assert "use at most 7" in str(e)
-            asyncio.run(ai._place_trade(_trade_args("PRA1", qty=7)))
+            n = len(_te_kite_client._paper_orders)
+            asyncio.run(ai._place_trade(_trade_args("PRA1", qty=10)))   # oversize → trimmed, not rejected
+            ent = [o for o in _te_kite_client._paper_orders[n:] if o["tradingsymbol"] == "PRA1" and o["order_type"] not in ("SL", "SL-M")]
+            assert ent and ent[0]["quantity"] == 7, ent
         with _patch.object(_ai_mod.portfolio_risk, "pre_entry",
                            return_value={"ok": False, "reason": "event block: results in 0.5h", "max_quantity": 0, "size_factor": 0.0}):
             _ai_tick("PRA2", 1000.0)
@@ -5385,7 +5384,6 @@ def t_research_evidence_shape():
 
 # ── Bull-vs-bear debate gate ──────────────────────────────────────────────
 import debate_gate as _dg
-import kronos_forecast as _kf
 
 class _FakeDebateClient:
     def __init__(self, verdict=None, fail=False):
@@ -5462,72 +5460,8 @@ def t_debate_gates_ai_entries():
     globals()["_noop_async_returning"] = _noop_async_returning
     _with_ai_env(lambda: _with_swing_file(lambda p: body()))
 
-# ── Kronos forecasts (fallback path; the real model is optional) ──────────
-def t_forecast_fallback_shape_and_cache():
-    bars = _trend_bars("KFC", days=2)
-    f = _kf.forecast("KFC", bars=bars, horizon=16, samples=50, use_cache=False)
-    assert f["available"] and f["source"].startswith("fallback") and f["model_available"] is False
-    assert f["horizon_bars"] == 16 and len(f["path_p50"]) == 16 and f["samples"] == 50
-    assert f["p10_pct"] <= f["p50_pct"] <= f["p90_pct"] and 0.0 <= f["p_up"] <= 1.0
-    assert f["expected_move_pct"] > 0, "an uptrending series forecasts up (shrunk drift)"
-    _ai_tick("KFC", bars[-1]["close"])
-    assert _kf.forecast("KFC", bars=bars[:20])["available"] is False
-    a = _kf.forecast("KFC", bars=bars); b = _kf.forecast("KFC", bars=bars)
-    assert a is b, "cached"
-    assert _kf.forecast("KFC", bars=bars, cached_only=True) is a
-    assert _kf.forecast("NOFC", bars=bars[-40:], cached_only=True)["available"] is True, "fallback is cheap: computed inline"
-    st = _kf.available(); assert st["kronos"] is False and st["fallback"]
-    from tick_engine import tick_engine as _tk
-    for b in bars[-60:]:
-        _tk._bufs_1min["KFC"].push(b["close"], b["volume"], b["ts"])
-    c = _kf.compact("KFC"); assert set(c) >= {"expected_move_pct", "p_up", "source"}, c
-
-def t_forecast_in_context_and_skill_check():
-    bars = _trend_bars("KFS", days=4, drift=0.002, seed=5)
-    _ai_tick("KFS", bars[-1]["close"])
-    from tick_engine import tick_engine as _tk
-    for b in bars[-90:]:
-        _tk._bufs_1min["KFS"].push(b["close"], b["volume"], b["ts"])
-    ctx = _mc.context_for("KFS")
-    assert "forecast" in ctx and ctx["forecast"].get("source", "").startswith("fallback")
-    assert "forecast" in _mc.compact_for_alert("KFS")
-    sk = _kf.skill_check("KFS", bars, horizon=16, step=25, lookback=120, samples=20)
-    assert sk["forecasts"] >= 20 and 0 <= sk["hit_rate"] <= 1 and len(sk["coin_flip_95pct_band"]) == 2
-    assert sk["verdict"] and sk["source"].startswith("fallback")
-    assert sk["hit_rate"] > 0.5, "on a strongly trending synthetic series even the drift fallback beats a coin"
-
-def t_kronos_vendored_package():
-    """The vendored Kronos package imports and exposes the predictor API the adapter uses
-    (skipped without torch; weights are never downloaded in tests)."""
-    try:
-        import torch  # noqa: F401
-    except ImportError:
-        return
-    from kronos_model import Kronos, KronosPredictor, KronosTokenizer
-    import inspect
-    sig = inspect.signature(KronosPredictor.predict)
-    for p in ("df", "x_timestamp", "y_timestamp", "pred_len", "T", "top_p", "sample_count"):
-        assert p in sig.parameters, p
-    assert hasattr(Kronos, "from_pretrained") and hasattr(KronosTokenizer, "from_pretrained")
-    assert (_SFPath(__file__).resolve().parent / "kronos_model" / "LICENSE").exists()
-
-def t_forecast_flags_implausible():
-    bars = _trend_bars("KFZ", days=2, drift=0.0006)
-    f = _kf.forecast("KFZ", bars=bars, horizon=16, samples=20, use_cache=False)
-    assert "z_score" in f and "realised_sigma_pct" in f and f["realised_sigma_pct"] > 0
-    assert f["flag"] in (None, "implausible: ignore")
-    with _patch.object(_kf, "_fallback", return_value={"last": 1000.0, "expected_move_pct": 9.0, "p_up": 1.0, "p10_pct": 8.0,
-                                                       "p50_pct": 9.0, "p90_pct": 10.0, "samples": 1, "source": "x", "path_p50": []}):
-        g = _kf.forecast("KFZ", bars=bars, horizon=16, samples=1, use_cache=False)
-    assert g["flag"] == "implausible: ignore" and abs(g["z_score"]) > 4
-    assert "flag" in _kf.compact("KFZ") or True
-
-run("Kronos: vendored package exposes the predictor API",      t_kronos_vendored_package)
-run("Forecast: implausible forecasts are flagged",              t_forecast_flags_implausible)
 run("Debate: verdicts, thresholds, size floor, fail-open",     t_debate_verdicts)
 run("Debate: gates every AI entry; momentum exempt",           t_debate_gates_ai_entries)
-run("Forecast: fallback shape, cache, cached_only, status",    t_forecast_fallback_shape_and_cache)
-run("Forecast: in market context; skill check vs coin flip",   t_forecast_in_context_and_skill_check)
 run("Research: proposals validated against the grid",          t_research_validate_proposals)
 run("Research: A/B verdicts (adopt / not better / thin / DD)",  t_research_ab_test_verdicts)
 run("Research: cycle adopts a winner, rejects a loser, logs",   t_research_cycle_adopts_and_logs)
@@ -6743,21 +6677,6 @@ def t_rolling_universe_select_and_persist():
 
 run("universe: rolling pick of profitable stocks, persisted per session", t_rolling_universe_select_and_persist)
 
-def t_forecast_at_signal_times_no_lookahead():
-    import ai_replay as _ar, kronos_forecast as _kf, replay_backtest as _rbm
-    bars = _trend_bars("FCS", days=3)
-    sig_ts = bars[500]["ts"]
-    seen = {}
-    def fake_fc(sym, hist, horizon, step, samples, use_cache):
-        seen["last"] = hist[-1]["ts"]; seen["n"] = len(hist)
-        return {"available": True, "expected_move_pct": -0.2, "p_up": 0.3, "flag": None, "source": "test", "z_score": -1.0}
-    with _patch.object(_rbm, "load_bars", return_value=(bars, "test")), _patch.object(_kf, "forecast", fake_fc):
-        res = asyncio.run(_ar.forecast_signals([{"symbol": "FCS", "ts": sig_ts.isoformat(), "side": "SELL", "net": 120.0}], lookback=300))
-    r = res["rows"][0]
-    assert seen["last"] < sig_ts and seen["n"] == 300, "only bars before the signal"
-    assert r["agrees"] is True and r["move_with_pct"] == 0.2 and r["net"] == 120.0
-
-run("forecast at signal times: bars before the signal only", t_forecast_at_signal_times_no_lookahead)
 
 def t_live_kite_ticks_become_ist_candles_the_agent_can_use():
     """Regression: the server stamps ticks with its UTC clock and Kite sends the day's running volume.
@@ -6825,31 +6744,6 @@ def t_live_kite_ticks_become_ist_candles_the_agent_can_use():
 
 run("live ticks: IST candles, per-minute volume, history first, ORB found", t_live_kite_ticks_become_ist_candles_the_agent_can_use)
 
-def t_kronos_veto_is_opt_in_and_fails_open():
-    from agents.intraday_v2 import IntradayV2Agent
-    import kronos_forecast as _kf
-    from tick_engine import tick_engine as _te, TickBuffer, Candle
-    a = IntradayV2Agent(); snap = _live_snap("KVETO", 1000.0)
-    prev = (_ai_settings.kronos_veto_enabled, _ai_settings.kronos_veto_pct)
-    try:
-        _te._bufs_1min["KVETO"] = TickBuffer(60, maxlen=400)
-        _te._bufs_1min["KVETO"].prepend_history([Candle(1000, 1001, 999, 1000, 10, datetime(2026, 11, 10, 10, 0) + timedelta(minutes=i)) for i in range(120)])
-        against = lambda *a_, **k: {"available": True, "expected_move_pct": -0.3, "source": "kronos:Kronos-small", "flag": None}
-        with _patch.object(_kf, "forecast", against):
-            _ai_settings.kronos_veto_enabled = False
-            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None, "off by default"
-            _ai_settings.kronos_veto_enabled = True; _ai_settings.kronos_veto_pct = -0.19
-            assert "against" in asyncio.run(a._kronos_veto(snap, "BUY"))
-            assert asyncio.run(a._kronos_veto(snap, "SELL")) is None, "a forecast down supports a short"
-        with _patch.object(_kf, "forecast", lambda *a_, **k: {"available": True, "expected_move_pct": -0.3, "source": "fallback", "flag": None}):
-            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None, "the statistical fallback never vetoes"
-        with _patch.object(_kf, "forecast", side_effect=RuntimeError("model down")):
-            assert asyncio.run(a._kronos_veto(snap, "BUY")) is None
-    finally:
-        _ai_settings.kronos_veto_enabled, _ai_settings.kronos_veto_pct = prev
-        _te._bufs_1min.pop("KVETO", None)
-
-run("Kronos veto: opt-in, direction-aware, never vetoes on fallback or error", t_kronos_veto_is_opt_in_and_fails_open)
 
 def t_intraday_leverage_scales_only_the_mis_bucket():
     from risk_manager import risk_manager as _rmx
@@ -6948,6 +6842,10 @@ def t_fno_no_exit_on_cold_option_and_gate_precheck():
     with _patch.object(_ba, "allocate_quantity", return_value=(5000, "ok")), \
          _patch("portfolio_risk.pre_entry", return_value={"ok": True, "max_quantity": 5000, "reason": ""}):
         assert sw._entry_precheck(snap, "BUY", {"stop_loss": 97.0}) is None
+    # a deliberate risk cut (1 % risk at a 3 % swing stop → ₹3.3L of a ₹10L budget) still trades (11 Nov)
+    with _patch.object(_ba, "allocate_quantity", return_value=(10000, "ok")), \
+         _patch("portfolio_risk.pre_entry", return_value={"ok": True, "max_quantity": 3300, "reason": "risk per trade"}):
+        assert sw._entry_precheck(snap, "BUY", {"stop_loss": 97.0}) is None
     assert fno._entry_precheck(snap, "BUY", {"exchange": "NFO"}) is None   # options size their own way
 
 run("fno: no exit on a cold option; gate pre-check skips refused trades", t_fno_no_exit_on_cold_option_and_gate_precheck)
@@ -6996,6 +6894,392 @@ def t_deliberate_size_cuts_not_floored():
         assert qty == 0 and "minimum" in why, (qty, why)
 
 run("sizing: allocator/review cuts are not floored; bucket remnants are", t_deliberate_size_cuts_not_floored)
+
+
+def t_history_bars_endpoint():
+    from unittest.mock import patch as _patch
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from fastapi.testclient import TestClient
+    import main as _main
+    from kite_client import kite_client as _kc
+    c = TestClient(_main.app)
+    prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+    ist = _tz(_td(hours=5, minutes=30))
+    rows = [{"date": _dt(2026, 1, 5, 9, 15, tzinfo=ist), "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 10}]
+    try:
+        with _patch.object(_kc, "get_instrument_tokens", return_value={"INDIA VIX": 264969}), \
+             _patch.object(_kc, "historical_data", return_value=rows) as hd:
+            r = c.get("/backtest/history-bars", params={"symbol": "india vix", "start": "2026-01-01", "end": "2026-03-31", "interval": "day"}, headers=H)
+            assert r.status_code == 200, r.text
+            assert r.json()["bars"] == [["2026-01-05T09:15:00", 1, 2, 0.5, 1.5, 10]]
+            assert hd.call_args.args[3] == "day"
+        assert c.get("/backtest/history-bars", params={"symbol": "X", "start": "2026-03-01", "end": "2026-01-01"}, headers=H).status_code == 400
+        with _patch.object(_kc, "get_instrument_tokens", return_value={}):
+            assert c.get("/backtest/history-bars", params={"symbol": "NOPE", "start": "2026-01-01", "end": "2026-02-01"}, headers=H).status_code == 404
+    finally:
+        _ai_settings.api_key = prev
+
+run("research: history bars over any date range", t_history_bars_endpoint)
+
+
+def t_regime_v2_routing():
+    import regime_v2 as rv
+    from unittest.mock import patch as _patch
+    import allocator as _al
+    # outcome labels against the normal range
+    flat = [["t", 100, 100.3, 99.8, 100.1]]
+    assert rv.label(flat, 1.0) == "RANGE"
+    assert rv.label([["t", 100, 101.0, 99.9, 100.9]], 1.0) == "TREND_UP"
+    assert rv.label([["t", 100, 102.0, 99.0, 100.5]], 1.0) == "VOLATILE"
+    # learned rule applied to features; no rule → None
+    model = {"first_hour": {"feature": "fh_rng", "cuts": [0.4, 0.7], "rule": {"0": "RANGE", "1": "TREND_UP", "2": "VOLATILE"}},
+             "preopen": None}
+    assert rv.classify({"fh_rng": 0.2}, "first_hour", model) == "RANGE"
+    assert rv.classify({"fh_rng": 0.9}, "first_hour", model) == "VOLATILE"
+    assert rv.classify({"gap": 1.0}, "preopen", model) is None
+    assert rv.classify({}, "first_hour", model) is None
+    # scorecard → factor: both halves positive boost, both negative cut, mixed / thin → 1.0
+    card = {"intraday": {"VOLATILE": {"h1": 5000, "h2": 3000, "trades": 80}, "RANGE": {"h1": -4000, "h2": -2000, "trades": 60},
+                         "TREND_UP": {"h1": 2000, "h2": -500, "trades": 50}, "TREND_DOWN": {"h1": -900, "h2": -800, "trades": 5}}}
+    assert rv.regime_factor("intraday", "VOLATILE", card)[0] == _ai_settings.regime_boost
+    assert rv.regime_factor("intraday", "RANGE", card)[0] == _ai_settings.regime_cut
+    assert rv.regime_factor("intraday", "TREND_UP", card)[0] == 1.0
+    assert rv.regime_factor("intraday", "TREND_DOWN", card)[0] == 1.0          # too few trades
+    assert rv.regime_factor("intraday", None, card)[0] == 1.0
+    prev = _ai_settings.use_regime_routing
+    try:
+        _ai_settings.use_regime_routing = False
+        assert rv.regime_factor("intraday", "RANGE", card)[0] == 1.0
+    finally:
+        _ai_settings.use_regime_routing = prev
+    # allocator size = AI factor × regime factor, capped
+    with _patch.object(_al, "today", return_value={"factors": {"intraday": 1.4, "swing": 0.0, "scalping": 0.8}}), \
+         _patch.object(rv, "factor", side_effect=lambda s: {"intraday": 1.25, "swing": 1.25, "scalping": 0.5}[s]):
+        assert _al.size_factor("intraday") == _al.MAX_FACTOR
+        assert _al.size_factor("swing") == 0.0
+        assert _al.size_factor("scalping") == 0.4
+    # without research files nothing changes
+    rv.reset()
+    with _patch.object(rv, "MODEL_FILE", Path("/nonexistent/m.json")), _patch.object(rv, "SCORECARD_FILE", Path("/nonexistent/s.json")):
+        assert rv.factor("intraday") == 1.0
+        assert rv.status()["factors"]["intraday"][0] == 1.0
+
+run("regime routing: learned day type → per-strategy size from the per-half scorecard", t_regime_v2_routing)
+
+
+def t_market_type_research_upload():
+    import tempfile
+    from unittest.mock import patch as _patch
+    from fastapi.testclient import TestClient
+    import main as _main, regime_v2 as rv
+    c = TestClient(_main.app)
+    prev = _ai_settings.api_key; _ai_settings.api_key = "k"; H = {"X-API-Key": "k"}
+    d = Path(tempfile.mkdtemp())
+    try:
+        with _patch.object(rv, "MODEL_FILE", d / "m.json"), _patch.object(rv, "SCORECARD_FILE", d / "s.json"):
+            good = {"model": {"preopen": {"feature": "gap", "cuts": [0, 1], "rule": {"0": "RANGE"}}, "first_hour": None},
+                    "scorecard": {"intraday": {"RANGE": {"h1": -1, "h2": -2, "trades": 40}}}}
+            r = c.put("/market-type/research", json=good, headers=H)
+            assert r.status_code == 200 and (d / "m.json").exists() and (d / "s.json").exists(), r.text
+            assert c.put("/market-type/research", json={"model": {"preopen": {"feature": "gap", "rule": {"0": "BOOM"}}}}, headers=H).status_code == 422
+            assert c.put("/market-type/research", json={"scorecard": {"x": {"RANGE": {"h1": 1}}}}, headers=H).status_code == 422
+            assert c.put("/market-type/research", json={"model": None}, headers=H).json()["model"] == "removed"
+            assert not (d / "m.json").exists()
+            assert c.put("/market-type/research", json=good).status_code == 401
+    finally:
+        _ai_settings.api_key = prev
+
+run("regime routing: research files installed through the API, validated", t_market_type_research_upload)
+
+# ══════════════════════════════════════════════════════════════════════════
+section("25. OPTIONS REPLAY (research only: Black-Scholes on index minute bars)")
+# ══════════════════════════════════════════════════════════════════════════
+import math as _ormath
+from datetime import date as _ordate, datetime as _ordt, time as _ortime, timedelta as _ortd
+import options_replay as _orp
+
+
+def _or_bars(days: list, path=lambda i: 0.0, base: float = 24000.0) -> list:
+    """Synthetic minute bars 09:15-15:29 for each date; close = base + path(global minute index)."""
+    out, k = [], 0
+    for d in days:
+        t0 = _ordt.combine(d, _ortime(9, 15))
+        for m in range(375):
+            c = base + path(k)
+            prev = base + path(k - 1) if k else c
+            out.append((t0 + _ortd(minutes=m), prev, max(prev, c) + 1, min(prev, c) - 1, c))
+            k += 1
+    return out
+
+
+_OR_DAYS = [_ordate(2026, 10, d) for d in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16)]
+_OR_VIX = {_ordate(2026, 10, 2) + _ortd(days=i): 13.0 for i in range(-5, 20)}
+
+
+def t_or_put_call_parity():
+    r = _orp.RISK_FREE
+    for S, K, T, sig in ((24000, 24000, 5 / 365, 0.13), (24000, 24500, 30 / 365, 0.2),
+                         (52000, 50000, 2 / 365, 0.35), (24000, 23000, 0.5, 0.1)):
+        c, p = _orp.bs(S, K, T, sig, "CE"), _orp.bs(S, K, T, sig, "PE")
+        assert abs((c - p) - (S - K * _ormath.exp(-r * T))) < 1e-6, (S, K, c, p)
+        assert c > 0 and p > 0
+
+
+def t_or_delta_range():
+    T, sig = 6 / 365, 0.14
+    for K in range(22000, 26001, 250):
+        dc, dp = _orp.bs_delta(24000, K, T, sig, "CE"), _orp.bs_delta(24000, K, T, sig, "PE")
+        assert 0.0 <= dc <= 1.0 and -1.0 <= dp <= 0.0, (K, dc, dp)
+        assert abs((dc - dp) - 1.0) < 1e-9
+    assert abs(_orp.bs_delta(24000, 24000, T, sig, "CE") - 0.5) < 0.05       # ATM call ~0.5
+    v = _orp.MarketView("NIFTY", _ordt(2026, 10, 14, 10, 20), 24013.0, [], [], 0.13,
+                        _ordate(2026, 10, 19), 50, _orp.years_between(_ordt(2026, 10, 14, 10, 20), _ordate(2026, 10, 19)))
+    kc, kp = v.strike_for_delta("CE", 0.175), v.strike_for_delta("PE", 0.175)
+    assert kc % 50 == 0 and kp % 50 == 0 and kc > 24013 > kp, (kc, kp)
+    assert 0.1 < v.delta("CE", kc) < 0.25 and -0.25 < v.delta("PE", kp) < -0.1
+
+
+def t_or_expiry_calendar():
+    td = lambda d: d.weekday() < 5 and d != _ordate(2026, 10, 20)           # Dussehra (Tue) closed
+    assert _orp.next_expiry("NIFTY", _ordate(2026, 10, 7), td) == _ordate(2026, 10, 13)       # Tuesday
+    assert _orp.next_expiry("NIFTY", _ordate(2026, 10, 13), td) == _ordate(2026, 10, 19)      # skip today; holiday → Mon
+    assert _orp.next_expiry("NIFTY", _ordate(2026, 10, 13), td, skip_today=False) == _ordate(2026, 10, 13)
+    assert _orp.next_expiry("NIFTY", _ordate(2025, 6, 2), td) == _ordate(2025, 6, 5)          # Thursday era
+    assert _orp.next_expiry("BANKNIFTY", _ordate(2026, 10, 7), td) == _ordate(2026, 10, 27)   # monthly, last Tue
+    assert _orp.next_expiry("BANKNIFTY", _ordate(2026, 10, 28), td) == _ordate(2026, 11, 24)
+    assert _orp.round_strike(24026, 50) == 24050 and _orp.round_strike(52049, 100) == 52000
+
+
+class _OrSpy(_orp.OptionStrategy):
+    name = "SPY"
+
+    def __init__(self):
+        self.decision_times = [_ortime(10, 20)]
+        self.hold = "intraday"
+        self.seen = []
+
+    def decide(self, v):
+        self.seen.append((v.now, v.spot, max(b[0] for b in v.bars), len(v.bars), v.today_bars()[-1][4]))
+        return _orp.IronCondor().decide(v)
+
+
+def t_or_no_lookahead():
+    days = _OR_DAYS[:3]
+    path = lambda i: 40 * _ormath.sin(i / 50.0)
+    cfg = _orp.ReplayConfig(underlying="NIFTY")
+    spy = _OrSpy()
+    res = _orp.Replay(_or_bars(days, path), spy, cfg, _OR_VIX).run()
+    assert len(spy.seen) == 3 and len(res.trades) == 3
+    for now, spot, last_ts, n, last_close in spy.seen:
+        assert last_ts < now and last_ts == now - _ortd(minutes=1), (now, last_ts)
+    # the same past with a wildly different future must give the same decisions and fills
+    wild = lambda i: path(i) if (i % 375) < 65 else path(i) + (900 if (i // 375) % 2 else -900)
+    spy2 = _OrSpy()
+    res2 = _orp.Replay(_or_bars(days, wild), spy2, cfg, _OR_VIX).run()
+    assert [s[:4] for s in spy.seen] == [s[:4] for s in spy2.seen]
+    for a, b in zip(res.trades, res2.trades):
+        assert [(l.opt, l.strike, l.side, l.entry_px) for l in a.legs] == \
+               [(l.opt, l.strike, l.side, l.entry_px) for l in b.legs]
+    assert any(a.net != b.net for a, b in zip(res.trades, res2.trades))   # ...but different outcomes
+    # the trend20 / first-hour signals use only prior sessions and today's bars before 10:15
+    cs = _orp.CreditSpread(direction="first_hour")
+    v = _orp.MarketView("NIFTY", _ordt(2026, 10, 5, 10, 15), 24000.0,
+                        [b for b in _or_bars([_OR_DAYS[0]], lambda i: i * 1.0) if b[0].time() < _ortime(10, 15)],
+                        [], 0.13, _ordate(2026, 10, 6), 50, 1 / 365)
+    assert cs.signal(v) == 1 and cs.decide(v)[0].opt == "PE"                   # up first hour → bull put
+
+
+def t_or_costs_per_leg():
+    days = _OR_DAYS[:2]
+    res = _orp.Replay(_or_bars(days, lambda i: 30 * _ormath.sin(i / 40.0)), _orp.IronCondor(),
+                      _orp.ReplayConfig(underlying="NIFTY"), _OR_VIX).run()
+    assert res.trades, "no trade"
+    for tr in res.trades:
+        assert len(tr.legs) == 4 and tr.qty == _orp.LOT_SIZE["NIFTY"]
+        manual = 0.0
+        for l in tr.legs:
+            ev, xv = l.entry_px * tr.qty, l.exit_px * tr.qty
+            buy_v, sell_v = (ev, xv) if l.side > 0 else (xv, ev)
+            exp = _orp.round_trip_cost(buy_v, sell_v, "option")
+            assert abs(l.cost - exp) < 0.02, (l, exp)
+            manual += exp
+        assert abs(tr.costs - manual) < 0.05 and tr.costs >= 4 * 2 * 20 * 1.18   # ₹20 per order per leg + GST
+        gross = sum((l.exit_px - l.entry_px) * l.side * tr.qty for l in tr.legs)
+        assert abs(tr.gross - gross) < 0.05 and abs(tr.net - (tr.gross - tr.costs)) < 1e-6
+        assert tr.max_risk > 0 and tr.entry_net > 0                                # defined-risk credit
+
+
+def t_or_haircut_and_settlement():
+    assert _orp.fill_price(100.0, +1, "NIFTY") == 102.0 and _orp.fill_price(100.0, -1, "NIFTY") == 98.0
+    assert _orp.fill_price(10.0, +1, "NIFTY") == 11.0 and _orp.fill_price(0.3, -1, "NIFTY") == _orp.TICK
+    # a long ITM leg settled at expiry pays exercise STT on top of round_trip_cost
+    plain = _orp.leg_cost(50.0, 120.0, +1, 75)
+    assert abs(_orp.leg_cost(50.0, 120.0, +1, 75, settled=True) - plain - 120 * 75 * 0.00025) < 0.02
+    # hold-to-expiry condor settles at intrinsic of the 15:00-15:29 mean on expiry day
+    days = [_ordate(2026, 10, 9), _ordate(2026, 10, 12), _ordate(2026, 10, 13)]
+    ic = _orp.IronCondor(hold="expiry", target_frac=99, stop_mult=99)
+    res = _orp.Replay(_or_bars(days, lambda i: 0.0), ic, _orp.ReplayConfig(underlying="NIFTY"), _OR_VIX).run()
+    tr = res.trades[0]
+    assert tr.expiry == _ordate(2026, 10, 13) and tr.reason == "expiry", (tr.expiry, tr.reason)
+    assert all(l.exit_px == 0.0 for l in tr.legs) and tr.gross > 0                # flat market: all OTM
+    assert len(res.trades) == 1                                                    # one position at a time
+
+
+def t_or_metrics_and_loader():
+    import json as _j
+    T = lambda d, n: _orp.Trade("X", "X", "NIFTY", _ordt.combine(d, _ortime(10)), d, 0, 0, "", 1, [], 0,
+                                exit_ts=_ordt.combine(d, _ortime(15)), gross=n, costs=0)
+    res = _orp.ReplayResult([T(_OR_DAYS[0], 100), T(_OR_DAYS[1], -300), T(_OR_DAYS[6], 200)], _OR_DAYS)
+    m = _orp.metrics(res)
+    assert m["all"]["trades"] == 3 and m["all"]["net"] == 0 and m["all"]["max_drawdown"] == 300
+    assert abs(m["all"]["profit_factor"] - 1.0) < 1e-9 and m["all"]["win_rate"] == 66.7
+    assert m["first_half"]["trades"] == 2 and m["second_half"]["trades"] == 1
+    bars = [[b[0].isoformat(), *b[1:], 0] for b in _or_bars(_OR_DAYS[:1])]
+    with _tmp0.TemporaryDirectory() as dd:
+        with open(_os.path.join(dd, "index.json"), "w") as fh:
+            _j.dump({"NIFTY 50": {"bars": bars}, "NIFTY BANK": {"bars": bars}}, fh)
+        u, vix = _orp.load_data(_os.path.join(dd, "index.json"))
+        assert set(u) == {"NIFTY", "BANKNIFTY"} and vix is None and len(u["NIFTY"]) == 375
+        d2 = _os.path.join(dd, "m"); _os.mkdir(d2)
+        for nm, sym in (("_NIFTY50_min.json", "NIFTY 50"), ("_NIFTYBANK_min.json", "NIFTY BANK")):
+            with open(_os.path.join(d2, nm), "w") as fh:
+                _j.dump({"symbol": sym, "interval": "minute", "bars": bars}, fh)
+        with open(_os.path.join(d2, "_VIX_day.json"), "w") as fh:
+            _j.dump({"symbol": "INDIA VIX", "interval": "day",
+                     "bars": [["2026-10-02T00:00:00", 12, 13, 11, 12.5, 0]]}, fh)
+        u, vix = _orp.load_data(d2)
+        assert set(u) == {"NIFTY", "BANKNIFTY"} and vix == {_ordate(2026, 10, 2): 12.5}
+    rv = _orp.realised_vol([24000 * (1.01 if i % 2 else 1.0) for i in range(21)])
+    assert rv is not None and 0.1 < rv < 0.3 and _orp.realised_vol([1.0] * 5) is None
+
+
+run("options replay: Black-Scholes put-call parity",                       t_or_put_call_parity)
+run("options replay: deltas in range, delta-picked strikes on the grid",   t_or_delta_range)
+run("options replay: NIFTY weekly Tue / BANKNIFTY monthly expiry, holidays", t_or_expiry_calendar)
+run("options replay: no look-ahead (decisions see only earlier bars)",     t_or_no_lookahead)
+run("options replay: NSE costs charged per leg via round_trip_cost",       t_or_costs_per_leg)
+run("options replay: haircut direction, expiry settlement, exercise STT",  t_or_haircut_and_settlement)
+run("options replay: metrics, halves and both data layouts load",          t_or_metrics_and_loader)
+
+# ── Research agents (replay only): swing_short, meanrev_v2 ───────────────
+from agents.research_agents import SwingShortAgent, MeanRevV2Agent
+
+def _mr_bars(day, spikes=(), n=375):
+    """A range day: price alternates 995/1005 around 1000 from 09:15; each minute in `spikes` is a stretch
+    bar that reaches 1012 (σ ≈ 3.3, so beyond the ~1010 3σ band) and closes red at 1008, back inside — a fade setup."""
+    out = []
+    for i in range(n):
+        ts = datetime(day.year, day.month, day.day, 9, 15) + timedelta(minutes=i)
+        if ts.time() in spikes:
+            o, h, l, c = 1011.0, 1012.0, 1007.0, 1008.0
+        else:
+            c = 995.0 if i % 2 else 1005.0
+            o, h, l = 1000.0, max(c, 1000.0) + 0.5, min(c, 1000.0) - 0.5
+        out.append({"ts": ts, "open": o, "high": h, "low": l, "close": c, "volume": 10000})
+    return out
+
+def _mr_walk(agent, sym, bars):
+    """Feed bars one minute at a time like the tick loop (snapshot = last 60 candles); returns the signals."""
+    sigs, candles = [], []
+    for b in bars:
+        candles.append(Candle(b["open"], b["high"], b["low"], b["close"], b["volume"], b["ts"]))
+        snap = _make_snap(symbol=sym, ltp=b["close"])
+        snap.candles_1min = candles[-60:]
+        with _with_v2_clock(b["ts"], None):
+            action, sig = agent.evaluate_tick(snap)
+        if action in ("BUY", "SELL"):
+            sigs.append((b["ts"], action, sig))
+    return sigs
+
+def t_research_agents_not_live():
+    assert "swing_short" not in ALL_AGENTS and "meanrev_v2" not in ALL_AGENTS
+    assert not any(isinstance(a, (SwingShortAgent, MeanRevV2Agent)) for a in ALL_AGENTS.values())
+    assert isinstance(_rb._agent("swing_short", None), SwingShortAgent)
+    a = _rb._agent("meanrev_v2", {"K_SIGMA": 2.5})
+    assert isinstance(a, MeanRevV2Agent) and a.K_SIGMA == 2.5 and MeanRevV2Agent.K_SIGMA == 3.0
+    assert SwingShortAgent._last_eval is not SwingAgent._last_eval, "own throttle state"
+
+def t_swing_short_rejection_sell():
+    a = SwingShortAgent()
+    # downtrend (price under EMA200), rally into EMA50, RSI mid-range → short
+    snap = _make_snap(symbol="SWS1", ltp=1000.0, rsi=50.0, trend="DOWN", ema50=1005.0, ema200=1100.0)
+    action, sig = a.evaluate_tick(snap)
+    assert action == "SELL", action
+    assert sig["product"] == "NRML" and sig["exchange"] == "NFO" and "EMA50-REJECT" in sig["trigger"]
+    assert abs(sig["stop_loss"] - 1030.0) < 0.01 and abs(sig["target"] - 920.0) < 0.01, sig
+    assert a.evaluate_tick(snap)[0] == "HOLD", "throttled to once a minute like swing"
+    # the long setup's mirror image must not short: price above EMA200
+    b = SwingShortAgent()
+    assert b.evaluate_tick(_make_snap(symbol="SWS2", ltp=1000.0, rsi=50.0, ema50=1005.0, ema200=900.0))[0] == "HOLD"
+    # nor with RSI outside 40-60
+    c = SwingShortAgent()
+    assert c.evaluate_tick(_make_snap(symbol="SWS3", ltp=1000.0, rsi=25.0, ema50=1005.0, ema200=1100.0))[0] == "HOLD"
+
+def t_swing_short_exit_rule_and_cost_model():
+    a = SwingShortAgent()
+    ind = _make_snap(ltp=1031.0).indicators
+    should, why = a.should_exit_position({"average_price": 1000.0, "quantity": -10}, ind)
+    assert should and "SL" in why
+    assert a.rule_exit({"average_price": 1000.0, "quantity": -10}, ind) == (False, ""), "no rule exits (NRML)"
+    fut = _rb._cost(1000.0, 980.0, 40, "SELL", "NRML", "SBIN")
+    cnc = _rb._cost(1000.0, 980.0, 40, "SELL", "CNC", "SBIN")
+    from costs import round_trip_cost
+    assert fut == round_trip_cost(980.0 * 40, 1000.0 * 40, "future") and fut < cnc, (fut, cnc)
+
+def t_meanrev_v2_fades_stretch_to_vwap():
+    day = datetime(2026, 1, 15)
+    a = MeanRevV2Agent()
+    sigs = _mr_walk(a, "MR1", _mr_bars(day, spikes=(time(11, 0),), n=120))
+    assert len(sigs) == 1, sigs
+    ts, action, sig = sigs[0]
+    assert ts.time() == time(11, 0) and action == "SELL"
+    assert 999.0 < sig["target"] < 1001.5, sig                     # target = session VWAP (~1000)
+    assert sig["target_pct"] >= 0.5 and sig["stop_loss"] > 1008.0 > sig["target"]
+    assert "VWAP_FADE" in sig["trigger"] and sig["product"] == "MIS"
+    # mirror: a stretch down that closes green → long
+    b = MeanRevV2Agent()
+    bars = _mr_bars(day, n=120)
+    k = next(i for i, x in enumerate(bars) if x["ts"].time() == time(11, 0))
+    bars[k] = {**bars[k], "open": 989.0, "high": 993.0, "low": 988.0, "close": 992.0}
+    sigs = _mr_walk(b, "MR1B", bars)
+    assert len(sigs) == 1 and sigs[0][1] == "BUY" and sigs[0][2]["stop_loss"] < 992.0 < sigs[0][2]["target"], sigs
+
+def t_meanrev_v2_time_window():
+    day = datetime(2026, 1, 15)
+    a = MeanRevV2Agent()                                       # 10:00 and 14:45 stretches are outside 10:30-14:30
+    assert _mr_walk(a, "MR2", _mr_bars(day, spikes=(time(10, 0), time(14, 45)))) == []
+    b = MeanRevV2Agent()                                       # an agent that joined mid-session has no session VWAP
+    late = [x for x in _mr_bars(day, spikes=(time(11, 30),)) if x["ts"].time() >= time(10, 0)]
+    assert _mr_walk(b, "MR3", late) == []
+    c = MeanRevV2Agent(); c.MIN_TGT_PCT = 2.0                  # VWAP too close to pay: skipped
+    assert _mr_walk(c, "MR4", _mr_bars(day, spikes=(time(11, 0),), n=120)) == []
+
+def t_meanrev_v2_one_trade_per_symbol_per_day():
+    a = MeanRevV2Agent()
+    d1, d2 = datetime(2026, 1, 15), datetime(2026, 1, 16)
+    spikes = (time(11, 0), time(12, 0), time(13, 0))
+    s1 = _mr_walk(a, "MR5", _mr_bars(d1, spikes=spikes))
+    s2 = _mr_walk(a, "MR5", _mr_bars(d2, spikes=spikes))
+    assert len(s1) == 1 and len(s2) == 1 and s2[0][0].date() == d2.date(), (s1, s2)
+    # through the replay: three setups a day for three days → at most one trade per symbol per day
+    prev = _ai_settings.use_multi_timeframe; _ai_settings.use_multi_timeframe = False
+    try:
+        bars = [b for d in range(3) for b in _mr_bars(datetime(2026, 1, 12 + d), spikes=spikes)]
+        res = _rb.replay("meanrev_v2", ["RMR"], days=3, slippage_bps=0.0, bars_by_symbol={"RMR": bars})
+        per_day = {}
+        for t in res.trades:
+            per_day[t.entry_ts.date()] = per_day.get(t.entry_ts.date(), 0) + 1
+        assert res.trades and max(per_day.values()) == 1, per_day
+        assert all(t.signal.startswith("MR2-") and time(10, 30) <= t.entry_ts.time() <= time(14, 31) for t in res.trades)
+    finally:
+        _ai_settings.use_multi_timeframe = prev
+
+run("research: swing_short / meanrev_v2 replay-only, not in ALL_AGENTS", t_research_agents_not_live)
+run("research: swing_short shorts an EMA50 rejection in an EMA200 downtrend", t_swing_short_rejection_sell)
+run("research: swing_short exits by stop only; priced as stock futures", t_swing_short_exit_rule_and_cost_model)
+run("research: meanrev_v2 fades a 3σ stretch to the session VWAP", t_meanrev_v2_fades_stretch_to_vwap)
+run("research: meanrev_v2 silent outside 10:30-14:30 / without session", t_meanrev_v2_time_window)
+run("research: meanrev_v2 at most one trade per symbol per day",         t_meanrev_v2_one_trade_per_symbol_per_day)
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

@@ -1540,59 +1540,6 @@ def market_context_view(symbol: str):
     return market_context.context_for(INDEX_QUOTE[und] if und else symbol.upper())
 
 
-@app.get("/forecast/status", tags=["Forecast"])
-def forecast_status():
-    """Is the Kronos model loaded, or is the labelled statistical fallback in use?"""
-    import kronos_forecast
-    return {**kronos_forecast.available(), "horizon_bars": settings.kronos_horizon_bars, "samples": settings.kronos_samples}
-
-
-@app.get("/forecast/{symbol}", tags=["Forecast"])
-def forecast_symbol(symbol: str, horizon: int | None = None):
-    """Next-bars forecast for a streamed symbol (expected move, p(up), p10/p90 band, median path)."""
-    import kronos_forecast
-    f = kronos_forecast.forecast(symbol.upper(), horizon=horizon)
-    if not f.get("available"):
-        raise HTTPException(404, f.get("reason", "no forecast"))
-    return f
-
-
-@app.get("/backtest/forecast-skill", tags=["Backtest"])
-async def forecast_skill(symbol: str, days: int = 20, horizon: int | None = None):
-    """Walk forward through past bars and measure the forecaster's directional hit-rate against a coin flip."""
-    import kronos_forecast, replay_backtest as rb
-    bars, src = await asyncio.to_thread(rb.load_bars, symbol.upper(), max(5, min(days, 60)))
-    if not bars:
-        raise HTTPException(404, f"no bar data for {symbol}")
-    res = await asyncio.to_thread(kronos_forecast.skill_check, symbol.upper(), bars, horizon)
-    return {**res, "data": src, "days": days}
-
-
-class ForecastSignalsRequest(BaseModel):
-    signals: list[dict] = Field(min_length=1, max_length=600)   # {symbol, ts (signal bar ISO), side, net, agent?}
-    samples: int = Field(default=8, ge=1, le=32)
-
-
-@app.post("/backtest/forecast-signals", tags=["Backtest"])
-async def backtest_forecast_signals(req: ForecastSignalsRequest):
-    """Kronos forecast at each given signal time from the bars before it (background; poll the GET)."""
-    import ai_replay
-    if ai_replay._FC_LAST.get("status") == "running":
-        return {k: v for k, v in ai_replay._FC_LAST.items() if k != "rows"}
-    asyncio.create_task(ai_replay.run_forecast_signals_and_record(req.signals, req.samples))
-    await asyncio.sleep(0)
-    return {"status": "running", "total": len(req.signals)}
-
-
-@app.get("/backtest/forecast-signals", tags=["Backtest"])
-def backtest_forecast_signals_status(rows: bool = False):
-    import ai_replay
-    st = dict(ai_replay._FC_LAST)
-    if not rows:
-        st.pop("rows", None)
-    return st
-
-
 @app.get("/market/trend-filter", tags=["Market Regime"])
 def trend_filter(refresh: bool = False):
     return market_filter.state(refresh=refresh)
@@ -1695,6 +1642,79 @@ async def backtest_bars(symbols: str, days: int = 45):
         bars, src = await asyncio.to_thread(rb.load_bars, s, days)
         out[s] = {"source": src, "bars": [[b["ts"].isoformat(), b["open"], b["high"], b["low"], b["close"], b["volume"]] for b in bars]}
     return out
+
+
+@app.get("/market-type", tags=["Market Regime"])
+def regime_status():
+    """Today's market-type read (pre-open / first hour), the learned model and each strategy's size factor."""
+    import regime_v2
+    return regime_v2.status()
+
+
+@app.put("/market-type/research", tags=["Market Regime"])
+def market_type_research(payload: dict):
+    """Install the research outputs the router reads: {"model": regime_model.json, "scorecard": regime_scorecard.json}.
+    Either may be omitted; null removes it (routing falls back to 1.0)."""
+    import regime_v2, json as _json
+    def _check_model(m):
+        for stage, e in (m or {}).items():
+            if stage not in ("preopen", "first_hour"):
+                raise HTTPException(422, f"unknown stage {stage}")
+            if e is not None and not ({"feature", "rule"} <= set(e) and all(v in regime_v2.TYPES for v in e["rule"].values())):
+                raise HTTPException(422, f"bad {stage} entry")
+    def _check_card(c):
+        for strat, regs in (c or {}).items():
+            for reg, v in regs.items():
+                if reg not in regime_v2.TYPES or not {"h1", "h2", "trades"} <= set(v):
+                    raise HTTPException(422, f"bad scorecard entry {strat}/{reg}")
+    out = {}
+    for key, path, check in (("model", regime_v2.MODEL_FILE, _check_model), ("scorecard", regime_v2.SCORECARD_FILE, _check_card)):
+        if key not in payload:
+            continue
+        if payload[key] is None:
+            path.unlink(missing_ok=True); out[key] = "removed"; continue
+        check(payload[key])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(payload[key])); out[key] = "installed"
+    return {**out, "status": regime_v2.status()}
+
+
+@app.post("/market-type/refresh", tags=["Market Regime"])
+async def regime_refresh(stage: str = "first_hour"):
+    if stage not in ("preopen", "first_hour"):
+        raise HTTPException(400, "stage must be preopen or first_hour")
+    import regime_v2
+    return await asyncio.to_thread(regime_v2.refresh, stage)
+
+
+@app.get("/backtest/history-bars", tags=["Backtest"])
+async def backtest_history_bars(symbol: str, start: str, end: str, interval: str = "minute", exchange: str = "NSE"):
+    """Kite history for one symbol over any date range (research data for the regime study): minute bars
+    are fetched in 60-day chunks. Indices use their Kite names ("NIFTY 50", "INDIA VIX").
+    → {symbol, interval, bars: [[ts, o, h, l, c, v], ...]}"""
+    from datetime import datetime as _dt
+    from kite_client import kite_client
+    if interval not in ("minute", "3minute", "5minute", "15minute", "60minute", "day"):
+        raise HTTPException(400, "interval must be minute, 3/5/15/60minute or day")
+    try:
+        d0, d1 = _dt.fromisoformat(start), _dt.fromisoformat(end)
+    except ValueError:
+        raise HTTPException(400, "start/end must be YYYY-MM-DD")
+    if d1 <= d0 or (d1 - d0).days > 800:
+        raise HTTPException(400, "end must be after start, at most 800 days apart")
+    sym = symbol.strip().upper()
+    def _load():
+        tok = kite_client.get_instrument_tokens([sym], exchange).get(sym)
+        if not tok:
+            return None
+        return kite_client.historical_data(tok, d0, d1.replace(hour=23, minute=59), interval)
+    rows = await asyncio.to_thread(_load)
+    if rows is None:
+        raise HTTPException(404, f"no instrument token for {exchange}:{sym}")
+    def _ts(d):
+        return (d.replace(tzinfo=None) if getattr(d, "tzinfo", None) else d).isoformat()
+    return {"symbol": sym, "interval": interval,
+            "bars": [[_ts(r["date"]), r["open"], r["high"], r["low"], r["close"], r.get("volume") or 0] for r in rows]}
 
 
 @app.get("/backtest/replay/last", tags=["Backtest"])
@@ -1886,9 +1906,6 @@ async def on_startup():
         _optimizer.apply_params()           # walk-forward-chosen agent parameters, if any
     except Exception as exc:
         logger.error("Parameter apply failed: {}", exc)
-    if settings.kronos_model:
-        import kronos_forecast
-        asyncio.create_task(kronos_forecast.refresher())
     from platform_scheduler import platform_scheduler
     platform_scheduler.start()
     try:

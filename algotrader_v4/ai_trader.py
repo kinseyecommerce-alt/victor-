@@ -129,10 +129,6 @@ get_ai_positions for what you hold.
 them, targets stop short of them), institutional flow, option-chain data (IV rank, PCR, OI \
 walls), multi-timeframe alignment, correlation with what you already hold, India VIX and the \
 lessons from recent trades. Use it.
-- A "forecast" block (Kronos candlestick model, or a labelled statistical fallback) gives the \
-expected move and the share of sampled paths that end up over the next bars. It has modest skill \
-at best: treat a forecast that agrees with your setup as mild support and one that disagrees as a \
-reason to look harder, never as a signal on its own. Ignore it entirely when it carries a flag.
 - Every entry you propose is reviewed by an independent bear-case check before the order goes \
 out; if it is rejected you will see the objection. Do not resubmit the same trade with the same \
 reasoning — either answer the objection with data or pass.
@@ -926,7 +922,11 @@ class AITrader:
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
-            reject(f"quantity {qty} too large: {pr['reason']} → use at most {pr['max_quantity']}")
+            # take the risk-adjusted size instead of rejecting: the correlation/event factor applies to the
+            # requested quantity, so "use at most N" shrank on every retry and the model burnt its steps
+            # chasing it (BANKNIFTY/BHARTIARTL, 11 Nov)
+            logger.info("[ai] {} size {} → {} ({})", sym, qty, pr["max_quantity"], pr["reason"])
+            qty = pr["max_quantity"]
         ok, msg = order_guard.can_place(sym, AGENT, side)
         if not ok:
             reject(msg)
@@ -1303,7 +1303,11 @@ class AITrader:
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
-            reject(f"quantity {qty} too large: {pr['reason']} → use at most {pr['max_quantity']}")
+            # take the risk-adjusted size instead of rejecting: the correlation/event factor applies to the
+            # requested quantity, so "use at most N" shrank on every retry and the model burnt its steps
+            # chasing it (BANKNIFTY/BHARTIARTL, 11 Nov)
+            logger.info("[ai] {} size {} → {} ({})", sym, qty, pr["max_quantity"], pr["reason"])
+            qty = pr["max_quantity"]
         ok, msg = order_guard.can_place(sym, _strategy, "BUY")
         if not ok:
             reject(msg)

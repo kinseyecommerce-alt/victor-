@@ -51,6 +51,15 @@ class PlatformScheduler:
             self._auto_start_bot, "cron",
             hour=9, minute=16, day_of_week="mon-fri", id="auto_start",
         )
+        # market-type reads (regime_v2): at the open (the gap is known) and after the first hour
+        self._sched.add_job(
+            self._regime_read, "cron", args=["preopen"],
+            hour=9, minute=16, second=30, day_of_week="mon-fri", id="regime_preopen",
+        )
+        self._sched.add_job(
+            self._regime_read, "cron", args=["first_hour"],
+            hour=10, minute=15, second=30, day_of_week="mon-fri", id="regime_first_hour",
+        )
         self._sched.add_job(
             self._allocate, "cron", args=["midday"],
             hour=12, minute=30, day_of_week="mon-fri", id="allocate_midday",
@@ -86,6 +95,23 @@ class PlatformScheduler:
                                 + (" (too few — fixed list)" if st["fallback"] else f" — {', '.join(st['symbols'][:12])}"))
         except Exception as exc:
             logger.error("[platform] universe refresh failed: {}", exc)
+
+    async def _regime_read(self, stage: str) -> None:
+        """Today's market type for the regime-aware sizing (regime_v2)."""
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        try:
+            import asyncio as _aio
+            import regime_v2
+            r = await _aio.to_thread(regime_v2.refresh, stage)
+            if r.get("regime"):
+                from agents.base_agent import send_telegram
+                st = regime_v2.status()
+                f = " ".join(f"{k} {v[0]:g}×" for k, v in st["factors"].items())
+                await send_telegram(f"🧭 <b>Market type ({stage})</b>: {r['regime']} → {f}")
+        except Exception as exc:
+            logger.error("[platform] regime read ({}) failed: {}", stage, exc)
 
     async def _allocate(self, reason: str) -> None:
         """The AI capital manager's two daily calls (09:08 before auto-start, 12:30)."""
