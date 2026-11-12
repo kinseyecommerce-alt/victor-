@@ -111,6 +111,8 @@ def size_factor(agent: str) -> float:
         f *= regime_v2.factor(agent)
     except Exception as exc:
         logger.debug("[allocator] regime factor unavailable: {}", exc)
+    if f <= 0 and not settings.allocator_can_block:
+        f = 1.0                                   # ALLOCATOR_CAN_BLOCK=false: the allocator may resize, never switch off
     return round(min(MAX_FACTOR, max(0.0, f)), 3)
 
 

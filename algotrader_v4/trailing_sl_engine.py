@@ -37,6 +37,14 @@ from loguru import logger
 
 # ── Types ─────────────────────────────────────────────────────────────────────
 
+def _floor_under_ai() -> bool:
+    try:
+        from config import settings
+        return bool(getattr(settings, "tsl_floor_under_ai", True))
+    except Exception:
+        return True
+
+
 class SLMode(str, Enum):
     FIXED      = "FIXED"       # static SL, never moves
     BREAKEVEN  = "BREAKEVEN"   # moves to entry once trigger_pct reached
@@ -369,11 +377,14 @@ class TrailingSLEngine:
                 await self.on_sl_hit(pos, ltp, pnl)
             return
 
-        if pos.external_trail:
+        # AI-managed trail: the AI moves the stop at R milestones; the mechanical breakeven and trail below still
+        # run as a floor (stops only ever tighten) unless TSL_FLOOR_UNDER_AI is off. Target steps stay with the AI.
+        ai_managed = pos.external_trail
+        if ai_managed and not _floor_under_ai():
             return
 
         # ── 3. Target 2 hit ────────────────────────────────────────────
-        if not pos.target2_hit:
+        if not ai_managed and not pos.target2_hit:
             t2 = (cfg.target2_pct / 100)
             t2_price = pos.entry_price * (1 + t2 if pos.side == "BUY" else 1 - t2)
             if (pos.side == "BUY" and ltp >= t2_price) or \
@@ -384,7 +395,7 @@ class TrailingSLEngine:
                     await self.on_target_hit(pos, ltp, 2)
 
         # ── 4. Target 1 hit → tighten trail ───────────────────────────
-        if not pos.target1_hit:
+        if not ai_managed and not pos.target1_hit:
             t1 = (cfg.target1_pct / 100)
             t1_price = pos.entry_price * (1 + t1 if pos.side == "BUY" else 1 - t1)
             if (pos.side == "BUY" and ltp >= t1_price) or \
