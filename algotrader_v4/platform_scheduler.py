@@ -64,6 +64,15 @@ class PlatformScheduler:
             self._allocate, "cron", args=["midday"],
             hour=12, minute=30, day_of_week="mon-fri", id="allocate_midday",
         )
+        # live paper forward test of the opening-auction fade (forward_test.py): pre-open indicative,
+        # post-match auction, continuous open, 09:20 exit
+        for _stage, (_h, _m, _s) in (("indicative_early", (9, 6, 45)), ("indicative", (9, 7, 30)), ("auction", (9, 8, 45)),
+                                     ("open", (9, 15, 5)), ("exit", (9, 20, 0))):
+            self._sched.add_job(
+                self._forward_test, "cron", args=[_stage],
+                hour=_h, minute=_m, second=_s, day_of_week="mon-fri", id=f"forward_{_stage}",
+                misfire_grace_time=20,
+            )
         self._sched.add_job(
             self._refresh_universe, "cron",
             hour=16, minute=30, day_of_week="mon-fri", id="universe_refresh",
@@ -112,6 +121,21 @@ class PlatformScheduler:
                 await send_telegram(f"🧭 <b>Market type ({stage})</b>: {r['regime']} → {f}")
         except Exception as exc:
             logger.error("[platform] regime read ({}) failed: {}", stage, exc)
+
+    async def _forward_test(self, stage: str) -> None:
+        """One stage of the opening-auction forward test; the 09:20 stage builds the day's paper trades."""
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        try:
+            import asyncio as _aio
+            import forward_test
+            r = await _aio.to_thread(forward_test.record, stage)
+            if stage == "exit" and r.get("net"):
+                lines = "\n".join(f"{k}: {r['trades'][k]} trades, ₹{v:+,.0f}" for k, v in r["net"].items())
+                await send_telegram(f"🧪 <b>Auction-fade forward test</b>\n{lines}")
+        except Exception as exc:
+            logger.error("[platform] forward test ({}) failed: {}", stage, exc)
 
     async def _allocate(self, reason: str) -> None:
         """The AI capital manager's two daily calls (09:08 before auto-start, 12:30)."""

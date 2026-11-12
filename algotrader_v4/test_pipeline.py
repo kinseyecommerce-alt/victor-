@@ -4538,9 +4538,9 @@ def t_costs_realistic():
     opt = _tc(100.0, 120.0, 75, "BUY", "NFO", "MIS", "NIFTY26JAN24000CE")
     fut = _tc(24000.0, 24050.0, 75, "BUY", "NFO", "MIS", "NIFTY26JANFUT")
     assert 40 <= mis <= 70, mis                                   # ~₹30 brokerage+GST, ₹12.6 STT, small exch/stamp
-    assert 100 <= cnc <= 130, cnc                                 # 0.1% STT both sides ≈ ₹100, no brokerage
-    assert 50 <= opt <= 70, opt                                   # ₹40 brokerage+GST, ₹9 STT on sell premium
-    assert 480 <= fut <= 560, fut                                 # 0.02% STT on ₹18 lakh ≈ ₹360 + exch/GST/stamp
+    assert 100 <= cnc <= 130, cnc                                 # 0.1% STT both sides ≈ ₹100 + ₹15.34 DP, no brokerage
+    assert 50 <= opt <= 75, opt                                   # ₹40 brokerage+GST, ₹13.5 STT (0.15%) on sell premium
+    assert 1000 <= fut <= 1130, fut                               # 2026: 0.05% STT on ₹18 lakh sell ≈ ₹902 + brokerage/exch/GST/stamp
     assert _rtc(0, 0, "equity_mis") == 0.0
 
 def t_perf_ledger_and_stats():
@@ -7139,9 +7139,12 @@ def t_or_costs_per_leg():
 def t_or_haircut_and_settlement():
     assert _orp.fill_price(100.0, +1, "NIFTY") == 102.0 and _orp.fill_price(100.0, -1, "NIFTY") == 98.0
     assert _orp.fill_price(10.0, +1, "NIFTY") == 11.0 and _orp.fill_price(0.3, -1, "NIFTY") == _orp.TICK
-    # a long ITM leg settled at expiry pays exercise STT on top of round_trip_cost
+    # a long ITM leg settled at expiry pays exercise STT (0.15 % of intrinsic, 2026), which is exactly the
+    # sell-side option STT round_trip_cost already charges on the settlement value: nothing extra
     plain = _orp.leg_cost(50.0, 120.0, +1, 75)
-    assert abs(_orp.leg_cost(50.0, 120.0, +1, 75, settled=True) - plain - 120 * 75 * 0.00025) < 0.02
+    assert _orp.EXERCISE_STT_EXTRA == 0.0
+    assert abs(_orp.leg_cost(50.0, 120.0, +1, 75, settled=True) - plain) < 0.02
+    assert plain >= 120 * 75 * 0.0015                                    # the 0.15 % is in there
     # hold-to-expiry condor settles at intrinsic of the 15:00-15:29 mean on expiry day
     days = [_ordate(2026, 10, 9), _ordate(2026, 10, 12), _ordate(2026, 10, 13)]
     ic = _orp.IronCondor(hold="expiry", target_frac=99, stop_mult=99)
@@ -7187,6 +7190,149 @@ run("options replay: no look-ahead (decisions see only earlier bars)",     t_or_
 run("options replay: NSE costs charged per leg via round_trip_cost",       t_or_costs_per_leg)
 run("options replay: haircut direction, expiry settlement, exercise STT",  t_or_haircut_and_settlement)
 run("options replay: metrics, halves and both data layouts load",          t_or_metrics_and_loader)
+
+
+# ── stratlab/options_vrp: pre-registered weekly NIFTY short strangles (VRP) ──
+from stratlab import options_vrp as _vrp
+from stratlab import protocol as _vrp_P
+
+# Oct 2026 weekdays; 2026-10-20 (Tue) is a holiday, so that week's expiry moves to Mon 10-19.
+_VRP_DAYS = [_ordate(2026, 10, d) for d in (5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 19, 21, 22, 23)]
+_VRP_VIX = {_ordate(2026, 9, 20) + _ortd(days=i): 13.0 for i in range(60)}
+
+
+def _vrp_spec(wing=None, lots=1, min_days=3):
+    return _vrp.OptSpec("T-" + str(wing), "t", {"short_delta": 0.16, "min_days_left": min_days, "wing_pts": wing},
+                        lots=lots)
+
+
+def t_vrp_expiry_transition_and_cycle():
+    td = _orp._calendar_trading_day
+    # the first Tuesday expiry: from Fri 2025-08-29 the next weekly expiry is Tue 2025-09-02 (not Thu 09-04)
+    assert _orp.next_expiry("NIFTY", _ordate(2025, 8, 29), td) == _ordate(2025, 9, 2)
+    assert _orp.next_expiry("NIFTY", _ordate(2025, 8, 26), td) == _ordate(2025, 8, 28)
+    # entries only on the first trading day after an expiry, never re-entered later in the week
+    res, strat = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS, lambda i: 20 * _ormath.sin(i / 60.0)),
+                                  _VRP_VIX, 20261023)
+    ent = [(t.entry_ts.date(), t.expiry, t.reason) for t in res.trades]
+    assert [e[0] for e in ent] == [_ordate(2026, 10, 7), _ordate(2026, 10, 14), _ordate(2026, 10, 21)], ent
+    assert ent[0][1] == _ordate(2026, 10, 13) and ent[1][1] == _ordate(2026, 10, 19)
+    assert ent[0][2] == ent[1][2] == "expiry" and ent[2][2] == "data_end"
+    assert all(t.entry_ts.time() == _ortime(10, 20) for t in res.trades)
+    # with 10-15 and 10-16 also closed only 10-19 is left after 10-14 (< 3 days): that week is skipped, not entered later
+    days = [d for d in _VRP_DAYS if d not in (_ordate(2026, 10, 15), _ordate(2026, 10, 16))]
+    res, strat = _vrp._run_replay(_vrp_spec(), _or_bars(days), _VRP_VIX, 20261023)
+    assert [t.entry_ts.date() for t in res.trades] == [_ordate(2026, 10, 7), _ordate(2026, 10, 21)]
+    assert strat.skipped_short_weeks == [_ordate(2026, 10, 14)]
+    assert _orp.trading_days_left(_ordate(2026, 10, 7), _ordate(2026, 10, 13), lambda d: d.weekday() < 5) == 4
+
+
+def t_vrp_strikes_wings_lots_margin():
+    res, _ = _vrp._run_replay(_vrp_spec(wing=400.0, lots=2), _or_bars(_VRP_DAYS), _VRP_VIX, 20261023)
+    tr = res.trades[0]
+    ce = [l for l in tr.legs if l.opt == "CE"]; pe = [l for l in tr.legs if l.opt == "PE"]
+    sc, lc = [l for l in ce if l.side < 0][0], [l for l in ce if l.side > 0][0]
+    sp_, lp = [l for l in pe if l.side < 0][0], [l for l in pe if l.side > 0][0]
+    assert lc.strike == sc.strike + 400 and lp.strike == sp_.strike - 400 and sc.strike % 50 == 0
+    T = _orp.years_between(tr.entry_ts, tr.expiry)
+    for l, want in ((sc, 0.16), (sp_, 0.16)):                              # closest to 0.16 on the 50-pt grid
+        d0 = abs(abs(_orp.bs_delta(tr.spot_in, l.strike, T, 0.13, l.opt)) - want)
+        for k in (l.strike - 50, l.strike + 50):
+            assert d0 <= abs(abs(_orp.bs_delta(tr.spot_in, k, T, 0.13, l.opt)) - want) + 1e-12
+    assert tr.qty == 2 * 65 and tr.max_risk > 0                             # 2026 dates: lot 65
+    sp = _vrp_spec(wing=400.0, lots=2)
+    assert abs(tr.max_risk - (400 - tr.entry_net) * tr.qty) < 0.05
+    assert abs(sp.margin(tr) - (tr.max_risk + 0.02 * tr.spot_in * tr.qty)) < 1e-6
+    tr.max_risk = 0.0
+    assert abs(_vrp_spec().margin(tr) - 0.12 * tr.spot_in * tr.qty) < 1e-6
+    # the pre-registered lot size in force on the entry date: 75, then 65 from 2025-12-31
+    assert _orp.lot_size_on(_vrp.LOT_SCHEDULE, _ordate(2025, 12, 30)) == 75
+    assert _orp.lot_size_on(_vrp.LOT_SCHEDULE, _ordate(2025, 12, 31)) == 65
+    assert _orp.lot_size_on(_vrp.LOT_SCHEDULE, _ordate(2023, 11, 10)) == 75
+    res, _ = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS), _VRP_VIX, 20261023)
+    assert all(t.qty == 65 for t in res.trades)                             # 2026 dates: 65
+
+
+def t_vrp_no_lookahead():
+    path = lambda i: 25 * _ormath.sin(i / 70.0)
+    base = _or_bars(_VRP_DAYS, path)
+    # 1) a wildly different future (every bar after the 10:20 entry bar) leaves that entry unchanged
+    a, _ = _vrp._run_replay(_vrp_spec(400.0), base, _VRP_VIX, 20261023)
+    key = lambda r: [(t.entry_ts, [(l.opt, l.strike, l.side, l.entry_px) for l in t.legs]) for t in r.trades]
+    assert len(a.trades) == 3
+    for k, t in enumerate(a.trades):
+        wild = [(x[0], x[1] + 700, x[2] + 700, x[3] + 700, x[4] + 700) if x[0] > t.entry_ts else x for x in base]
+        b, _ = _vrp._run_replay(_vrp_spec(400.0), wild, _VRP_VIX, 20261023)
+        assert key(b)[k] == key(a)[k] and b.trades[k].net != t.net
+    # 2) today's VIX (not yet closed at 10:20) is never used: only the previous close
+    vx = dict(_VRP_VIX); vx[_ordate(2026, 10, 7)] = 80.0
+    c, _ = _vrp._run_replay(_vrp_spec(), base, vx, 20261023)
+    assert key(c)[0] == key(_vrp._run_replay(_vrp_spec(), base, _VRP_VIX, 20261023)[0])[0]
+    assert c.trades[0].sigma == 0.13
+    # 3) the runtime audit agrees, and a DISCOVERY-style run up to `hi` never reads a later bar
+    assert _vrp.audit_lookahead(_vrp_spec(400.0), base, _VRP_VIX, a.trades) is None
+    assert _vrp.audit_lookahead(_vrp_spec(), base, _VRP_VIX, a.trades) is not None      # wrong legs are caught
+    poisoned = base + [(b[0] + _ortd(days=28), float("nan"), float("nan"), float("nan"), float("nan"))
+                       for b in _or_bars(_VRP_DAYS[-5:])]
+    sim1 = _vrp.make_simulator(base, _VRP_VIX)([_vrp_spec()], 20261001, 20261016)
+    sim2 = _vrp.make_simulator(poisoned, _VRP_VIX)([_vrp_spec()], 20261001, 20261016)
+    assert sim1 == sim2 and len(sim1["T-None"]["trades"]) == 2 and sim1["T-None"]["lookahead"] is None
+
+
+def t_vrp_costs_and_haircut():
+    # flat market: both shorts expire worthless; fees = 2 sell orders at the 2026 option rates, no settlement haircut
+    res, _ = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS[:7]), _VRP_VIX, 20261013)
+    tr = res.trades[0]
+    assert tr.reason == "expiry" and all(l.exit_px == 0.0 for l in tr.legs)
+    man = 0.0
+    for l in tr.legs:
+        prem = l.entry_px * tr.qty
+        bro, stt, exch, sebi = 20.0, 0.0015 * prem, 0.0003553 * prem, prem * 10 / 1e7
+        man += bro + stt + exch + sebi + 0.18 * (bro + exch + sebi)
+    assert abs(tr.costs - man) < 0.05, (tr.costs, man)
+    # haircut: max(1 pt, 2 %) per leg at entry only (settlement is not a fill)
+    T = _orp.years_between(tr.entry_ts, tr.expiry)
+    for l in tr.legs:
+        m = _orp.bs(tr.spot_in, l.strike, T, 0.13, l.opt)
+        assert abs(l.entry_px - max(_orp.TICK, m - max(1.0, 0.02 * m))) < 1e-9
+    assert abs(tr.slippage - sum(max(1.0, 0.02 * _orp.bs(tr.spot_in, l.strike, T, 0.13, l.opt)) for l in tr.legs) * tr.qty) < 0.05
+    assert abs(tr.net - (tr.entry_net * tr.qty - tr.costs)) < 0.05
+    # the 2.5x sensitivity haircut costs more and changes nothing else
+    s5, _ = _vrp._run_replay(_vrp_spec(), _or_bars(_VRP_DAYS[:7]), _VRP_VIX, 20261013, haircut_mult=2.5)
+    assert [l.strike for l in s5.trades[0].legs] == [l.strike for l in tr.legs] and s5.trades[0].net < tr.net
+    # a short leg settled in the money is bought back at intrinsic: gross loss, STT only on the sale
+    up = _or_bars(_VRP_DAYS[:7], lambda i: 0.0 if i < 2 * 375 + 65 else 900.0)
+    tr2 = _vrp._run_replay(_vrp_spec(), up, _VRP_VIX, 20261013)[0].trades[0]
+    ce = [l for l in tr2.legs if l.opt == "CE"][0]
+    assert ce.exit_px > 0 and abs(ce.exit_px - (24900.0 - ce.strike)) < 1e-6 and tr2.net < 0
+
+
+def t_vrp_protocol_ledger():
+    import tempfile as _t, os as _o
+    days = [d for d in (_ordate(2026, 1, 1) + _ortd(days=i) for i in range(400)) if d.weekday() < 5][:150]
+    vix = {days[0] - _ortd(days=5) + _ortd(days=i): 13.0 for i in range(260)}
+    bars = _or_bars(days, lambda i: 30 * _ormath.sin(i / 300.0))
+    cal = _vrp.calendar_of(bars)
+    sp = _vrp_P.split_sessions(cal)
+    with _t.TemporaryDirectory() as td:
+        led = _o.path.join(td, "final_ledger.json")
+        seen = []
+        sim = _vrp.make_simulator(bars, vix)
+        spy = lambda specs, lo, hi: (seen.append((lo, hi)), sim(specs, lo, hi))[1]
+        res, _ = _vrp_P.evaluate([_vrp_spec()], cal, spy, n_symbols=1, ledger_path=led, screen_only=True,
+                                 cost_model=_vrp.COST_MODEL)
+        assert seen == [sp.discovery] and not _o.path.exists(led)              # screen only: FINAL never simulated
+        assert res[0]["screen"]["disc"]["trades"] > 0
+        assert all(sp.discovery[0] <= t[2] <= sp.discovery[1] for t in sim([_vrp_spec()], *sp.discovery)["T-None"]["trades"])
+    assert _vrp.COST_MODEL == _vrp._costs.COST_MODEL_VERSION + "/o1"
+
+
+run("options VRP: first Tuesday expiry 2025-09-02; entries only the day after an expiry; short weeks skipped",
+    t_vrp_expiry_transition_and_cycle)
+run("options VRP: 0.16-delta strikes on the grid, +/-400 wings, lot 75 then 65, margin rules", t_vrp_strikes_wings_lots_margin)
+run("options VRP: no look-ahead (future bars, same-day VIX, DISCOVERY run never reads later bars)", t_vrp_no_lookahead)
+run("options VRP: 2026 option fees per order, entry-only haircut, ITM settlement, 2.5x sensitivity", t_vrp_costs_and_haircut)
+run("options VRP: lab protocol on DISCOVERY only with --screen-only, no ledger write", t_vrp_protocol_ledger)
 
 # ── Research agents (replay only): swing_short, meanrev_v2 ───────────────
 from agents.research_agents import SwingShortAgent, MeanRevV2Agent
@@ -7430,16 +7576,16 @@ def t_sl_fill_next_open_with_slippage():
     a["o"][11] = 101.0; a["h"][11] = 101.0; a["c"][11] = 100.5; a["l"][11] = 100.5
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=99.0, target=110.0))
-    assert abs(fill - 101.0 * 1.0005) < 1e-9, fill               # next bar's open, 5 bps worse
+    assert abs(fill - 101.0 * (1 + _sls.SLIPPAGE)) < 1e-9, fill               # next bar's open, SLIPPAGE worse
     k2, fill2, _, _ = _sls.fill_intraday(s, _SlEntry(10, -1, stop=103.0, target=90.0))
-    assert abs(fill2 - 101.0 * 0.9995) < 1e-9, fill2
+    assert abs(fill2 - 101.0 * (1 - _sls.SLIPPAGE)) < 1e-9, fill2
     assert _sls.fill_intraday(s, _SlEntry(10, 1, stop=101.5)) is None      # stop already through at the open
     assert _sls.fill_intraday(s, _SlEntry(len(s) - 1, 1, stop=99.0)) is None  # no next bar
     rr = _sls.fill_intraday(s, _SlEntry(10, 1, stop=100.0, rr=2.0))
     assert rr is not None
 
 
-run("stratlab: entries fill at the next bar's open with 5 bps slippage", t_sl_fill_next_open_with_slippage)
+run("stratlab: entries fill at the next bar's open with the default (2 bps) slippage", t_sl_fill_next_open_with_slippage)
 
 
 def t_sl_stop_before_target_same_bar():
@@ -7447,9 +7593,9 @@ def t_sl_stop_before_target_same_bar():
     a["h"][20] = 103.0; a["l"][20] = 97.0                        # one bar touches target and stop
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
-    assert (k, reason) == (20, "stop") and abs(px - 98.0 * 0.9995) < 1e-9, (k, reason, px)
+    assert (k, reason) == (20, "stop") and abs(px - 98.0 * (1 - _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=98.0))
-    assert (k, reason) == (20, "stop") and abs(px - 102.0 * 1.0005) < 1e-9, (k, reason, px)
+    assert (k, reason) == (20, "stop") and abs(px - 102.0 * (1 + _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     a["l"][20] = 100.0                                           # target only
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
@@ -7457,7 +7603,7 @@ def t_sl_stop_before_target_same_bar():
     a["o"][30] = 95.0; a["l"][30] = 95.0; a["h"][20] = 100.0     # gap through the stop: filled at the open
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
-    assert (k, reason) == (30, "stop") and abs(px - 95.0 * 0.9995) < 1e-9, (k, reason, px)
+    assert (k, reason) == (30, "stop") and abs(px - 95.0 * (1 - _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, trail=("pct", 1.0)))
     assert (k, reason) == (30, "stop")
 
@@ -7471,7 +7617,7 @@ def t_sl_squareoff_and_time_stop():
     a["o"][sq] = 101.0
     s = _sl_session(a, date, t, v)
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, target=120.0))
-    assert (k, reason) == (sq, "squareoff") and abs(px - 101.0 * 0.9995) < 1e-9, (k, reason, px)
+    assert (k, reason) == (sq, "squareoff") and abs(px - 101.0 * (1 - _sls.SLIPPAGE)) < 1e-9, (k, reason, px)
     assert _sls.fill_intraday(s, _SlEntry(sq - 1, 1, stop=90.0)) is None      # no entries from 15:15
     assert _sls.fill_intraday(s, _SlEntry(sq - 2, 1, stop=90.0)) is not None
     k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, time_stop=15))
@@ -7534,8 +7680,8 @@ def t_sl_positional():
         return _SlSwing(1, stop_pct=5.0, target_pct=10.0, max_hold=10) if len(d) == 2 else None
     sw = _sl_spec(buy_day1, kind="swing")
     (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999)
-    assert tr[2] == days[2] and abs(tr[5] - 100.0 * 1.0005) < 1e-6, tr        # decided on day 1, filled next open
-    assert tr[13] == "stop" and tr[6] == days[4] and abs(tr[8] - 90.0 * 0.9995) < 1e-6, tr   # gap: fill at the open
+    assert tr[2] == days[2] and abs(tr[5] - 100.0 * (1 + _sls.SLIPPAGE)) < 1e-6, tr        # decided on day 1, filled next open
+    assert tr[13] == "stop" and tr[6] == days[4] and abs(tr[8] - 90.0 * (1 - _sls.SLIPPAGE)) < 1e-6, tr   # gap: fill at the open
     qty = tr[9]
     assert tr[11] == _sl_rtc(tr[5] * qty, tr[8] * qty, "equity_cnc") and tr[11] > 150, tr      # delivery costs
     assert seen[:2] == [1, 2] and max(seen) <= 8
@@ -7729,6 +7875,7 @@ def t_sl_catalogue_first_batch():
                            25000 * np.exp(np.cumsum(rng.normal(0, 0.0004, len(sd.c)))), sd.v * 0)
     specs = [sp for sp in _SL_REG.values() if sp.horizon == "intraday"]
     sessions = _sli.build_sessions(sd, idx)
+    rare = {sp.id for sp in specs if sp.family == "candlestick"}   # textbook patterns may not occur in 30 days
     traded = 0
     for sp in specs:
         n = 0
@@ -7740,8 +7887,8 @@ def t_sl_catalogue_first_batch():
                 assert x[4] < "15:15" and x[7] <= "15:15" and x[4] <= x[7], (sp.id, x)
             bad = _sls.audit_lookahead(sp, s, cuts=(20, 46, 75, 110, 170, 226, 290, 330))
             assert bad is None, f"{sp.id}: {bad}"
-        traded += n > 0
-    assert traded >= len(specs) - 3, traded                      # nearly every strategy trades on a random walk
+        traded += n > 0 and sp.id not in rare
+    assert traded >= len(specs) - len(rare) - 3, traded                      # nearly every strategy trades on a random walk
     out = _sls.run_symbol("", "RW", list(_SL_REG.values()), 0, 99999999, sd=sd, index=idx)
     assert all(r["error"] is None and r["lookahead"] is None for r in out.values()), \
         {k: (r["error"], r["lookahead"]) for k, r in out.items() if r["error"] or r["lookahead"]}
@@ -7782,6 +7929,1267 @@ def t_sl_cli_end_to_end():
 
 
 run("stratlab: CLI end to end (results.csv, summary.txt, trade CSVs without FINAL trades)", t_sl_cli_end_to_end)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# STRATLAB — candlestick patterns (stratlab/candles.py, catalog/candlestick.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("STRATLAB: candlestick patterns")
+
+from stratlab import candles as _cdl
+from stratlab.catalog import candlestick as _cdlcat
+
+# 12 ordinary candles (alternating white / black, body 1, range 2) so avgB = 1 and avgR = 2 before a pattern
+_CS_BASE = [(100.0, 101.5, 99.5, 101.0) if k % 2 == 0 else (101.0, 101.5, 99.5, 100.0) for k in range(12)]
+
+
+def _cs(*rows):
+    """OHLC arrays: the 12 ordinary candles followed by `rows` (each (o, h, l, c))."""
+    a = np.array(_CS_BASE + list(rows), float)
+    return a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+
+
+def _cs_hit(fn, *rows) -> bool:
+    return bool(fn(*_cs(*rows))[-1])
+
+
+def t_cs_single_candle_detectors():
+    D = _cdl
+    hammer = (100.5, 101.0, 98.5, 101.0)            # B .5, lower shadow 2.0, no upper shadow
+    assert _cs_hit(D.hammer, hammer) and _cs_hit(D.hanging_man, hammer)
+    assert not _cs_hit(D.hammer, (100.5, 101.6, 98.5, 101.0))      # upper shadow .6 > 10 % of range
+    assert not _cs_hit(D.hammer, (100.5, 101.0, 99.6, 101.0))      # lower shadow .9 < 2 x body
+    assert not _cs_hit(D.hammer, (100.95, 101.0, 98.5, 101.0))     # body .05: a doji, not a hammer
+    assert not _cs_hit(D.hammer, (100.0, 100.1, 99.85, 100.1))     # range .25 < .5 x average range
+    inv = (99.5, 102.0, 99.5, 100.0)                # B .5, upper shadow 2.0, no lower shadow
+    assert _cs_hit(D.inverted_hammer, inv) and _cs_hit(D.shooting_star, inv)
+    assert not _cs_hit(D.inverted_hammer, (99.5, 102.0, 99.0, 100.0)) and not _cs_hit(D.shooting_star, hammer)
+    assert _cs_hit(D.bullish_marubozu, (99.0, 101.55, 99.0, 101.5))
+    assert not _cs_hit(D.bullish_marubozu, (99.0, 102.0, 99.0, 101.5))            # upper shadow .5
+    assert not _cs_hit(D.bullish_marubozu, (100.0, 100.8, 100.0, 100.8))           # body .8 not long
+    assert _cs_hit(D.bearish_marubozu, (101.5, 101.5, 98.95, 99.0))
+    assert not _cs_hit(D.bearish_marubozu, (99.0, 101.55, 99.0, 101.5))
+    assert _cs_hit(D.doji, (100.0, 101.0, 99.0, 100.05)) and not _cs_hit(D.doji, (100.0, 101.0, 99.0, 100.5))
+    assert _cs_hit(D.dragonfly_doji, (101.0, 101.0, 99.0, 101.0))
+    assert not _cs_hit(D.dragonfly_doji, (101.0, 101.5, 99.0, 101.0))              # upper shadow .5 of 2.5
+    assert _cs_hit(D.gravestone_doji, (99.0, 101.0, 99.0, 99.0))
+    assert not _cs_hit(D.gravestone_doji, (101.0, 101.0, 99.0, 101.0))
+    assert _cs_hit(D.long_legged_doji, (100.0, 101.0, 99.0, 100.0))
+    assert not _cs_hit(D.long_legged_doji, (101.0, 101.0, 99.0, 101.0))            # dragonfly, not long-legged
+    assert _cs_hit(D.spinning_top, (100.0, 101.5, 99.0, 100.5))
+    assert not _cs_hit(D.spinning_top, hammer)
+    assert "doji" in _cdl.CONTEXT_ONLY and "spinning_top" in _cdl.CONTEXT_ONLY
+    assert not any(k in _cdl.PATTERNS for k in ("doji", "spinning_top"))
+
+
+run("candles: single-candle detectors on textbook examples (positive and negative)", t_cs_single_candle_detectors)
+
+
+def t_cs_two_candle_detectors():
+    D = _cdl
+    black, white = (101.0, 101.5, 99.5, 100.0), (100.0, 101.5, 99.5, 101.0)
+    assert _cs_hit(D.bullish_engulfing, black, (99.9, 101.3, 99.8, 101.2))
+    assert not _cs_hit(D.bullish_engulfing, black, (100.2, 101.0, 100.1, 100.8))      # inside, not engulfing
+    assert not _cs_hit(D.bullish_engulfing, white, (99.9, 101.3, 99.8, 101.2))        # first candle not black
+    assert _cs_hit(D.bearish_engulfing, white, (101.1, 101.2, 99.7, 99.8))
+    assert not _cs_hit(D.bearish_engulfing, white, (100.8, 100.9, 100.1, 100.2))
+    long_black, long_white = (102.0, 102.1, 99.9, 100.0), (100.0, 102.1, 99.9, 102.0)
+    assert _cs_hit(D.piercing_line, long_black, (99.8, 101.4, 99.7, 101.3))
+    assert not _cs_hit(D.piercing_line, long_black, (100.1, 101.4, 100.0, 101.3))     # did not open below the low
+    assert not _cs_hit(D.piercing_line, long_black, (99.8, 100.9, 99.7, 100.8))       # closed below the midpoint
+    assert not _cs_hit(D.piercing_line, long_black, (99.8, 102.3, 99.7, 102.2))       # above the open: engulfing
+    assert _cs_hit(D.dark_cloud_cover, long_white, (102.2, 102.3, 100.6, 100.7))
+    assert not _cs_hit(D.dark_cloud_cover, long_white, (101.9, 102.0, 100.6, 100.7))  # did not open above the high
+    assert not _cs_hit(D.dark_cloud_cover, long_white, (102.2, 102.3, 99.7, 99.8))
+    assert _cs_hit(D.bullish_harami, (102.0, 102.1, 98.9, 99.0), (100.0, 100.6, 99.9, 100.5))
+    assert not _cs_hit(D.bullish_harami, (102.0, 102.1, 98.9, 99.0), (98.5, 99.6, 98.4, 99.5))   # body outside
+    assert not _cs_hit(D.bullish_harami, (100.0, 101.5, 99.5, 100.5), (100.2, 100.4, 100.1, 100.3))  # 1st not black
+    assert _cs_hit(D.bearish_harami, (99.0, 102.1, 98.9, 102.0), (101.0, 101.1, 100.4, 100.5))
+    assert not _cs_hit(D.bearish_harami, (99.0, 102.1, 98.9, 102.0), (101.0, 102.6, 100.4, 102.5))
+    assert _cs_hit(D.tweezer_bottom, black, (100.0, 101.5, 99.5, 101.0))
+    assert not _cs_hit(D.tweezer_bottom, black, (100.0, 101.5, 99.2, 101.0))          # lows .3 apart
+    assert _cs_hit(D.tweezer_top, white, (101.0, 101.5, 99.5, 100.0))
+    assert not _cs_hit(D.tweezer_top, white, (101.0, 101.9, 99.5, 100.0))
+    assert _cs_hit(D.inside_bar, (100.0, 102.0, 98.0, 101.0), (100.5, 101.0, 99.0, 100.0))
+    assert not _cs_hit(D.inside_bar, (100.0, 102.0, 98.0, 101.0), (100.5, 102.0, 99.0, 100.0))  # equal high
+    assert _cs_hit(D.outside_bar, (100.0, 101.0, 99.0, 100.5), (100.5, 101.5, 98.5, 99.0))
+    assert not _cs_hit(D.outside_bar, (100.0, 101.0, 99.0, 100.5), (100.5, 101.5, 99.2, 99.5))
+
+
+run("candles: two-candle detectors on textbook examples (positive and negative)", t_cs_two_candle_detectors)
+
+
+def t_cs_three_candle_detectors():
+    D = _cdl
+    ms = [(102.0, 102.1, 99.4, 99.5), (99.2, 99.3, 98.8, 99.0)]
+    assert _cs_hit(D.morning_star, *ms, (99.3, 101.3, 99.2, 101.2))
+    assert not _cs_hit(D.morning_star, *ms, (99.3, 100.6, 99.2, 100.5))              # below candle 1's midpoint
+    assert not _cs_hit(D.morning_star, ms[0], (99.6, 99.8, 99.3, 99.7), (99.3, 101.3, 99.2, 101.2))  # no gap
+    es = [(99.5, 102.1, 99.4, 102.0), (102.3, 102.7, 102.2, 102.5)]
+    assert _cs_hit(D.evening_star, *es, (102.2, 102.3, 100.4, 100.5))
+    assert not _cs_hit(D.evening_star, *es, (102.2, 102.3, 100.9, 101.0))
+    sold = [(100.0, 101.6, 99.9, 101.5), (101.0, 102.6, 100.9, 102.5), (102.0, 103.6, 101.9, 103.5)]
+    assert _cs_hit(D.three_white_soldiers, *sold)
+    assert not _cs_hit(D.three_white_soldiers, *sold[:2], (103.0, 104.6, 102.9, 104.5))   # opened above body 2
+    assert not _cs_hit(D.three_white_soldiers, *sold[:2], (102.0, 104.5, 101.9, 103.5))   # far from its high
+    crows = [(101.0, 101.1, 99.4, 99.5), (100.0, 100.1, 98.4, 98.5), (99.0, 99.1, 97.4, 97.5)]
+    assert _cs_hit(D.three_black_crows, *crows)
+    assert not _cs_hit(D.three_black_crows, *crows[:2], (98.0, 98.1, 96.4, 96.5))         # opened below body 2
+    har_up = [(102.0, 102.1, 98.9, 99.0), (100.0, 100.6, 99.9, 100.5)]
+    assert _cs_hit(D.three_inside_up, *har_up, (100.5, 102.6, 100.4, 102.5))
+    assert not _cs_hit(D.three_inside_up, *har_up, (100.5, 101.6, 100.4, 101.5))          # not above candle 1's open
+    har_dn = [(99.0, 102.1, 98.9, 102.0), (101.0, 101.1, 100.4, 100.5)]
+    assert _cs_hit(D.three_inside_down, *har_dn, (100.5, 100.6, 98.4, 98.5))
+    assert not _cs_hit(D.three_inside_down, *har_dn, (100.5, 100.6, 99.4, 99.5))
+    eng_up = [(101.0, 101.5, 99.5, 100.0), (99.9, 101.3, 99.8, 101.2)]
+    assert _cs_hit(D.three_outside_up, *eng_up, (101.2, 101.9, 101.1, 101.8))
+    assert not _cs_hit(D.three_outside_up, *eng_up, (101.2, 101.3, 100.9, 101.0))         # lower close
+    eng_dn = [(100.0, 101.5, 99.5, 101.0), (101.1, 101.2, 99.7, 99.8)]
+    assert _cs_hit(D.three_outside_down, *eng_dn, (99.8, 99.9, 99.2, 99.3))
+    assert not _cs_hit(D.three_outside_down, *eng_dn, (99.8, 100.2, 99.7, 100.1))
+
+
+run("candles: three-candle detectors on textbook examples (positive and negative)", t_cs_three_candle_detectors)
+
+
+def _cs_trend(direction: int, n: int = 30):
+    """n candles trending by 0.5 per candle (body .4, range .8)."""
+    rows = []
+    for k in range(n):
+        m = 100.0 + direction * 0.5 * k
+        rows.append((m - direction * 0.2, m + 0.4, m - 0.4, m + direction * 0.2))
+    return rows
+
+
+def t_cs_trend_context_once_for_all():
+    down, up = _cs_trend(-1), _cs_trend(1)
+    last_dn, last_up = down[-1][3], up[-1][3]
+    ham_dn = (last_dn - 0.3, last_dn + 0.2, last_dn - 2.0, last_dn + 0.2)       # hammer after the decline
+    ham_up = (last_up - 0.3, last_up + 0.2, last_up - 2.0, last_up + 0.2)       # same shape after the rise
+    for rows, want_long, want_short in ((down + [ham_dn], True, False), (up + [ham_up], False, True)):
+        o, h, l, c = (np.array(x) for x in zip(*rows))
+        sig = _cdl.signals(o, h, l, c, ["hammer", "hanging_man", "inside_bar", "outside_bar"])
+        assert bool(sig["hammer"][0][-1]) is want_long, ("hammer", want_long)
+        assert bool(sig["hanging_man"][1][-1]) is want_short, ("hanging man", want_short)
+        assert not sig["hammer"][1].any() and not sig["hanging_man"][0].any()
+    o, h, l, c = (np.array(x) for x in zip(*_cs_trend(-1)))
+    dn, upm = _cdl.trend_context(c)
+    assert dn[-1] and not upm[-1] and not dn[:_cdl.EMA_N].any()
+    assert not _cdl.trend_context(c[:_cdl.EMA_N])[0].any()                       # too short for EMA20
+    # the context is the candle BEFORE the pattern's first candle
+    assert _cdl.PATTERNS["morning_star"].n == 3 and _cdl.PATTERNS["hammer"].n == 1
+    # every traded pattern has a direction rule; reversals need the opposite trend
+    for name, p in _cdl.PATTERNS.items():
+        if p.context in ("down", "up"):
+            assert (p.side > 0) == (p.context == "down"), name
+
+
+run("candles: one prior-trend rule (EMA20 + 5-candle close) gates every reversal pattern", t_cs_trend_context_once_for_all)
+
+
+def t_cs_resample_alignment():
+    n = 375
+    t = 555 + np.arange(n)
+    o = 100.0 + np.arange(n) * 0.01
+    c = o + 0.005
+    h, l, v = c + 0.02, o - 0.02, np.ones(n)
+    for tf, count, starts in ((5, 75, [555, 560, 565]), (15, 25, [555, 570, 585]), (60, 7, [555, 615, 675])):
+        cd = _cdl.resample(t, o, h, l, c, v, tf)
+        assert len(cd.o) == count and list(cd.start[:3]) == starts, (tf, len(cd.o), cd.start[:3])
+        assert (cd.end - cd.start <= tf).all() and cd.sig[0] == tf - 1 and (cd.sig == cd.last).all()
+    cd = _cdl.resample(t, o, h, l, c, v, 60)
+    assert list(cd.start) == [555, 615, 675, 735, 795, 855, 915] and list(cd.end)[-2:] == [915, 930]
+    assert cd.last[-1] - cd.first[-1] + 1 == 15                                  # short last candle 15:15-15:29
+    cd = _cdl.resample(t, o, h, l, c, v, 15)
+    k = 1                                                                         # 09:30-09:45 = bars 15..29
+    assert cd.o[k] == o[15] and cd.c[k] == c[29] and cd.h[k] == h[15:30].max() and cd.l[k] == l[15:30].min()
+    assert cd.v[k] == 15 and _cdl.SESSION_END == 930
+    # a candle is complete only when its last minute (end-1) is known
+    part = _cdl.resample(t[:29], o[:29], h[:29], l[:29], c[:29], v[:29], 15)   # bars up to 09:43
+    assert len(part.o) == 1 and part.end[-1] == 570
+    full = _cdl.resample(t[:30], o[:30], h[:30], l[:30], c[:30], v[:30], 15)   # bar 09:44 known
+    assert len(full.o) == 2 and full.sig[-1] == 29 and t[29] == 584
+    raw = _cdl.resample(t[:29], o[:29], h[:29], l[:29], c[:29], v[:29], 15, complete_only=False)
+    assert len(raw.o) == 2 and raw.sig[-1] == -1
+    # the 09:44 bar is missing: the candle is known complete only at the close of the 09:45 bar
+    keep = t != 584
+    gap = _cdl.resample(t[keep], o[keep], h[keep], l[keep], c[keep], v[keep], 15)
+    assert t[keep][gap.sig[1]] == 585 and gap.last[1] == 28
+    g29 = _cdl.resample(t[keep][:29], o[keep][:29], h[keep][:29], l[keep][:29], c[keep][:29], v[keep][:29], 15)
+    assert len(g29.o) == 1                                                       # 09:43 known, 09:44 missing: not yet
+
+
+run("candles: 5m / 15m / 60m candles aligned at 09:15, short 15:15 candle, complete only at minute end-1", t_cs_resample_alignment)
+
+
+def _cs_hammer_day(shift_after: float = 1.0, drop_944: bool = False):
+    """Day 1: a steady decline (120 -> 100). Day 2: the decline continues to 09:29, the 09:30-09:44 candle is a
+    hammer (open 99.5, low 98.0, close 99.9 at 09:44), then flat. `shift_after` rescales every bar from 09:45."""
+    n = 375
+    p1 = np.linspace(120.0, 100.0, n + 1)
+    o1, c1 = p1[:-1], p1[1:]
+    p2 = np.concatenate((np.linspace(100.0, 99.5, 16), np.full(n - 15, 99.9)))
+    o2, c2 = p2[:-1].copy(), p2[1:].copy()
+    o2[15:30] = 99.5; c2[15:30] = 99.5
+    o2[20], c2[20] = 99.5, 98.2                                              # the dip at 09:35
+    o2[21], c2[21] = 98.2, 99.5
+    o2[29], c2[28], c2[29] = 99.9, 99.9, 99.9                                # the candle closes at 99.9
+    o = np.concatenate((o1, o2)); c = np.concatenate((c1, c2))
+    h = np.maximum(o, c) + 0.01; l = np.minimum(o, c) - 0.01
+    a2 = n
+    l[a2 + 20] = 98.0; h[a2 + 29] = 99.95
+    for k in range(a2 + 15, a2 + 30):                                         # keep the candle's high at 99.95
+        h[k] = min(h[k], 99.95)
+    date = np.repeat(np.array([20260105, 20260106], np.int32), n)
+    t = np.tile(555 + np.arange(n), 2).astype(np.int16)
+    after = (date == 20260106) & (t >= 585)
+    for arr in (o, h, l, c):
+        arr[after] *= shift_after
+    keep = np.ones(len(t), bool)
+    if drop_944:
+        keep &= ~((date == 20260106) & (t == 584))
+    return _sld.from_arrays("HAM", date[keep], t[keep], o[keep], h[keep], l[keep], c[keep], np.full(keep.sum(), 1000.0))
+
+
+def t_cs_pattern_complete_before_signal():
+    sp = _SL_REG["cs_hammer_15m"]
+    s = _sli.build_sessions(_cs_hammer_day())[1]
+    cs = _cdl.session_candles(s, 15)
+    assert cs.start[1] == 570 and bool(cs.sigs["hammer"][0][1]), "the 09:30-09:45 candle should be a hammer"
+    ents = sp.fn(s, sp.p)
+    assert len(ents) == 1 and ents[0].side == 1 and int(s.t[ents[0].i]) == 584, [(e.i, e.side) for e in ents]
+    e = ents[0]
+    assert e.stop < 98.0 and abs(e.stop - min(98.0 - 0.05, 99.9 - 0.3 * cs.atr[1])) < 1e-9 and e.rr == 2.0
+    trades, _ = _sls.sim_session(sp, s)
+    assert trades and trades[0][4] == "09:45" and abs(trades[0][5] - float(s.o[ents[0].i + 1]) * (1 + _sls.SLIPPAGE)) < 1e-3
+    # at the close of 09:43 the candle is not finished: no signal yet; at 09:44 it is
+    assert sp.fn(s.view(int(np.searchsorted(s.t, 584))), sp.p) == []
+    assert len(sp.fn(s.view(int(np.searchsorted(s.t, 584)) + 1), sp.p)) == 1
+    # changing every bar after the pattern candle changes neither the signal nor its fill time
+    s2 = _sli.build_sessions(_cs_hammer_day(shift_after=1.02))[1]
+    e2 = sp.fn(s2, sp.p)
+    assert [(x.i, x.side, round(x.stop, 9), x.rr) for x in e2] == [(e.i, e.side, round(e.stop, 9), e.rr)]
+    tr2, _ = _sls.sim_session(sp, s2)
+    assert tr2 and tr2[0][4] == "09:45"
+    assert _sls.audit_lookahead(sp, s, cuts=(20, 29, 30, 31, 60, 200)) is None
+    # with the 09:44 bar missing the candle is known complete at the close of 09:45: fill at 09:46
+    s3 = _sli.build_sessions(_cs_hammer_day(drop_944=True))[1]
+    e3 = sp.fn(s3, sp.p)
+    assert len(e3) == 1 and int(s3.t[e3[0].i]) == 585
+    tr3, _ = _sls.sim_session(sp, s3)
+    assert tr3 and tr3[0][4] == "09:46"
+    # confirmation variant: the next candle (09:45-10:00) closes above 99.9 only when the rest of the day is higher
+    spc = _SL_REG["cs_hammer_15m_conf"]
+    assert spc.fn(s, spc.p) == []                                            # flat at 99.9: not confirmed
+    ec = spc.fn(s2, spc.p)
+    cs2 = _cdl.session_candles(s2, 15)
+    assert len(ec) == 1 and int(s2.t[ec[0].i]) == 599                         # after the 09:45-10:00 candle
+    assert abs(ec[0].stop - min(98.0 - 0.05, float(cs2.c[2]) - 0.3 * float(cs2.atr[2]))) < 1e-9
+
+
+run("candles: pattern candle must be complete (15m candle to 09:45 fills at 09:45 open); later bars change nothing", t_cs_pattern_complete_before_signal)
+
+
+def t_cs_catalogue_and_windows():
+    ids = [i for i, sp in _SL_REG.items() if sp.family == "candlestick"]
+    assert len(ids) == _cdlcat.N_REGISTERED == 152 == len(_cdlcat.IDS) == len(set(_cdlcat.IDS))
+    n_conf = sum(i.endswith("_conf") for i in ids)
+    assert n_conf == 4 * len(_cdlcat.CONFIRM) == 44
+    for pat in _cdl.PATTERNS:
+        for tf in ("5m", "15m", "60m", "d"):
+            assert f"cs_{pat}_{tf}" in _SL_REG, (pat, tf)
+    for i in ids:
+        sp = _SL_REG[i]
+        if i.split("_")[-1] in ("d",) or i.endswith("_d_conf"):
+            side = _cdl.PATTERNS[sp.params["pattern"]].side
+            assert sp.kind == ("swing" if side > 0 else "futures") and sp.horizon == "positional", i
+        else:
+            assert sp.kind == "intraday" and sp.max_per_day == 1, i
+    # windows: 5m / 15m decisions on candles ending 09:30-14:30; 60m by 14:15; stops on the losing side
+    sd = _sl_walk(n_days=8, seed=5)
+    sessions = _sli.build_sessions(sd)
+    seen = {5: 0, 15: 0, 60: 0}
+    for s in sessions[1:]:
+        for pat in _cdl.PATTERNS:
+            for tf in (5, 15, 60):
+                for conf in (False, True):
+                    for e in _cdlcat.candle_entries(s, pat, tf, conf):
+                        seen[tf] += 1
+                        tt = int(s.t[e.i])
+                        assert (569 <= tt <= 869) if tf != 60 else (614 <= tt <= 854), (pat, tf, tt)
+                        assert e.side * (float(s.c[e.i]) - e.stop) > 0, (pat, tf)
+    assert seen[5] > 0 and seen[15] > 0, seen
+
+
+run("candles: 152 strategies cs_<pattern>_<tf>[_conf], right kinds, entry windows and stop sides", t_cs_catalogue_and_windows)
+
+
+def t_cs_daily_rr_and_no_lookahead():
+    # Swing(rr=2): target = fill + 2 x (fill - stop), as for intraday entries
+    days = [20260105 + k for k in range(5)]
+    date, t, a, v = _sl_flat(days=days)
+    m = date == days[3]
+    a["h"][m] = 120.0
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    calls = []
+
+    def fn(d, p):
+        calls.append(len(d))
+        return _SlSwing(1, stop=95.0, rr=2.0, max_hold=3) if len(d) == 2 else None
+    tr, _ = _sls.sim_positional(_sl_spec(fn, kind="swing"), sd, 0, 99999999)
+    assert tr and tr[0][-1] == "target", tr
+    fill = 100.0 * (1 + _sls.SLIPPAGE)
+    assert abs(tr[0][8] - (fill + 2 * (fill - 95.0))) < 1e-9 and tr[0][2] == days[2]
+    # daily candlestick signal: a hammer on the decision day, unchanged by anything after it
+    o, h, l, c = (np.array(x) for x in zip(*_cs_trend(-1, 40)))
+    last = c[-1]
+    ham = (last - 0.3, last + 0.2, last - 2.0, last + 0.2)
+
+    cols = [np.append(x, y) for x, y in zip((o, h, l, c), ham)]
+    d = _sls.DailyView(np.arange(len(cols[0])), *cols, np.ones(len(cols[0])))
+    d.symbol, d.nifty, d.vix = "X", None, None
+    sw = _cdlcat.daily_signal(d, "hammer", False, (1,))
+    assert sw is not None and sw.side == 1 and sw.rr == 2.0 and sw.max_hold == 10 and sw.stop <= ham[2] - 0.05
+    assert _cdlcat.daily_signal(d, "hanging_man", False, (-1,)) is None                  # wrong trend
+    assert _cdlcat.daily_signal(d, "hammer", True, (1,)) is None                         # no confirmation day yet
+    sp = _SL_REG["cs_hammer_d"]
+    assert sp.kind == "swing" and isinstance(sp.fn(d, sp.p), _SlSwing)
+
+
+run("candles: daily patterns: Swing rr=2 target from the fill, hammer signal on the decision day only", t_cs_daily_rr_and_no_lookahead)
+
+
+def _cs_perturb(sd, mask, seed):
+    """A copy of sd whose bars under `mask` are randomly moved (OHLC kept consistent, volume tripled)."""
+    r = np.random.default_rng(seed)
+    o, h, l, c = (np.asarray(x, float).copy() for x in (sd.o, sd.h, sd.l, sd.c))
+    k = int(mask.sum())
+    f = np.exp(r.normal(0, 0.004, k))
+    o[mask] *= f
+    c[mask] *= f * np.exp(r.normal(0, 0.004, k))
+    h[mask] = np.maximum(np.maximum(o[mask], c[mask]), h[mask] * f * (1 + np.abs(r.normal(0, 0.002, k))))
+    l[mask] = np.minimum(np.minimum(o[mask], c[mask]), l[mask] * f * (1 - np.abs(r.normal(0, 0.002, k))))
+    return _sld.from_arrays(sd.symbol, sd.date, sd.t, o, h, l, c, np.asarray(sd.v, float) * np.where(mask, 3.0, 1.0))
+
+
+_CS_PERTURB_PATTERNS = ("outside_bar", "inside_bar", "bull_engulfing", "bear_engulfing", "tweezer_bottom",
+                        "tweezer_top", "bull_marubozu", "bear_marubozu")
+
+
+def t_cs_future_bars_change_nothing_intraday():
+    """Perturb every bar from a cut minute onward (and every later session): signals decided before the cut and
+    fills before the cut must not change, on 5m, 15m and 60m; every fill is at or after its candle's end."""
+    sd = _sl_walk(n_days=24, seed=11, symbol="PERT")
+    sessions = _sli.build_sessions(sd)
+    compared = {}
+    for k in (6, 11, 17, 22):
+        s = sessions[k]
+        for T in (600, 690, 780, 870):                       # 10:00, 11:30, 13:00, 14:30
+            sd2 = _cs_perturb(sd, (sd.date > s.date) | ((sd.date == s.date) & (sd.t >= T)), k * 1000 + T)
+            s2 = _sli.build_sessions(sd2)[k]
+            cut = int(np.searchsorted(s.t, T))               # bars 0..cut-1 are identical in s and s2
+            assert np.array_equal(s.c[:cut], s2.c[:cut]) and not np.array_equal(s.c[cut:], s2.c[cut:])
+            for tf in ("5m", "15m", "60m"):
+                for pat in _CS_PERTURB_PATTERNS:
+                    sp = _SL_REG[f"cs_{pat}_{tf}"]
+                    canon = lambda ents: sorted((int(e.i), int(e.side), round(float(e.stop), 9), e.rr)
+                                                for e in ents if e.i <= cut - 1)
+                    a, b = canon(sp.fn(s, sp.p)), canon(sp.fn(s2, sp.p))
+                    assert a == b, (sp.id, s.date, T, a, b)
+                    compared[sp.id] = compared.get(sp.id, 0) + len(a)
+                    cs = _cdl.session_candles(s, sp.p.tf)
+                    for e in sp.fn(s, sp.p):                 # the fill is never before the candle has closed
+                        d = int(np.flatnonzero(cs.sig == e.i)[0])
+                        assert e.i + 1 >= len(s.t) or int(s.t[e.i + 1]) >= int(cs.end[d]), (sp.id, e.i)
+                    ta, tb = _sls.sim_session(sp, s)[0], _sls.sim_session(sp, s2)[0]
+                    before = lambda tr: [x[3:6] for x in tr if int(x[4][:2]) * 60 + int(x[4][3:]) < T]
+                    assert before(ta) == before(tb), (sp.id, s.date, T, before(ta), before(tb))
+    for tf in ("5m", "15m", "60m"):
+        hit = [p for p in _CS_PERTURB_PATTERNS if compared.get(f"cs_{p}_{tf}", 0) > 0]
+        assert len(hit) >= 3, (tf, compared)                  # at least 3 strategies per timeframe really compared
+    # signal-anchored: for EVERY intraday candlestick strategy, move every bar after each signal bar i; the signal
+    # (bar, side, stop) must survive. Moving every bar after the fill bar i+1 must leave the fill (time, price)
+    # unchanged.
+    perturbed = {}
+
+    def moved(k, s, first_bar):
+        if (k, first_bar) not in perturbed:
+            T = int(s.t[first_bar]) if first_bar < len(s.t) else 930
+            sd2 = _cs_perturb(sd, (sd.date > s.date) | ((sd.date == s.date) & (sd.t >= T)), k * 7919 + first_bar)
+            perturbed[(k, first_bar)] = _sli.build_sessions(sd2)[k]
+        return perturbed[(k, first_bar)]
+    survived = {"5m": set(), "15m": set(), "60m": set()}
+    for k in (6, 13, 20):
+        s = sessions[k]
+        for sp in (x for x in _SL_REG.values() if x.family == "candlestick" and x.horizon == "intraday"):
+            for e in sorted(sp.fn(s, sp.p), key=lambda x: x.i)[:2]:
+                s2 = moved(k, s, e.i + 1)
+                same = lambda ents: sorted((int(x.i), int(x.side), round(float(x.stop), 9), x.rr)
+                                           for x in ents if x.i <= e.i)
+                assert same(sp.fn(s, sp.p)) == same(sp.fn(s2, sp.p)), (sp.id, s.date, e.i)
+                ta = _sls.sim_session(sp, s)[0]
+                if ta and ta[0][4] == _sls._hm(s.t[e.i + 1]):
+                    tb = _sls.sim_session(sp, moved(k, s, e.i + 2))[0]
+                    assert tb and tb[0][3:6] == ta[0][3:6], (sp.id, s.date, ta[:1], tb[:1])
+                survived[f"{sp.p.tf}m"].add(sp.id)
+    assert all(len(v) >= 3 for v in survived.values()), {k: len(v) for k, v in survived.items()}
+
+
+run("candles: perturbing future bars changes no earlier 5m/15m/60m signal or fill; fills at/after candle end",
+    t_cs_future_bars_change_nothing_intraday)
+
+
+def t_cs_future_days_change_nothing_daily():
+    """Daily patterns: perturb every day after D; decisions up to D and trades entered up to D are unchanged.
+    Entries are filled at the next session's open; exits are never before the entry day."""
+    sd = _sl_walk(n_days=90, seed=12, symbol="PERTD")
+    dd = sd.daily()
+    ids = [f"cs_{p}_d" for p in _CS_PERTURB_PATTERNS]
+    seen = {i: 0 for i in ids}
+
+    def view(dct, upto):
+        v = _sls.DailyView(dct["date"][:upto + 1], *(dct[x][:upto + 1] for x in "ohlcv"))
+        v.symbol, v.nifty, v.vix = "PERTD", None, None
+        return v
+    for j in (40, 55, 70, 82):
+        D = int(sd.days[j])
+        sd2 = _cs_perturb(sd, sd.date > D, j)
+        dd2 = sd2.daily()
+        for i in ids:
+            sp = _SL_REG[i]
+            for day in range(25, j + 1):
+                a, b = sp.fn(view(dd, day), sp.p), sp.fn(view(dd2, day), sp.p)
+                assert (a is None) == (b is None) and (a is None or (a.side, round(a.stop, 9), a.rr) ==
+                                                       (b.side, round(b.stop, 9), b.rr)), (i, day)
+                seen[i] += a is not None
+            ta, tb = _sls.sim_positional(sp, sd, 0, 99999999)[0], _sls.sim_positional(sp, sd2, 0, 99999999)[0]
+            assert [x[2:6] for x in ta if x[2] <= D] == [x[2:6] for x in tb if x[2] <= D], (i, D)
+            for x in ta:
+                e_day = int(np.searchsorted(dd["date"], x[2]))
+                sig = sp.fn(view(dd, e_day - 1), sp.p)       # the signal came from the previous session
+                assert sig is not None and sig.side == x[3], (i, x)
+                assert abs(x[5] - dd["o"][e_day] * (1 + x[3] * _sls.SLIPPAGE)) < 1e-3 and x[4] == "09:15", (i, x)   # trade rows round to 4 dp
+                assert x[6] >= x[2], (i, x)
+    assert sum(v > 0 for v in seen.values()) >= 3, ("seen", seen)
+
+
+run("candles: daily patterns: perturbing later days changes no decision or entry; fill at next session open",
+    t_cs_future_days_change_nothing_daily)
+
+
+def t_cs_costs_per_lab():
+    """Candlestick trades pay the lab's costs: MIS for intraday, CNC for swing (daily bullish), futures for daily
+    shorts / two-sided patterns; net = gross - cost."""
+    kinds = {"intraday": "equity_mis", "swing": "equity_cnc", "futures": "future"}
+    sd = _sl_walk(n_days=60, seed=13, symbol="COST")
+    ids = ["cs_outside_bar_5m", "cs_bull_engulfing_15m", "cs_outside_bar_60m", "cs_bull_engulfing_d",
+           "cs_bear_engulfing_d", "cs_outside_bar_d"]
+    want = {"cs_bull_engulfing_d": "equity_cnc", "cs_bear_engulfing_d": "future", "cs_outside_bar_d": "future"}
+    got = set()
+    for i in ids:
+        sp = _SL_REG[i]
+        assert sp.cost_kind == kinds[sp.kind] == want.get(i, "equity_mis"), i
+        res = _sls.run_symbol("", "COST", [sp], 0, 99999999, sd=sd, index=None, audit=False)[i]
+        assert res["error"] is None, res["error"]
+        for x in res["trades"]:
+            side, fill, px, qty = x[3], x[5], x[8], x[9]
+            bv, sv = (fill * qty, px * qty) if side > 0 else (px * qty, fill * qty)
+            assert abs(x[11] - _sl_rtc(bv, sv, sp.cost_kind)) < 0.011 and abs(x[12] - (x[10] - x[11])) < 0.02, x
+            got.add(sp.cost_kind)
+    assert got == {"equity_mis", "equity_cnc", "future"}, got
+    # magnitudes on Rs 1 lakh: delivery costs the most, then futures, then intraday
+    m, d, f = (_sl_rtc(1e5, 1e5, k) for k in ("equity_mis", "equity_cnc", "future"))
+    # 2026 rates: futures STT 0.05% on the sell side makes a ₹1L futures round trip (~₹104) dearer than MIS (~₹83);
+    # delivery ~₹238 incl. the ₹15.34 DP charge
+    assert 50 < m < 100 and 200 < d < 260 and m < f < 2 * m, (m, d, f)
+
+
+run("candles: trades pay MIS (intraday), CNC (daily long) and futures (daily short) costs per the lab", t_cs_costs_per_lab)
+
+
+def t_cs_float_ties_resolve_the_same_way():
+    """B == avgB up to floating-point noise: neither long nor short, whatever history went into the cumsum.
+    Same for the ratio tests (e.g. U == 10 % of R): a tie satisfies '<=' every time."""
+    # ten candles with body 1.65 and a last candle with body 1.65, at price levels that make the sums inexact
+    tail = [(2162.10 + 0.05 * k, 2164.0 + 0.05 * k, 2161.0 + 0.05 * k, 2163.75 + 0.05 * k) for k in range(11)]
+    rng = np.random.default_rng(3)
+    seen, raw = set(), set()
+    for n_hist in (0, 1, 7, 37, 250, 1000, 3000):
+        hist = [(x, x + 3.3, x - 2.7, x + rng.choice([-1, 1]) * rng.integers(1, 60) * 0.05)
+                for x in 2000.0 + 0.05 * rng.integers(0, 40000, n_hist)]
+        a = np.array(hist + tail, float)
+        k = _cdl._K(a[:, 0], a[:, 1], a[:, 2], a[:, 3])
+        assert abs(k.B[-1] - k.avgB[-1]) < 1e-8, (n_hist, k.B[-1], k.avgB[-1])
+        seen.add((bool(k.long[-1]), bool(k.short[-1])))
+        raw.add((bool(k.B[-1] > k.avgB[-1]), bool(k.B[-1] < k.avgB[-1])))
+    assert seen == {(False, False)}, (seen, raw)          # raw comparisons may flip with the history; these do not
+    # a ratio tie: upper shadow exactly 10 % of the range counts as "very little" (hammer)
+    rows = _cs_trend(-1, 40)
+    last = rows[-1][3]
+    lo_, hi_ = last - 2.0, last + 0.2                     # R = 2.2 -> 10 % = 0.22
+    ham = (hi_ - 0.22 - 0.5, hi_, lo_, hi_ - 0.22)       # U = 0.22 (a tie up to float noise), B = 0.5, L = 1.48
+    o, h, l, c = (np.array(x) for x in zip(*(rows + [ham])))
+    assert bool(_cdl.hammer(o, h, l, c)[-1])
+
+
+run("candles: exact body / ratio ties resolve the same way whatever the cumsum history (tolerance EPS)",
+    t_cs_float_ties_resolve_the_same_way)
+
+
+def t_cs_confirmation_beyond_the_body():
+    """_conf: the confirmation candle must close beyond the pattern candle's REAL BODY (Nison's hanging-man rule),
+    not merely beyond its close: a close inside a white hanging man's body is no confirmation."""
+    rows = _cs_trend(1, 40)
+    last = rows[-1][3]
+    hm = (last + 0.1, last + 0.42, last - 1.5, last + 0.4)       # white hanging man: body 0.1..0.4 at the top
+
+    def view(extra):
+        cols = [np.array(x, float) for x in zip(*(rows + [hm] + extra))]
+        d = _sls.DailyView(np.arange(len(cols[0])), *cols, np.ones(len(cols[0])))
+        d.symbol, d.nifty, d.vix = "HM", None, None
+        return d
+    assert _cdlcat.daily_signal(view([]), "hanging_man", False, (-1,)) is not None
+    inside = (last + 0.4, last + 0.45, last + 0.2, last + 0.25)  # closes below the HM close but inside its body
+    below = (last + 0.4, last + 0.45, last - 0.2, last + 0.0)    # closes below the HM body (below its open)
+    assert _cdlcat.daily_signal(view([inside]), "hanging_man", True, (-1,)) is None
+    sw = _cdlcat.daily_signal(view([below]), "hanging_man", True, (-1,))
+    assert sw is not None and sw.side == -1
+    # the same helper decides intraday (candle_entries)
+    mk = lambda o, c: _cdl.SessionCandles(np.array(o), None, None, np.array(c), None, None, None, None, None, None,
+                                          None)
+    assert _cdlcat._confirmed(mk([1.0, 2.0], [1.3, 0.5]), -1, 0, 1)
+    assert not _cdlcat._confirmed(mk([1.0, 2.0], [1.3, 1.2]), -1, 0, 1)      # 1.2 is inside the body 1.0..1.3
+    assert not _cdlcat._confirmed(mk([1.3, 1.0], [1.0, 1.2]), 1, 0, 1)       # black hammer: must close above 1.3
+    assert _cdlcat._confirmed(mk([1.3, 1.0], [1.0, 1.35]), 1, 0, 1)
+
+
+run("candles: _conf needs a close beyond the pattern candle's real body (white hanging man: below its open)",
+    t_cs_confirmation_beyond_the_body)
+
+
+def t_cs_60m_history_skips_short_last_candle():
+    """60m: the short 15:15-15:30 candle of earlier sessions is not in the history used for averages / EMA / ATR:
+    moving those 15 minutes of earlier days changes no 60m measurement of a later day (it does on 15m)."""
+    sd = _sl_walk(n_days=8, seed=21, symbol="H60")
+    ho, hh, hl, hc, hs, hf = _cdl._symbol_candles(sd, 60)
+    assert np.all(np.bincount(hs) == 6), np.bincount(hs)          # 09:15 ... 14:15, no 15:15 candle
+    m = (sd.date < sd.days[-1]) & (sd.t >= 915)
+    r = np.random.default_rng(4)
+    f = np.exp(r.normal(0, 0.02, int(m.sum())))
+    o, h, l, c = (np.asarray(x, float).copy() for x in (sd.o, sd.h, sd.l, sd.c))
+    o[m] *= f
+    c[m] *= f
+    h[m] = np.maximum(np.maximum(o[m], c[m]), h[m] * f * 1.01)
+    l[m] = np.minimum(np.minimum(o[m], c[m]), l[m] * f * 0.99)
+    sd2 = _sld.from_arrays(sd.symbol, sd.date, sd.t, o, h, l, c, np.asarray(sd.v, float))
+    s1, s2 = _sli.build_sessions(sd)[-1], _sli.build_sessions(sd2)[-1]
+    a, b = _cdl.session_candles(s1, 60), _cdl.session_candles(s2, 60)
+    assert np.allclose(a.atr, b.atr, equal_nan=True)
+    assert all(np.array_equal(a.sigs[k][j], b.sigs[k][j]) for k in a.sigs for j in (0, 1))
+    a15, b15 = _cdl.session_candles(s1, 15), _cdl.session_candles(s2, 15)
+    assert not np.allclose(a15.atr, b15.atr, equal_nan=True)       # the 15m history does contain those bars
+
+
+run("candles: 60m history leaves out the short 15:15-15:30 candle of earlier sessions",
+    t_cs_60m_history_skips_short_last_candle)
+
+
+def t_cs_daily_full_history():
+    """Daily candles are measured on the whole history up to the decision day: a day's values equal those of
+    the full series at that day (no moving 150-day window), and nothing after the day is read."""
+    r = np.random.default_rng(8)
+    n = 320
+    c = 100 * np.exp(np.cumsum(r.normal(0, 0.015, n)))
+    o = np.concatenate(([100.0], c[:-1])) * np.exp(r.normal(0, 0.004, n))
+    h = np.maximum(o, c) * (1 + np.abs(r.normal(0, 0.006, n)))
+    l = np.minimum(o, c) * (1 - np.abs(r.normal(0, 0.006, n)))
+
+    def view(k):
+        d = _sls.DailyView(np.arange(k), o[:k], h[:k], l[:k], c[:k], np.ones(k))
+        d.symbol, d.nifty, d.vix = "FH", None, None
+        return d
+    full = _cdl.daily_candles(view(n))
+    for k in (40, 151, 200, 260, 319):
+        got = _cdl.daily_candles(view(k))
+        assert len(got.c) == k
+        assert np.isclose(got.atr[-1], full.atr[k - 1]), k
+        for name, (lm, sm) in got.sigs.items():
+            assert lm[-1] == full.sigs[name][0][k - 1] and sm[-1] == full.sigs[name][1][k - 1], (name, k)
+    assert len(_cdl.daily_candles(view(300), lookback=150).c) == 150      # the old window is still available
+
+
+run("candles: daily patterns use the whole history up to the decision day (no moving window)", t_cs_daily_full_history)
+
+
+def t_sl_positional_exit_stays_in_period():
+    """A positional trade entered in a period is closed by the end of that period: DISCOVERY trades never use
+    FINAL-period prices (reason period_end, at that session's close)."""
+    days = tuple(20260101 + d for d in range(10))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    for k in range(10):
+        a["c"][k * 300:(k + 1) * 300] = 100.0 + k                 # each day closes higher; no stop / target hit
+        a["h"][k * 300:(k + 1) * 300] = 100.0 + k
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sp = _sl_spec(lambda d, p: _SlSwing(1, stop_pct=50.0, max_hold=6) if len(d) == 1 else None, kind="swing",
+                  id="t_period")
+    (tr,), _ = _sls.sim_positional(sp, sd, 0, days[3])
+    assert tr[2] == days[1] and tr[6] == days[3] and tr[13] == "period_end", tr
+    assert abs(tr[8] - 103.0 * (1 - _sls.SLIPPAGE)) < 1e-6, tr
+    (tr,), _ = _sls.sim_positional(sp, sd, 0, 99999999)
+    assert tr[6] == days[6] and tr[13] == "max_hold", tr
+
+
+run("stratlab: positional exits never walk past the simulated period (DISCOVERY never uses FINAL prices)",
+    t_sl_positional_exit_stays_in_period)
+
+
+def t_sl_final_ledger_per_dataset():
+    """The FINAL ledger is keyed by dataset: a 12-month and a 3-year run of the same strategy each get their own
+    once-only FINAL (neither is a RETEST of the other), and each entry records its dataset."""
+    cal12 = list(range(20260001, 20260251))
+    cal3y = list(range(20240001, 20240751))
+    books = {"12m": _sl_book("good", cal12), "3y": _sl_book("good", cal3y)}
+    spec = _sl_spec(lambda s, p: [], id="good")
+    cur = {}
+
+    def simulate(specs_, lo, hi):
+        return {s.id: {"trades": [x for x in books[cur["ds"]] if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                       "error": None} for s in specs_}
+    with _sl_tmp.TemporaryDirectory() as td:
+        ledger = os.path.join(td, "final_ledger.json")
+        for ds, cal in (("12m", cal12), ("3y", cal3y), ("12m", cal12)):
+            cur["ds"] = ds
+            res, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, dataset="/data/" + ds)
+            assert res[0]["verdict"] == "CONFIRMED", (ds, res[0]["verdict"], res[0]["final_note"])
+        with open(ledger) as fh:
+            led = _sl_json.load(fh)
+        assert len(led) == 2 and sorted(e["dataset"] for e in led.values()) == ["/data/12m", "/data/3y"], led
+        sp12, sp3 = _slp.split_sessions(cal12), _slp.split_sessions(cal3y)
+        cm = _sls.COST_MODEL
+        assert _slp.ledger_key("good", sp12, 250, 5, cm) in led and _slp.ledger_key("good", sp3, 750, 5, cm) in led
+
+
+run("stratlab: FINAL ledger has one once-only entry per strategy AND dataset (12m vs 3y)",
+    t_sl_final_ledger_per_dataset)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# COSTS 2026 + STRATLAB honest fills (per-run slippage, gaps, ticks, index futures, cost-model ledger)
+# ══════════════════════════════════════════════════════════════════════════
+section("COSTS 2026 AND STRATLAB FILL MODEL")
+
+import costs as _costs26
+
+
+def t_costs_2026_rates():
+    G = _costs26.GST
+    # futures: 0.05 % STT on the sell side only; NSE 0.00183 %; brokerage min(0.03 %, ₹20) per side; stamp 0.002 % buy
+    bv = sv = 1e6
+    bro, exch, sebi = 40.0, 2e6 * 0.0000183, 2e6 * 1e-6
+    want = bro + sv * 0.0005 + exch + sebi + bv * 0.00002 + G * (bro + exch + sebi)
+    assert _rtc(bv, sv, "future") == round(want, 2), (_rtc(bv, sv, "future"), want)
+    assert _rtc(bv, 0, "future") < _rtc(0, bv, "future")                       # STT only when selling
+    # options: 0.15 % of the sell premium, flat ₹20 per order, NSE 0.03553 % of premium
+    bro, exch, sebi = 40.0, 20000 * 0.0003553, 20000 * 1e-6
+    want = bro + 10000 * 0.0015 + exch + sebi + 10000 * 0.00003 + G * (bro + exch + sebi)
+    assert _rtc(10000, 10000, "option") == round(want, 2)
+    assert _costs26.exercise_stt(10000) == 15.0 and _costs26.exercise_stt(-5) == 0.0
+    # equity: NSE 0.00307 %; delivery pays the ₹15.34 DP charge (GST included) on the sell, once
+    exch, sebi = 2e5 * 0.0000307, 2e5 * 1e-6
+    cnc = 2e5 * 0.001 + exch + sebi + 1e5 * 0.00015 + G * (exch + sebi) + 15.34
+    assert _rtc(1e5, 1e5, "equity_cnc") == round(cnc, 2), (_rtc(1e5, 1e5, "equity_cnc"), cnc)
+    assert abs(_rtc(1e5, 0, "equity_cnc") - round(1e5 * 0.001 + 1e5 * 0.0000307 + 1e5 * 1e-6 + 1e5 * 0.00015
+                                                  + G * (1e5 * 0.0000307 + 1e5 * 1e-6), 2)) < 0.011     # buy only: no DP
+    mis = 40.0 + 1e5 * 0.00025 + exch + sebi + 1e5 * 0.00003 + G * (40.0 + exch + sebi)
+    assert _rtc(1e5, 1e5, "equity_mis") == round(mis, 2)                      # intraday: no DP charge
+    assert _costs26.DP_CHARGE == 15.34 and _costs26.COST_MODEL_VERSION == "2026-11"
+    # trade_cost routes a CNC sell through the DP charge too
+    assert _tc(1000.0, 1010.0, 50, "BUY", "NSE", "CNC") - _tc(1000.0, 1010.0, 50, "BUY", "NSE", "MIS") > 15.0
+
+
+run("costs: 2026 F&O STT (fut 0.05% sell, opt 0.15% premium sell, exercise 0.15%), NSE 0.00307%, CNC DP ₹15.34",
+    t_costs_2026_rates)
+
+
+def t_sl_slippage_is_a_run_setting():
+    assert _sls.DEFAULT_SLIPPAGE_BPS == 2.0 and abs(_sls.SLIPPAGE - 0.0002) < 1e-12
+    assert _sls.SENSITIVITY_SLIPPAGE_BPS == 5.0 and _sls.INDEX_SLIPPAGE_BPS == 1.0
+    date, t, a, v = _sl_flat()
+    a["o"][11] = 101.0; a["h"][11] = 101.0; a["c"][11] = 100.5; a["l"][11] = 100.5
+    s = _sl_session(a, date, t, v)
+    e = _SlEntry(10, 1, stop=99.0, target=110.0)
+    k, fill, px, _ = _sls.fill_intraday(s, e)
+    assert abs(fill - 101.0 * 1.0002) < 1e-9 and abs(px - 100.0 * 0.9998) < 1e-9, (fill, px)    # default 2 bps
+    k, fill5, px5, _ = _sls.fill_intraday(s, e, 0.0005)
+    assert abs(fill5 - 101.0 * 1.0005) < 1e-9 and abs(px5 - 100.0 * 0.9995) < 1e-9
+    k, fill0, px0, _ = _sls.fill_intraday(s, e, 0.0)
+    assert fill0 == 101.0 and px0 == 100.0
+    sp = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=99.0)], id="t_slip")
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    r2 = _sls.run_symbol("", "SYN", [sp], 0, 99999999, sd=sd, audit=False)["t_slip"]["trades"][0]
+    r5 = _sls.run_symbol("", "SYN", [sp], 0, 99999999, sd=sd, audit=False, slippage=0.0005)["t_slip"]["trades"][0]
+    assert abs(r2[5] - 101.0 * 1.0002) < 1e-4 and abs(r5[5] - 101.0 * 1.0005) < 1e-4 and r5[12] < r2[12], (r2, r5)
+    # positional takes the run's slippage too
+    days = tuple(20260101 + d for d in range(6))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sw = _sl_spec(lambda d, p: _SlSwing(1, stop_pct=5.0, max_hold=2) if len(d) == 1 else None, kind="swing", id="t_sw")
+    (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999, slip=0.0005)
+    assert abs(tr[5] - 100.05) < 1e-6 and abs(tr[8] - 99.95) < 1e-6 and tr[13] == "max_hold", tr   # max-hold exit pays it
+
+
+run("stratlab: slippage is a per-run setting (default 2 bps, 5 bps sensitivity) for intraday and positional",
+    t_sl_slippage_is_a_run_setting)
+
+
+def t_sl_gap_through_stop_fills_at_open():
+    date, t, a, v = _sl_flat()
+    a["o"][30] = 104.0; a["h"][30] = 104.5; a["l"][30] = 103.5; a["c"][30] = 104.0     # short stopped by a gap up
+    s = _sl_session(a, date, t, v)
+    k, fill, px, reason = _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=95.0))
+    assert (k, reason) == (30, "stop") and abs(px - 104.0 * (1 + _sls.SLIPPAGE)) < 1e-9, (k, reason, px)   # not 102
+    # positional short: a daily gap through the stop fills at that day's open
+    days = tuple(20260101 + d for d in range(6))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    sl3 = slice(3 * 300, 4 * 300)
+    a["o"][sl3] = a["h"][sl3] = a["l"][sl3] = a["c"][sl3] = 110.0
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    fut = _sl_spec(lambda d, p: _SlSwing(-1, stop_pct=3.0, max_hold=5) if len(d) == 1 else None, kind="futures",
+                   horizon="positional", id="t_fgap")
+    (tr,), _ = _sls.sim_positional(fut, sd, 0, 99999999)
+    assert tr[13] == "stop" and tr[6] == days[3] and abs(tr[8] - 110.0 * (1 + _sls.SLIPPAGE)) < 1e-6, tr
+
+
+run("stratlab: a stop gapped through fills at the bar's (or day's) open plus slippage, not at the stop",
+    t_sl_gap_through_stop_fills_at_open)
+
+
+def t_sl_market_exits_pay_slippage():
+    date, t, a, v = _sl_flat()
+    a["o"][26] = 100.4
+    sq = 15 * 60 + 15 - 555
+    a["o"][sq] = 99.0
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=90.0, time_stop=15), 0.0003)
+    assert (k, reason) == (26, "time") and abs(px - 100.4 * 0.9997) < 1e-9, (k, reason, px)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, -1, stop=110.0), 0.0003)
+    assert (k, reason) == (sq, "squareoff") and abs(px - 99.0 * 1.0003) < 1e-9, (k, reason, px)     # short buys back worse
+    s360 = _sl_session({x: y[:360] for x, y in a.items()}, date[:360], t[:360], v[:360])         # data ends 15:14
+    k, _f, px, reason = _sls.fill_intraday(s360, _SlEntry(10, 1, stop=90.0), 0.0003)
+    assert reason == "squareoff" and abs(px - 100.0 * 0.9997) < 1e-9
+
+
+run("stratlab: time, square-off and data-end exits pay slippage (both sides)", t_sl_market_exits_pay_slippage)
+
+
+def t_sl_target_needs_a_tick_through():
+    assert _sls.equity_tick(500.0, 20240101) == 0.05 and _sls.equity_tick(200.0, 20240101) == 0.05
+    assert _sls.equity_tick(200.0, 20250616) == 0.01 and _sls.equity_tick(300.0, 20260101) == 0.05
+    date, t, a, v = _sl_flat()
+    a["h"][20] = 102.0                                                      # touches 102 exactly
+    a["h"][40] = 102.005                                                    # less than a tick (₹0.01 under ₹250 from 16-06-2025) through
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert reason == "squareoff", (k, reason, px)                           # a touch is not a fill
+    a["h"][60] = 102.01                                                     # one tick through
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert (k, reason, px) == (60, "target", 102.0), (k, reason, px)
+    a["o"][50] = a["h"][50] = a["l"][50] = a["c"][50] = 103.0               # gap beyond the target: fill at the open
+    s = _sl_session(a, date, t, v)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0))
+    assert (k, reason, px) == (50, "target", 103.0), (k, reason, px)
+    k, _f, px, reason = _sls.fill_intraday(s, _SlEntry(10, 1, stop=98.0, target=102.0, trail=("pct", 5.0)))
+    assert (k, reason, px) == (50, "target", 103.0), (k, reason, px)        # trailing path: same rule
+    # short side
+    date, t, a, v = _sl_flat()
+    a["l"][20] = 98.0
+    s = _sl_session(a, date, t, v)
+    assert _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=98.0))[3] == "squareoff"
+    a["l"][30] = 97.95
+    s = _sl_session(a, date, t, v)
+    assert _sls.fill_intraday(s, _SlEntry(10, -1, stop=102.0, target=98.0))[2:] == (98.0, "target")
+    # positional: a daily high that only touches the target is not a fill
+    days = tuple(20260101 + d for d in range(6))
+    date, t, a, v = _sl_flat(days=days, n=300)
+    a["h"][2 * 300 + 50] = 110.0
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sw = _sl_spec(lambda d, p: _SlSwing(1, stop=95.0, target=110.0, max_hold=3) if len(d) == 1 else None,
+                  kind="swing", id="t_ptgt")
+    (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999)
+    assert tr[13] == "max_hold", tr
+    a["h"][2 * 300 + 50] = 110.05
+    sd = _sld.from_arrays("SYN", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    (tr,), _ = _sls.sim_positional(sw, sd, 0, 99999999)
+    assert tr[13] == "target" and tr[8] == 110.0 and tr[6] == days[2], tr
+
+
+run("stratlab: a target fills only if traded through by a tick (a gap beyond fills at the open)",
+    t_sl_target_needs_a_tick_through)
+
+
+def _sl_index_sd(n_days=3, px=24000.0):
+    days = tuple(20260105 + d for d in range(n_days))
+    date, t, a, v = _sl_flat(days=days, px=px)
+    return days, date, t, a, np.zeros(len(date))
+
+
+def t_sl_index_futures():
+    from stratlab.api import strategy as _sl_strategy
+    for bad in (dict(kind="intraday", underlying="NIFTY"), dict(kind="futures", underlying="FINNIFTY")):
+        try:
+            _sl_strategy("t_bad_idx", bad["kind"], "x", "x", horizon="intraday", underlying=bad["underlying"])(lambda s, p: [])
+            raise AssertionError(f"accepted {bad}")
+        except ValueError:
+            pass
+    assert _sls.LOT_SIZES == {"NIFTY": 65, "BANKNIFTY": 30}
+    days, date, t, a, v = _sl_index_sd()
+    a["h"][100] = 24100.0
+    sd = _sld.from_arrays("_NIFTY50_min", date, t, a["o"], a["h"], a["l"], a["c"], v)
+    sp = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=23900.0, target=24050.0)], kind="futures", horizon="intraday",
+                  id="t_nifty_fut", underlying="NIFTY")
+    stock = _sl_spec(lambda s, p: [_SlEntry(10, 1, stop=23900.0)], id="t_stock_on_index")
+    out = _sls.run_symbol("", "_NIFTY50_min", [sp, stock], 0, 99999999, sd=sd, audit=False)
+    trs = out["t_nifty_fut"]["trades"]
+    assert len(trs) == len(days) and out["t_stock_on_index"]["trades"] == [], out
+    tr = trs[0]
+    assert tr[9] == 65 and abs(tr[5] - 24000.0 * 1.0001) < 1e-3 and tr[13] == "target" and tr[8] == 24050.0, tr
+    assert tr[11] == _sl_rtc(tr[5] * 65, 24050.0 * 65, "future") and abs(tr[10] - (24050.0 - tr[5]) * 65) < 0.01, tr
+    # index specs never run on stocks; BANKNIFTY uses its own data and lot size
+    assert _sls.run_symbol("", "RELIANCE", [sp], 0, 99999999, sd=sd, audit=False)["t_nifty_fut"]["trades"] == []
+    bn = _sl_spec(lambda s, p: [_SlEntry(10, -1, stop=24200.0)], kind="futures", horizon="intraday", id="t_bn",
+                  underlying="BANKNIFTY", lots=2)
+    assert _sls.run_symbol("", "_NIFTY50_min", [bn], 0, 99999999, sd=sd, audit=False)["t_bn"]["trades"] == []
+    tb = _sls.run_symbol("", "_NIFTYBANK_min", [bn], 0, 99999999, sd=sd, audit=False)["t_bn"]["trades"][0]
+    assert tb[9] == 60 and tb[13] == "squareoff" and abs(tb[8] - 24000.0 * 1.0001) < 1e-3, tb
+    # run slippage override for index futures; positional holds allowed on the index
+    tr5 = _sls.run_symbol("", "_NIFTY50_min", [sp], 0, 99999999, sd=sd, audit=False,
+                          index_slippage=0.00025)["t_nifty_fut"]["trades"][0]
+    assert abs(tr5[5] - 24000.0 * 1.00025) < 1e-3
+    pos = _sl_spec(lambda d, p: _SlSwing(-1, stop_pct=2.0, max_hold=2) if len(d) == 1 else None, kind="futures",
+                   horizon="positional", id="t_nifty_pos", underlying="NIFTY")
+    (tp,) = _sls.run_symbol("", "_NIFTY50_min", [pos], 0, 99999999, sd=sd, audit=False)["t_nifty_pos"]["trades"]
+    assert tp[3] == -1 and tp[9] == 65 and tp[13] == "max_hold" and tp[11] == _sl_rtc(tp[8] * 65, tp[5] * 65, "future")
+    # the screen's one-symbol concentration gate does not apply to a single-underlying strategy
+    cal = list(range(20260001, 20260201))
+    book = [x[:1] + ("_NIFTY50_min",) + x[2:] for x in _sl_book("t_nifty_fut", cal)]
+    split = _slp.split_sessions(cal)
+    assert not _slp.screen(book, split, "intraday")["passed"]
+    assert _slp.screen(book, split, "intraday", single_underlying=True)["passed"]
+
+
+run("stratlab: NIFTY/BANKNIFTY futures on index bars (lots 65/30, 1 bps, futures costs, positional, own screen)",
+    t_sl_index_futures)
+
+
+def t_sl_ledger_keyed_by_cost_model_and_screen_only():
+    cal = list(range(20260001, 20260251))
+    book = _sl_book("good", cal)
+    spec = _sl_spec(lambda s, p: [], id="good")
+    calls = []
+
+    def simulate(specs_, lo, hi):
+        calls.append((lo, hi))
+        return {s.id: {"trades": [x for x in book if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                       "error": None} for s in specs_}
+    split = _slp.split_sessions(cal)
+    with _sl_tmp.TemporaryDirectory() as td:
+        ledger = os.path.join(td, "final_ledger.json")
+        # screen only: FINAL is never simulated and nothing is written
+        res, trades = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, screen_only=True)
+        assert res[0]["verdict"] == "PASSED SCREEN" and res[0]["final"] is None and not os.path.exists(ledger)
+        assert all(hi <= split.discovery[1] for _lo, hi in calls) and all(x[2] <= split.discovery[1] for x in trades["good"])
+        # the old, unversioned key (cost model None) and a new cost model each get their own once-only FINAL
+        r_old, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, cost_model=None)
+        r_new, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger, cost_model="2026-11/f2")
+        assert r_old[0]["verdict"] == "CONFIRMED" and r_new[0]["verdict"] == "CONFIRMED", r_new[0]["final_note"]
+        assert "also seen under cost model legacy" in r_new[0]["final_note"], r_new[0]["final_note"]
+        led = _sl_json.load(open(ledger))
+        assert set(led) == {_slp.ledger_key("good", split, 250, 5), _slp.ledger_key("good", split, 250, 5, "2026-11/f2")}
+        # default cost model = the simulator's current one
+        r_cur, _ = _slp.evaluate([spec], cal, simulate, n_symbols=5, ledger_path=ledger)
+        assert _slp.ledger_key("good", split, 250, 5, _sls.COST_MODEL) in _sl_json.load(open(ledger))
+        # a strategy whose code changed after its FINAL was seen is still a RETEST under a new cost model
+        changed = _sl_spec(lambda s, p: [1], id="good")
+        r_chg, _ = _slp.evaluate([changed], cal, simulate, n_symbols=5, ledger_path=ledger, cost_model="2099-01/f9")
+        assert r_chg[0]["verdict"] == "RETEST (FINAL already used)", r_chg[0]
+        # and a peek under one cost model is not washed out by another
+        bad = _sl_spec(lambda s, p: [], id="bad")
+        badbook = _sl_book("bad", cal, win=100.0, loss=-300.0)
+
+        def sim_bad(specs_, lo, hi):
+            return {s.id: {"trades": [x for x in badbook if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                           "error": None} for s in specs_}
+        _slp.evaluate([bad], cal, sim_bad, n_symbols=5, ledger_path=ledger, peek_final=True, cost_model="A")
+        goodbook = _sl_book("bad", cal)                       # same id, now it would pass the screen
+
+        def sim_good(specs_, lo, hi):
+            return {s.id: {"trades": [x for x in goodbook if lo <= x[2] <= hi], "skipped": 0, "lookahead": None,
+                           "error": None} for s in specs_}
+        r_b, _ = _slp.evaluate([bad], cal, sim_good, n_symbols=5, ledger_path=ledger, cost_model="B")
+        assert r_b[0]["verdict"] == "RETEST (FINAL already used)" and "peeked" in r_b[0]["final_note"], r_b[0]
+        r_b2, _ = _slp.evaluate([bad], cal, sim_good, n_symbols=5, ledger_path=ledger, cost_model="B")
+        assert r_b2[0]["verdict"] == "RETEST (FINAL already used)", r_b2[0]          # the taint is remembered
+        try:
+            _slp.evaluate([spec], cal, simulate, screen_only=True, peek_final=True)
+            raise AssertionError("screen_only + peek_final accepted")
+        except ValueError:
+            pass
+
+
+run("stratlab: FINAL ledger keyed by cost model (a re-costed run is not a second look; peeks/code changes still are); "
+    "--screen-only never simulates FINAL", t_sl_ledger_keyed_by_cost_model_and_screen_only)
+
+
+def t_sl_cli_sensitivity_and_screen_only():
+    from stratlab import run as _slr
+    import contextlib, io, csv as _csv
+
+    def bars(sd):
+        return [[f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:]}T{m // 60:02d}:{m % 60:02d}:00", float(o), float(h), float(l), float(c), float(v)]
+                for d, m, o, h, l, c, v in zip(sd.date, sd.t, sd.o, sd.h, sd.l, sd.c, sd.v)]
+    with _sl_tmp.TemporaryDirectory() as td:
+        src, out = os.path.join(td, "bars"), os.path.join(td, "out"); os.makedirs(src)
+        for k, sym in enumerate(("AAA", "BBB")):
+            with open(os.path.join(src, sym + ".json"), "w") as fh:
+                _sl_json.dump({"symbol": sym, "interval": "minute", "bars": bars(_sl_walk(n_days=12, seed=30 + k, symbol=sym))}, fh)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = _slr.main(["--data", src, "--kind", "scalping", "--ids", "scalp_orb5", "--out", out, "--screen-only",
+                            "--cache", os.path.join(td, "cache"), "--jobs", "1"])
+        assert rc == 0
+        text = open(os.path.join(out, "summary.txt")).read()
+        assert "2.0 bps slippage" in text and "net@5" in text and "SCREEN ONLY" in text and _sls.COST_MODEL in text, text[:600]
+        row = list(_csv.DictReader(open(os.path.join(out, "results.csv"))))[0]
+        assert row["slippage_bps"] == "2.0" and row["sens_slippage_bps"] == "5.0" and row["cost_model"] == _sls.COST_MODEL
+        assert float(row["sens_disc_net"]) < float(row["disc_net"]) and int(row["sens_disc_trades"]) > 0, row
+        assert not os.path.exists(os.path.join(td, "cache", "final_ledger.json"))
+
+
+run("stratlab: CLI reports 2 bps by default, a 5 bps sensitivity column, the cost model, and --screen-only",
+    t_sl_cli_sensitivity_and_screen_only)
+
+section("STRATLAB: long-term reversal basket (stratlab/ltr.py)")
+from stratlab import tests_ltr as _tltr  # noqa: E402
+for _n, _f in _tltr.TESTS:
+    run(_n, _f)
+
+
+# ── stratlab/options_vrp_vix: pre-registered VIX-regime filter on the winged weekly strangle ──
+from stratlab import options_vrp_vix as _vx
+
+
+def _vx_vix():
+    """VIX on weekdays (no 2026-10-20 holiday) ending 2026-10-23: 13 everywhere, except 10-06 = 14 (above the
+    median, +7.7 % over 5 sessions -> take the 10-07 week), 10-13 = 12 (below median -> skip 10-14) and
+    10-19 = 16 (+23 % vs 10-12 -> spike, skip 10-21)."""
+    days, d = [], _ordate(2026, 10, 23)
+    while len(days) < 320:
+        if d.weekday() < 5 and d != _ordate(2026, 10, 20):
+            days.append(d)
+        d -= _ortd(days=1)
+    v = {x: 13.0 for x in days}
+    v[_ordate(2026, 10, 6)], v[_ordate(2026, 10, 13)], v[_ordate(2026, 10, 19)] = 14.0, 12.0, 16.0
+    return v
+
+
+def _vx_spec(vix):
+    sp = _vx.VixOptSpec("T-HV", "t", dict(_vx.HIGHVIX.params), lots=2)
+    sp.vix = vix
+    return sp
+
+
+def t_vx_filter_rules_and_past_only():
+    v = _vx_vix()
+    f = _vx.vix_filter(v, _ordate(2026, 10, 7))
+    assert f["take"] and f["prev"] == _ordate(2026, 10, 6) and f["median"] == 13.0 and abs(f["chg5"] - 1 / 13) < 1e-9
+    assert _vx.vix_filter(v, _ordate(2026, 10, 14))["why"] == "below_median"
+    f = _vx.vix_filter(v, _ordate(2026, 10, 21))
+    assert f["why"] == "spike" and f["prev"] == _ordate(2026, 10, 19) and abs(f["chg5"] - 3 / 13) < 1e-9
+    # strictly greater than the median: equal is not taken
+    assert _vx.vix_filter(v, _ordate(2026, 10, 8))["why"] == "below_median"              # prev 10-07 = 13 = median
+    # exactly +15 % over 5 sessions is a spike (>=, float-safe); just under is taken
+    w = dict(v); w[_ordate(2026, 10, 19)] = 14.95                                       # 14.95 / 13 - 1 = 0.15
+    assert _vx.vix_filter(w, _ordate(2026, 10, 21))["why"] == "spike"
+    w[_ordate(2026, 10, 12)], w[_ordate(2026, 10, 19)] = 13.0, 13.0 * 1.1499
+    assert _vx.vix_filter(w, _ordate(2026, 10, 21))["take"]
+    # the median is over the 250 sessions BEFORE prev, not including it
+    days = sorted(v)
+    i = days.index(_ordate(2026, 10, 6))
+    w = dict(v)
+    for x in days[:i - 250]:
+        w[x] = 99.0                                                                     # outside the window
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7)) == _vx.vix_filter(v, _ordate(2026, 10, 7))
+    w = dict(v)
+    for x in days[i - 250:i - 124]:
+        w[x] = 99.0                                                                     # 126 of 250 inside: median moves
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7))["median"] == 99.0
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7))["why"] == "below_median"
+    # no look-ahead: closes on/after the entry day are never read
+    w = dict(v)
+    for x in days:
+        if x >= _ordate(2026, 10, 7):
+            w[x] = 500.0
+    assert _vx.vix_filter(w, _ordate(2026, 10, 7)) == _vx.vix_filter(v, _ordate(2026, 10, 7))
+    # fewer than 250 closes before prev: no trade
+    short = {x: 13.0 for x in days[i - 249:i + 1]}
+    short[_ordate(2026, 10, 6)] = 14.0
+    assert _vx.vix_filter(short, _ordate(2026, 10, 7))["why"] == "no_history"
+    short[days[i - 250]] = 13.0
+    assert _vx.vix_filter(short, _ordate(2026, 10, 7))["take"]
+
+
+def t_vx_replay_trades_only_taken_weeks_identical_to_baseline():
+    v = _vx_vix()
+    bars = _or_bars(_VRP_DAYS, lambda i: 20 * _ormath.sin(i / 60.0))
+    sp = _vx_spec(v)
+    res, strat = _vrp._run_replay(sp, bars, v, 20261023)
+    base, _ = _vrp._run_replay(_vrp.BY_ID["VRP-STRANGLE-016-WINGED"], bars, v, 20261023)
+    assert [t.entry_ts.date() for t in base.trades] == [_ordate(2026, 10, 7), _ordate(2026, 10, 14), _ordate(2026, 10, 21)]
+    assert [t.entry_ts.date() for t in res.trades] == [_ordate(2026, 10, 7)]
+    assert [(d, f["why"]) for d, f in strat.filter_log] == [(_ordate(2026, 10, 7), "take"),
+                                                           (_ordate(2026, 10, 14), "below_median"),
+                                                           (_ordate(2026, 10, 21), "spike")]
+    a, b = res.trades[0], base.trades[0]
+    # exactly the winged structure: same legs, fills, 2 lots, costs, haircut, net; margin rule unchanged
+    assert [(l.opt, l.strike, l.side, l.entry_px, l.exit_px) for l in a.legs] == \
+           [(l.opt, l.strike, l.side, l.entry_px, l.exit_px) for l in b.legs]
+    assert len(a.legs) == 4 and a.qty == 2 * 65 and (a.costs, a.slippage, a.net) == (b.costs, b.slippage, b.net)
+    assert sp.margin(a) == _vrp.BY_ID["VRP-STRANGLE-016-WINGED"].margin(b)
+    # the fingerprint covers the filter's parameters
+    q = _vx_spec(v); q.params = dict(q.params, spike_pct=0.2)
+    assert q.fingerprint != sp.fingerprint and sp.fingerprint != _vrp.BY_ID["VRP-STRANGLE-016-WINGED"].fingerprint
+
+
+def t_vx_no_lookahead():
+    v = _vx_vix()
+    path = lambda i: 25 * _ormath.sin(i / 70.0)
+    base = _or_bars(_VRP_DAYS, path)
+    sp = _vx_spec(v)
+    a, _ = _vrp._run_replay(sp, base, v, 20261023)
+    # future bars and future VIX closes changed wildly: the same week, legs and entry fills
+    t0 = a.trades[0].entry_ts
+    wild = [(b[0], b[1] + 700, b[2] + 700, b[3] + 700, b[4] + 700) if b[0] > t0 else b for b in base]
+    w = dict(v)
+    for x in list(w):
+        if x >= _ordate(2026, 10, 7):
+            w[x] = w[x] * 3
+    b, _ = _vrp._run_replay(_vx_spec(w), wild, w, 20261013)
+    key = lambda r: [(t.entry_ts, [(l.opt, l.strike, l.side, l.entry_px) for l in t.legs]) for t in r.trades]
+    assert key(a)[:1] == key(b) and len(key(b)) == 1 and a.trades[0].net != b.trades[0].net
+    assert _vrp.audit_lookahead(sp, base, v, a.trades) is None
+    # a DISCOVERY-style simulation up to `hi` never reads later bars
+    poisoned = base + [(x[0] + _ortd(days=28), float("nan"), float("nan"), float("nan"), float("nan"))
+                       for x in _or_bars(_VRP_DAYS[-5:])]
+    s1 = _vrp.make_simulator(base, v)([sp], 20261001, 20261016)
+    s2 = _vrp.make_simulator(poisoned, v)([sp], 20261001, 20261016)
+    assert s1 == s2 and len(s1["T-HV"]["trades"]) == 1 and s1["T-HV"]["lookahead"] is None
+
+
+def t_vx_merge_vix_and_compare():
+    import tempfile as _t, json as _j, os as _o
+    with _t.TemporaryDirectory() as td:
+        pth = _o.path.join(td, "v.json")
+        with open(pth, "w") as fh:
+            _j.dump({"symbol": "INDIA VIX", "interval": "day",
+                     "bars": [["2022-01-03T00:00:00", 1, 1, 1, 16.45, 0], ["2022-11-10T00:00:00", 1, 1, 1, 99.0, 0]]}, fh)
+        m = _vx.merge_vix({_ordate(2022, 11, 10): 15.57}, [pth])
+    assert m == {_ordate(2022, 1, 3): 16.45, _ordate(2022, 11, 10): 15.57}               # base wins on overlap
+    bd = {1: {"net": 100.0, "bps": 10.0}, 2: {"net": -50.0, "bps": -5.0}, 3: {"net": 30.0, "bps": 3.0}}
+    cd = {1: {"net": 100.0, "bps": 10.0}}
+    dec = {1: {"take": True, "why": "take"}, 2: {"take": False, "why": "spike"}, 3: {"take": False, "why": "below_median"}}
+    c = _vx._week_compare(bd, cd, dec, (1, 3))
+    assert c["weeks"] == 3 and c["taken"] == 1 and c["cond_bps"] == 10.0 and abs(c["uncond_bps"] - 8 / 3) < 1e-9
+    assert c["rest_bps"] == -1.0 and c["spike_bps"] == -5.0 and not c["mismatch"] and not c["missing"]
+
+
+run("options VRP x VIX: strict median of the 250 prior sessions, >=15 % 5-session spike, past closes only",
+    t_vx_filter_rules_and_past_only)
+run("options VRP x VIX: trades only taken weeks, each identical to the unconditional winged trade",
+    t_vx_replay_trades_only_taken_weeks_identical_to_baseline)
+run("options VRP x VIX: no look-ahead (future bars and VIX, audit, DISCOVERY run)", t_vx_no_lookahead)
+run("options VRP x VIX: older VIX merged without overwriting, per-week comparison", t_vx_merge_vix_and_compare)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("STRATLAB OPENING-AUCTION FADE (stratlab/auction.py)")
+# ══════════════════════════════════════════════════════════════════════════
+from stratlab import auction as _sla  # noqa: E402
+
+
+def _auc_sd(symbol="AUC", gaps=(0.0, 0.05, -0.03, 0.25, 0.01), n=375, seed=3):
+    """One synthetic symbol: day k opens at prev close x (1 + gaps[k]) (gaps[0] ignored), flat-ish walk after."""
+    rng = np.random.default_rng(seed)
+    date, t, o, c = [], [], [], []
+    px = 1000.0
+    for k, g in enumerate(gaps):
+        op = px * (1 + g) if k else px
+        cl = op * np.exp(np.cumsum(rng.normal(0, 0.0008, n)))
+        oo = np.concatenate(([op], cl[:-1]))
+        date += [20260105 + k] * n; t += list(555 + np.arange(n)); o += list(oo); c += list(cl)
+        px = float(cl[-1])
+    o, c = np.array(o), np.array(c)
+    return _sld.from_arrays(symbol, date, t, o, np.maximum(o, c) * 1.0002, np.minimum(o, c) * 0.9998, c,
+                            np.full(len(c), 1000.0))
+
+
+def t_auc_rule_and_features():
+    assert _sla.auction_rule(100, 103, 0.02)[0] == -1 and _sla.auction_rule(100, 97, 0.02)[0] == 1
+    assert _sla.auction_rule(100, 102, 0.02) is None            # |gap| must be > 2 %, not >=
+    assert _sla.auction_rule(100, 125, 0.02) is None            # > 20 %: corporate action / circuit excluded
+    sd = _auc_sd()
+    f = _sla.session_features(sd)
+    assert not np.isfinite(f[0][1])                             # no previous session -> no prev_close
+    for k in range(1, len(f)):
+        assert abs(f[k][1] - float(sd.c[sd.ends[k - 1] - 1])) < 1e-9 and abs(f[k][2] - float(sd.o[sd.starts[k]])) < 1e-9
+        assert f[k][3] == 560 and abs(f[k][4] - float(sd.o[sd.starts[k] + 5])) < 1e-9
+    rows = _sla.candidates_for("AUC", f, 0.02)
+    assert [(r[0], r[2]) for r in rows] == [(20260106, -1), (20260107, 1)], rows   # 25 % gap and 1 % gap dropped
+
+
+def t_auc_no_lookahead():
+    """Changing anything after the 09:20 open of day d, or any later day, leaves day d's trade unchanged; changing
+    the 09:16-09:19 bars changes nothing either (the hold has no stop)."""
+    base = _sla.candidates_for("AUC", _sla.session_features(_auc_sd()), 0.02)
+    sd = _auc_sd()
+    a = int(sd.starts[1])
+    for arr in (sd.o, sd.h, sd.l, sd.c):
+        arr[a + 1:a + 5] *= 1.03                                # 09:16-09:19 of day 1
+        arr[a + 6:] *= 0.9                                      # after the 09:20 open, and all later days
+    pert = _sla.candidates_for("AUC", _sla.session_features(sd), 0.02)
+    assert pert[0] == base[0], (pert[0], base[0])
+
+
+def t_auc_ranking_cap_and_costs():
+    rows = [(20260105, f"S{i:02d}", -1, 0.021 + i * 0.0006, 500.0, 560, 499.0) for i in range(14)]
+    pick = _sla.select(rows, _sla.SPECS[0], 0, 99999999)
+    assert len(pick) == 10 and {r[1] for r in pick} == {f"S{i:02d}" for i in range(4, 14)}   # 10 largest |gap|
+    assert len(_sla.select(rows, _sla.SPECS[1], 0, 99999999)) == 0        # all gaps <= 3 %
+    tr = _sla.settle("X", rows[0], 2.1e-4)
+    qty = 200                                                             # floor(1e5 / 500)
+    fill, ex = 500.0 * (1 - 2.1e-4), 499.0 * (1 + 2.1e-4)                 # short: sell lower, buy back higher
+    assert tr[9] == qty and abs(tr[5] - fill) < 1e-3 and abs(tr[8] - ex) < 1e-3 and tr[3] == -1
+    assert abs(tr[10] - (fill - ex) * qty) < 0.01
+    from costs import round_trip_cost as _rtc
+    assert abs(tr[11] - _rtc(ex * qty, fill * qty, "equity_mis")) < 1e-6 and abs(tr[12] - (tr[10] - tr[11])) < 0.01
+    fr = (_rtc(1e5, 1e5, "equity_mis") + 2 * 2.1e-4 * 1e5) / 1e5 * 1e4  # pre-registered friction ~12.3 bps
+    assert 11.8 < fr < 12.8, fr
+
+
+def t_auc_protocol_final_never_for_failures():
+    """Through protocol.evaluate: FINAL is never simulated for screen failures; default slippage is 2.1 bps."""
+    seen = []
+    rows = [(20240101 + (d % 28) + (d // 28) * 100, "A", 1, -0.03, 100.0, 560, 99.0) for d in range(200)]   # always loses
+    base = _sla.make_simulator(rows)
+
+    def sim_(specs, lo, hi):
+        seen.append((lo, hi))
+        return base(specs, lo, hi)
+    cal = sorted({r[0] for r in rows})
+    res, _tr = _slp.evaluate(_sla.SPECS, cal, sim_, n_symbols=1, ledger_path=None, cost_model=_sla.COST_MODEL)
+    assert all(r["verdict"] == "FAILED SCREEN" for r in res) and len(seen) == 1, (seen, [r["why"] for r in res])
+    assert _sla.DEFAULT_SLIPPAGE_BPS == 2.1 and _sla.COST_MODEL.startswith(_sls.COST_MODEL)
+
+
+run("auction: signal rule, prev_close / 09:15 / 09:20 features, 20 % exclusion", t_auc_rule_and_features)
+run("auction: later bars cannot change an earlier signal or fill (look-ahead)", t_auc_no_lookahead)
+run("auction: top-10 |gap| per day, 3 % subset, qty, slippage and costs", t_auc_ranking_cap_and_costs)
+run("auction: protocol never simulates FINAL for screen failures", t_auc_protocol_final_never_for_failures)
+
+
+section("AUCTION FADE LIVE FORWARD TEST")
+import forward_test as _fwd
+from pathlib import Path
+
+
+def _fwd_q(ltp=0.0, open_=0.0, pc=100.0):
+    return {"ltp": ltp, "open": open_, "prev_close": pc}
+
+
+def t_fwd_trades_variants_rules():
+    """Gap > 3 % up is faded short at the auction price; the live rule uses the indicative price; 1-3 % excludes > 3 %."""
+    st = {"indicative_early": {"ABB": _fwd_q(100.0, 103.5), "ADANIENT": _fwd_q(100.0, 101.0),
+                               "ADANIGREEN": _fwd_q(100.0, 97.5)},
+          "auction": {}, "open": {"ABB": _fwd_q(104.0, 104.0), "ADANIENT": _fwd_q(102.5, 102.5),
+                                  "ADANIGREEN": _fwd_q(96.5, 96.5)},
+          "exit": {"ABB": _fwd_q(103.0), "ADANIENT": _fwd_q(102.0), "ADANIGREEN": _fwd_q(97.5)}}
+    tr = _fwd.build_trades(st)
+    f3 = tr["AUC-FADE-3PCT"]["final"]
+    assert [t["symbol"] for t in f3] == ["ABB", "ADANIGREEN"], f3
+    abb = f3[0]
+    assert abb["side"] == "SELL" and abb["qty"] == 961 and abb["auction_px"] == 104.0
+    assert tr["AUC-FADE-3PCT"]["live"][0]["qty"] == 966                                     # sized on 103.5
+    s = _fwd.SLIPPAGE_BPS / 1e4
+    assert abs(abb["entry_fill"] - round(104 * (1 - s), 2)) < 1e-6 and abs(abb["exit_fill"] - round(103 * (1 + s), 2)) < 1e-6
+    from costs import trade_cost as _tc
+    e, x = 104 * (1 - s), 103 * (1 + s)
+    assert abs(abb["gross"] - round((e - x) * 961, 2)) < 0.01 and abs(abb["cost"] - _tc(e, x, 961, "SELL")) < 1e-6
+    assert f3[1]["side"] == "BUY" and f3[1]["net"] == round(f3[1]["gross"] - f3[1]["cost"], 2)
+    # live rule: ABB indicative 3.5 % → in; ADANIGREEN indicative -2.5 % → not in 3 %; ADANIENT +1 % → not in 3 %
+    assert [t["symbol"] for t in tr["AUC-FADE-3PCT"]["live"]] == ["ABB"]
+    assert [t["symbol"] for t in tr["AUC-FADE-1TO3PCT"]["final"]] == ["ADANIENT"]          # 2.5 % in, 3+ % out
+    assert sorted(t["symbol"] for t in tr["AUC-FADE-1TO3PCT"]["live"]) == ["ADANIGREEN"]    # 1.0 % is not > 1 %
+
+
+def t_fwd_cap_exclusions_missing():
+    """At most 10 a day by |gap|; |gap| > 20 % and symbols missing a price are skipped; summary arithmetic."""
+    syms = _fwd.UNIVERSE[:14]
+    st = {"open": {s: _fwd_q(100 + 4 + i, 100 + 4 + i) for i, s in enumerate(syms)},
+          "exit": {s: _fwd_q(100.0) for s in syms}}
+    st["open"][syms[13]] = _fwd_q(125.0, 125.0)               # 25 % gap: excluded
+    st["exit"].pop(syms[12])                                   # no exit price: skipped
+    tr = _fwd.build_trades(st)["AUC-FADE-3PCT"]["final"]
+    assert len(tr) == 10 and syms[13] not in [t["symbol"] for t in tr] and syms[12] not in [t["symbol"] for t in tr]
+    assert tr[0]["symbol"] == syms[11] and all(t["side"] == "SELL" and t["net"] > 0 for t in tr)
+    sm = _fwd.summarize({"2026-11-12": _fwd.build_trades(st)})["AUC-FADE-3PCT/final"]
+    assert sm["trades"] == 10 and sm["days"] == 1 and sm["win_rate"] == 1.0 and abs(sm["net"] - sum(t["net"] for t in tr)) < 0.05
+    q = _fwd.indicative_quality({"indicative_early": {"ABB": _fwd_q(100.0, 103.0), "ADANIENT": _fwd_q(100.0, 0.0)},
+                                 "open": {"ABB": _fwd_q(104.0, 104.0), "ADANIENT": _fwd_q(103.0, 103.0)}})["indicative_early"]
+    assert q["with_indicative"] == 1 and q["missing"] == 1 and q["gaps_over_2pct"] == 2 and q["caught_by_indicative"] == 1
+    # no indicative (open 0, ltp = prev close) is missing, never a 0 % gap
+    assert _fwd.indicative_price({"indicative_early": {"X": _fwd_q(100.0, 0.0)}}, "X") == 0.0
+    import json as _j
+    _j.dumps(_fwd.summarize({"d": _fwd.build_trades(st)}), allow_nan=False)                # all winners: still valid JSON
+
+
+def t_fwd_record_persists_and_scheduler():
+    """record() stores each stage and builds trades at exit in its own file; the scheduler has the four jobs."""
+    import tempfile, kite_client as _kc
+    from config import settings as _st
+    tmp = Path(tempfile.mkdtemp()) / "fwd.json"
+    old_file, old_q, old_src = _fwd.FILE, _kc.kite_client.quote_kite, _st.paper_data_source
+    prices = {"indicative_early": 100.0, "indicative": 100.0, "auction": 104.0, "open": 104.0, "exit": 103.0}
+    stage_now = {}
+    _kc.kite_client.quote_kite = lambda ins: {"NSE:ABB": {"last_price": prices[stage_now["s"]],
+                                                          "ohlc": {"open": 104.0,
+                                                                   "close": 100.0}}}
+    try:
+        _fwd.FILE = tmp
+        _st.paper_data_source = "KITE"
+        for s in _fwd.STAGES:
+            stage_now["s"] = s
+            r = _fwd.record(s)
+            assert r.get("symbols") == 1, r
+        st = _fwd.status()
+        assert st["summary"]["AUC-FADE-3PCT/final"]["trades"] == 1 and st["summary"]["AUC-FADE-3PCT/live"]["trades"] == 1
+        assert set(st["today"]["stages_recorded"]) == set(_fwd.STAGES) and tmp.exists()
+    finally:
+        _fwd.FILE, _kc.kite_client.quote_kite, _st.paper_data_source = old_file, old_q, old_src
+    import platform_scheduler as _ps
+    src = Path(_ps.__file__).read_text()
+    assert 'forward_{_stage}' in src and '("indicative_early", (9, 6, 45))' in src and '("exit", (9, 20, 0))' in src
+    bad = Path(tempfile.mkdtemp()) / "fwd.json"
+    bad.write_text("{not json")
+    _fwd.FILE = bad
+    try:
+        assert _fwd._load() == {"days": {}} and not bad.exists() and list(bad.parent.glob("fwd.json.corrupt-*"))
+    finally:
+        _fwd.FILE = old_file
+
+
+run("forward test: variants, final vs live rule, fills, slippage, costs", t_fwd_trades_variants_rules)
+run("forward test: 10-a-day cap, 20 % exclusion, missing prices, summary", t_fwd_cap_exclusions_missing)
+run("forward test: record() persists stages, exit builds trades; scheduler jobs", t_fwd_record_persists_and_scheduler)
 
 
 # ══════════════════════════════════════════════════════════════════════════

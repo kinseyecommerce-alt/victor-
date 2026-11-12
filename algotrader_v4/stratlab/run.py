@@ -38,16 +38,21 @@ def _scan(symbol):
 
 
 def _work(args):
-    symbol, ids, lo, hi = args
-    return symbol, sim.run_symbol(_CTX["cache"], symbol, [REGISTRY[i] for i in ids], lo, hi)
+    symbol, ids, lo, hi, slip, islip = args
+    return symbol, sim.run_symbol(_CTX["cache"], symbol, [REGISTRY[i] for i in ids], lo, hi,
+                                  slippage=slip, index_slippage=islip)
 
 
-def make_simulator(pool, symbols, timing: dict):
-    def simulate(specs, lo, hi):
+def make_simulator(pool, symbols, timing: dict, slippage: float | None = None, index_slippage: float | None = None):
+    """simulate(specs, lo, hi[, slippage, index_slippage]) over every symbol; per-side slippage fractions default
+    to the run's settings."""
+    def simulate(specs, lo, hi, slip=None, islip=None):
+        slip = slippage if slip is None else slip
+        islip = index_slippage if islip is None else islip
         ids = [sp.id for sp in specs]
         merged = {i: {"trades": [], "skipped": 0, "lookahead": None, "error": None, "sessions": 0} for i in ids}
         t0 = time.time()
-        for _sym, res in pool.imap_unordered(_work, [(s, ids, lo, hi) for s in symbols]):
+        for _sym, res in pool.imap_unordered(_work, [(s, ids, lo, hi, slip, islip) for s in symbols]):
             for i, r in res.items():
                 m = merged[i]
                 m["trades"].extend(r["trades"])
@@ -90,6 +95,13 @@ def write_outputs(out, results, trades_by_id, timing, meta, quality, problems):
             "final_trades": fv["trades"] if fv else "", "final_win_pct": fv["win_pct"] if fv else "",
             "final_pf": fv["pf"] if fv else "", "final_net": fv["net"] if fv else "",
             "final_note": r.get("final_note", ""),
+            "slippage_bps": meta.get("slippage_bps", ""),
+            "sens_slippage_bps": meta.get("sens_bps", "") if r.get("sens") else "",
+            "sens_disc_trades": r["sens"]["disc"]["trades"] if r.get("sens") else "",
+            "sens_disc_pf": r["sens"]["disc"]["pf"] if r.get("sens") else "",
+            "sens_disc_net": r["sens"]["disc"]["net"] if r.get("sens") else "",
+            "sens_screen_passed": r["sens"]["passed"] if r.get("sens") else "",
+            "cost_model": meta.get("cost_model", ""),
             "cpu_secs": round(timing.get(sp.id, 0.0), 2),
         })
         with open(os.path.join(out, "trades", sp.id + ".csv"), "w", newline="") as fh:
@@ -113,9 +125,17 @@ def write_outputs(out, results, trades_by_id, timing, meta, quality, problems):
         L.append(f"DISCOVERY {sp_.discovery[0]}..{sp_.discovery[1]} ({sp_.n_discovery} sessions; "
                  f"H1 to {sp_.h1[1]}, H2 from {sp_.h2[0]})   FINAL {sp_.final[0]}..{sp_.final[1]} "
                  f"({sp_.n_final} sessions)")
-    L.append("All figures are after costs and 5 bps slippage per market fill, ₹1,00,000 notional per trade.")
+    L.append(f"All figures are after costs (model {meta.get('cost_model', '?')}) and {meta.get('slippage_bps', '?')} bps "
+             f"slippage per market fill ({meta.get('index_slippage_bps', '?')} bps for index futures), ₹1,00,000 "
+             f"notional per stock trade, 1 lot per index-futures trade.")
+    if meta.get("sens_bps"):
+        L.append(f"Sensitivity: 'net@{meta['sens_bps']:g}' = DISCOVERY net with {meta['sens_bps']:g} bps slippage per fill "
+                 f"(index futures {meta['sens_index_bps']:g} bps); 'scr' = would it pass the screen there (Y/N).")
+    if meta.get("screen_only"):
+        L.append("SCREEN ONLY: FINAL was not simulated for any strategy (passers keep their single FINAL look).")
     L.append("")
     hdr = (f"{'id':<26}{'trades':>7}{'win%':>6}{'PF':>6}{'net H1':>11}{'net H2':>11}{'net disc':>11}"
+           f"{'net@' + format(meta.get('sens_bps') or 0, 'g'):>11}{'scr':>4}"
            f"  {'verdict':<18}{'FINAL tr':>9}{'PF':>6}{'net':>11}  why")
     L.append(hdr)
     L.append("-" * len(hdr))
@@ -127,8 +147,10 @@ def write_outputs(out, results, trades_by_id, timing, meta, quality, problems):
         else:
             a = f"{r['id']:<26}{'':>52}"
         b = (f"{fv['trades']:>9}{_f(fv['pf'], 2):>6}{_f(fv['net']):>11}" if fv else f"{'hidden':>9}{'':>17}")
+        sv = r.get("sens")
+        c = f"{_f(sv['disc']['net']):>11}{('Y' if sv['passed'] else 'N'):>4}" if sv else f"{'':>15}"
         note = r["why"] + (f" | {r['final_note']}" if r.get("final_note") else "")
-        L.append(f"{a}  {r['verdict']:<18}{b}  {note}")
+        L.append(f"{a}{c}  {r['verdict']:<18}{b}  {note}")
     L.append("")
     L.append(P.luck_reminder(results))
     L.append("")
@@ -200,6 +222,15 @@ def main(argv=None) -> int:
     ap.add_argument("--peek-final", action="store_true",
                     help="ALSO evaluate FINAL for strategies that failed the screen. This burns the hold-out: "
                          "the peek is recorded and those strategies can never be CONFIRMED on this data.")
+    ap.add_argument("--slippage-bps", type=float, default=sim.DEFAULT_SLIPPAGE_BPS,
+                    help=f"per-side slippage on stocks (default {sim.DEFAULT_SLIPPAGE_BPS:g} bps)")
+    ap.add_argument("--index-slippage-bps", type=float, default=sim.INDEX_SLIPPAGE_BPS,
+                    help=f"per-side slippage on NIFTY/BANKNIFTY futures (default {sim.INDEX_SLIPPAGE_BPS:g} bps)")
+    ap.add_argument("--sens-bps", type=float, default=sim.SENSITIVITY_SLIPPAGE_BPS,
+                    help="also report every strategy's DISCOVERY net at this stock slippage (index futures scaled in "
+                         "proportion); 0 = off")
+    ap.add_argument("--screen-only", action="store_true",
+                    help="never simulate FINAL, not even for screen passers (their one FINAL look stays unused)")
     ap.add_argument("--list", action="store_true", help="list the strategies of the kind and exit")
     a = ap.parse_args(argv)
 
@@ -214,7 +245,8 @@ def main(argv=None) -> int:
     specs.sort(key=lambda sp: (sp.kind, sp.id))
     if a.list:
         for sp in specs:
-            print(f"{sp.id:<26}{sp.kind:<10}{sp.family:<16}{sp.desc}")
+            print(f"{sp.id:<26}{sp.kind:<10}{sp.family:<16}{sp.desc}"
+                  + (f"  [{sp.underlying} futures]" if sp.underlying else ""))
         return 0
     if not specs:
         print("no strategies selected", file=sys.stderr)
@@ -233,6 +265,10 @@ def main(argv=None) -> int:
     if not symbols:
         print("no symbols found in --data", file=sys.stderr)
         return 2
+    idx_syms = sorted({sim.INDEX_DATA[sp.underlying] for sp in specs if sp.underlying})
+    missing_idx = [x for x in idx_syms if x not in man["aux"]]
+    run_syms = symbols + [x for x in idx_syms if x in man["aux"]]
+    slip, islip = a.slippage_bps / 1e4, a.index_slippage_bps / 1e4
     _CTX["cache"] = cache
     with mp.get_context("fork").Pool(a.jobs) as pool:
         quality, cal = [], set()
@@ -243,10 +279,21 @@ def main(argv=None) -> int:
         calendar = sorted(cal)
         prep = time.time() - t0
         timing: dict = {}
-        simulate = make_simulator(pool, symbols, timing)
+        simulate = make_simulator(pool, run_syms, timing, slip, islip)
         results, trades_by_id = P.evaluate(specs, calendar, simulate, n_symbols=len(symbols),
                                            ledger_path=os.path.join(cache, "final_ledger.json"),
-                                           peek_final=a.peek_final)
+                                           peek_final=a.peek_final, dataset=os.path.realpath(a.data),
+                                           screen_only=a.screen_only, cost_model=sim.COST_MODEL)
+        sens_i = a.index_slippage_bps * a.sens_bps / a.slippage_bps if a.slippage_bps > 0 else a.sens_bps
+        split = results[0].get("split") if results else None
+        if a.sens_bps > 0 and split is not None:        # DISCOVERY dates only: the sensitivity never sees FINAL
+            sens = make_simulator(pool, run_syms, {}, a.sens_bps / 1e4, sens_i / 1e4)(
+                specs, split.discovery[0], split.discovery[1])
+            for r in results:
+                tr = sens.get(r["id"], {}).get("trades", [])
+                sc = P.screen(tr, split, r["spec"].horizon, single_underlying=bool(r["spec"].underlying))
+                r["sens"] = {"disc": sc["disc"], "passed": sc["passed"]}
+            del sens
     has_index = "_NIFTY50_min" in man["aux"]
     for r in results:
         if r["spec"].needs_index and not has_index:
@@ -254,10 +301,15 @@ def main(argv=None) -> int:
     problems = list(man["problems"])
     if not has_index:
         problems.append("no _NIFTY50_min.json in this data: strategies that need the index made no trades")
+    for x in missing_idx:
+        problems.append(f"no {x}.json in this data: index-futures strategies on it made no trades")
     meta = {"kind": a.kind, "data": os.path.realpath(a.data), "n_symbols": len(symbols),
             "n_sessions": len(calendar), "first": calendar[0] if calendar else "", "jobs": a.jobs,
             "last": calendar[-1] if calendar else "", "prep_secs": prep,
-            "quality_notes": quality_notes(quality, calendar)}
+            "quality_notes": quality_notes(quality, calendar),
+            "slippage_bps": a.slippage_bps, "index_slippage_bps": a.index_slippage_bps,
+            "sens_bps": a.sens_bps, "sens_index_bps": sens_i if a.sens_bps > 0 else 0,
+            "screen_only": a.screen_only, "cost_model": sim.COST_MODEL}
     text = write_outputs(out, results, trades_by_id, timing, meta, quality, problems)
     print(text)
     print(f"written to {out}")

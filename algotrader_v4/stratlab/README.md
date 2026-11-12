@@ -121,25 +121,76 @@ By default the fill is the next session's open. With `decision_time="15:20"` in 
 bar is the day *so far* at that minute and the fill is that minute's bar open.
 `kind="swing"` is delivery and long-only; shorts go under `kind="futures", horizon="positional"`.
 
+## Candlestick patterns (`candles.py`, `catalog/candlestick.py`)
+
+`candles.resample()` turns a session's 1-minute bars into 5m / 15m / 60m candles aligned at 09:15 (the 60m day
+ends with a short 15:15-15:30 candle); daily candles are the lab's daily bars. A candle is usable only once it is
+complete — at the close of its last minute (the 09:44 bar for the 09:30-09:45 candle), so the earliest fill is
+the open of the 09:45 bar. `session_candles(s, tf)` prepends up to 100 candles of earlier sessions (read through
+`s._sd`, never at or after today's first bar) for EMA20 / ATR / average body. The detectors are pure functions
+with their textbook definitions (Nison / Bulkowski) and fixed ratios in docstrings and module constants; one
+prior-trend rule (close vs EMA20 and vs the close 5 candles earlier, on the candle before the pattern) gates every
+reversal. The catalogue registers 152 strategies `cs_<pattern>_<tf>[_conf]` with one fixed plan (next-open
+entry, stop beyond the pattern extreme and >= 0.3 ATR, 2R, square-off 15:15 / 10 sessions) — count all 152 when
+judging how many screen passes luck alone would give. `Swing(rr=...)` sets a positional target at rr × the risk
+from the fill.
+
+What the candlestick results do and do not test (read before quoting a pass):
+
+* "Long" body means B > 1.0 × the average body of the previous 10 candles (TA-Lib's default, pre-registered), i.e.
+  "above average" — about 39 % of 15m candles — not Nison's "distinctly long". "Short" is below average.
+* Ratio comparisons use a 1e-6 rupee tolerance (`candles.EPS`) so exact ties (frequent with 0.05 ticks) resolve
+  the same way whatever the floating-point noise: a tie is neither long nor short and satisfies "<=" / ">=".
+* Intraday piercing line, dark cloud cover, morning star and evening star need all their candles in today's
+  session, so their "gap" is only the tick-level jump between consecutive intraday candles, not Nison's
+  overnight gap. A pass by these intraday variants is not evidence for the textbook pattern.
+* `_conf` = the next candle closes beyond the pattern candle's REAL BODY in the trade direction (Nison's
+  hanging-man rule, applied to every confirmation variant).
+* Daily candles are built from 1-minute bars: open = the 09:15 minute's open, close = the 15:29 minute's close,
+  not NSE's official close (a 30-minute VWAP); borderline gap / engulfing conditions can differ from an official
+  chart. Daily EMA20 / ATR use the whole history up to the decision day.
+* 60m: the short 15:15-15:30 candle of earlier sessions is left out of the history (averages, EMA, ATR).
+* Some daily patterns fire only a handful of times a year (piercing line, three black crows, stars, ...): they
+  fail the minimum-trades gate on count alone — report them as "insufficient trades", not "no edge".
+
 ## Simulator assumptions (`sim.py`)
 
 * **Data**: 1-minute bars, 09:15–15:29 IST. Sessions with fewer than 200 bars (the Diwali muhurat hour, a
   half-downloaded day) are dropped entirely, so "yesterday" is always the last full session.
-* **Entry**: signal at the close of bar `i` → filled at the **open of bar i+1**, 5 bps worse. An entry whose
+* **Slippage** is a per-run setting: `--slippage-bps` (default **2 bps per side** for NIFTY-100 stocks) and
+  `--index-slippage-bps` (default **1 bps** for NIFTY / BANKNIFTY futures). 2 bps comes from the cost audit: the
+  effective half-spread of NIFTY-100 stocks for ₹1 lakh orders measured on 1-minute bars was about 2.4x below the
+  old 5 bps default. Every report also shows each strategy's DISCOVERY net at `--sens-bps` (default 5 bps; index
+  futures scaled in proportion, 2.5 bps) and whether it would still pass the screen there (`net@5`, `scr`).
+* **Entry**: signal at the close of bar `i` → filled at the **open of bar i+1**, `slippage` worse. An entry whose
   stop is already through at that open, or whose target is on the wrong side, is skipped (counted in
   `skipped_entries`). No fills at or after 15:15.
 * **Exit**: stop and target are checked on each later bar's low/high, the entry bar included. **If one bar
-  touches both, the stop is assumed.** A bar that opens beyond the stop fills at its open. Stop, time-stop and
-  square-off exits pay 5 bps slippage; a target is a resting limit order and fills at its price.
+  touches both, the stop is assumed.** A bar that opens beyond the stop fills at its **open**, not the stop.
+  Stop, time-stop, square-off and data-end exits are market orders and pay `slippage`. A target is a resting
+  limit order: it fills only when a bar trades **at least one tick through it** (a bare touch is not a fill);
+  if the bar opens a tick or more beyond it, it fills at that open. Tick = ₹0.05, or ₹0.01 for stocks under
+  ₹250 from 16 June 2025 (`sim.equity_tick`); index futures 0.05.
 * **Square-off** at the open of the 15:15 bar. If the day's data ends earlier, at the last available close.
 * **Size**: ₹1,00,000 notional per trade in whole shares. One open position per symbol; `max_per_day`
   trades per symbol per day. Strategies are simulated independently: no portfolio cap, no capital limit.
-* **Costs**: `costs.round_trip_cost` — `equity_mis` for intraday and scalping, `equity_cnc` for swing,
-  `future` for futures. On ₹1 lakh that is about ₹80 for an intraday round trip and about ₹230 for delivery,
-  plus about ₹100 of slippage: an intraday trade starts roughly 0.18 % behind.
-* **Futures** are simulated on the cash price with futures costs: no basis, lot size, margin or rollover.
+* **Costs**: `costs.round_trip_cost` (2026 Zerodha/NSE rates, `costs.COST_MODEL_VERSION`) — `equity_mis` for
+  intraday and scalping, `equity_cnc` for swing (incl. the ₹15.34 DP charge per sell), `future` for futures
+  (0.05 % STT on the sell side). On ₹1 lakh that is about ₹83 for an intraday round trip, ₹238 for delivery and
+  ₹104 for a futures round trip, plus about ₹40 of slippage at 2 bps (₹100 at 5 bps): an intraday trade starts
+  roughly 0.12 % behind (0.18 % at 5 bps).
+* **Stock futures** (`kind="futures"` without `underlying`) are simulated on the cash price with futures costs:
+  no basis, lot size, margin or rollover.
+* **Index futures** (`kind="futures", underlying="NIFTY"` or `"BANKNIFTY"`, optional `lots=`) run only on
+  `_NIFTY50_min.json` / `_NIFTYBANK_min.json`, with futures costs, `lots` × the 2026 lot size (NIFTY 65,
+  BANKNIFTY 30 — NSE circular FAOP70616, from the January 2026 expiries; used for every date) and index
+  slippage. Positional holds are allowed. The spot index stands in for the future: basis and expiry roll are
+  ignored (a hold across expiry would really pay a roll spread and another round trip). The screen's
+  "no symbol > 35 % of net" gate cannot apply to a one-instrument strategy and is skipped for them; every other
+  gate is unchanged.
 * **Positional**: stop/target checked on daily high/low (stop first); a gap through the stop fills at the
-  open; the position is closed at the close of its `max_hold`-th session. Delivery is long-only.
+  open; the position is closed at the close of its `max_hold`-th session, or at the close of the last session of
+  the period being simulated (`period_end`), so DISCOVERY trades never use FINAL-period prices. Delivery is long-only.
 * **Not modelled**: order-book depth, partial fills, circuit limits, short-selling bans, corporate actions
   (the bars are used as given — check `data_quality.json` for unadjusted splits), options.
 
@@ -161,9 +212,19 @@ otherwise `REJECTED ON FINAL`.
 * FINAL for screen failures is not hidden by formatting — it is **never simulated**, and their trade CSVs
   contain DISCOVERY trades only. The one way to see it is `--peek-final`, which labels the result `PEEK`
   and records it, so that strategy can never be reported as CONFIRMED on that data.
-* FINAL is reported once per strategy: the first result is kept in `final_ledger.json` in the data cache. If
+* FINAL is reported once per strategy AND dataset: the first result is kept in `final_ledger.json` in the
+  data cache (one cache per data directory; the key also holds the FINAL dates, session and symbol counts, and
+  the entry records the data directory), so a 12-month and a 3-year run each have their own single FINAL. If
   the strategy's code or parameters change after its FINAL was seen, a later pass is reported as
   `RETEST (FINAL already used)`, not as a confirmation.
+* The ledger key also holds the **cost/fill model** (`sim.COST_MODEL` = `costs.COST_MODEL_VERSION` /
+  `sim.FILL_MODEL_VERSION`; entries from before versioning have no suffix and count as "legacy"). Re-running the
+  same, unchanged strategy under corrected costs is therefore not a second look: it gets its own FINAL, whose note
+  lists every earlier-model FINAL result. A FINAL that was peeked, or seen with different code, under any cost
+  model still makes a later pass a RETEST. Per-run slippage is deliberately NOT part of the key, so a slippage
+  chosen after seeing FINAL never buys a fresh look.
+* `--screen-only` never simulates FINAL, not even for passers (verdict `PASSED SCREEN`, FINAL hidden, nothing
+  written to the ledger): use it to compare cost models without spending the hold-out.
 * Below 100 sessions there is **no verdict** ("too few sessions"); the discovery numbers are shown for
   debugging only.
 * A strategy that raises, or fails the look-ahead audit, is `INVALID`.
@@ -172,10 +233,57 @@ otherwise `REJECTED ON FINAL`.
   lucky confirmations are expected from strategies with no edge. A confirmation earns a paper-trading trial,
   nothing more.
 
+## Opening-auction fade (`auction.py`)
+
+`python -m stratlab.auction --data <bars dir> --out <scratch dir> [--screen-only]` runs the two pre-registered
+strategies AUC-FADE-2PCT and AUC-FADE-3PCT: fade the 09:15 call-auction print when |auction / previous close - 1|
+exceeds 2 % (3 %), up to 20 %; enter AT the 09:15 open (live: a pre-open market order at 09:07), exit at the 09:20
+open; Rs 1 lakh per trade, at most the 10 largest |gap| per day. The intraday simulator fills at the bar after a
+signal and cannot express an auction fill, so this module has its own fill model (`FILL_MODEL`, part of the FINAL
+ledger key) and goes through `protocol.evaluate` unchanged (same split, screen and ledger; no `--peek-final`).
+Slippage defaults to the family's pre-registered 2.1 bps per side; every report adds a 5 bps stress column on
+DISCOVERY (and on FINAL, re-costing the same FINAL trades, only for screen passers), the net without the best five
+dates, a date-clustered t on the gross and quarterly nets. Caveat: the backtest uses the final auction price, a
+mild look-ahead against the 09:07 indicative price used live. 3 % is a nested subset of 2 %: one effect.
+
+## Index options: weekly NIFTY short strangles (`options_vrp.py`)
+
+`sim.py` cannot hold option legs, so `python -m stratlab.options_vrp --data <bars dir> --out <scratch dir>` runs the
+two pre-registered volatility-risk-premium strategies (VRP-STRANGLE-016-NAKED, 1 lot; VRP-STRANGLE-016-WINGED,
++/-400-point wings, 2 lots) through `options_replay.ShortStrangle` (Black-Scholes on the NIFTY 50 minute bars, India
+VIX previous close as one flat vol) and judges them with `protocol.evaluate`: same DISCOVERY / FINAL split, H1 / H2
+screen, PF >= 1.15, >= 60 trades, FINAL once through the data directory's `final_ledger.json` (keyed by cost model
+`2026-11/o1`), no `--peek-final`. Entry 10:20 on the first session after each weekly expiry (week skipped if fewer
+than 3 sessions remain to expiry), 0.16-delta strikes, held to expiry settlement, no stop or target; lot 75, 65 from
+2025-12-31. Reports rupees, rupees per lot, bps of margin (naked 12 % of notional; winged max loss + 2 %), worst week
+and max drawdown, plus DISCOVERY-only sensitivities: the haircut x2.5 ("net@5") and approximate historical lot sizes.
+The credit is a model value (no skew); treat a pass as a reason to paper-trade, not as a fill record.
+
 ## Tests
 
 `cd algotrader_v4 && python test_pipeline.py` — the `STRATLAB` section covers: the per-bar view cannot read
 bar i+1; changing future bars does not change earlier fills; the audit catches a cheating vector strategy;
 indicators are causal; next-open fills and slippage; stop-before-target; square-off and time stop; costs;
 the positional simulator; the protocol gates and that FINAL is never simulated for screen failures; both data
-layouts; every catalogue strategy runs and passes the audit; the CLI end to end.
+layouts; every catalogue strategy runs and passes the audit; the CLI end to end. The `COSTS 2026 AND STRATLAB
+FILL MODEL` section covers the 2026 cost rates, per-run slippage and the 5 bps sensitivity column, stops gapped
+through filling at the open, market exits paying slippage, the one-tick target rule, index futures, the
+cost-model-keyed FINAL ledger and `--screen-only`.
+
+## Cross-sectional baskets (`ltr.py`)
+
+`ltr.py` runs a portfolio strategy that the per-symbol simulator cannot express: LTR-12-1-LOSERS-CNC, the 10 NIFTY-100
+stocks with the lowest 12-1 month return (C[t-21]/C[t-252]-1), long-only CNC, Rs 1 lakh each from Rs 10 lakh,
+rebalanced every 21 sessions at the 15:14 bar, kept names not topped up, pre-registered CNC costs (DP 15.34 + GST)
+and 2.1 bps slippage (5 bps sensitivity). Known unadjusted corporate-action gaps (`CA_GAPS`: SIEMENS 2025-04-07,
+VEDL 2026-04-30) are removed. It goes through the SAME `protocol.evaluate` (70/30 split, H1/H2 screen, PF >= 1.15,
+>= 60 trades, 35 % symbol cap, FINAL once, same `final_ledger.json`) with one "trade" = one name over one period and
+its net = EXCESS over the equal-weight universe; the per-period table (portfolio level, idle cash included) and its
+t statistic are printed next to the verdict. `--hist` adds read-only history-bars day files for lookback only
+(days before each stock's first minute day). Tests: `tests_ltr.py`, run by `test_pipeline.py`.
+
+```
+python -m stratlab.ltr --data <bars3y> --hist <day files> --out <scratch dir> [--screen-only]
+```
+
+Result on the 3-year data (DISCOVERY only; FINAL never simulated): FAILED SCREEN - PAYTM is 52 % of the excess net.
