@@ -604,14 +604,16 @@ class KiteClient:
         # every position the moment its SL-M was placed.
         resting = order_type in ("SL", "SL-M")
         ltp = self._paper_ltp(tradingsymbol)
+        # the touch a real order meets: the ask for a BUY, the bid for a SELL (the LTP when no sane quote)
+        touch = self._paper_touch(tradingsymbol, transaction_type, ltp)
         if resting:
             fill = price
-        elif order_type == "LIMIT" and price > 0 and ltp > 0:
+        elif order_type == "LIMIT" and price > 0 and touch > 0:
             # a marketable limit fills at the touch, not at its limit; a passive one is assumed filled at its limit
-            marketable = (price >= ltp) if transaction_type == "BUY" else (price <= ltp)
-            fill = ltp if marketable else price
+            marketable = (price >= touch) if transaction_type == "BUY" else (price <= touch)
+            fill = touch if marketable else price
         else:
-            fill = price if price > 0 else ltp
+            fill = price if price > 0 else touch
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -652,6 +654,22 @@ class KiteClient:
         from tick_engine import tick_engine   # local import: tick_engine imports this module
         tick, _ = tick_engine.latest(symbol)
         return float(tick.ltp) if tick else 0.0
+
+    @staticmethod
+    def _paper_touch(symbol: str, side: str, ltp: float) -> float:
+        """Paper fill price for a marketable order: the tick's ask (BUY) or bid (SELL), so paper P&L pays the
+        spread as a real fill does. Falls back to the LTP when the quote is missing, crossed or implausibly
+        far (> 1 %) from the LTP."""
+        try:
+            from tick_engine import tick_engine
+            tick, _ = tick_engine.latest(symbol)
+            bid, ask = float(getattr(tick, "bid", 0) or 0), float(getattr(tick, "ask", 0) or 0)
+        except Exception:
+            return ltp
+        if ltp <= 0 or bid <= 0 or ask <= 0 or bid > ask:
+            return ltp
+        px = ask if side == "BUY" else bid
+        return px if abs(px / ltp - 1) <= 0.01 else ltp
 
     def _mark_paper_positions(self) -> None:
         """Mark the paper book to market the way Kite reports it: last_price from the tick engine and

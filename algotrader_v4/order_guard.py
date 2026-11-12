@@ -25,6 +25,18 @@ class ActiveOrder:
     placed_at: float
 
 
+def _loss_cooldown_applies(strategy: str) -> bool:
+    """The post-loss cooldown blocks every symbol of the strategy. Agents validated by replay_backtest
+    (validated_by_replay) are judged on replays without it: one early ORB stop-out silenced the whole
+    watchlist for 5 minutes of a 29-minute breakout window and each refused symbol lost its one ORB of the day."""
+    try:
+        from agents.strategy_agents import ALL_AGENTS     # lazy: the agents import this module
+        agent = ALL_AGENTS.get(strategy)
+    except Exception:
+        return True
+    return not getattr(agent, "validated_by_replay", False)
+
+
 class OrderGuard:
 
     def __init__(self) -> None:
@@ -77,7 +89,7 @@ class OrderGuard:
         with self._lock:
             key = (symbol, strategy, side)
             self._active.pop(key, None)
-            if pnl < 0 and settings.cooldown_after_loss_sec > 0:
+            if pnl < 0 and settings.cooldown_after_loss_sec > 0 and _loss_cooldown_applies(strategy):
                 self._cooldown_until[strategy] = time.time() + settings.cooldown_after_loss_sec
 
     def is_symbol_active_anywhere(self, symbol: str) -> list[str]:

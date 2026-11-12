@@ -67,7 +67,7 @@ def enabled() -> bool:
 
 _TSL_FIELDS = ("symbol", "strategy", "side", "entry_price", "quantity", "order_id", "current_sl", "best_price",
                "trail_active", "breakeven_hit", "target1_hit", "target2_hit", "sl_moves", "max_profit",
-               "locked_profit", "external_trail", "opened_at", "atr")
+               "locked_profit", "external_trail", "opened_at", "atr", "target", "target_hit")
 
 
 def _agents() -> dict:

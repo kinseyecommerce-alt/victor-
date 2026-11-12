@@ -313,10 +313,11 @@ def _setup_tsl_callbacks() -> None:
                        f"TSL-HIT-{pos.strategy}", pos.strategy)
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
-        if level == 2:
+        # level 0 = the signal's own target (validated agents exit there, as in the replay); 2 = the generic T2
+        if level in (0, 2):
             pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
             _close_tracked(pos.order_id, pos.symbol, pos.side, pos.quantity, pnl,
-                           f"TSL-T{level}-{pos.strategy}", pos.strategy)
+                           f"TARGET-{pos.strategy}" if level == 0 else f"TSL-T{level}-{pos.strategy}", pos.strategy)
 
     trailing_sl_engine.on_sl_moved   = _on_sl_moved
     trailing_sl_engine.on_sl_hit     = _on_sl_hit
@@ -702,14 +703,18 @@ class BaseAgent(ABC):
         _sf = signal.get("_gate_size_factor", 1.0)
         if signal.pop("_extended", False):       # outside the replay-validated window (intraday_all_day)
             _sf = round(_sf * settings.extended_window_size_factor, 3)
-        if evt["size_factor"] < 1.0:
+        # BaseAgent._try_enter sizes through portfolio_risk.pre_entry, which applies the event factor (and the
+        # correlation factor for equities) itself: applying them here as well cut every correlated entry by the
+        # factor squared (0.75 -> 0.56, 0.5 -> 0.25). Only entry paths that skip pre_entry take them here.
+        base_path = type(self)._try_enter is BaseAgent._try_enter
+        if evt["size_factor"] < 1.0 and not base_path:
             _sf = round(_sf * evt["size_factor"], 3)
         from correlation_guard import check as _corr_check
         _open_syms = [p["tradingsymbol"] for p in kite_client.positions().get("net", []) if p.get("quantity", 0) != 0]
         _corr = _corr_check(snap.symbol, _open_syms)
         if not _corr["allowed"]:
             return self._skip(snap.symbol, f"correlation: {_corr['reason']}")
-        if _corr["size_factor"] < 1.0:
+        if _corr["size_factor"] < 1.0 and not (base_path and signal.get("exchange", "NSE") != "NFO"):
             _sf = round(_sf * _corr["size_factor"], 3)
         signal["_gate_size_factor"] = _sf
         async with _ENTRY_LOCK:                 # concurrent reviews must not race for the same bucket room
@@ -813,6 +818,7 @@ class BaseAgent(ABC):
             symbol=sym, strategy=self.name, side=action,
             entry_price=fill, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
+            target=float(signal.get("target") or 0.0),   # exit at the signal's target, as the replay does
         )
         # Start the software stop where the exchange stop actually is. Otherwise the engine
         # tracks its own default % stop, and its first trail move could LOOSEN the real stop.
