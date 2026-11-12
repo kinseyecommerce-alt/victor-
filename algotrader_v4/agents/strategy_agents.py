@@ -825,10 +825,17 @@ class FnOAgent(BaseAgent):
         allowed, reason = risk_manager.check_before_order(opt_sym, qty, opt_price, action)
         if not allowed:
             return self._skip(underlying, f"risk: {reason}")
+        import portfolio_risk
+        sl_pct  = signal.get("stop_loss_pct", 30)
+        tgt_pct = signal.get("target_pct", 65)
+        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
+        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
+        # The option's VaR, as portfolio_risk._open_book will carry it once open (loss at the stop, or the
+        # whole premium with OPTION_VAR_AT_STOP off). FNO_VAR_CHECK_ENABLED is off by default: one lot is
+        # over the fno share at ₹5L capital, and FNO_MAX_OPEN_POSITIONS bounds the agent instead.
+        opt_var = portfolio_risk.option_max_loss(opt_price, sl_px, qty)
         if settings.fno_var_check_enabled:
-            # A bought option can lose its whole premium: that is its VaR (as portfolio_risk._open_book counts it)
-            import portfolio_risk
-            why = portfolio_risk.var_check(self.name, opt_price * qty)
+            why = portfolio_risk.var_check(self.name, opt_var)
             if why:
                 return self._skip(underlying, f"portfolio risk: {why}")
 
@@ -858,11 +865,6 @@ class FnOAgent(BaseAgent):
         # Stream the option leg so its exits are driven by the option's own price
         tick_engine.subscribe([{"symbol": opt_sym, "exchange": exch, "seed_price": opt_price}])
         self._exit_only.add(opt_sym)
-
-        sl_pct  = signal.get("stop_loss_pct", 30)
-        tgt_pct = signal.get("target_pct", 65)
-        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
-        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
 
         # Protective stop goes in immediately; no position is kept without one.
         # Options take a stop-loss LIMIT ("SL") — brokers reject SL-M on options.
@@ -894,6 +896,7 @@ class FnOAgent(BaseAgent):
             "sl_type":      "SL",
             "sl_buffer_pct": 5.0,
             "exit_limit_buffer_pct": 3.0,
+            "max_loss":     opt_var,        # VaR the open book carries (portfolio_risk)
         }
         tsl_pos = trailing_sl_engine.register(
             symbol=opt_sym, strategy=self.name, side=action,
