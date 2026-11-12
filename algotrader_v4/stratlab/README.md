@@ -287,3 +287,13 @@ python -m stratlab.ltr --data <bars3y> --hist <day files> --out <scratch dir> [-
 ```
 
 Result on the 3-year data (DISCOVERY only; FINAL never simulated): FAILED SCREEN - PAYTM is 52 % of the excess net.
+
+## Round-2 scalping: SCALP-AUC-FADE-1TO3-0925 (`auction_r2.py`)
+
+A pre-registered parameter variant of the opening-auction fade, using `auction.py`'s fill model (`auction1`) and
+`protocol.evaluate` unchanged: fade the 09:15 auction print when 1.0 % <= |gap| <= 3.0 % (inclusive), exit at the
+09:25 open, top 10 |gap| per day, Rs 1 lakh each, no stop; skip a symbol-day whose previous session was short
+(< 200 bars, dropped by the loader). Slippage 2 bps per side (5 bps stress). Reports long / short split, top-symbol
+share, net without the best 5 dates and a date-clustered t on DISCOVERY and (for a screen passer) FINAL.
+
+    python -m stratlab.auction_r2 --data <bars3y> --out <scratch dir> [--screen-only]
