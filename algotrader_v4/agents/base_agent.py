@@ -96,7 +96,7 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     exited = True
     if send_exit:
         try:
-            kite_client.place_order(
+            exit_oid = kite_client.place_order(
                 tradingsymbol=symbol,
                 exchange=entry.get("exchange", "NSE"),
                 transaction_type="SELL" if side == "BUY" else "BUY",
@@ -105,6 +105,12 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
                 tag=tag,
                 **_exit_order(entry, symbol, side, fallback_px),
             )
+            # PAPER: a marketable exit fills at the touch (bid for a SELL, ask for a BUY), while the caller priced
+            # pnl at the LTP — book the half-spread the paper broker charged so ledger, risk and broker agree
+            if exit_oid and settings.trading_mode == "PAPER":
+                d = kite_client.paper_fill_vs_ltp(exit_oid)
+                if d:
+                    pnl += d * quantity if side == "BUY" else -d * quantity
         except Exception as exc:
             exited = False
             logger.critical("[{}] exit order for {} qty={} FAILED: {}", strategy, symbol, quantity, exc)
@@ -119,6 +125,14 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
                                  signal_price=entry.get("signal_price"), order_id=entry_oid)
     except Exception as exc:
         logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
+    try:
+        # every exit (stop, trailing stop, target, rule, square-off) lands here: the agent's day P&L too
+        from agents.strategy_agents import ALL_AGENTS
+        a = ALL_AGENTS.get(entry.get("agent") or strategy)
+        if a is not None:
+            a.state.pnl_today += pnl
+    except Exception:
+        pass
     _notify_agent_result(strategy, symbol, pnl)
     _book_changed()
     return exited
@@ -141,12 +155,15 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
     except Exception as exc:
         logger.error("[squareoff] net positions unavailable ({}) — leaving every position to the broker flatten", exc)
         return []
-    # the broker keeps one net row per (symbol, product); the paper book one per symbol
-    by_product = settings.trading_mode != "PAPER"
+    # the broker (and the paper book) keep one net row per (symbol, product)
+    by_product = True
     open_qty: dict[tuple, int] = {}
+    last_px: dict[str, float] = {}
     for p in net_rows:
         key = (p.get("tradingsymbol"), (p.get("product") or "MIS") if by_product else "")
         open_qty[key] = open_qty.get(key, 0) + int(p.get("quantity") or 0)
+        if float(p.get("last_price") or 0) > 0:
+            last_px[p.get("tradingsymbol")] = float(p["last_price"])
     closed = []
     for oid, e in list(_tsl_sl_orders.items()):
         if only is not None and oid not in only:
@@ -160,7 +177,8 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
         key = (pos.symbol, e.get("product", "MIS") if by_product else "")
         qty = min(int(pos.quantity), max(0, open_qty.get(key, 0) * sign))
         tick, _ = tick_engine.latest(pos.symbol)
-        px = tick.ltp if tick and tick.ltp > 0 else pos.entry_price
+        # no tick yet (right after a restart): the broker's last price, which is what the exit fills at
+        px = tick.ltp if tick and tick.ltp > 0 else (last_px.get(pos.symbol) or pos.entry_price)
         tag = f"SquareOff-{pos.strategy}"[:20]
         try:
             if qty <= 0:
@@ -183,15 +201,91 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
             continue
         if exited:
             closed.append(pos.symbol)            # its exit went out: the broker flatten must not send a second one
-        try:
-            from agents.strategy_agents import ALL_AGENTS
-            a = ALL_AGENTS.get(e.get("agent"))
-            if a is not None:
-                a.state.pnl_today += pnl
-        except Exception:
-            pass
         logger.info("[squareoff] {} {} closed ({}) P&L ₹{:.0f}", pos.strategy, pos.symbol, reason, pnl)
     return closed
+
+
+# Delivery (CNC) trades are closed after this many sessions — the replay that validated the swing agent
+# (replay_backtest imports it) and the live rule_exit share it.
+MAX_CNC_SESSIONS = 15
+
+
+def sessions_held(opened, today) -> int:
+    """Trading sessions after the entry session up to and including `today` (the replay's days_held:
+    +1 on the first bar of every later trading day)."""
+    from datetime import date as _date, timedelta as _td
+    from ist_clock import is_trading_day
+    try:
+        d = opened if isinstance(opened, _date) else _date.fromisoformat(str(opened)[:10])
+    except ValueError:
+        return 0
+    n = 0
+    while d < today:
+        d += _td(days=1)
+        if is_trading_day(d):
+            n += 1
+    return n
+
+
+def _sa_now():
+    import agents.strategy_agents as _sa      # the clock the agents (and the tests' IST clock) read
+    return _sa.now_ist()
+
+
+def _is_overnight(e: dict) -> bool:
+    """A delivery (CNC) / swing holding: kept past the close, never squared off at SQUAREOFF_TIME."""
+    return e.get("product", "MIS") == "CNC" or e.get("kind") == "swing"
+
+
+def reapply_overnight_tracked() -> int:
+    """After the daily counter reset (order_guard.reset_daily / risk_manager.reset_daily): the rule agents'
+    delivery holdings carried from earlier days still exist. Re-mark them in the order guard (so the agent
+    cannot buy the same symbol a second time) and in the open-position count. The AI trader re-applies its
+    own (ai_trader.reapply_overnight). Returns the number re-applied."""
+    n = 0
+    for oid, e in list(_tsl_sl_orders.items()):
+        if e.get("agent") == "ai" or not _is_overnight(e):
+            continue
+        pos = trailing_sl_engine._positions.get(oid)
+        if pos is None:
+            continue
+        order_guard.restore_active(e.get("guard_symbol", e.get("symbol", pos.symbol)), pos.strategy,
+                                   e.get("side", pos.side), oid)
+        risk_manager.position_opened()
+        n += 1
+    return n
+
+
+def overnight_hold_qty() -> dict[tuple[str, str], int]:
+    """Signed quantity of every tracked position held overnight (CNC delivery, or kind 'swing' such as the AI's
+    NRML swing put), keyed by (symbol, product). The broker-level square-off must leave these alone:
+    squareoff_all_positions skipped only CNC rows, so it sold an NRML swing put (and, in the paper book, a CNC
+    swing whose row kept the product of an earlier MIS round trip) while the agent kept tracking it — its later
+    exit then opened a naked short."""
+    held: dict[tuple[str, str], int] = {}
+    for oid, e in _tsl_sl_orders.items():
+        if not _is_overnight(e):
+            continue
+        pos = trailing_sl_engine._positions.get(oid)
+        if pos is None:
+            continue
+        key = (pos.symbol, e.get("product", "MIS"))
+        held[key] = held.get(key, 0) + int(pos.quantity) * (1 if pos.side == "BUY" else -1)
+    return held
+
+
+def reapply_overnight() -> int:
+    """After the daily counter reset (master._daily_reset, paper_book.roll_day_if_due): positions held from
+    earlier days (CNC delivery / swing, any agent) still exist — re-mark them in the order guard and the
+    open-position count: the strategy agents' (reapply_overnight_tracked) and the AI trader's
+    (ai_trader.reapply_overnight). Returns the number of strategy-agent positions re-applied."""
+    n = reapply_overnight_tracked()
+    try:
+        from ai_trader import ai_trader
+        ai_trader.reapply_overnight()
+    except Exception as exc:
+        logger.warning("[reset] AI overnight positions not re-applied: {}", exc)
+    return n
 
 
 def _book_changed() -> None:
@@ -296,10 +390,11 @@ def _setup_tsl_callbacks() -> None:
                        f"TSL-HIT-{pos.strategy}", pos.strategy)
 
     async def _on_target_hit(pos, ltp: float, level: int) -> None:
-        if level == 2:
+        # level 0 = the signal's own target (validated agents exit there, as in the replay); 2 = the generic T2
+        if level in (0, 2):
             pnl = (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
             _close_tracked(pos.order_id, pos.symbol, pos.side, pos.quantity, pnl,
-                           f"TSL-T{level}-{pos.strategy}", pos.strategy)
+                           f"TARGET-{pos.strategy}" if level == 0 else f"TSL-T{level}-{pos.strategy}", pos.strategy)
 
     trailing_sl_engine.on_sl_moved   = _on_sl_moved
     trailing_sl_engine.on_sl_hit     = _on_sl_hit
@@ -309,6 +404,29 @@ def _setup_tsl_callbacks() -> None:
 # ── Entry protection ─────────────────────────────────────────────────────────
 SL_PLACE_RETRIES = 3
 SL_RETRY_DELAY_S = 0.2
+
+
+# Delivery stops are GTTs placed just beyond the software stop (which exits first while the server runs), as
+# the AI trader's swing path does (ai_trader.GTT_TRIGGER_OFFSET_PCT).
+CNC_GTT_TRIGGER_OFFSET_PCT = 0.25
+CNC_GTT_BUFFER_PCT = 1.0
+
+
+async def place_gtt_with_retry(agent: str, symbol: str, exchange: str, quantity: int,
+                               stop: float, last_price: float) -> Optional[int]:
+    """GTT stop for a just-bought delivery holding. Returns the GTT id, or None if every attempt failed."""
+    from options_resolver import round_tick
+    trigger = round_tick(stop * (1 - CNC_GTT_TRIGGER_OFFSET_PCT / 100))
+    for attempt in range(1, SL_PLACE_RETRIES + 1):
+        try:
+            return kite_client.place_gtt_stop(symbol, exchange, quantity, trigger,
+                                              sl_limit_price(trigger, "BUY", CNC_GTT_BUFFER_PCT), last_price)
+        except Exception as exc:
+            logger.error("[{}] GTT stop for {} failed (attempt {}/{}): {}",
+                         agent, symbol, attempt, SL_PLACE_RETRIES, exc)
+            if attempt < SL_PLACE_RETRIES:
+                await asyncio.sleep(SL_RETRY_DELAY_S)
+    return None
 
 
 async def place_sl_with_retry(
@@ -432,9 +550,16 @@ class BaseAgent(ABC):
         """The exit-rule policy shared by the live loop and the replay."""
         if not self.strategy_rule_exits:
             from datetime import time as _dtime
-            if self.product != "MIS":
-                return False, ""
             import agents.strategy_agents as _sa
+            if self.product != "MIS":
+                # delivery holding period: the replay closes CNC trades after MAX_CNC_SESSIONS sessions
+                # (exit "TIME"); pos["opened"] is the entry session, set by the live loop from the tracking
+                opened = pos.get("opened")
+                if self.product == "CNC" and opened:
+                    held = sessions_held(opened, _sa.now_ist().date())
+                    if held >= MAX_CNC_SESSIONS:
+                        return True, f"Holding period: {held} sessions (max {MAX_CNC_SESSIONS})"
+                return False, ""
             t = _sa.now_ist().time().replace(tzinfo=None)
             h, m = (int(x) for x in settings.squareoff_time.split(":"))
             if t >= _dtime(h, m):            # same time as the replay that validated these agents
@@ -685,14 +810,18 @@ class BaseAgent(ABC):
         _sf = signal.get("_gate_size_factor", 1.0)
         if signal.pop("_extended", False):       # outside the replay-validated window (intraday_all_day)
             _sf = round(_sf * settings.extended_window_size_factor, 3)
-        if evt["size_factor"] < 1.0:
+        # BaseAgent._try_enter sizes through portfolio_risk.pre_entry, which applies the event factor (and the
+        # correlation factor for equities) itself: applying them here as well cut every correlated entry by the
+        # factor squared (0.75 -> 0.56, 0.5 -> 0.25). Only entry paths that skip pre_entry take them here.
+        base_path = type(self)._try_enter is BaseAgent._try_enter
+        if evt["size_factor"] < 1.0 and not base_path:
             _sf = round(_sf * evt["size_factor"], 3)
         from correlation_guard import check as _corr_check
         _open_syms = [p["tradingsymbol"] for p in kite_client.positions().get("net", []) if p.get("quantity", 0) != 0]
         _corr = _corr_check(snap.symbol, _open_syms)
         if not _corr["allowed"]:
             return self._skip(snap.symbol, f"correlation: {_corr['reason']}")
-        if _corr["size_factor"] < 1.0:
+        if _corr["size_factor"] < 1.0 and not (base_path and signal.get("exchange", "NSE") != "NFO"):
             _sf = round(_sf * _corr["size_factor"], 3)
         signal["_gate_size_factor"] = _sf
         async with _ENTRY_LOCK:                 # concurrent reviews must not race for the same bucket room
@@ -774,11 +903,18 @@ class BaseAgent(ABC):
         sebi_compliance.record_order_id(self.name, sym, order_id)
         fill = fill_after(order_id, ltp)          # the real average price, for the stop, P&L and slippage
 
-        # Protective SL-M goes in immediately; no position is kept without one
+        # Protective stop goes in immediately; no position is kept without one. A delivery (CNC) holding gets
+        # a GTT: a day SL-M expires at the close and left every overnight swing position unprotected.
         sl = signal.get("stop_loss", risk_manager.sl_price(ltp, action))
-        sl_order_id = await place_sl_with_retry(
-            self.name, sym, exch, action, qty, product, sl)
-        if sl_order_id is None and await flatten_unprotected(
+        sl_order_id, gtt_id = None, None
+        if product == "CNC" and action == "BUY":
+            gtt_id = await place_gtt_with_retry(self.name, sym, exch, qty, sl, ltp)
+            protected = gtt_id is not None
+        else:
+            sl_order_id = await place_sl_with_retry(
+                self.name, sym, exch, action, qty, product, sl)
+            protected = sl_order_id is not None
+        if not protected and await flatten_unprotected(
                 self.name, sym, exch, action, qty, product):
             return
 
@@ -796,6 +932,7 @@ class BaseAgent(ABC):
             symbol=sym, strategy=self.name, side=action,
             entry_price=fill, quantity=qty, order_id=order_id,
             atr=snap.indicators.atr_14,
+            target=float(signal.get("target") or 0.0),   # exit at the signal's target, as the replay does
         )
         # Start the software stop where the exchange stop actually is. Otherwise the engine
         # tracks its own default % stop, and its first trail move could LOOSEN the real stop.
@@ -811,7 +948,11 @@ class BaseAgent(ABC):
             "agent":        self.name,
             "side":         action,
             "signal_price": ltp,
+            "opened":       _sa_now().date().isoformat(),   # entry session (delivery holding period)
         }
+        if gtt_id is not None:
+            _tsl_sl_orders[order_id].update(gtt_id=gtt_id, gtt_buffer_pct=CNC_GTT_BUFFER_PCT,
+                                            gtt_trigger_offset_pct=CNC_GTT_TRIGGER_OFFSET_PCT)
         _book_changed()                     # write the paper book now, not up to 3 s later
 
         ind = snap.indicators
@@ -851,7 +992,9 @@ class BaseAgent(ABC):
         for pos in kite_client.positions().get("net", []):
             if pos.get("tradingsymbol") != sym or pos.get("quantity", 0) == 0:
                 continue
-            should, reason = self.rule_exit(pos, ind)
+            if (pos.get("product") or "MIS") != entry.get("product", "MIS"):
+                continue   # another product's row of the same symbol (e.g. a swing holding beside an MIS trade)
+            should, reason = self.rule_exit({**pos, "opened": entry.get("opened")}, ind)
             if not should:
                 continue
             side = "SELL" if pos["quantity"] > 0 else "BUY"
@@ -862,7 +1005,6 @@ class BaseAgent(ABC):
                 pnl = (snap.tick.ltp - pos.get("average_price", 0.0)) * pos["quantity"]
             _close_tracked(entry_oid, sym, entry.get("side", "BUY" if side == "SELL" else "SELL"),
                            qty, pnl, f"Agent-{self.name}-EXIT", self.name)
-            self.state.pnl_today += pnl
             _dot = "\U0001f534" if pnl < 0 else "\U0001f7e2"
             await send_telegram(
                 f"{_dot} <b>[{self.name.upper()}]</b> EXIT {sym}\n"

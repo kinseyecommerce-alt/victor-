@@ -406,6 +406,7 @@ class AITrader:
         self._queue:      Optional[asyncio.Queue] = None
         self._client:     Optional[anthropic.AsyncAnthropic] = None
         self._action_lock = asyncio.Lock()             # one trade action at a time
+        self._pending_exits: dict[str, asyncio.Task] = {}   # code exits waiting for the lock (key → task)
         self._cycle_lock  = asyncio.Lock()
         self._chats: dict[str, list] = {}              # conversation_id → messages
         self._targets: dict[str, float] = {}           # entry order id → target price
@@ -1176,11 +1177,14 @@ class AITrader:
         if v["size_factor"] < 1.0 and lots > 1:
             lots = max(1, int(lots * v["size_factor"])); qty = lots * c.lot_size
         tick_engine.subscribe([{"symbol": c.tradingsymbol, "exchange": "NFO", "seed_price": ltp}])
+        tick_engine.seed_quote(c.tradingsymbol, ltp, bid, ask)      # paper fills at the touch, not the limit
         order_id = kite_client.place_order(
             tradingsymbol=c.tradingsymbol, exchange="NFO", transaction_type="BUY", quantity=qty,
             order_type="LIMIT", price=entry_px, product="MIS", tag="Agent-ai-opt",
         )
         sebi_compliance.record_order_id(AGENT, c.tradingsymbol, order_id)
+        from execution import fill_after
+        fill = fill_after(order_id, entry_px)          # the real average price, for the P&L and slippage
 
         sl_px  = round_tick(entry_px * (1 - slp / 100))
         tgt_px = round_tick(entry_px * (1 + tgp / 100))
@@ -1202,7 +1206,7 @@ class AITrader:
             "max_loss": portfolio_risk.option_max_loss(entry_px, sl_px, qty),   # same VaR pre_entry checked
         }
         pos = trailing_sl_engine.register(
-            symbol=c.tradingsymbol, strategy=OPT_STRATEGY, side="BUY", entry_price=entry_px,
+            symbol=c.tradingsymbol, strategy=OPT_STRATEGY, side="BUY", entry_price=fill,
             quantity=qty, order_id=order_id,
         )
         pos.current_sl = sl_px
@@ -1937,11 +1941,14 @@ class AITrader:
         if v["size_factor"] < 1.0 and lots > 1:
             lots = max(1, int(lots * v["size_factor"])); qty = lots * c.lot_size
         tick_engine.subscribe([{"symbol": c.tradingsymbol, "exchange": "NFO", "seed_price": ltp}])
+        tick_engine.seed_quote(c.tradingsymbol, ltp, bid, ask)      # paper fills at the touch, not the limit
         order_id = kite_client.place_order(
             tradingsymbol=c.tradingsymbol, exchange="NFO", transaction_type="BUY", quantity=qty,
             order_type="LIMIT", price=entry_px, product="NRML", tag="Agent-ai-swput",
         )
         sebi_compliance.record_order_id(AGENT, c.tradingsymbol, order_id)
+        from execution import fill_after
+        fill = fill_after(order_id, entry_px)          # the real average price, for the P&L and slippage
 
         sl_px, tgt_px = round_tick(entry_px * (1 - slp / 100)), round_tick(entry_px * (1 + tgp / 100))
         buf = 5.0
@@ -1972,7 +1979,7 @@ class AITrader:
             "max_loss": portfolio_risk.option_max_loss(entry_px, sl_px, qty),   # same VaR pre_entry checked
         }
         pos = trailing_sl_engine.register(symbol=c.tradingsymbol, strategy=SWING_OPT_STRATEGY, side="BUY",
-                                          entry_price=entry_px, quantity=qty, order_id=order_id)
+                                          entry_price=fill, quantity=qty, order_id=order_id)
         pos.current_sl = sl_px
         self._start_trail(order_id, pos)
         self._targets[order_id] = tgt_px
@@ -2309,14 +2316,15 @@ class AITrader:
             sp["value"] = round(v, 2)
             self._trail_spread(sp, v)
             if v >= sp["stop_value"]:
-                async with self._action_lock:
-                    if sid in self._spreads:
-                        await self._close_spread(sid, f"stop: spread cost ₹{v:.2f} ≥ ₹{sp['stop_value']:.2f}", by_code=True)
+                await self._code_exit(
+                    f"spread:{sid}", lambda sid=sid: sid in self._spreads,
+                    lambda sid=sid, why=f"stop: spread cost ₹{v:.2f} ≥ ₹{sp['stop_value']:.2f}":
+                        self._close_spread(sid, why, by_code=True))
             elif v <= sp["target_value"]:
-                async with self._action_lock:
-                    if sid in self._spreads:
-                        await self._close_spread(sid, f"take profit: spread cost ₹{v:.2f} ≤ ₹{sp['target_value']:.2f}",
-                                                 by_code=True)
+                await self._code_exit(
+                    f"spread:{sid}", lambda sid=sid: sid in self._spreads,
+                    lambda sid=sid, why=f"take profit: spread cost ₹{v:.2f} ≤ ₹{sp['target_value']:.2f}":
+                        self._close_spread(sid, why, by_code=True))
             elif self.enabled and settings.ai_agent_realtime and spot is not None:
                 used = (v - sp["credit"]) / max(sp["stop_value"] - sp["credit"], 0.01)
                 if used >= 0.6:
@@ -2384,6 +2392,33 @@ class AITrader:
             except Exception as exc:
                 logger.error("[ai] tick monitor error: {}", exc)
 
+    async def _code_exit(self, key: str, still_open, make_exit) -> None:
+        """A code-driven exit (target, spread stop / take-profit) that needs _action_lock. A model entry holds
+        that lock across its debate LLM call (seconds); awaiting it here blocked the single AI tick monitor, so
+        every other AI position — option stops are watched only by this monitor — went unchecked and the queued
+        stale snapshots were replayed afterwards. When the lock is busy the exit waits in its own task (one per
+        key) and the monitor keeps processing ticks."""
+        if key in self._pending_exits:
+            return
+        if not self._action_lock.locked():
+            async with self._action_lock:
+                if still_open():
+                    await make_exit()
+            return
+
+        async def _run() -> None:
+            try:
+                async with self._action_lock:
+                    if still_open():
+                        await make_exit()
+            except ToolRejected:
+                pass
+            except Exception as exc:
+                logger.error("[ai] deferred exit {} failed: {}", key, exc)
+            finally:
+                self._pending_exits.pop(key, None)
+        self._pending_exits[key] = asyncio.create_task(_run())
+
     async def _on_snap(self, snap) -> None:
         held = {oid: e for oid, e in self._ai_entries().items() if e["symbol"] == snap.symbol}
         if held:
@@ -2395,8 +2430,10 @@ class AITrader:
                 if not tgt or oid not in self._ai_entries():     # closed by the TSL just now
                     continue
                 if (e["side"] == "BUY" and ltp >= tgt) or (e["side"] == "SELL" and ltp <= tgt):
-                    async with self._action_lock:
-                        await self._close_position(snap.symbol, f"target ₹{tgt:.2f} hit", by_code=True)
+                    await self._code_exit(
+                        f"target:{oid}", lambda oid=oid: oid in self._ai_entries(),
+                        lambda sym=snap.symbol, tgt=tgt: self._close_position(sym, f"target ₹{tgt:.2f} hit",
+                                                                              by_code=True))
         self._note_stop_exits()
         now_t = now_ist().time()
         if self._spreads:
@@ -2482,13 +2519,26 @@ class AITrader:
 
     def _handover_if_ai_unavailable(self, held: dict) -> None:
         """Runs on every tick of a held position, even when the AI is stopped: if Claude
-        can't manage the trail, give the position back to the mechanical trailing stop."""
+        can't manage the trail, give the position back to the mechanical trailing stop. A position handed
+        over this way (marked in its trail state, which the paper book persists) returns to the AI once it is
+        available again — a restart before the auto-start, 3 provider errors or the cost cap took every
+        position away from the AI for good. The stop the mechanical trail set is kept (stops only tighten)."""
         if self._ai_trailing_available():
+            if not settings.ai_agent_ai_trailing:
+                return
+            for oid in held:
+                st, pos = self._trail.get(oid), trailing_sl_engine._positions.get(oid)
+                if st and st.get("handed_over") and pos and not pos.external_trail:
+                    st.pop("handed_over", None)
+                    pos.external_trail = True
+                    self._record("system", f"{pos.symbol}: AI available again — AI trailing resumed")
             return
         for oid in held:
             pos = trailing_sl_engine._positions.get(oid)
             if pos and pos.external_trail:
                 pos.external_trail = False
+                if oid in self._trail:
+                    self._trail[oid]["handed_over"] = True
                 self._record("system", f"{pos.symbol}: AI unavailable — standard trailing stop took over")
 
     def _check_trail(self, snap, oid: str, pos) -> None:

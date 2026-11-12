@@ -38,7 +38,7 @@ from tick_engine import Candle, IndicatorCalc, MarketSnapshot, Tick, TickBuffer
 from trailing_sl_engine import TrailingSLEngine, TRAIL_CONFIGS
 
 SQUARE_OFF = time(15, 15)
-MAX_CNC_SESSIONS = 15
+from agents.base_agent import MAX_CNC_SESSIONS   # noqa: E402  (shared with the live rule_exit)
 _LAST: dict[str, dict] = {}                   # last result per agent (for the dashboard / research loop / allocator)
 # Live-only entry filters the replay can apply to measure their effect (off = raw agent signals)
 LIVE_FILTERS: dict[str, bool] = {"mtf": False, "strategy_exits": False}

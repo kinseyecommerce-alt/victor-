@@ -346,17 +346,30 @@ class MasterAgent:
                 "signals":     sigs.to_dict() if sigs else {},
             }))
 
-    async def _auto_squareoff(self) -> None:
+    @staticmethod
+    def squareoff_book(reason: str = "auto square-off") -> list[str]:
+        """Flatten the intraday book the safe way: tracked positions first, through the normal exit path
+        (ledger once, bookkeeping released), then the broker-level square-off for untracked leftovers only.
+        Every square-off (the 15:15 job, the dashboard button, the control action) goes through here: a bare
+        kite_client.squareoff_all_positions() left the trailing stop armed, and its later 'SL hit' sold a
+        second time — an untracked naked reverse position and a fake ledger trade."""
         closed: list[str] = []
         if settings.squareoff_closes_tracked:
-            # tracked positions first, through the normal exit path (ledger once, bookkeeping released);
-            # the broker-level square-off below then only meets untracked leftovers
             from agents.base_agent import close_tracked_for_squareoff
             try:
-                closed = close_tracked_for_squareoff("auto square-off")
+                closed = close_tracked_for_squareoff(reason)
             except Exception as exc:
                 logger.error("[master] tracked square-off failed: {} — flattening the book", exc)
-        ids = closed + kite_client.squareoff_all_positions(exclude=frozenset(closed))
+        from agents.base_agent import overnight_hold_qty
+        try:
+            hold = overnight_hold_qty()          # swing holdings (CNC, NRML swing puts) stay open overnight
+        except Exception as exc:
+            logger.error("[master] overnight holdings unavailable: {}", exc)
+            hold = {}
+        return closed + kite_client.squareoff_all_positions(exclude=frozenset(closed), hold=hold)
+
+    async def _auto_squareoff(self) -> None:
+        ids = self.squareoff_book("auto square-off")
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
             from n8n_bridge import notify as _n8n
@@ -367,8 +380,8 @@ class MasterAgent:
         order_guard.reset_daily()
         for a in ALL_AGENTS.values():
             a.reset_daily()
-        from ai_trader import ai_trader
-        ai_trader.reapply_overnight()        # swing positions held from earlier days still count
+        from agents.base_agent import reapply_overnight
+        reapply_overnight()                  # positions held from earlier days still count (every agent, AI too)
         import paper_book
         paper_book.mark_day_reset()          # PAPER book: its own rollover must not reset a second time
         await send_telegram("<b>New trading day</b> — counters reset")

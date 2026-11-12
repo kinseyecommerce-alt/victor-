@@ -155,6 +155,7 @@ class IntradayV2Agent(BaseAgent):
         self._fired: dict = {}        # (sym, day) → {"ORB": bool, "VWAP_TREND": bool}
         self._prev_close: dict = {}   # sym → last close
         self._prev_vwap_side: dict = {}
+        self._bar_ref: dict = {}      # sym → (bar minute, previous bar's last price, previous bar's VWAP side)
         _apply_all_day(self, intraday=True)
 
     def export_day_state(self) -> dict:
@@ -220,8 +221,15 @@ class IntradayV2Agent(BaseAgent):
         ind, sym, ltp = snap.indicators, snap.symbol, snap.tick.ltp
         now = now_ist().replace(tzinfo=None)
         t = now.time()
-        prev_close = self._prev_close.get(sym, ltp)
-        prev_side = self._prev_vwap_side.get(sym)
+        # The crossings are judged against the previous BAR (its last price and VWAP side), as the replay does
+        # once per completed bar. Judged tick-to-tick, a breakout was checked only on its crossing tick, when the
+        # forming bar held a few seconds of volume (ratio ~0.3), and never again: live missed ORBs the replay took.
+        # Per bar, the breakout stays armed through its minute while the volume builds. Replay: unchanged.
+        bar = now.replace(second=0, microsecond=0)
+        ref = self._bar_ref.get(sym)
+        if ref is None or ref[0] != bar:
+            ref = self._bar_ref[sym] = (bar, self._prev_close.get(sym, ltp), self._prev_vwap_side.get(sym))
+        prev_close, prev_side = ref[1], ref[2]
         self._prev_close[sym] = ltp
         if ind.vwap:
             self._prev_vwap_side[sym] = ltp > ind.vwap

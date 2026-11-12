@@ -392,10 +392,15 @@ class KiteClient:
             label="cancel_order",
         )
 
-    def squareoff_all_positions(self, exclude: frozenset = frozenset()) -> list[str]:
+    def squareoff_all_positions(self, exclude: frozenset = frozenset(),
+                                hold: Optional[dict] = None) -> list[str]:
         """exclude: symbols whose exit order was just sent elsewhere (a broker position can lag the fill,
-        and squaring it off again would open a reverse position)."""
+        and squaring it off again would open a reverse position).
+        hold: {(symbol, product): signed qty} of tracked overnight positions (base_agent.overnight_hold_qty) —
+        only the quantity beyond them is flattened, row by row (symbol, product)."""
         order_ids: list[str] = []
+        hold = hold or {}
+        paper = settings.trading_mode == "PAPER"
         for pos in self.positions().get("net", []):
             if pos.get("quantity", 0) == 0:
                 continue
@@ -403,8 +408,21 @@ class KiteClient:
                 continue
             if pos.get("product") == "CNC":       # delivery (swing) positions are held overnight
                 continue
-            side = "SELL" if pos["quantity"] > 0 else "BUY"
-            qty  = abs(pos["quantity"])
+            sym = pos.get("tradingsymbol")
+            held = hold.get((sym, pos.get("product", "MIS")), 0)
+            if paper:
+                # the paper book keeps one row per (symbol, product); a snapshot from before that kept one row
+                # per symbol, so a hold whose product has no open row of its own counts against this row
+                open_products = {p.get("product", "MIS") for p in self._paper_positions
+                                 if p.get("tradingsymbol") == sym and p.get("quantity")}
+                held += sum(q for (s, p), q in hold.items() if s == sym and p not in open_products)
+            net = int(pos["quantity"]) - held
+            if net == 0 or (net > 0) != (pos["quantity"] > 0):
+                if held:
+                    logger.info("Square-off: {} held overnight (qty {}) — left open", sym, held)
+                continue
+            side = "SELL" if net > 0 else "BUY"
+            qty  = abs(net)
             oid  = self.place_order(
                 tradingsymbol=pos["tradingsymbol"],
                 exchange=pos.get("exchange", "NSE"),
@@ -604,14 +622,24 @@ class KiteClient:
         # every position the moment its SL-M was placed.
         resting = order_type in ("SL", "SL-M")
         ltp = self._paper_ltp(tradingsymbol)
+        # the touch a real order meets: the ask for a BUY, the bid for a SELL (the LTP when no sane quote)
+        touch = self._paper_touch(tradingsymbol, transaction_type, ltp)
         if resting:
             fill = price
-        elif order_type == "LIMIT" and price > 0 and ltp > 0:
+        elif order_type == "LIMIT" and price > 0 and touch > 0:
             # a marketable limit fills at the touch, not at its limit; a passive one is assumed filled at its limit
-            marketable = (price >= ltp) if transaction_type == "BUY" else (price <= ltp)
-            fill = ltp if marketable else price
+            marketable = (price >= touch) if transaction_type == "BUY" else (price <= touch)
+            fill = touch if marketable else price
         else:
-            fill = price if price > 0 else ltp
+            fill = price if price > 0 else touch
+        if not resting and fill <= 0:
+            # no tick for the symbol in this process yet (a restored position right after a restart): the paper
+            # book's own last price, never ₹0 — a ₹0 fill booked the whole notional as a loss at the broker
+            fill = next((float(p.get("last_price") or 0) for p in self._paper_positions
+                         if p.get("tradingsymbol") == tradingsymbol), 0.0)
+            if fill <= 0:
+                logger.warning("[PAPER] {} {} {}: no price for the symbol yet — filled at ₹0",
+                               order_type, transaction_type, tradingsymbol)
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -622,6 +650,7 @@ class KiteClient:
             "product":          product,
             "price":            fill,
             "average_price":    0.0 if resting else fill,
+            "ref_ltp":          0.0 if resting else ltp,   # the LTP at the fill: callers price P&L at it
             "trigger_price":    trigger_price,
             "status":           "TRIGGER PENDING" if resting else "COMPLETE",
             "tag":              tag,
@@ -634,6 +663,15 @@ class KiteClient:
                     transaction_type, tradingsymbol, order_type,
                     quantity, fill or trigger_price, order_id)
         return order_id
+
+    def paper_fill_vs_ltp(self, order_id: str) -> float:
+        """PAPER: fill price minus the LTP at the moment of the fill (the half-spread a marketable order paid,
+        signed), 0.0 when unknown or not a paper order. Lets the ledger book what the paper broker booked."""
+        for r in reversed(self._paper_orders):
+            if r.get("order_id") == order_id:
+                fill, ref = float(r.get("average_price") or 0), float(r.get("ref_ltp") or 0)
+                return fill - ref if fill > 0 and ref > 0 else 0.0
+        return 0.0
 
     def fill_price(self, order_id: str) -> Optional[float]:
         """Average fill price of an order, or None if not (yet) filled / unknown."""
@@ -653,6 +691,22 @@ class KiteClient:
         tick, _ = tick_engine.latest(symbol)
         return float(tick.ltp) if tick else 0.0
 
+    @staticmethod
+    def _paper_touch(symbol: str, side: str, ltp: float) -> float:
+        """Paper fill price for a marketable order: the tick's ask (BUY) or bid (SELL), so paper P&L pays the
+        spread as a real fill does. Falls back to the LTP when the quote is missing, crossed or implausibly
+        far (> 1 %) from the LTP."""
+        try:
+            from tick_engine import tick_engine
+            tick, _ = tick_engine.latest(symbol)
+            bid, ask = float(getattr(tick, "bid", 0) or 0), float(getattr(tick, "ask", 0) or 0)
+        except Exception:
+            return ltp
+        if ltp <= 0 or bid <= 0 or ask <= 0 or bid > ask:
+            return ltp
+        px = ask if side == "BUY" else bid
+        return px if abs(px / ltp - 1) <= 0.01 else ltp
+
     def _mark_paper_positions(self) -> None:
         """Mark the paper book to market the way Kite reports it: last_price from the tick engine and
         pnl = sell value − buy value + quantity × last price (realised + unrealised). Before this the
@@ -665,19 +719,27 @@ class KiteClient:
                 pos["pnl"] = round(pos["sell_value"] - pos["buy_value"] + pos["quantity"] * pos["last_price"], 2)
 
     def _update_paper_position(self, order: dict) -> None:
+        """One net row per (tradingsymbol, product), as Kite keeps them. A single row per symbol kept the
+        product of the day's first order: a swing CNC buy after an intraday MIS round trip on the same symbol
+        landed in the 'MIS' row, and the 15:15 square-off sold the delivery holding."""
         sym       = order["tradingsymbol"]
+        product   = order.get("product") or "MIS"
         px        = order["price"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
         value     = px * order["quantity"]
         for pos in self._paper_positions:
-            if pos["tradingsymbol"] == sym:
+            if pos["tradingsymbol"] == sym and (pos.get("product") or "MIS") == product:
                 pos.setdefault("buy_value", 0.0); pos.setdefault("sell_value", 0.0)
                 pos["buy_value" if qty_delta > 0 else "sell_value"] += value
                 old_q = pos["quantity"]
                 new_q = old_q + qty_delta
                 if old_q == 0 or (new_q != 0 and (old_q > 0) != (new_q > 0)):
                     pos["average_price"] = px                  # fresh or flipped position
+                    if old_q == 0:
+                        # a fresh position carries its own product (an earlier MIS round trip in the symbol
+                        # left the row MIS, and the 15:15 square-off then sold a CNC swing bought later)
+                        pos["product"] = order.get("product", pos.get("product", "MIS"))
                 elif (old_q > 0) == (qty_delta > 0):           # adding to the position
                     pos["average_price"] = round(
                         (pos["average_price"] * abs(old_q) + px * abs(qty_delta)) / abs(new_q), 2)
@@ -687,7 +749,7 @@ class KiteClient:
         self._paper_positions.append({
             "tradingsymbol": sym,
             "exchange":      order["exchange"],
-            "product":       order["product"],
+            "product":       product,
             "quantity":      qty_delta,
             "average_price": px,
             "last_price":    px,

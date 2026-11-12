@@ -19,6 +19,18 @@ from kite_client import kite_client
 from ist_clock import now_ist as _now_ist   # tz-aware IST: the container clock is UTC
 
 
+# master_agent_v5 jobs (same schedule as master.start()) that must run whether or not the bot is started.
+# Not the trading jobs (square-off, daily reset, momentum rotation): those belong to a running bot.
+MASTER_HOUSEKEEPING: dict[str, dict] = {
+    "_daily_scoreboard":        dict(hour=15, minute=35, day_of_week="mon-fri"),
+    "_nightly_adaptive":        dict(hour=21, minute=0,  day_of_week="mon-fri"),
+    "_weekly_backtest":         dict(hour=20, minute=0,  day_of_week="sun"),
+    "_weekly_optimise":         dict(hour=21, minute=30, day_of_week="sat"),
+    "_weekly_research":         dict(hour=21, minute=30, day_of_week="sun"),
+    "_weekly_memory_synthesis": dict(hour=21, minute=0,  day_of_week="sun"),
+}
+
+
 class PlatformScheduler:
     def __init__(self) -> None:
         self._sched = AsyncIOScheduler(timezone="Asia/Kolkata")
@@ -85,6 +97,11 @@ class PlatformScheduler:
             self._options_cache_refresh, "interval",
             minutes=5, id="options_cache",
         )
+        # master's date-based housekeeping (scoreboard, nightly and weekend reviews) lives in master's own
+        # scheduler, which only exists once master.start() ran. After a restart from 15:00 to the next 09:16,
+        # or on a weekend/holiday, master is not running: these run them in its place (never twice).
+        for _name, _cron in MASTER_HOUSEKEEPING.items():
+            self._sched.add_job(self._master_job, "cron", args=[_name], id=f"master_{_name}", **_cron)
         self._sched.start()
         logger.info("[platform] scheduler started (Kite login@08:45/08:55/09:05, Report@09:00, Data@09:10, Start@09:16 IST)")
 
@@ -95,6 +112,17 @@ class PlatformScheduler:
             pass
 
     # ── Jobs ──────────────────────────────────────────────────────────────────
+
+    async def _master_job(self, name: str) -> None:
+        """Run one of master's housekeeping jobs when master is not running (its own scheduler runs it otherwise)."""
+        from master_agent_v5 import master_agent as master
+        if master.running:
+            return
+        logger.info("[platform] bot not running — running master's {} in its place", name)
+        try:
+            await getattr(master, name)()
+        except Exception as exc:
+            logger.error("[platform] {} failed: {}", name, exc)
 
     async def _refresh_universe(self) -> None:
         """After the close: replay the opening-range agents on the NIFTY 100 for the next session's universe."""

@@ -2062,10 +2062,11 @@ def t_fno_tracked_on_option_premium():
         oid = next(o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == opt)
         try:
             pos = _tsl_eng._positions[oid]
-            assert pos.symbol == opt and pos.entry_price == 120.0, (pos.symbol, pos.entry_price)
+            entry_order = _order(oid)
+            # tracked (and booked) at the broker's fill, not the quote (the marketable LIMIT fills up to 1 % above)
+            assert pos.symbol == opt and pos.entry_price == entry_order["price"] > 0, (pos.symbol, pos.entry_price)
             sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
             assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING", sl
-            entry_order = _order(oid)
             assert entry_order["order_type"] == "LIMIT" and entry_order["tradingsymbol"] == opt
             assert opt in agent._exit_only and opt in _te_mod.tick_engine.symbols()
             # An index tick must not touch the option position (this used to fire target 2)
@@ -2261,11 +2262,12 @@ _ai_settings.prune_enabled = False          # see the top of this file; section 
 
 _MKT_NOW = datetime(2026, 1, 15, 11, 0, 0)
 
-def _ai_tick(sym, ltp, age_s=0):
+def _ai_tick(sym, ltp, age_s=0, half_spread=0.0):
+    """half_spread 0: paper market/marketable orders fill at the LTP (they fill at the touch, see EQ-6)."""
     import tick_engine as _te_mod
     _te_mod.tick_engine.subscribe([{"symbol": sym, "exchange": "NSE"}])
     _te_mod.tick_engine._latest_tick[sym] = Tick(
-        symbol=sym, ltp=ltp, bid=ltp - 0.05, ask=ltp + 0.05, volume=1000, change=0.0,
+        symbol=sym, ltp=ltp, bid=ltp - half_spread, ask=ltp + half_spread, volume=1000, change=0.0,
         change_pct=0.0, high=ltp, low=ltp, open=ltp, timestamp=datetime.now() - timedelta(seconds=age_s))
     _te_mod.tick_engine._latest_ind[sym] = _make_snap(symbol=sym, ltp=ltp).indicators
 
@@ -3898,6 +3900,8 @@ def t_fno_pat_orb_ce():
     a._orb_high["NIFTY"] = 22050.0
     a._orb_low["NIFTY"]  = 21950.0
     a._orb_fired["NIFTY"] = False
+    from ist_clock import now_ist as _now_orb
+    a._orb_day["NIFTY"]   = _now_orb().date()   # the range was built this session
     a._prev_ltp["NIFTY"]  = 22045.0   # was just below ORB high
     from unittest.mock import MagicMock
     ind = MagicMock()
@@ -4456,7 +4460,8 @@ def t_ai_spread_stop_and_take_profit():
         assert ai._spreads, "small move: spread stays open"
         asyncio.run(ai._on_snap(_index_snap(23800.0)))              # index falls through the short put
         assert not ai._spreads and any("stop: spread cost" in e["text"] for e in ai.log)
-        assert _og_x._cooldown_until["ai_spread"] > 0, "a losing spread starts the post-loss cooldown"
+        # the mechanical agents' post-loss cooldown does not apply to the AI (it blocked unrelated AI entries)
+        assert not _og_x._cooldown_until.get("ai_spread"), "no post-loss cooldown for the AI"
         _og_x._cooldown_until.clear()
         _index_snap(24000.0)
         asyncio.run(ai._place_option_spread(_spread_args()))
@@ -5461,12 +5466,22 @@ def t_exec_marketable_limit_and_paper_fill():
         assert _ex.entry_order("BUY", tick, 1000.0) == {"order_type": "MARKET"}
     finally:
         _ai_settings.use_limit_entries = prev
-    # paper: a marketable limit fills at the touch, not at its limit; a passive one at its limit
-    _ai_tick("EXQ", 1000.0)
+    # paper: a marketable limit fills at the touch (the ask for a BUY, the bid for a SELL), not at the LTP or
+    # its limit; a passive one at its limit. MARKET orders pay the spread too (EQ-6: it filled at the LTP).
+    _ai_tick("EXQ", 1000.0, half_spread=0.05)
     oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "LIMIT", "MIS", price=1001.5)
-    assert _te_kite_client.fill_price(oid) == 1000.0
+    assert _te_kite_client.fill_price(oid) == 1000.05, _te_kite_client.fill_price(oid)
+    oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "LIMIT", "MIS", price=998.5)
+    assert _te_kite_client.fill_price(oid) == 999.95, _te_kite_client.fill_price(oid)
     oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "LIMIT", "MIS", price=1003.0)
     assert _te_kite_client.fill_price(oid) == 1003.0
+    oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "MARKET", "MIS")
+    assert _te_kite_client.fill_price(oid) == 999.95
+    oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "MARKET", "MIS")
+    assert _te_kite_client.fill_price(oid) == 1000.05
+    _ai_tick("EXQ", 1000.0, half_spread=30.0)          # a nonsense quote (6 % wide) falls back to the LTP
+    oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "MARKET", "MIS")
+    assert _te_kite_client.fill_price(oid) == 1000.0
     assert _ex.slippage_bps(1000.0, 1000.5, "BUY") == 5.0 and _ex.slippage_bps(1000.0, 999.0, "SELL") == 10.0
     assert _ex.slippage_bps(1000.0, 999.0, "BUY") == -10.0
 
@@ -7081,6 +7096,152 @@ def t_min_position_value_skips_bucket_remnants():
         _ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.max_intraday_positions = prev
 
 run("live path: validated signal reaches the paper broker at full size",  t_live_entry_path_reaches_the_broker)
+
+
+# ── equity agents e2e findings (12 Nov 2026) ──────────────────────────────
+class _EqLive:
+    """PAPER, ₹5L, 2 intraday slots, allocator 1×, an empty trailing book — restored afterwards."""
+    def __enter__(self):
+        import performance as _pf
+        from trailing_sl_engine import trailing_sl_engine as _tse
+        from risk_manager import risk_manager as _rm
+        self.prev = (_ai_settings.trading_mode, _ai_settings.total_capital, _ai_settings.intraday_capital_pct,
+                     _ai_settings.max_intraday_positions, list(_pf.performance.trades), dict(_pf.performance.pruned),
+                     dict(_tse._positions), _rm.open_position_count, _rm.is_trading_halted)
+        _ai_settings.trading_mode = "PAPER"; _ai_settings.total_capital = 500000
+        _ai_settings.intraday_capital_pct = 40; _ai_settings.max_intraday_positions = 2
+        _pf.performance.pruned = {}
+        _tse._positions.clear(); _rm.open_position_count = 0; _rm.is_trading_halted = False
+        import allocator as _al
+        self.p = _patch.object(_al, "size_factor", return_value=1.0); self.p.start()
+        return self
+    def __exit__(self, *a):
+        import performance as _pf
+        from trailing_sl_engine import trailing_sl_engine as _tse
+        from risk_manager import risk_manager as _rm
+        self.p.stop()
+        (_ai_settings.trading_mode, _ai_settings.total_capital, _ai_settings.intraday_capital_pct,
+         _ai_settings.max_intraday_positions) = self.prev[:4]
+        _pf.performance.trades, _pf.performance.pruned = self.prev[4], self.prev[5]
+        _tse._positions.clear(); _tse._positions.update(self.prev[6])
+        _rm.open_position_count, _rm.is_trading_halted = self.prev[7], self.prev[8]
+
+def _eq_paper_qty(sym):
+    from kite_client import kite_client as _kc
+    return sum(int(p.get("quantity", 0)) for p in _kc._paper_positions if p["tradingsymbol"] == sym)
+
+def t_eq1_live_exits_at_the_signal_target():
+    """EQ-1: the live path held through the signal's 2.5R / 1.5R target (the engine only knew its generic +2 % /
+    +3.5 % steps) and gave the move back to breakeven; the replay closes at the target (exit TARGET)."""
+    from agents.intraday_v2 import IntradayV2Agent
+    from agents import base_agent as _bam
+    from tick_engine import tick_engine as _te
+    from trailing_sl_engine import trailing_sl_engine as _tse
+    import performance as _pf
+    with _EqLive():
+        snap = _live_snap("EQ1TGT", 1000.0)
+        _te._latest_tick["EQ1TGT"] = snap.tick
+        a = IntradayV2Agent()
+        asyncio.run(a._try_enter(snap, "BUY", {"symbol": "EQ1TGT", "exchange": "NSE", "side": "BUY", "price": 1000.0,
+                                               "stop_loss": 996.0, "target": 1010.0, "product": "MIS",
+                                               "trigger": "INTRA2-BUY [ORB]"}))
+        oid = next(o for o, e in _bam._tsl_sl_orders.items() if e.get("symbol") == "EQ1TGT")
+        assert _tse._positions[oid].target == 1010.0, "the signal's target reaches the trailing engine"
+        assert _eq_paper_qty("EQ1TGT") > 0
+        for px in (1004.0, 1009.9):                       # breakeven moves, no exit short of the target
+            _ai_tick("EQ1TGT", px); asyncio.run(_tse.on_tick("EQ1TGT", px))
+        assert oid in _tse._positions, "closed before its target"
+        n0 = len(_pf.performance.trades)
+        _ai_tick("EQ1TGT", 1010.2); asyncio.run(_tse.on_tick("EQ1TGT", 1010.2))
+        assert oid not in _tse._positions and oid not in _bam._tsl_sl_orders, "target touched: position closed"
+        assert _eq_paper_qty("EQ1TGT") == 0, "flat at the broker"
+        rec = _pf.performance.trades[-1]
+        assert len(_pf.performance.trades) == n0 + 1 and rec["note"].startswith("TARGET-intraday") and rec["gross"] > 0, rec
+        # the generic engine without a target still behaves as before (AI trader / F&O registrations)
+        p2 = _tse.register("EQ1NOT", "intraday", "BUY", 1000.0, 1, "EQ1NOT-1")
+        asyncio.run(_tse.on_tick("EQ1NOT", 1010.2))
+        assert "EQ1NOT-1" in _tse._positions and not p2.target_hit
+        _tse.deregister("EQ1NOT-1")
+
+def t_eq2_loss_cooldown_spares_replay_validated_agents():
+    """EQ-2: a losing intraday trade froze every other symbol's ORB for COOLDOWN_AFTER_LOSS_SEC (and the refused
+    symbol lost its one ORB of the day). The replay has no cooldown; validated agents are exempt."""
+    from order_guard import OrderGuard
+    prev = _ai_settings.cooldown_after_loss_sec; _ai_settings.cooldown_after_loss_sec = 300
+    try:
+        g = OrderGuard()
+        for strat in ("intraday", "scalping", "swing"):
+            g.register_order("EQ2TCS", strat, "BUY", "o1")
+            g.release_order("EQ2TCS", strat, "BUY", -2305.0)
+            ok_, why = g.can_place("EQ2INFY", strat, "BUY")
+            assert ok_, (strat, why)
+        g.register_order("EQ2TCS", "fno", "BUY", "o2")       # not replay-validated: the cooldown still applies
+        g.release_order("EQ2TCS", "fno", "BUY", -100.0)
+        assert not g.can_place("EQ2INFY", "fno", "BUY")[0]
+    finally:
+        _ai_settings.cooldown_after_loss_sec = prev
+
+def t_eq3_orb_volume_judged_over_the_breakout_bar():
+    """EQ-3: the ORB volume filter ran only on the crossing tick, when the forming minute held a few seconds of
+    volume; later ticks of the same breakout minute were never checked again (no tick-to-tick crossing), so live
+    missed breakouts the replay took on the completed bar. Crossings are now judged against the previous bar."""
+    from agents.intraday_v2 import IntradayV2Agent
+    a = IntradayV2Agent()
+    t0 = datetime(2026, 1, 15, 9, 39, 58)
+    with _with_v2_clock(t0, "UP"):
+        assert a.evaluate_tick(_orb_snap("EQ3LT", t0, 1004.0, 1000.0, 1006.0))[0] == "HOLD"    # previous bar inside
+    t1 = datetime(2026, 1, 15, 9, 40, 2)
+    with _with_v2_clock(t1, "UP"):                     # crossing tick: 2 s of volume in the forming bar
+        assert a.evaluate_tick(_orb_snap("EQ3LT", t1, 1008.0, 1000.0, 1006.0, vol_ratio=0.3))[0] == "HOLD"
+    t2 = datetime(2026, 1, 15, 9, 40, 40)
+    with _with_v2_clock(t2, "UP"):                     # same minute, volume has built up: the breakout trades
+        action, sig = a.evaluate_tick(_orb_snap("EQ3LT", t2, 1008.3, 1000.0, 1006.0, vol_ratio=1.4))
+    assert action == "BUY" and "ORB" in sig["trigger"], action
+    # the next minute (previous bar already closed above the range) is not a fresh breakout
+    b = IntradayV2Agent()
+    with _with_v2_clock(t0, "UP"):
+        b.evaluate_tick(_orb_snap("EQ3B", t0, 1004.0, 1000.0, 1006.0))
+    with _with_v2_clock(t1, "UP"):
+        b.evaluate_tick(_orb_snap("EQ3B", t1, 1008.0, 1000.0, 1006.0, vol_ratio=0.3))
+    t3 = datetime(2026, 1, 15, 9, 41, 5)
+    with _with_v2_clock(t3, "UP"):
+        assert b.evaluate_tick(_orb_snap("EQ3B", t3, 1008.5, 1000.0, 1006.0, vol_ratio=1.4))[0] == "HOLD"
+
+def t_eq4_correlation_and_event_factors_applied_once():
+    """EQ-4: _finish_entry multiplied the size by the correlation and event factors and portfolio_risk.pre_entry
+    applied them again (0.75 → 0.56 of the size). Each applies once."""
+    from agents.intraday_v2 import IntradayV2Agent
+    from tick_engine import tick_engine as _te
+    from kite_client import kite_client as _kc
+    from risk_manager import risk_manager as _rm
+    import correlation_guard as _cg, event_calendar as _ec, market_context as _mc
+    evt = {"size_factor": 0.5, "risk_level": "HIGH", "event_type": "RESULTS", "description": "results",
+           "hours_until": 20}
+    with _EqLive():
+        snap = _live_snap("EQ4ICICI", 1300.0)
+        _te._latest_tick["EQ4ICICI"] = snap.tick
+        base = _rm.calculate_quantity(1300.0, agent="intraday")
+        a = IntradayV2Agent()
+        before = len(_kc._paper_orders)
+        with _patch.object(_cg, "check", return_value={"allowed": True, "size_factor": 0.75, "reason": "r 0.6"}), \
+             _patch.object(_cg, "portfolio_heat", return_value=0.0), \
+             _patch.object(_ec, "get_event_risk", return_value=evt), \
+             _patch.object(_mc, "open_symbols", return_value=["EQ4HDFC"]):
+            asyncio.run(a._finish_entry(snap, "BUY", {"symbol": "EQ4ICICI", "exchange": "NSE", "side": "BUY",
+                                                      "price": 1300.0, "stop_loss": 1297.0, "target": 1307.5,
+                                                      "product": "MIS", "trigger": "INTRA2-BUY [ORB]"}, evt))
+        entries = [o for o in _kc._paper_orders[before:] if o["tradingsymbol"] == "EQ4ICICI"
+                   and o["order_type"] not in ("SL", "SL-M")]
+        assert entries, (a.state.last_skip, a.state.skip_counts)
+        assert entries[0]["quantity"] == int(base * 0.5 * 0.75), (entries[0]["quantity"], base)
+        from agents import base_agent as _bam
+        oid = next(o for o, e in _bam._tsl_sl_orders.items() if e.get("symbol") == "EQ4ICICI")
+        _bam._close_tracked(oid, "EQ4ICICI", "BUY", entries[0]["quantity"], 0.0, "t", "intraday")
+
+run("EQ-1: live intraday/scalp positions exit at the signal's target (replay parity)", t_eq1_live_exits_at_the_signal_target)
+run("EQ-2: one losing trade does not freeze a validated agent's other symbols",       t_eq2_loss_cooldown_spares_replay_validated_agents)
+run("EQ-3: ORB volume judged over the breakout bar, not only its crossing tick",      t_eq3_orb_volume_judged_over_the_breakout_bar)
+run("EQ-4: correlation / event size factors applied once, not squared",                 t_eq4_correlation_and_event_factors_applied_once)
 run("exits: validated agents hold to stop/target; square-off at 15:15",    t_validated_agents_exit_policy_and_candle_depth)
 run("sizing: bucket remnants under 40% of a position are skipped",         t_min_position_value_skips_bucket_remnants)
 
@@ -9943,7 +10104,8 @@ def _pb_isolated():
         "gtts": dict(_te_kite_client._paper_gtts), "tracked": dict(_ba._tsl_sl_orders),
         "tsl": dict(_tsl_eng._positions), "guard": (dict(_og_pb._active), dict(_og_pb._trade_count), dict(_og_pb._cooldown_until)),
         "risk": {k: getattr(_rm_x, k) for k in ("daily_realised_pnl", "open_position_count", "trades_today", "wins_today",
-                                                "losses_today", "gross_profit", "gross_loss", "is_trading_halted")},
+                                                "losses_today", "gross_profit", "gross_loss", "costs_today",
+                                                "is_trading_halted")},
         "agents": {n: (a.state.trades_today, a.state.pnl_today, a.state.signals_fired, set(a._exit_only))
                    for n, a in _ALL_pb.items()},
         "ai": (dict(_ai_pb._targets), dict(_ai_pb._open), dict(_ai_pb._trail), dict(_ai_pb._spreads), _ai_pb.trades_today),
@@ -10037,11 +10199,12 @@ def t_paper_book_round_trip():
 
 
 def t_paper_book_stale_ignored():
+    """A snapshot dated in the future (clock trouble) is not used."""
     with _pb_isolated() as f:
         _pb_open_trailed("PBSTALE")
         _pb.save()
         snap = _json_pb.loads(f.read_text())
-        snap["session"] = (_pb.now_ist().date() - timedelta(days=1)).isoformat()
+        snap["session"] = (_pb.now_ist().date() + timedelta(days=1)).isoformat()
         f.write_text(_json_pb.dumps(snap))
         _pb_wipe()
         out = _pb.restore()
@@ -10050,6 +10213,86 @@ def t_paper_book_stale_ignored():
         assert _rm_x.open_position_count == 0 and _rm_x.trades_today == 0
         kept = f.with_name(f"{f.stem}.{snap['session']}.json")          # the old snapshot is kept, not overwritten
         assert kept.exists() and _json_pb.loads(kept.read_text())["session"] == snap["session"]
+
+
+def t_paper_book_earlier_session_keeps_cnc_settles_mis():
+    """RC-1 / RC-3: the process stops on Thursday (a CNC swing holding plus an MIS position that never reached
+    the 15:15 square-off) and starts again on Friday. The swing holding is restored (broker, tracking, stop,
+    guard, open count) and its stop still fires; the MIS position is closed at its last price and lands in the
+    ledger exactly once — neither is silently dropped."""
+    from unittest.mock import patch
+    import performance as _perf_mod
+    async def _noop(*a, **k): return None
+    clk_now = [_pb_at(_D_pb, 14, 30)]
+    with _pb_isolated() as f, patch.object(_pb, "now_ist", side_effect=lambda: clk_now[0]), \
+            patch.object(_perf_mod, "now_ist", side_effect=lambda: clk_now[0]), \
+            patch.object(_ba, "send_telegram", _noop):
+        _pb._book_day = _pb.session_day()
+        mis = _pb_open_trailed("PBOLDMIS")                               # entry ₹1000, trailed
+        mis_qty = _paper_pos("PBOLDMIS")["quantity"]
+        _paper_pos("PBOLDMIS")["last_price"] = 1012.0                    # last mark before the process died
+        cnc = _paper_entry(_ALL_pb["swing"], "PBOLDCNC", 500.0)
+        assert _ba._tsl_sl_orders[cnc]["product"] == "CNC"
+        cnc_qty = _paper_pos("PBOLDCNC")["quantity"]
+        cnc_gtt = _ba._tsl_sl_orders[cnc].get("gtt_id")        # SF-8: a GTT, not a day SL order
+        assert cnc_gtt and not _ba._tsl_sl_orders[cnc].get("sl_order_id")
+        assert _pb.save(force=True)
+        old = f.read_text()
+        n0 = len(_perf_pb.trades)
+        _pb_wipe()
+        clk_now[0] = _pb_at(_D_pb + timedelta(days=1), 9, 20)           # Friday morning, after 09:15
+        out = _pb.restore()
+        assert out["restored"] and out["stale"] and out.get("day_reset"), out
+        assert out["positions"] == ["PBOLDCNC"] and out["settled"] == ["PBOLDMIS"], out
+        # the CNC holding is back, fully managed
+        assert cnc in _ba._tsl_sl_orders and cnc in _tsl_eng._positions and cnc in _pb._restored
+        assert _paper_pos("PBOLDCNC")["quantity"] == cnc_qty
+        assert _te_kite_client._paper_gtts[int(cnc_gtt)]["status"] == "active"
+        assert _rm_x.open_position_count == 1 and not _og_pb.can_place("PBOLDCNC", "swing", "BUY")[0]
+        # the MIS position was closed at its last price and recorded once, the day counters are Friday's
+        rows = [t for t in _perf_pb.trades if t.get("oid") == mis]
+        assert len(rows) == 1 and rows[0]["exit"] == 1012.0 and rows[0]["gross"] == round(12.0 * mis_qty, 2), rows
+        assert "2026-11-12" in rows[0]["note"]
+        assert mis not in _ba._tsl_sl_orders and _paper_pos("PBOLDMIS")["quantity"] == 0
+        assert _rm_x.trades_today == 0 and _rm_x.daily_realised_pnl == 0
+        ids = {o["order_id"] for o in _te_kite_client._paper_orders}
+        assert mis not in ids and cnc not in ids, "Thursday's filled orders are history"
+        # a second restart from the same Thursday snapshot must not record the MIS trade again
+        f.write_text(old)
+        _pb_wipe()
+        out = _pb.restore()
+        assert out["reconciled"] == ["PBOLDMIS"] and not out["settled"], out
+        assert len([t for t in _perf_pb.trades if t.get("oid") == mis]) == 1
+        assert _rm_x.open_position_count == 1
+        # Friday: the swing stop still fires and reaches the ledger
+        stop = _tsl_eng._positions[cnc].current_sl
+        asyncio.run(_pb.on_snap(_make_snap(symbol="PBOLDCNC", ltp=round(stop - 0.5, 2))))
+        assert cnc not in _ba._tsl_sl_orders and _paper_pos("PBOLDCNC")["quantity"] == 0
+        assert len([t for t in _perf_pb.trades if t.get("oid") == cnc]) == 1
+        assert len(_perf_pb.trades) == n0 + 2
+
+
+def t_daily_reset_keeps_overnight_swing_guarded():
+    """RC-2: master's 09:15 reset (and the paper book's own rollover) clears the order guard and the open
+    count; a CNC swing position held overnight must stay guarded and counted, so the next swing signal on
+    the same symbol is a duplicate, not a second position."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop):
+        sw = _ALL_pb["swing"]
+        oid = _paper_entry(sw, "PBDUP", 500.0)
+        qty = _paper_pos("PBDUP")["quantity"]
+        for reset in (lambda: asyncio.run(_mav_pb.master_agent._daily_reset()),
+                      lambda: (setattr(_pb, "_book_day", _pb.session_day() - timedelta(days=1)),
+                               _pb.roll_day_if_due())):
+            reset()
+            assert _rm_x.open_position_count == 1, _rm_x.open_position_count
+            assert not _og_pb.can_place("PBDUP", "swing", "BUY")[0], "held overnight: still guarded"
+            _paper_entry(sw, "PBDUP", 505.0)                         # the swing agent signals it again
+            assert [o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == "PBDUP"] == [oid]
+            assert _paper_pos("PBDUP")["quantity"] == qty, "no second position on a held symbol"
+        _ba._close_tracked(oid, "PBDUP", "BUY", qty, 0.0, "T", "swing")
 
 
 def t_paper_book_restored_exits_on_stop_once():
@@ -10376,6 +10619,128 @@ def t_paper_book_restored_fno_squared_off_without_master():
         assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 5)) == []
 
 
+def t_daily_reset_keeps_strategy_swing_positions():
+    """STARTUP-1: a SwingAgent CNC position held overnight must still count after the 09:15 reset (master's
+    _daily_reset or the paper book's own rollover): the same swing signal next day may not buy it again,
+    and the open-position count keeps it."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    swing = _ALL_pb["swing"]
+    for reset in ("master", "paper_book"):
+        with _pb_isolated(), patch.object(_pb, "now_ist") as clk, patch.object(_mav_pb, "send_telegram", _noop):
+            clk.return_value = _pb_at(_D_pb, 13, 0)
+            _pb._book_day = _pb.session_day()
+            oid = _paper_entry(swing, "PBSWG", 1500.0)
+            assert _ba._tsl_sl_orders[oid]["product"] == "CNC"
+            assert not _og_pb.can_place("PBSWG", "swing", "BUY")[0]
+            clk.return_value = _pb_at(_D_pb + timedelta(days=1), 9, 15)
+            if reset == "master":
+                asyncio.run(_mav_pb.master_agent._daily_reset())
+            else:
+                assert _pb.roll_day_if_due()
+            ok, why = _og_pb.can_place("PBSWG", "swing", "BUY")
+            assert not ok and "Duplicate" in why, (reset, why)
+            assert _og_pb.is_symbol_active_anywhere("PBSWG") == ["swing"], reset
+            assert _rm_x.open_position_count == 1, (reset, _rm_x.open_position_count)
+            assert _og_pb._trade_count.get("swing", 0) == 0, "a held position is not a new trade today"
+            n = len(_ba._tsl_sl_orders)
+            _paper_entry(swing, "PBSWG", 1505.0)                      # the same signal again on day 2
+            assert len(_ba._tsl_sl_orders) == n, f"{reset}: swing bought PBSWG a second time"
+            assert sum(1 for e in _ba._tsl_sl_orders.values() if e["symbol"] == "PBSWG") == 1
+
+
+def t_fno_orb_resets_each_session():
+    """STARTUP-3: FnOAgent's opening range belongs to one session. A process running into the next day must
+    build a fresh range (only today's candles) and may fire the ORB again; yesterday's range is never used."""
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    import agents.strategy_agents as _sa_pb
+    a = FnOAgent()
+    sym = "ORBNEXT"
+    saved = {k: dict(getattr(FnOAgent, k)) for k in ("_orb_high", "_orb_low", "_orb_fired", "_orb_day", "_prev_ltp")}
+    def C(d, hh, mm, lo, hi):
+        return SimpleNamespace(ts=datetime.combine(d, time(hh, mm)), high=hi, low=lo)
+    try:
+        d1, d2 = _D_pb, _D_pb + timedelta(days=1)
+        candles = [C(d1, 9, 16, 24000, 24000), C(d1, 9, 20, 24100, 24100)]
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d1, 9, 25)):
+            a._update_orb(sym, SimpleNamespace(tick=SimpleNamespace(ltp=24050), candles_1min=candles), time(9, 25))
+        a._prev_ltp[sym] = 24100
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d1, 9, 35)):
+            assert a._pat_orb(sym, None, None, 24150, time(9, 35)) == ("CE", 5, "ORB")
+        # day 2, same process; the 1-minute buffer still holds yesterday's opening candles
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d2, 9, 35)):
+            assert a._pat_orb(sym, None, None, 23650, time(9, 35)) == ("", 0, ""), "no range built today yet"
+        candles += [C(d2, 9, 16, 23500, 23500), C(d2, 9, 20, 23600, 23600)]
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d2, 9, 25)):
+            a._update_orb(sym, SimpleNamespace(tick=SimpleNamespace(ltp=23550), candles_1min=candles), time(9, 25))
+        assert (a._orb_low[sym], a._orb_high[sym]) == (23500, 23600), (a._orb_low[sym], a._orb_high[sym])
+        a._prev_ltp[sym] = 23600
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d2, 9, 35)):
+            assert a._pat_orb(sym, None, None, 23650, time(9, 35)) == ("CE", 5, "ORB")
+    finally:
+        for k, v in saved.items():
+            getattr(FnOAgent, k).clear(); getattr(FnOAgent, k).update(v)
+
+
+def t_scoreboard_backfills_missed_day():
+    """STARTUP-2: a trading day whose 15:35 snapshot never ran (restart after 15:00) still counts: the next
+    snapshot fills the day in from the trade ledger, so month/since-start P&L include it."""
+    def body(p, path):
+        d1 = datetime(2026, 11, 12, 15, 15)
+        d2 = datetime(2026, 11, 13, 15, 35)
+        with _patch.object(p, "_benchmark_closes", return_value=[("2026-11-11", 24000.0)]):
+            with _patch.object(_perf_mod, "now_ist", return_value=d1):
+                p.record_trade("intraday", "SBIN", "BUY", 250, 800.0, 6250.0)
+            net1 = round(6250.0 - p.trades[-1]["cost"], 2)
+            assert p.days == {}, "no snapshot ran on day 1"
+            with _patch.object(_perf_mod, "now_ist", return_value=d2), \
+                 _patch.object(p, "_nifty_today_pct", return_value=None):
+                p.snapshot_today(0.0)
+                sb = p.scoreboard()
+        assert sorted(p.days) == ["2026-11-12", "2026-11-13"], sorted(p.days)
+        assert p.days["2026-11-12"]["net"] == net1 and p.days["2026-11-12"]["trades"] == 1
+        assert sb["periods"]["month"]["net_pnl"] == net1, sb["periods"]["month"]
+    _with_perf(body)
+
+
+def t_platform_runs_master_housekeeping_when_master_stopped():
+    """STARTUP-2: the scoreboard and nightly/weekend jobs live in master's scheduler, which does not exist after
+    a restart outside 09:16-15:00. The platform scheduler (always running) runs them then — never twice."""
+    import platform_scheduler as _ps
+    import master_agent_v5 as _mav_pb
+    calls = []
+    async def job(): calls.append(1)
+    ps = _ps.PlatformScheduler()
+    added = {}
+    with _patch.object(ps._sched, "add_job", side_effect=lambda f, *a, **k: added.__setitem__(k.get("id"), (f, a, k))), \
+         _patch.object(ps._sched, "start"):
+        ps.start()
+    for name in ("_daily_scoreboard", "_nightly_adaptive", "_weekly_backtest", "_weekly_optimise",
+                 "_weekly_research", "_weekly_memory_synthesis"):
+        f, a, k = added[f"master_{name}"]
+        assert f == ps._master_job and k["args"] == [name] and hasattr(_mav_pb.master_agent, name), name
+    k = added["master__daily_scoreboard"][2]
+    assert (k["hour"], k["minute"], k["day_of_week"]) == (15, 35, "mon-fri")
+    m = _mav_pb.master_agent
+    prev = m.running
+    try:
+        with _patch.object(m, "_daily_scoreboard", job):
+            m.running = False
+            asyncio.run(ps._master_job("_daily_scoreboard"))
+            assert calls == [1], "master stopped: the platform runs the scoreboard"
+            m.running = True
+            asyncio.run(ps._master_job("_daily_scoreboard"))
+            assert calls == [1], "master running: its own scheduler runs it"
+    finally:
+        m.running = prev
+
+
+run("daily reset: strategy swing (CNC) positions stay guarded and counted",  t_daily_reset_keeps_strategy_swing_positions)
+run("F&O agent: opening range resets each session in a running process",       t_fno_orb_resets_each_session)
+run("scoreboard: a day without a 15:35 snapshot is filled in from the ledger",   t_scoreboard_backfills_missed_day)
+run("platform scheduler: runs master's housekeeping jobs when master is stopped", t_platform_runs_master_housekeeping_when_master_stopped)
 run("paper book: snapshot/restore round-trip keeps the trailing stop, book and counters", t_paper_book_round_trip)
 run("paper book: a snapshot rewritten after midnight does not carry the day counters", t_paper_book_midnight_snapshot_does_not_carry_counters)
 run("paper book: evening restore keeps today's counters, next morning resets them", t_paper_book_evening_restore_rolls_next_morning)
@@ -10384,13 +10749,606 @@ run("auto square-off: an already-flat tracked position gets no exit order",     
 run("paper book: restored F&O leg squared off at SQUAREOFF_TIME without master", t_paper_book_restored_fno_squared_off_without_master)
 run("paper book: watchdog hands a restored position to its running agent",     t_paper_book_watchdog_hands_over_to_agent)
 run("auto square-off: tracked MIS positions reach the ledger once, no reverse", t_scheduled_squareoff_records_tracked_once)
-run("paper book: a snapshot from an earlier day is ignored",                   t_paper_book_stale_ignored)
+run("paper book: a snapshot dated in the future is ignored",                   t_paper_book_stale_ignored)
+run("paper book: earlier-session snapshot keeps CNC holdings, settles missed MIS square-off", t_paper_book_earlier_session_keeps_cnc_settles_mis)
+run("daily reset: an overnight swing holding stays guarded and counted",        t_daily_reset_keeps_overnight_swing_guarded)
 run("paper book: restored position exits on its stop, ledger records it once", t_paper_book_restored_exits_on_stop_once)
 run("paper book: restored MIS position is squared off at SQUAREOFF_TIME",      t_paper_book_restored_mis_squareoff)
 run("paper book: LIVE mode (and the setting off) never writes or restores",    t_paper_book_never_in_live)
 run("paper book: corrupt snapshot does not crash startup",                     t_paper_book_corrupt_file)
 run("paper book: scalper/intraday day state survives a restart",               t_paper_book_agent_day_state)
 run("paper book: AI trader targets, trails and counters restored",             t_paper_book_ai_round_trip)
+
+
+# ── Ledger / risk (Nov 2026 e2e): manual square-off, ₹0 fills, costs in the loss limit, agent day P&L ──
+
+def _lr_tick(sym, px):
+    import tick_engine as _te_mod
+    _te_mod.tick_engine._latest_tick[sym] = Tick(symbol=sym, ltp=px, bid=px, ask=px, volume=1, change=0.0,
+                                                 change_pct=0.0, high=px, low=px, open=px, timestamp=datetime.now())
+
+
+def t_manual_squareoff_closes_tracked():
+    """LR-1: the dashboard 'Square off' (POST /orders/squareoff) and the 'squareoff' control action closed the
+    broker book behind the agents' backs: no ledger row, and the still-armed trailing stop later sold a second
+    time (an untracked naked short and a fake ledger trade). They now go through the tracked exit path."""
+    from unittest.mock import patch
+    import main as _main
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBMSQ")
+        qty = _paper_pos("PBMSQ")["quantity"]
+        _lr_tick("PBMSQ", 1012.0)
+        n0, pnl0 = len(_perf_pb.trades), _rm_x.daily_realised_pnl
+        out = asyncio.run(_main.squareoff())
+        assert out["squared_off"] == 1, out
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions, "tracking released"
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _perf_pb.trades[-1]["gross"] == 12.0 * qty
+        assert _rm_x.daily_realised_pnl - pnl0 == 12.0 * qty and _rm_x.open_position_count == 0
+        assert _paper_pos("PBMSQ")["quantity"] == 0
+        n_orders = len(_te_kite_client._paper_orders)
+        asyncio.run(_tsl_eng.on_tick("PBMSQ", 950.0, 0.0))           # through the old stop: nothing left to sell
+        assert len(_te_kite_client._paper_orders) == n_orders and _paper_pos("PBMSQ")["quantity"] == 0
+        assert len(_perf_pb.trades) == n0 + 1
+
+
+def t_restored_squareoff_without_tick_not_at_zero():
+    """LR-2: a restored MIS position squared off before its symbol ticked in the new process sold at ₹0 (the whole
+    notional lost at the broker) while the ledger booked a flat trade. The exit uses the book's last price."""
+    import tick_engine as _te_mod
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBNOTICK")
+        qty = _paper_pos("PBNOTICK")["quantity"]
+        _lr_tick("PBNOTICK", 1008.0)
+        _te_kite_client.positions()                                    # marks the paper book: last price 1008
+        _pb.save(); _pb_wipe(); _pb.restore()
+        _te_mod.tick_engine._latest_tick.pop("PBNOTICK", None)        # new process: no tick yet
+        d = _pb.now_ist().date()
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        h, m = (int(x) for x in settings.squareoff_time.split(":"))
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 2)) == ["PBNOTICK"]
+        sells = [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == "PBNOTICK"
+                 and o["transaction_type"] == "SELL" and o["status"] == "COMPLETE"]
+        assert len(sells) == 1 and sells[0]["price"] == 1008.0, sells
+        p = _paper_pos("PBNOTICK")
+        assert p["quantity"] == 0 and round(p["sell_value"] - p["buy_value"], 2) == 8.0 * qty
+        assert _perf_pb.trades[-1]["oid"] == oid and _perf_pb.trades[-1]["gross"] == 8.0 * qty
+
+
+def t_daily_loss_limit_after_costs():
+    """LR-4: the MAX_DAILY_LOSS halt compared only the gross P&L; the ledger's transaction costs let the account
+    lose more than the limit net and keep opening positions."""
+    with _pb_isolated():
+        prev = settings.max_daily_loss
+        settings.max_daily_loss = 1000.0
+        try:
+            _rm_x.reset_daily()
+            _rm_x.record_trade(-990.0)                             # gross: still inside the limit
+            _perf_pb.record_trade("intraday", "LRCOST", "BUY", 100, 1000.0, -990.0)
+            assert _rm_x.costs_today > 10, _rm_x.costs_today
+            assert _rm_x.net_realised_pnl() < -1000
+            ok, why = _rm_x.check_before_order("HDFCBANK", 1, 100.0, "BUY")
+            assert not ok and "Daily loss limit" in why, why
+            assert _rm_x.status()["net_daily_pnl"] == round(-990.0 - _rm_x.costs_today, 2)
+            _rm_x.reset_daily()
+            assert _rm_x.costs_today == 0.0
+        finally:
+            settings.max_daily_loss = prev
+            _perf_pb.trades = [t for t in _perf_pb.trades if t["symbol"] != "LRCOST"]
+
+
+def t_agent_pnl_today_counts_stop_exits():
+    """LR-5: an agent's pnl_today (strategy cards, get_status) missed every stop / trailing-stop / target exit,
+    so a losing day showed as a winning one. Every exit through _close_tracked now counts, once."""
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_ba, "send_telegram", _noop):
+        a = _ALL_pb["intraday"]
+        a.state.pnl_today = 0.0
+        oid = _paper_entry(a, "PBPNL", 1000.0)
+        qty = _paper_pos("PBPNL")["quantity"]
+        stop = _tsl_eng._positions[oid].current_sl
+        _lr_tick("PBPNL", stop - 1)
+        asyncio.run(_tsl_eng.on_tick("PBPNL", stop - 1, 0.0))        # stop hit
+        assert oid not in _ba._tsl_sl_orders
+        row = _perf_pb.trades[-1]
+        assert row["oid"] == oid and row["gross"] < 0
+        assert round(a.state.pnl_today, 2) == row["gross"], (a.state.pnl_today, row["gross"])
+        _og_pb._cooldown_until.clear()                                # the post-loss cooldown is not under test
+        _paper_entry(a, "PBPNL2", 1000.0)
+        _lr_tick("PBPNL2", 1010.0)
+        closed = _ba.close_tracked_for_squareoff("t")                 # square-off: counted once, not twice
+        assert closed == ["PBPNL2"]
+        assert round(a.state.pnl_today, 2) == round(row["gross"] + 10.0 * _paper_pos("PBPNL2")["buy_value"] / 1000.0, 2)
+
+
+run("manual square-off closes tracked positions once, no stop re-sell",         t_manual_squareoff_closes_tracked)
+run("restored square-off before the first tick does not fill at ₹0",            t_restored_squareoff_without_tick_not_at_zero)
+run("daily loss limit is measured after transaction costs",                    t_daily_loss_limit_after_costs)
+run("agent pnl_today counts stop exits and square-offs once",                  t_agent_pnl_today_counts_stop_exits)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SWING / F&O — delivery holdings and option contracts (e2e findings SF-1..SF-8, 12 Nov 2026)
+# ══════════════════════════════════════════════════════════════════════════
+section("SWING / F&O LIFECYCLE")
+import master_agent_v5 as _mav_sf
+import replay_backtest as _rb_sf
+from trailing_sl_engine import TrailingSLEngine as _TSLE_sf, TRAIL_CONFIGS as _TC_sf, SLMode as _SLM_sf
+
+
+def _sf_rows(sym):
+    return [p for p in _te_kite_client._paper_positions if p["tradingsymbol"] == sym]
+
+
+def _sf_row(sym, product):
+    return next((p for p in _sf_rows(sym) if p.get("product") == product), None)
+
+
+def _sf_swing_entry(sym, ltp=1000.0):
+    oid = _paper_entry(_ALL_pb["swing"], sym, ltp)
+    assert _ba._tsl_sl_orders[oid]["product"] == "CNC" and _ba._tsl_sl_orders[oid]["agent"] == "swing"
+    return oid
+
+
+def t_sf_cnc_holding_survives_squareoff_after_mis_round_trip():
+    """SF-1: intraday trades X MIS and closes it, then swing buys X CNC the same day. The paper broker kept one
+    row per symbol with the first order's product ('MIS'), so the 15:15 square-off sold the swing holding while
+    its tracking survived — the later stop sold it again (naked short + phantom ledger loss)."""
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_sf, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        sym = "SFMIXCNC"
+        mis = _paper_entry(_ALL_pb["intraday"], sym, 1000.0)
+        q_mis = _sf_row(sym, "MIS")["quantity"]
+        _ba._close_tracked(mis, sym, "BUY", q_mis, -100.0, "T", "intraday")
+        assert _sf_row(sym, "MIS")["quantity"] == 0
+        sw = _sf_swing_entry(sym)
+        cnc = _sf_row(sym, "CNC")
+        assert cnc is not None and cnc["quantity"] > 0, f"the CNC buy needs its own row: {_sf_rows(sym)}"
+        qty = cnc["quantity"]
+        asyncio.run(_mav_sf.master_agent._auto_squareoff())
+        squared = [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == sym and o["tag"] == "SquareOff"]
+        assert not squared, f"the delivery holding was squared off: {squared}"
+        assert _sf_row(sym, "CNC")["quantity"] == qty and sw in _ba._tsl_sl_orders
+        # the swing stop later closes it exactly once and the book ends flat (never short)
+        pos = _tsl_eng._positions[sw]
+        asyncio.run(_tsl_eng.on_sl_hit(pos, pos.current_sl, (pos.current_sl - pos.entry_price) * qty))
+        assert sw not in _ba._tsl_sl_orders
+        assert all(p["quantity"] == 0 for p in _sf_rows(sym)), _sf_rows(sym)
+
+
+def t_sf_paper_rows_keyed_by_product():
+    """SF-1: the paper broker keeps one net row per (symbol, product), as Kite does; the tracked square-off
+    bounds an MIS exit by the MIS row only."""
+    with _pb_isolated():
+        k = _te_kite_client
+        for prod, qty in (("CNC", 10), ("MIS", 5)):
+            k._update_paper_position({"tradingsymbol": "SFKEY", "exchange": "NSE", "product": prod,
+                                      "transaction_type": "BUY", "quantity": qty, "price": 100.0})
+        assert {(p["product"], p["quantity"]) for p in _sf_rows("SFKEY")} == {("CNC", 10), ("MIS", 5)}
+        k._update_paper_position({"tradingsymbol": "SFKEY", "exchange": "NSE", "product": "MIS",
+                                  "transaction_type": "SELL", "quantity": 5, "price": 101.0})
+        assert _sf_row("SFKEY", "CNC")["quantity"] == 10 and _sf_row("SFKEY", "MIS")["quantity"] == 0
+        k.squareoff_all_positions()
+        assert _sf_row("SFKEY", "CNC")["quantity"] == 10, "delivery rows are never squared off"
+
+
+def t_sf_daily_reset_keeps_swing_holding_in_guard():
+    """SF-2: master's 09:15 reset (and the paper book's own rollover) cleared the order guard and the
+    open-position count; only the AI trader's holdings were re-applied, so SwingAgent bought a symbol it
+    already held a second time."""
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_sf, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        sym = "SFRESET"
+        sw = _sf_swing_entry(sym)
+        assert _rm_x.open_position_count == 1
+        for reset in ("master", "paper_book"):
+            if reset == "master":
+                asyncio.run(_mav_sf.master_agent._daily_reset())
+            else:
+                _pb._book_day = _pb.session_day() - timedelta(days=1)
+                assert _pb.roll_day_if_due()
+            assert _og_pb.is_symbol_active_anywhere(sym) == ["swing"], reset
+            assert not _og_pb.can_place(sym, "swing", "BUY")[0], reset
+            assert _rm_x.open_position_count == 1, (reset, _rm_x.open_position_count)
+        n = len(_te_kite_client._paper_orders)
+        asyncio.run(_ALL_pb["swing"]._try_enter(_make_snap(symbol=sym, ltp=1000.0), "BUY", {"stop_loss": 970.0}))
+        assert len(_te_kite_client._paper_orders) == n, "no second buy of a symbol already held"
+        _ba._close_tracked(sw, sym, "BUY", _sf_row(sym, "CNC")["quantity"], 0.0, "T", "swing")
+        assert _rm_x.open_position_count == 0 and not _og_pb.is_symbol_active_anywhere(sym)
+
+
+def t_sf_restart_next_day_keeps_swing_holding():
+    """SF-3: a restart on a later day restored nothing (stale snapshot): every SwingAgent CNC holding vanished
+    (no exit, no ledger row). Its delivery positions are carried over; intraday rows and day counters are not."""
+    with _pb_isolated() as f:
+        sw = _sf_swing_entry("SFNEXT", 1000.0)
+        mis = _paper_entry(_ALL_pb["intraday"], "SFNEXTI", 500.0)
+        pos0 = _tsl_eng._positions[sw]
+        pos0.current_sl = 975.5
+        qty, gtt = pos0.quantity, _ba._tsl_sl_orders[sw].get("gtt_id")
+        _pb.save()
+        snap = _json_pb.loads(f.read_text())
+        prev = (_pb.now_ist().date() - timedelta(days=3)).isoformat()
+        snap["session"] = snap["book_day"] = prev
+        f.write_text(_json_pb.dumps(snap))
+        _pb_wipe()
+        _pb._book_day = None
+        out = _pb.restore()
+        assert out["restored"] and out["positions"] == ["SFNEXT"], out
+        assert sw in _ba._tsl_sl_orders and mis not in _ba._tsl_sl_orders
+        assert _tsl_eng._positions[sw].current_sl == 975.5 and _tsl_eng._positions[sw].quantity == qty
+        assert _sf_row("SFNEXT", "CNC")["quantity"] == qty
+        # RC-3: the earlier session's MIS position is settled (flat at the broker, one ledger row), not dropped
+        assert not any(p["quantity"] for p in _sf_rows("SFNEXTI")), _sf_rows("SFNEXTI")
+        assert out["settled"] == ["SFNEXTI"] and len([t for t in _perf_pb.trades if t.get("oid") == mis]) == 1
+        assert gtt is None or _te_kite_client._paper_gtts[int(gtt)]["status"] == "active"
+        assert _og_pb.is_symbol_active_anywhere("SFNEXT") == ["swing"]
+        assert _rm_x.open_position_count == 1 and _rm_x.trades_today == 0
+        assert _ALL_pb["swing"].state.trades_today == 0 and _ALL_pb["intraday"].state.trades_today == 0
+        n0 = len(_perf_pb.trades)
+        _ba._close_tracked(sw, "SFNEXT", "BUY", qty, (990.0 - 1000.0) * qty, "T", "swing")
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == sw
+        assert _sf_row("SFNEXT", "CNC")["quantity"] == 0
+
+
+def t_sf_swing_trail_is_percent_like_replay():
+    """SF-4: the swing trail was ATR_TRAIL fed the 1-minute ATR live (₹1 behind the best price) but replayed
+    with atr=0 (1 % trail): live cut every winner on its first small pullback. Live and replay must agree."""
+    assert _TC_sf["swing"].mode == _SLM_sf.TRAILING
+    stops = []
+    for atr in (0.67, 0.0):                         # live (1-minute ATR) vs replay (0)
+        eng = _TSLE_sf()
+        p = eng.register(symbol="SFTRAIL", strategy="swing", side="BUY", entry_price=1400.0, quantity=10,
+                         order_id=f"SFT-{atr}")
+        for px in (1420.0, 1441.0):
+            asyncio.run(eng.on_tick("SFTRAIL", px, atr))
+        asyncio.run(eng.on_tick("SFTRAIL", 1433.0, atr))   # a 0.6 % dip after +2.9 %
+        assert p.status.value == "ACTIVE", f"atr={atr}: stopped out on a 0.6 % dip at {p.current_sl}"
+        stops.append(p.current_sl)
+    assert stops[0] == stops[1], stops
+
+
+def t_sf_swing_holding_period_matches_replay():
+    """SF-5: the replay closes a swing trade after MAX_CNC_SESSIONS sessions ('TIME'); live never did."""
+    from unittest.mock import patch
+    import agents.strategy_agents as _sa_sf
+    from ist_clock import is_trading_day
+    assert _rb_sf.MAX_CNC_SESSIONS is _ba.MAX_CNC_SESSIONS == 15
+    d0 = date(2026, 11, 13)
+    days, d = [], d0
+    while len(days) < 15:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            days.append(d)
+    a = _ALL_pb["swing"]
+    row = {"tradingsymbol": "SFHOLD", "quantity": 10, "average_price": 1000.0, "opened": d0.isoformat()}
+    ind = _make_snap(symbol="SFHOLD", ltp=1000.0).indicators
+    for day, want in ((days[13], False), (days[14], True)):
+        with patch.object(_sa_sf, "now_ist", return_value=_pb_at(day, 9, 16)):
+            assert a.rule_exit(row, ind)[0] is want, (day, a.rule_exit(row, ind))
+    with patch.object(_sa_sf, "now_ist", return_value=_pb_at(days[14], 9, 16)):
+        assert a.rule_exit({k: v for k, v in row.items() if k != "opened"}, ind)[0] is False
+    # the live loop passes the entry session and exits the holding through the normal path
+    async def _noop(*a_, **k): return None
+    with _pb_isolated(), patch.object(_ba, "send_telegram", _noop), patch.object(_sa_sf, "send_telegram", _noop, create=True):
+        sw = _sf_swing_entry("SFHOLD")
+        assert _ba._tsl_sl_orders[sw]["opened"] == _sa_sf.now_ist().date().isoformat()
+        _ba._tsl_sl_orders[sw]["opened"] = d0.isoformat()
+        with patch.object(_sa_sf, "now_ist", return_value=_pb_at(days[14], 9, 16)):
+            asyncio.run(a._check_exits_on_tick(_make_snap(symbol="SFHOLD", ltp=1000.0)))
+        assert sw not in _ba._tsl_sl_orders and _sf_row("SFHOLD", "CNC")["quantity"] == 0
+
+
+def _sf_listed(name, step, centre, lot, expiry):
+    return [{"name": name, "instrument_type": t, "segment": "NFO-OPT", "strike": float(k), "expiry": expiry,
+             "tradingsymbol": f"{name}SF{int(k) if float(k).is_integer() else k}{t}", "lot_size": lot}
+            for t in ("CE", "PE") for k in [centre + i * step for i in range(-30, 31)]]
+
+
+def t_sf_fno_trades_nearest_listed_strike():
+    """SF-6/SF-7: a stock strike on a fixed 50-point grid (TATASTEEL 163 → 150, INFY ₹20 steps never list 1550)
+    had to match one of 7 listed strikes exactly, else the signal was dropped silently. The agent now trades the
+    listed strike nearest to its delta-0.4 target, counts drops via _skip, and tracks the trade at the broker's
+    fill (the ledger booked the quote, 1 % under the paper fill)."""
+    from unittest.mock import patch
+    import options_resolver as _or_sf
+    class _OptKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 4.0} for i in instruments}
+    async def _noop(*a, **k): return None
+    exp = datetime.now().date() + timedelta(days=6)
+    listed = _sf_listed("TATASTEEL", 1, 163, 5500, exp) + _sf_listed("INFY", 20, 1500, 400, exp)
+    def body():
+        _te_kite_client._kite = _OptKite()
+        agent = FnOAgent()
+        with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+             patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+             patch.object(_ba, "send_telegram", _noop), \
+             patch.object(_or_sf, "_instruments", return_value=listed):
+            spot = 163.44
+            sig = {"option_symbol": "BUILT", "exchange": "NFO", "lot_size": 1, "option_type": "CE",
+                   "strike": agent._pick_strike(spot, "CE", 25.0),
+                   "target_strike": agent._target_strike(spot, "CE", 25.0), "atm_iv": 25.0}
+            assert sig["strike"] == 150
+            asyncio.run(agent._try_enter(_make_snap(symbol="TATASTEEL", ltp=spot), "BUY", dict(sig)))
+            oid, e = next((o, e) for o, e in _ba._tsl_sl_orders.items() if e["symbol"].startswith("TATASTEELSF"))
+            assert e["symbol"] == f"TATASTEELSF{round(sig['target_strike'])}CE", e["symbol"]
+            assert _tsl_eng._positions[oid].quantity == 5500
+            fill = _order(oid)["average_price"]
+            assert _tsl_eng._positions[oid].entry_price == fill, (_tsl_eng._positions[oid].entry_price, fill)
+            n0 = len(_perf_pb.trades)
+            _ba._close_tracked(oid, e["symbol"], "BUY", 5500, 0.0, "T", "fno")
+            assert _perf_pb.trades[-1]["oid"] == oid and len(_perf_pb.trades) == n0 + 1
+            # INFY lists 1540/1560 only: the 50-grid 1550 snaps to a listed neighbour
+            asyncio.run(agent._try_enter(_make_snap(symbol="INFY", ltp=1548.0), "BUY",
+                        {"exchange": "NFO", "lot_size": 1, "option_type": "CE", "strike": 1550}))
+            oid2, e2 = next((o, e) for o, e in _ba._tsl_sl_orders.items() if e["symbol"].startswith("INFYSF"))
+            assert e2["symbol"] in ("INFYSF1540CE", "INFYSF1560CE") and _tsl_eng._positions[oid2].quantity == 400
+            _ba._close_tracked(oid2, e2["symbol"], "BUY", 400, 0.0, "T", "fno")
+            # an underlying with no listed options is a counted skip, not a silent drop
+            n = len(_te_kite_client._paper_orders)
+            asyncio.run(agent._try_enter(_make_snap(symbol="NOOPTS", ltp=500.0), "BUY",
+                        {"exchange": "NFO", "lot_size": 1, "option_type": "CE", "strike": 500}))
+            assert len(_te_kite_client._paper_orders) == n
+            assert agent.state.skip_counts.get("no listed contract") == 1, agent.state.skip_counts
+    _with_paper_kite(body)
+
+
+def t_sf_swing_entry_protected_by_gtt():
+    """SF-8: a SwingAgent CNC entry was protected by a DAY SL-M, which expires at the close (LIVE: no stop
+    overnight). It gets a GTT like the AI swing path; the GTT follows the trail and is deleted on exit."""
+    with _pb_isolated():
+        sw = _sf_swing_entry("SFGTT", 1000.0)
+        e = _ba._tsl_sl_orders[sw]
+        assert e.get("gtt_id") and not e.get("sl_order_id"), e
+        g = _te_kite_client._paper_gtts[int(e["gtt_id"])]
+        assert g["status"] == "active" and g["quantity"] == _sf_row("SFGTT", "CNC")["quantity"]
+        assert g["trigger"] < 990.0, g                      # just beyond the software stop (₹990)
+        assert not [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == "SFGTT"
+                    and o["order_type"] in ("SL", "SL-M")], "no day stop order on a delivery holding"
+        pos = _tsl_eng._positions[sw]
+        asyncio.run(_tsl_eng.on_tick("SFGTT", 1030.0, 0.0))
+        assert pos.current_sl > 990.0 and g["trigger"] > 990.0, (pos.current_sl, g)
+        _ba._close_tracked(sw, "SFGTT", "BUY", pos.quantity, 0.0, "T", "swing")
+        assert g["status"] == "deleted"
+    # intraday (MIS) entries keep their exchange SL-M
+    with _pb_isolated():
+        oid = _paper_entry(_ALL_pb["intraday"], "SFMISSL", 500.0)
+        assert _order(_ba._tsl_sl_orders[oid]["sl_order_id"])["order_type"] == "SL-M"
+
+
+run("SF-1 swing CNC holding survives the 15:15 square-off after an MIS round trip", t_sf_cnc_holding_survives_squareoff_after_mis_round_trip)
+run("SF-1 paper broker keeps one row per (symbol, product)",                       t_sf_paper_rows_keyed_by_product)
+run("SF-2 09:15 reset keeps swing holdings in the guard and position count",       t_sf_daily_reset_keeps_swing_holding_in_guard)
+run("SF-3 restart on a later day carries the swing holding over",                  t_sf_restart_next_day_keeps_swing_holding)
+run("SF-4 swing trail is the replay's percent trail, not the 1-minute ATR",        t_sf_swing_trail_is_percent_like_replay)
+run("SF-5 swing holding period exits after MAX_CNC_SESSIONS, as replayed",         t_sf_swing_holding_period_matches_replay)
+run("SF-6/7 F&O trades the nearest listed strike, tracked at the broker fill",     t_sf_fno_trades_nearest_listed_strike)
+run("SF-8 swing CNC entry is protected by a GTT, not a day SL-M",                  t_sf_swing_entry_protected_by_gtt)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AI trader e2e regressions (Nov 2026): swing holds vs 15:15, guard caps, trail handover, lock stall, option fill
+# ══════════════════════════════════════════════════════════════════════════
+
+def _ai_sq(fn):
+    """Isolated paper book + AI env + private swing file; the master square-off's notifications muted."""
+    import master_agent_v5 as _mav_ai
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), _patch.object(_mav_ai, "send_telegram", _noop):
+        return _with_ai_env(lambda: _with_swing_file(lambda path: fn(_mav_ai.master_agent)))
+
+
+def t_ai_swing_put_survives_squareoff():
+    """AI-1: an NRML swing put is held for days; the 15:15 broker flatten skipped only CNC rows and sold it
+    while the AI kept tracking it (its later exit then opened a naked short)."""
+    def body(master):
+        ai = _rt_ai()
+        _ai_tick("PUTSQ", 1000.0)
+        out = asyncio.run(ai._place_swing_put(_put_args("PUTSQ")))
+        oid, sym, qty = out["order_id"], out["symbol"], out["quantity"]
+        assert _paper_pos(sym)["quantity"] == qty
+        asyncio.run(master._auto_squareoff())
+        assert oid in ai._ai_entries(), "the swing put is still tracked"
+        assert _paper_pos(sym)["quantity"] == qty, "the broker square-off must not sell a held swing put"
+        assert not [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == sym and o["tag"] == "SquareOff"]
+        asyncio.run(ai._close_position(sym, "next-day stop"))
+        assert _paper_pos(sym)["quantity"] == 0, "flat after its own exit, not short"
+    _ai_sq(body)
+
+
+def t_ai_cnc_swing_after_mis_round_trip_survives_squareoff():
+    """AI-5: an MIS round trip earlier in the day left the paper row product MIS; a CNC swing bought later in
+    the same symbol was then sold by the 15:15 MIS square-off."""
+    def body(master):
+        ai = _rt_ai()
+        _ai_tick("SWMIX", 1000.0)
+        for side in ("BUY", "SELL"):
+            _te_kite_client.place_order(tradingsymbol="SWMIX", exchange="NSE", transaction_type=side, quantity=20,
+                                        order_type="MARKET", product="MIS", tag="t")
+        out = asyncio.run(ai._place_swing_trade(_swing_args("SWMIX")))
+        rows = [p for p in _te_kite_client._paper_positions if p["tradingsymbol"] == "SWMIX"]
+        row = next(p for p in rows if p["quantity"])
+        assert row["quantity"] == out["quantity"] and row["product"] == "CNC", rows
+        row["product"] = "MIS"      # a legacy single-row snapshot whose row still says MIS keeps the holding too
+        asyncio.run(master._auto_squareoff())
+        assert out["order_id"] in ai._ai_entries() and row["quantity"] == out["quantity"]
+        row["product"] = "CNC"
+        asyncio.run(ai._close_position("SWMIX", "t"))
+        assert row["quantity"] == 0
+    _ai_sq(body)
+
+
+def t_squareoff_hold_is_per_product_row():
+    """Merge regression (SF-1 x AI-5): the paper book keeps one row per (symbol, product), but the square-off
+    still summed every product's overnight hold against each row, so an untracked MIS leftover in a symbol with
+    a CNC swing holding of the same size was left open overnight. Holds apply to their own product's row."""
+    def body(master):
+        ai = _rt_ai()
+        _ai_tick("SWLEFT", 1000.0)
+        out = asyncio.run(ai._place_swing_trade(_swing_args("SWLEFT")))
+        q = out["quantity"]
+        _te_kite_client.place_order(tradingsymbol="SWLEFT", exchange="NSE", transaction_type="BUY", quantity=q,
+                                    order_type="MARKET", product="MIS", tag="t")      # untracked leftover
+        asyncio.run(master._auto_squareoff())
+        rows = {p.get("product"): p["quantity"] for p in _te_kite_client._paper_positions
+                if p["tradingsymbol"] == "SWLEFT"}
+        assert rows == {"CNC": q, "MIS": 0}, rows
+        asyncio.run(ai._close_position("SWLEFT", "t"))
+    _ai_sq(body)
+
+
+def t_order_guard_ai_limits():
+    """AI-2: the guard capped every AI key at 10 trades/day (AI_AGENT_MAX_TRADES_PER_DAY ignored) and applied
+    the mechanical agents' post-loss cooldown to the AI, while the model was told it had trades left."""
+    prev = _ai_settings.ai_agent_max_trades_per_day
+    _ai_settings.ai_agent_max_trades_per_day = 999
+    def body():
+        for i in range(10):
+            _og_x.register_order(f"OGAI{i}", "ai", "BUY", f"P{i}")
+            _og_x.release_order(f"OGAI{i}", "ai", "BUY", 100.0)
+        assert _og_x.can_place("OGAI10", "ai", "BUY")[0], "11th AI trade with a 999/day limit"
+        _og_x.release_order("OGAI0", "ai", "BUY", -50.0)
+        ok, why = _og_x.can_place("OGTCS", "ai", "BUY")
+        assert ok, why
+        ai = _rt_ai()
+        _ai_tick("OGAIX", 1000.0)
+        assert asyncio.run(ai._place_trade(_trade_args("OGAIX")))["status"] == "placed"
+        asyncio.run(ai._close_position("OGAIX", "t"))
+        # fno: a mechanical agent the replay did not validate (intraday / scalping / swing have no strategy-wide
+        # cooldown since EQ-2) keeps the post-loss cooldown
+        _og_x.release_order("OGMECH", "fno", "BUY", -50.0)
+        assert not _og_x.can_place("OGMECH2", "fno", "BUY")[0], "mechanical agents keep their cooldown"
+    try:
+        _with_ai_env(body)
+    finally:
+        _ai_settings.ai_agent_max_trades_per_day = prev
+        _og_x._cooldown_until.clear(); _og_x._trade_count.clear()
+
+
+def _ai_cleanup(fn):
+    """Close any AI position a failed assertion left open (the next AI test would hit the position limit)."""
+    try:
+        return fn()
+    finally:
+        ai = _rt_ai()
+        for sym in {e["symbol"] for e in ai._ai_entries().values()}:
+            try:
+                asyncio.run(ai._close_position(sym, "test cleanup"))
+            except Exception:
+                pass
+
+
+def t_ai_trail_handover_returns_to_ai():
+    """AI-3: a position handed to the mechanical trail while the AI was unavailable (restart before the
+    auto-start, provider errors, cost cap) never came back to AI management once the AI recovered."""
+    prev_rt, prev_tr = _ai_settings.ai_agent_realtime, _ai_settings.ai_agent_ai_trailing
+    _ai_settings.ai_agent_realtime = _ai_settings.ai_agent_ai_trailing = True
+    def body():
+        ai = _rt_ai()
+        ai.enabled = True
+        _ai_tick("HOAI", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("HOAI")))["order_id"]
+        pos = _tsl_eng._positions[oid]
+        held = {oid: _ba._tsl_sl_orders[oid]}
+        assert pos.external_trail and ai._ai_trailing_available()
+        ai._ai_errors = 3
+        ai._handover_if_ai_unavailable(held)
+        assert not pos.external_trail and ai._trail[oid].get("handed_over")
+        assert ai.export_book()["trail"][oid].get("handed_over"), "persisted across a restart"
+        ai._ai_errors = 0
+        ai._handover_if_ai_unavailable(held)
+        assert pos.external_trail and not ai._trail[oid].get("handed_over"), "back under AI management"
+        asyncio.run(ai._close_position("HOAI", "t"))
+    try:
+        _with_ai_env(lambda: _with_key(lambda: _ai_cleanup(body)))
+    finally:
+        _ai_settings.ai_agent_realtime, _ai_settings.ai_agent_ai_trailing = prev_rt, prev_tr
+
+
+def t_ai_tick_monitor_not_blocked_by_action_lock():
+    """AI-4: a model entry holds _action_lock across its debate LLM call; a target hit then blocked the single
+    AI tick monitor on the lock, so other positions' stops went unchecked until the debate finished."""
+    def body():
+        ai = _rt_ai()
+        _ai_tick("LKA", 1000.0); _ai_tick("LKB", 1000.0)
+        a = asyncio.run(ai._place_trade(_trade_args("LKA")))["order_id"]
+        b = asyncio.run(ai._place_trade(_trade_args("LKB")))["order_id"]
+        async def run():
+            await ai._action_lock.acquire()                   # a debate in progress
+            try:
+                await asyncio.wait_for(ai._on_snap(_make_snap(symbol="LKA", ltp=1021.0)), 1.0)   # target hit
+                _ai_tick("LKB", 985.0)
+                await asyncio.wait_for(ai._on_snap(_make_snap(symbol="LKB", ltp=985.0)), 1.0)    # stop hit
+                assert b not in ai._ai_entries(), "the stop runs while the lock is held"
+                assert a in ai._ai_entries(), "the target exit waits for the lock"
+            finally:
+                ai._action_lock.release()
+            for t in list(ai._pending_exits.values()):
+                await t
+            assert a not in ai._ai_entries() and not ai._pending_exits
+        asyncio.run(run())
+    _with_ai_env(lambda: _ai_cleanup(body))
+
+
+def t_ai_option_entry_fills_at_touch():
+    """AI-7: the contract had no tick when the marketable LIMIT (ask × 1.01) went in, so the paper broker
+    filled at the limit and the ledger booked ~1 % of premium as phantom cost / slippage."""
+    def body():
+        ai = _rt_ai()
+        import tick_engine as _te_mod
+        real_q = ai._option_quotes
+        def quotes(cs, spot):
+            out = real_q(cs, spot)
+            for c in cs:
+                _te_mod.tick_engine._latest_tick.pop(c.tradingsymbol, None)     # a freshly chosen contract
+                out[c.tradingsymbol] = {**out[c.tradingsymbol], "ltp": 120.0, "bid": 119.8, "ask": 120.2,
+                                        "estimated": False}
+            return out
+        with _patch.object(ai, "_option_quotes", side_effect=quotes):
+            out = asyncio.run(ai._place_option_trade(_opt_args()))
+        oid = out["order_id"]
+        fill = _order(oid)["price"]
+        assert fill <= 120.2, f"paper fill {fill} above the ask (limit {out['limit_price']})"
+        assert _tsl_eng._positions[oid].entry_price == fill, "the position is registered at its fill"
+        asyncio.run(ai._close_position(out["symbol"], "t"))
+    _with_opt_env(lambda: _ai_cleanup(body))
+
+
+run("AI-1: AI swing put (NRML) survives the 15:15 square-off",                   t_ai_swing_put_survives_squareoff)
+run("AI-5: CNC swing after an MIS round trip survives the 15:15 square-off",     t_ai_cnc_swing_after_mis_round_trip_survives_squareoff)
+run("merge: square-off applies overnight holds to their own (symbol, product) row", t_squareoff_hold_is_per_product_row)
+run("AI-2: order guard uses the AI's daily limit and no post-loss cooldown",     t_order_guard_ai_limits)
+run("AI-3: a position handed to the mechanical trail returns to the AI",          t_ai_trail_handover_returns_to_ai)
+run("AI-4: tick monitor keeps running stops while _action_lock is held",          t_ai_tick_monitor_not_blocked_by_action_lock)
+run("AI-7: paper AI option entry fills at the touch, registered at its fill",     t_ai_option_entry_fills_at_touch)
+
+
+def t_ledger_books_paper_exit_at_touch():
+    """Paper exits fill at the bid/ask (EQ-6); the ledger, risk P&L and the broker must book the same price."""
+    import tick_engine as _te_mod
+    from performance import performance as _perf
+    agent = IntradayAgent()
+    oid = _paper_entry(agent, "LEDTCH", 1000.0)
+    qty = _paper_pos("LEDTCH")["quantity"]
+    _te_mod.tick_engine._latest_tick["LEDTCH"] = Tick(
+        symbol="LEDTCH", ltp=1010.0, bid=1009.5, ask=1010.5, volume=1, change=0.0, change_pct=0.0,
+        high=1010.0, low=1010.0, open=1010.0, timestamp=datetime.now())
+    before = _rm_x.daily_realised_pnl
+    _ba._close_tracked(oid, "LEDTCH", "BUY", qty, (1010.0 - 1000.0) * qty, "T", "intraday")
+    booked = _rm_x.daily_realised_pnl - before
+    assert abs(booked - (1009.5 - 1000.0) * qty) < 1e-6, (booked, qty)
+    rec = [t for t in _perf.trades if t.get("symbol") == "LEDTCH"] if hasattr(_perf, "trades") else []
+    if rec:
+        assert abs(float(rec[-1].get("pnl", rec[-1].get("gross", booked))) - booked) < 1e-6, rec[-1]
+
+run("ledger books a paper exit at the touch the broker filled", t_ledger_books_paper_exit_at_touch)
 
 
 # ══════════════════════════════════════════════════════════════════════════
