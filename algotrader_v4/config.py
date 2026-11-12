@@ -101,6 +101,7 @@ class Settings(BaseSettings):
     regime_cut: float = 0.5             # strategy lost on this day type in both halves
     regime_min_trades: int = 20         # fewer trades on a day type than this → no adjustment
     regime_pause_mode: Literal["extreme_only", "plan", "off"] = "extreme_only"   # see MasterAgent._regime_pauses
+    allocator_can_block:  bool = True     # False: a 0x allocator factor becomes 1x (every agent keeps trading)
     master_ai_review:     bool = False    # per-minute AI regime review (superseded by the twice-daily allocator)
     master_ai_review_min: int  = 30       # when on: at most one AI review per this many minutes
     claude_gate_threshold: int = 65       # min confidence to enter (master raises/lowers dynamically)
@@ -150,6 +151,7 @@ class Settings(BaseSettings):
     # +2R, +3R…) and periodically while price makes new highs. Stops can only tighten.
     # If the AI is unavailable, the standard mechanical trail takes over that position.
     ai_agent_ai_trailing:         bool  = True
+    tsl_floor_under_ai:           bool  = True     # the mechanical breakeven + trail also runs under AI-managed stops
     ai_agent_trail_review_s:      int   = 120      # min seconds between trail reviews per position
     ai_agent_trail_min_gap_pct:   float = 0.15     # equity stop must stay this far from price
     ai_agent_option_trail_min_gap_pct: float = 5.0 # option stop must stay this far from premium

@@ -551,6 +551,40 @@ async def t_tsl_sell_side():
     await tsl.on_tick("ICICIBANK", 880.0, 6.0)
     assert tsl.get_position("oid-t07") is not None
 
+async def t_tsl_floor_under_ai_trail():
+    """AI-managed stops also get the mechanical breakeven + trail as a floor (TSL_FLOOR_UNDER_AI, on by default);
+    with the floor off the engine leaves them to the AI, as before."""
+    from config import settings as _sf
+    for floor, moves in ((True, True), (False, False)):
+        prev = _sf.tsl_floor_under_ai; _sf.tsl_floor_under_ai = floor
+        try:
+            tsl = TrailingSLEngine()
+            pos = tsl.register("HDFCBANK", "intraday", "BUY", 1500.0, 5, f"oid-ai-{floor}", atr=8.0)
+            pos.external_trail = True
+            orig = pos.current_sl
+            for px in (1515.0, 1530.0, 1545.0, 1560.0):
+                await tsl.on_tick("HDFCBANK", px, 8.0)
+            assert (pos.current_sl > orig) == moves, (floor, orig, pos.current_sl)
+            assert not pos.target1_hit and not pos.target2_hit          # target steps stay with the AI
+        finally:
+            _sf.tsl_floor_under_ai = prev
+
+
+def t_allocator_can_block_switch():
+    import allocator as _al
+    from config import settings as _sa
+    from unittest.mock import patch as _pa
+    with _pa.object(_al, "today", return_value={"factors": {"intraday": 0.0, "swing": 0.5}}):
+        assert _al.size_factor("intraday") == 0.0
+        prev = _sa.allocator_can_block; _sa.allocator_can_block = False
+        try:
+            assert _al.size_factor("intraday") == 1.0 and _al.size_factor("swing") == 0.5
+        finally:
+            _sa.allocator_can_block = prev
+
+
+run("TSL: mechanical trail is a floor under AI-managed stops", t_tsl_floor_under_ai_trail)
+run("allocator: ALLOCATOR_CAN_BLOCK=false turns 0x into 1x", t_allocator_can_block_switch)
 run("TRAIL_CONFIGS has all 4 strategies",      t_tsl_configs_all_strats)
 run("register() sets entry_price + symbol",    t_tsl_register)
 run("get_position() finds by order_id",        t_tsl_get_position)
@@ -2853,7 +2887,12 @@ def t_tsl_external_trail_left_alone():
     pos = eng.register(symbol="EXT", strategy="intraday", side="BUY", entry_price=100.0,
                        quantity=10, order_id="EXT-1")
     pos.current_sl, pos.external_trail = 98.0, True
-    asyncio.run(eng.on_tick("EXT", 110.0, 1.0))            # +10%: would breakeven + trail + T2
+    from config import settings as _sx
+    prev = _sx.tsl_floor_under_ai; _sx.tsl_floor_under_ai = False          # floor off: the AI alone moves the stop
+    try:
+        asyncio.run(eng.on_tick("EXT", 110.0, 1.0))        # +10%: would breakeven + trail + T2
+    finally:
+        _sx.tsl_floor_under_ai = prev
     assert pos.current_sl == 98.0 and not pos.trail_active and not pos.target2_hit
     hits = []
     async def on_hit(p, ltp, pnl): hits.append(ltp)
@@ -2980,7 +3019,7 @@ def t_ai_trailing_falls_back_when_ai_stopped():
         asyncio.run(ai.close_all("t"))
     _with_ai_env(lambda: _with_key(body))
 
-run("TSL leaves AI-managed stops alone, still fires hits",   t_tsl_external_trail_left_alone)
+run("TSL with the floor off leaves AI stops alone, still fires hits", t_tsl_external_trail_left_alone)
 run("TSL target-1 tightening updates exchange stop",          t_tsl_t1_tighten_syncs_exchange)
 run("AI entries are AI-trailed",                              t_ai_entry_uses_ai_trailing)
 run("AI adjust_stop moves the exchange stop + target",        t_ai_adjust_stop_tightens_exchange_order)
