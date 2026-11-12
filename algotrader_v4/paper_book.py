@@ -229,10 +229,10 @@ def roll_day_if_due(now=None) -> bool:
     for a in _agents().values():
         a.reset_daily()
     try:
-        from ai_trader import ai_trader
-        ai_trader.reapply_overnight()             # swing positions held from earlier days still count
+        from agents.base_agent import reapply_overnight_tracked
+        reapply_overnight_tracked()               # CNC/swing positions held from earlier days (every agent) still count
     except Exception as exc:
-        logger.warning("[paper_book] AI overnight positions not re-applied: {}", exc)
+        logger.warning("[paper_book] overnight positions not re-applied: {}", exc)
     logger.warning("[paper_book] new trading session {} — day counters of {} reset", cur, prev)
     save(force=True)
     return True

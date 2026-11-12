@@ -429,6 +429,7 @@ class FnOAgent(BaseAgent):
     _orb_high:        dict = {}   # sym → float (ORB high built 9:15-9:30)
     _orb_low:         dict = {}   # sym → float
     _orb_fired:       dict = {}   # sym → bool  (prevent ORB retrigger)
+    _orb_day:         dict = {}   # sym → date the ORB above belongs to (a running process spans sessions)
     _last_candle_ts:  dict = {}   # sym → candle ts (SURGE dedup)
     _prev_above_vwap: dict = {}   # sym → bool (VWAP cross state)
     _prev_bb_width:   dict = {}   # sym → float (squeeze detection)
@@ -569,6 +570,8 @@ class FnOAgent(BaseAgent):
     def _pat_orb(self, sym, snap, ind, ltp, t):
         if not (time(9, 30) <= t <= time(10, 0)):
             return "", 0, ""
+        if self._orb_day.get(sym) != now_ist().date():      # no range built this session
+            return "", 0, ""
         orb_h = self._orb_high.get(sym)
         orb_l = self._orb_low.get(sym)
         if not (orb_h and orb_l and orb_h > orb_l):
@@ -696,13 +699,16 @@ class FnOAgent(BaseAgent):
     def _update_orb(self, sym: str, snap: MarketSnapshot, t: time) -> None:
         if not (time(9, 15) <= t <= time(9, 30)):
             return
-        if sym not in self._orb_high:
+        today = now_ist().date()
+        if sym not in self._orb_high or self._orb_day.get(sym) != today:
+            # a new session: yesterday's range and "already fired" flag do not carry over
             self._orb_high[sym] = snap.tick.ltp
             self._orb_low[sym]  = snap.tick.ltp
             self._orb_fired[sym] = False
+            self._orb_day[sym] = today
         for c in snap.candles_1min:
             c_t = getattr(c, "ts", None)
-            if c_t and time(9, 15) <= c_t.time() <= time(9, 30):
+            if c_t and c_t.date() == today and time(9, 15) <= c_t.time() <= time(9, 30):
                 self._orb_high[sym] = max(self._orb_high[sym], c.high)
                 self._orb_low[sym]  = min(self._orb_low[sym],  c.low)
 

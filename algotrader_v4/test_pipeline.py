@@ -3898,6 +3898,8 @@ def t_fno_pat_orb_ce():
     a._orb_high["NIFTY"] = 22050.0
     a._orb_low["NIFTY"]  = 21950.0
     a._orb_fired["NIFTY"] = False
+    from ist_clock import now_ist as _now_orb
+    a._orb_day["NIFTY"]   = _now_orb().date()   # the range was built this session
     a._prev_ltp["NIFTY"]  = 22045.0   # was just below ORB high
     from unittest.mock import MagicMock
     ind = MagicMock()
@@ -10376,6 +10378,128 @@ def t_paper_book_restored_fno_squared_off_without_master():
         assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 5)) == []
 
 
+def t_daily_reset_keeps_strategy_swing_positions():
+    """STARTUP-1: a SwingAgent CNC position held overnight must still count after the 09:15 reset (master's
+    _daily_reset or the paper book's own rollover): the same swing signal next day may not buy it again,
+    and the open-position count keeps it."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    swing = _ALL_pb["swing"]
+    for reset in ("master", "paper_book"):
+        with _pb_isolated(), patch.object(_pb, "now_ist") as clk, patch.object(_mav_pb, "send_telegram", _noop):
+            clk.return_value = _pb_at(_D_pb, 13, 0)
+            _pb._book_day = _pb.session_day()
+            oid = _paper_entry(swing, "PBSWG", 1500.0)
+            assert _ba._tsl_sl_orders[oid]["product"] == "CNC"
+            assert not _og_pb.can_place("PBSWG", "swing", "BUY")[0]
+            clk.return_value = _pb_at(_D_pb + timedelta(days=1), 9, 15)
+            if reset == "master":
+                asyncio.run(_mav_pb.master_agent._daily_reset())
+            else:
+                assert _pb.roll_day_if_due()
+            ok, why = _og_pb.can_place("PBSWG", "swing", "BUY")
+            assert not ok and "Duplicate" in why, (reset, why)
+            assert _og_pb.is_symbol_active_anywhere("PBSWG") == ["swing"], reset
+            assert _rm_x.open_position_count == 1, (reset, _rm_x.open_position_count)
+            assert _og_pb._trade_count.get("swing", 0) == 0, "a held position is not a new trade today"
+            n = len(_ba._tsl_sl_orders)
+            _paper_entry(swing, "PBSWG", 1505.0)                      # the same signal again on day 2
+            assert len(_ba._tsl_sl_orders) == n, f"{reset}: swing bought PBSWG a second time"
+            assert sum(1 for e in _ba._tsl_sl_orders.values() if e["symbol"] == "PBSWG") == 1
+
+
+def t_fno_orb_resets_each_session():
+    """STARTUP-3: FnOAgent's opening range belongs to one session. A process running into the next day must
+    build a fresh range (only today's candles) and may fire the ORB again; yesterday's range is never used."""
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    import agents.strategy_agents as _sa_pb
+    a = FnOAgent()
+    sym = "ORBNEXT"
+    saved = {k: dict(getattr(FnOAgent, k)) for k in ("_orb_high", "_orb_low", "_orb_fired", "_orb_day", "_prev_ltp")}
+    def C(d, hh, mm, lo, hi):
+        return SimpleNamespace(ts=datetime.combine(d, time(hh, mm)), high=hi, low=lo)
+    try:
+        d1, d2 = _D_pb, _D_pb + timedelta(days=1)
+        candles = [C(d1, 9, 16, 24000, 24000), C(d1, 9, 20, 24100, 24100)]
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d1, 9, 25)):
+            a._update_orb(sym, SimpleNamespace(tick=SimpleNamespace(ltp=24050), candles_1min=candles), time(9, 25))
+        a._prev_ltp[sym] = 24100
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d1, 9, 35)):
+            assert a._pat_orb(sym, None, None, 24150, time(9, 35)) == ("CE", 5, "ORB")
+        # day 2, same process; the 1-minute buffer still holds yesterday's opening candles
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d2, 9, 35)):
+            assert a._pat_orb(sym, None, None, 23650, time(9, 35)) == ("", 0, ""), "no range built today yet"
+        candles += [C(d2, 9, 16, 23500, 23500), C(d2, 9, 20, 23600, 23600)]
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d2, 9, 25)):
+            a._update_orb(sym, SimpleNamespace(tick=SimpleNamespace(ltp=23550), candles_1min=candles), time(9, 25))
+        assert (a._orb_low[sym], a._orb_high[sym]) == (23500, 23600), (a._orb_low[sym], a._orb_high[sym])
+        a._prev_ltp[sym] = 23600
+        with patch.object(_sa_pb, "now_ist", return_value=_pb_at(d2, 9, 35)):
+            assert a._pat_orb(sym, None, None, 23650, time(9, 35)) == ("CE", 5, "ORB")
+    finally:
+        for k, v in saved.items():
+            getattr(FnOAgent, k).clear(); getattr(FnOAgent, k).update(v)
+
+
+def t_scoreboard_backfills_missed_day():
+    """STARTUP-2: a trading day whose 15:35 snapshot never ran (restart after 15:00) still counts: the next
+    snapshot fills the day in from the trade ledger, so month/since-start P&L include it."""
+    def body(p, path):
+        d1 = datetime(2026, 11, 12, 15, 15)
+        d2 = datetime(2026, 11, 13, 15, 35)
+        with _patch.object(p, "_benchmark_closes", return_value=[("2026-11-11", 24000.0)]):
+            with _patch.object(_perf_mod, "now_ist", return_value=d1):
+                p.record_trade("intraday", "SBIN", "BUY", 250, 800.0, 6250.0)
+            net1 = round(6250.0 - p.trades[-1]["cost"], 2)
+            assert p.days == {}, "no snapshot ran on day 1"
+            with _patch.object(_perf_mod, "now_ist", return_value=d2), \
+                 _patch.object(p, "_nifty_today_pct", return_value=None):
+                p.snapshot_today(0.0)
+                sb = p.scoreboard()
+        assert sorted(p.days) == ["2026-11-12", "2026-11-13"], sorted(p.days)
+        assert p.days["2026-11-12"]["net"] == net1 and p.days["2026-11-12"]["trades"] == 1
+        assert sb["periods"]["month"]["net_pnl"] == net1, sb["periods"]["month"]
+    _with_perf(body)
+
+
+def t_platform_runs_master_housekeeping_when_master_stopped():
+    """STARTUP-2: the scoreboard and nightly/weekend jobs live in master's scheduler, which does not exist after
+    a restart outside 09:16-15:00. The platform scheduler (always running) runs them then — never twice."""
+    import platform_scheduler as _ps
+    import master_agent_v5 as _mav_pb
+    calls = []
+    async def job(): calls.append(1)
+    ps = _ps.PlatformScheduler()
+    added = {}
+    with _patch.object(ps._sched, "add_job", side_effect=lambda f, *a, **k: added.__setitem__(k.get("id"), (f, a, k))), \
+         _patch.object(ps._sched, "start"):
+        ps.start()
+    for name in ("_daily_scoreboard", "_nightly_adaptive", "_weekly_backtest", "_weekly_optimise",
+                 "_weekly_research", "_weekly_memory_synthesis"):
+        f, a, k = added[f"master_{name}"]
+        assert f == ps._master_job and k["args"] == [name] and hasattr(_mav_pb.master_agent, name), name
+    k = added["master__daily_scoreboard"][2]
+    assert (k["hour"], k["minute"], k["day_of_week"]) == (15, 35, "mon-fri")
+    m = _mav_pb.master_agent
+    prev = m.running
+    try:
+        with _patch.object(m, "_daily_scoreboard", job):
+            m.running = False
+            asyncio.run(ps._master_job("_daily_scoreboard"))
+            assert calls == [1], "master stopped: the platform runs the scoreboard"
+            m.running = True
+            asyncio.run(ps._master_job("_daily_scoreboard"))
+            assert calls == [1], "master running: its own scheduler runs it"
+    finally:
+        m.running = prev
+
+
+run("daily reset: strategy swing (CNC) positions stay guarded and counted",  t_daily_reset_keeps_strategy_swing_positions)
+run("F&O agent: opening range resets each session in a running process",       t_fno_orb_resets_each_session)
+run("scoreboard: a day without a 15:35 snapshot is filled in from the ledger",   t_scoreboard_backfills_missed_day)
+run("platform scheduler: runs master's housekeeping jobs when master is stopped", t_platform_runs_master_housekeeping_when_master_stopped)
 run("paper book: snapshot/restore round-trip keeps the trailing stop, book and counters", t_paper_book_round_trip)
 run("paper book: a snapshot rewritten after midnight does not carry the day counters", t_paper_book_midnight_snapshot_does_not_carry_counters)
 run("paper book: evening restore keeps today's counters, next morning resets them", t_paper_book_evening_restore_rolls_next_morning)
