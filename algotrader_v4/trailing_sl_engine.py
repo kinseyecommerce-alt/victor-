@@ -157,14 +157,14 @@ TRAIL_CONFIGS: dict[str, TrailConfig] = {
         mode            = SLMode.TRAILING,
         atr_multiplier  = 1.5,
     ),
-    "swing": TrailConfig(
+    "swing": TrailConfig(     # SwingAgent (delivery, held for days)
         initial_sl_pct  = 3.00,
-        trail_pct       = 1.00,
-        breakeven_pct   = 1.00,
-        activation_pct  = 2.00,
+        trail_pct       = 1.00,   # percent trail, as replay_backtest validated it (it feeds atr=0): the
+        breakeven_pct   = 1.00,   # live tick feed's ATR is 1-minute (~0.07 % on RELIANCE) and cut every
+        activation_pct  = 2.00,   # winner on its first small pullback
         target1_pct     = 4.00,
         target2_pct     = 8.00,
-        mode            = SLMode.ATR_TRAIL,
+        mode            = SLMode.TRAILING,
         atr_multiplier  = 1.5,
     ),
 }

@@ -112,6 +112,30 @@ def resolve(underlying: str, spot: float, option_type: str, strike_offset: int,
                           option_type, lot, live=False)
 
 
+def resolve_nearest(underlying: str, spot: float, option_type: str, target_strike: float,
+                    today: date, skip_expiry_today: bool = True) -> Optional[OptionContract]:
+    """Nearest-expiry listed contract whose strike is closest to `target_strike` (ties: the one nearer the
+    money). Strike steps differ per stock (₹1, 2.5, 5, 10, 20 …) and are read from the instrument master, so
+    a strike computed on a fixed grid is snapped to what NSE actually lists."""
+    und = normalize_underlying(underlying) or underlying.strip().upper()
+    if not und or option_type not in ("CE", "PE") or spot <= 0 or target_strike <= 0:
+        return None
+    rows = [i for i in _instruments()
+            if i.get("name") == und and i.get("instrument_type") == option_type
+            and str(i.get("segment", "")).endswith("OPT")]
+    if not rows:
+        return None
+    expiries = sorted({r["expiry"] for r in rows if r.get("expiry") and r["expiry"] >= today
+                       and not (skip_expiry_today and r["expiry"] == today)})
+    if not expiries:
+        return None
+    exp = expiries[0]
+    by_strike = {float(r["strike"]): r for r in rows if r["expiry"] == exp}
+    k = min(by_strike, key=lambda x: (abs(x - target_strike), abs(x - spot)))
+    r = by_strike[k]
+    return OptionContract(r["tradingsymbol"], und, exp, k, option_type, int(r.get("lot_size") or 0), live=True)
+
+
 def estimate_premium(spot: float, strike: float, option_type: str, iv: float = 0.15,
                      days: float = 5.0) -> float:
     """Rough premium for the paper simulator only (ATM ≈ 0.4·S·σ·√T, decaying with distance)."""

@@ -156,9 +156,10 @@ def _closed_ids(session: str) -> dict:
     return {t["oid"]: t for t in performance.trades if t.get("oid") and str(t.get("t", "")).startswith(session)}
 
 
-def _flatten_paper(kite_client, symbol: str, price: float, note: str) -> None:
+def _flatten_paper(kite_client, symbol: str, price: float, note: str, product: Optional[str] = None) -> None:
     """Close a restored paper position the ledger shows as already closed (synthetic exit at `price`)."""
-    pos = next((p for p in kite_client._paper_positions if p["tradingsymbol"] == symbol), None)
+    pos = next((p for p in kite_client._paper_positions if p["tradingsymbol"] == symbol
+                and (product is None or (p.get("product") or "MIS") == product) and p.get("quantity")), None)
     if not pos or not pos.get("quantity"):
         return
     px = price or pos.get("last_price") or pos.get("average_price") or 0.0
@@ -229,10 +230,15 @@ def roll_day_if_due(now=None) -> bool:
     for a in _agents().values():
         a.reset_daily()
     try:
-        from agents.base_agent import reapply_overnight_tracked
-        reapply_overnight_tracked()               # CNC/swing positions held from earlier days (every agent) still count
+        from ai_trader import ai_trader
+        ai_trader.reapply_overnight()             # swing positions held from earlier days still count
     except Exception as exc:
-        logger.warning("[paper_book] overnight positions not re-applied: {}", exc)
+        logger.warning("[paper_book] AI overnight positions not re-applied: {}", exc)
+    try:
+        from agents.base_agent import reapply_overnight_tracked
+        reapply_overnight_tracked()               # SwingAgent CNC holdings too
+    except Exception as exc:
+        logger.warning("[paper_book] agent overnight positions not re-applied: {}", exc)
     logger.warning("[paper_book] new trading session {} — day counters of {} reset", cur, prev)
     save(force=True)
     return True
@@ -307,17 +313,23 @@ def _restore() -> dict:
         _quarantine()
         return {"restored": False, "reason": f"unreadable: {str(exc)[:120]}"}
     today = now_ist().date().isoformat()
+    if d.get("mode", "PAPER") != "PAPER":
+        return {"restored": False, "reason": "snapshot not from PAPER mode"}
+    stale_session = None
     if d.get("session") != today:
-        logger.info("[paper_book] snapshot is from {} — not today's session ({}); starting fresh",
-                    d.get("session"), today)
-        try:                                   # keep it: the next save would overwrite it (e.g. overnight CNC swing)
+        try:                                   # keep it: the next save would overwrite it
             f = path()
             f.with_name(f"{f.stem}.{d.get('session') or 'old'}.json").write_text(raw)
         except Exception as exc:
             logger.warning("[paper_book] could not keep the old snapshot: {}", exc)
-        return {"restored": False, "reason": f"stale snapshot from {d.get('session')}"}
-    if d.get("mode", "PAPER") != "PAPER":
-        return {"restored": False, "reason": "snapshot not from PAPER mode"}
+        stale_session = str(d.get("session") or "")
+        d = _overnight_only(d)
+        if not d["tracked"]:
+            logger.info("[paper_book] snapshot is from {} — not today's session ({}) and holds no overnight "
+                        "position; starting fresh", stale_session, today)
+            return {"restored": False, "reason": f"stale snapshot from {stale_session}"}
+        logger.warning("[paper_book] snapshot is from {} — carrying its {} delivery / swing position(s) "
+                       "into {}; day counters start fresh", stale_session, len(d["tracked"]), today)
 
     from kite_client import kite_client
     from trailing_sl_engine import trailing_sl_engine, PositionSL, SLStatus
@@ -343,6 +355,8 @@ def _restore() -> dict:
     agents_state = d.get("agents") or {}
 
     closed = _closed_ids(today)
+    if stale_session:
+        closed.update(_closed_ids(stale_session))
     tracked = {oid: e for oid, e in tracked.items() if oid in tsl}       # a position needs both halves
 
     # ── apply ──
@@ -433,12 +447,45 @@ def _restore() -> dict:
             "saved_at": d.get("saved_at"), "message": msg}
 
 
+def _overnight_only(d: dict) -> dict:
+    """A snapshot from an earlier session: only what is held past the close survives into today — the rule
+    agents' delivery (CNC) / swing holdings with their trailing stop, resting stop order, GTT and paper-broker
+    row. Day counters, guard, agent day state and intraday positions belong to the old session (dropped; the
+    day rollover re-marks the holdings in the guard and the open-position count). The AI trader's swing book
+    is restored by ai_trader.restore_swing; only its paper-broker rows are carried here, so its exits do not
+    meet an empty book. Before this a restart on any later day silently dropped every swing holding."""
+    import agents.base_agent as ba
+    k = d.get("kite") or {}
+    all_tracked = {str(oid): dict(e) for oid, e in (d.get("tracked") or {}).items()}
+    tsl_rows = {str(r.get("order_id")): r for r in d.get("tsl") or []}
+    overnight = {oid: e for oid, e in all_tracked.items() if ba._is_overnight(e) and oid in tsl_rows}
+    tracked = {oid: e for oid, e in overnight.items() if e.get("agent") != "ai"}
+    held = {(e.get("symbol"), e.get("product", "MIS")) for e in overnight.values()}
+    positions = []
+    for p in k.get("positions") or []:
+        if (p.get("tradingsymbol"), p.get("product") or "MIS") in held and int(p.get("quantity") or 0):
+            p = dict(p)
+            q, avg = int(p["quantity"]), float(p.get("average_price") or 0.0)
+            # a carried holding opens the new session at its cost (the old day's realised P&L stays in the ledger)
+            p["buy_value"], p["sell_value"] = (avg * q, 0.0) if q > 0 else (0.0, avg * -q)
+            positions.append(p)
+    sl_ids = {e.get("sl_order_id") for e in tracked.values() if e.get("sl_order_id")}
+    orders = [o for o in k.get("orders") or [] if o.get("order_id") in sl_ids and o.get("status") == "TRIGGER PENDING"]
+    gtt_ids = {str(e.get("gtt_id")) for e in tracked.values() if e.get("gtt_id")}
+    gtts = {gid: g for gid, g in (k.get("gtts") or {}).items() if str(gid) in gtt_ids}
+    return {"session": d.get("session"), "book_day": d.get("book_day") or d.get("session"), "mode": d.get("mode"),
+            "saved_at": d.get("saved_at"), "kite": {"orders": orders, "positions": positions, "gtts": gtts},
+            "tsl": [tsl_rows[oid] for oid in tracked], "tracked": tracked,
+            "risk": {}, "guard": {}, "agents": {}, "ai": None}
+
+
 def _reconcile_closed(kite_client, og, rm, agents, e: dict, pos, row: dict) -> None:
     """The ledger already has this trade: settle the restored counters and paper position to match."""
     for o in kite_client._paper_orders:
         if o["order_id"] == e.get("sl_order_id") and o.get("status") == "TRIGGER PENDING":
             o["status"] = "CANCELLED"
-    _flatten_paper(kite_client, e["symbol"], float(row.get("exit") or 0.0), "RESTORE-RECON")
+    _flatten_paper(kite_client, e["symbol"], float(row.get("exit") or 0.0), "RESTORE-RECON",
+                   e.get("product", "MIS"))
     gross = float(row.get("gross") or 0.0)
     og.release_order(e.get("guard_symbol", e["symbol"]), pos.strategy, e.get("side", pos.side), gross)
     rm.record_trade(gross)
