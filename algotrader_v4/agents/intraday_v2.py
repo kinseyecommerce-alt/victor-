@@ -49,6 +49,25 @@ def _day_key(sym: str, now: datetime) -> tuple:
     return (sym, now.date())
 
 
+def _session_bars(snap, now: datetime) -> list:
+    """Today's 1-minute bars for the opening range. A live snapshot carries only the last 60 bars, so after
+    ~10:15 (e.g. a restart mid-session, 12 Nov 2026) it no longer reaches 09:15 and the range could never be
+    built: read the full buffer from the tick engine then. The replay's snapshots already hold the session."""
+    bars = snap.candles_1min
+    first = next((c for c in bars if getattr(c, "ts", None) is not None and c.ts.date() == now.date()), None)
+    if first is not None and first.ts.time() <= time(9, 15):
+        return bars
+    try:
+        from tick_engine import tick_engine
+        buf = tick_engine._bufs_1min.get(snap.symbol)
+        full = buf.candles() if buf else []
+        if any(getattr(c, "ts", None) is not None and c.ts.date() == now.date() for c in full):
+            return full
+    except Exception:
+        pass
+    return bars
+
+
 # Daily bias provider: (symbol, date) → "UP" | "DOWN" | None. Live: close vs 20-day EMA from daily_data;
 # the replay installs its own provider built from the bars under test so there is no look-ahead.
 BIAS_PROVIDER = None
@@ -148,7 +167,7 @@ class IntradayV2Agent(BaseAgent):
             for old in [x for x in self._orb if x[0] == sym and x != k]:
                 self._orb.pop(old, None); self._fired.pop(old, None)
         if not r["done"]:
-            for c in snap.candles_1min:
+            for c in _session_bars(snap, now):
                 ts = getattr(c, "ts", None)
                 if ts is None or ts.date() != now.date():
                     continue
@@ -292,7 +311,7 @@ class ScalpV2Agent(BaseAgent):
             for old in [x for x in self._orb if x[0] == sym and x != k]:
                 self._orb.pop(old, None)
         if not r["done"]:
-            for c in snap.candles_1min:
+            for c in _session_bars(snap, now):
                 ts = getattr(c, "ts", None)
                 if ts is None or ts.date() != now.date():
                     continue
@@ -312,7 +331,7 @@ class ScalpV2Agent(BaseAgent):
         happened before it came back (12 Nov 2026: restarted at 09:30 and 10:50)."""
         h, l = r["h"], r["l"]
         mid = (h + l) / 2
-        bars = [c for c in snap.candles_1min[:-1]
+        bars = [c for c in _session_bars(snap, now)[:-1]
                 if getattr(c, "ts", None) is not None and c.ts.date() == now.date()
                 and c.ts.time() >= self._t(self.RT_ORB_END_MIN)]
         for c in bars:
