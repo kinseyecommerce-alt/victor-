@@ -70,9 +70,11 @@ def _exit_order(entry: dict, symbol: str, side: str, fallback_px: float = 0.0) -
 
 
 def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
-                   pnl: float, tag: str, strategy: str) -> None:
+                   pnl: float, tag: str, strategy: str, send_exit: bool = True) -> bool:
     """Fully close a tracked position: cancel its resting SL-M, exit at market,
-    and release every piece of bookkeeping. Safe to call once per position."""
+    and release every piece of bookkeeping. Safe to call once per position.
+    send_exit=False: the broker position is already flat (its stop filled), only release the bookkeeping.
+    Returns False when the exit order could not be placed (the position may still be open at the broker)."""
     entry = _tsl_sl_orders.pop(entry_oid, None) or {}
     tracked = trailing_sl_engine._positions.get(entry_oid)
     fallback_px = tracked.entry_price if tracked else 0.0
@@ -91,18 +93,21 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
             kite_client.cancel_order(sl_oid)
         except Exception as exc:
             logger.error("[{}] could not cancel SL-M {} for {}: {}", strategy, sl_oid, symbol, exc)
-    try:
-        kite_client.place_order(
-            tradingsymbol=symbol,
-            exchange=entry.get("exchange", "NSE"),
-            transaction_type="SELL" if side == "BUY" else "BUY",
-            quantity=quantity,
-            product=entry.get("product", "MIS"),
-            tag=tag,
-            **_exit_order(entry, symbol, side, fallback_px),
-        )
-    except Exception as exc:
-        logger.critical("[{}] exit order for {} qty={} FAILED: {}", strategy, symbol, quantity, exc)
+    exited = True
+    if send_exit:
+        try:
+            kite_client.place_order(
+                tradingsymbol=symbol,
+                exchange=entry.get("exchange", "NSE"),
+                transaction_type="SELL" if side == "BUY" else "BUY",
+                quantity=quantity,
+                product=entry.get("product", "MIS"),
+                tag=tag,
+                **_exit_order(entry, symbol, side, fallback_px),
+            )
+        except Exception as exc:
+            exited = False
+            logger.critical("[{}] exit order for {} qty={} FAILED: {}", strategy, symbol, quantity, exc)
     order_guard.release_order(entry.get("guard_symbol", symbol), strategy, side, pnl)
     risk_manager.record_trade(pnl)
     risk_manager.position_closed()
@@ -111,10 +116,92 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
         from performance import performance
         performance.record_trade(strategy, symbol, side, quantity, fallback_px, pnl,
                                  entry.get("exchange", "NSE"), entry.get("product", "MIS"), note=tag,
-                                 signal_price=entry.get("signal_price"))
+                                 signal_price=entry.get("signal_price"), order_id=entry_oid)
     except Exception as exc:
         logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
     _notify_agent_result(strategy, symbol, pnl)
+    _book_changed()
+    return exited
+
+
+def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] = None) -> list[str]:
+    """The scheduled square-off: close every tracked intraday position (not delivery / swing holdings) through
+    _close_tracked, so each lands in the ledger and releases its bookkeeping. kite_client.squareoff_all_positions
+    alone flattened the book behind the agents' backs: the trade never reached the ledger and its tracking
+    (stop order, trailing stop, order guard, open-position count) was left behind.
+
+    The broker's net position is read once and bounds every exit: a tracked position whose symbol is already
+    flat (its exchange stop filled between polls) is only released, never sold again (that would open a fresh
+    reverse position), and an exit never exceeds the open net quantity. Returns the symbols whose exit order
+    actually went out — the caller excludes only those from the broker-level flatten, so a failed exit is
+    still flattened there. `only`: restrict to these entry order ids."""
+    from tick_engine import tick_engine
+    try:
+        net_rows = kite_client.positions().get("net", []) or []
+    except Exception as exc:
+        logger.error("[squareoff] net positions unavailable ({}) — leaving every position to the broker flatten", exc)
+        return []
+    # the broker keeps one net row per (symbol, product); the paper book one per symbol
+    by_product = settings.trading_mode != "PAPER"
+    open_qty: dict[tuple, int] = {}
+    for p in net_rows:
+        key = (p.get("tradingsymbol"), (p.get("product") or "MIS") if by_product else "")
+        open_qty[key] = open_qty.get(key, 0) + int(p.get("quantity") or 0)
+    closed = []
+    for oid, e in list(_tsl_sl_orders.items()):
+        if only is not None and oid not in only:
+            continue
+        if e.get("product", "MIS") == "CNC" or e.get("kind") == "swing":
+            continue
+        pos = trailing_sl_engine._positions.get(oid)
+        if pos is None:
+            continue
+        sign = 1 if pos.side == "BUY" else -1
+        key = (pos.symbol, e.get("product", "MIS") if by_product else "")
+        qty = min(int(pos.quantity), max(0, open_qty.get(key, 0) * sign))
+        tick, _ = tick_engine.latest(pos.symbol)
+        px = tick.ltp if tick and tick.ltp > 0 else pos.entry_price
+        tag = f"SquareOff-{pos.strategy}"[:20]
+        try:
+            if qty <= 0:
+                # flat at the broker already: the stop filled. Release the tracking at the stop price.
+                stop_px = pos.current_sl if pos.current_sl and pos.current_sl > 0 else px
+                pnl = (stop_px - pos.entry_price) * pos.quantity * sign
+                logger.warning("[squareoff] {} {} is already flat at the broker — releasing its tracking, "
+                               "no exit order", pos.strategy, pos.symbol)
+                _close_tracked(oid, pos.symbol, pos.side, pos.quantity, pnl, tag, pos.strategy, send_exit=False)
+                exited = False
+            else:
+                if qty < pos.quantity:
+                    logger.warning("[squareoff] {} {} tracked qty {} but only {} open at the broker — exiting {}",
+                                   pos.strategy, pos.symbol, pos.quantity, qty, qty)
+                pnl = (px - pos.entry_price) * qty * sign
+                open_qty[key] = open_qty.get(key, 0) - qty * sign
+                exited = _close_tracked(oid, pos.symbol, pos.side, qty, pnl, tag, pos.strategy)
+        except Exception as exc:
+            logger.error("[squareoff] {} close failed: {}", pos.symbol, exc)
+            continue
+        if exited:
+            closed.append(pos.symbol)            # its exit went out: the broker flatten must not send a second one
+        try:
+            from agents.strategy_agents import ALL_AGENTS
+            a = ALL_AGENTS.get(e.get("agent"))
+            if a is not None:
+                a.state.pnl_today += pnl
+        except Exception:
+            pass
+        logger.info("[squareoff] {} {} closed ({}) P&L ₹{:.0f}", pos.strategy, pos.symbol, reason, pnl)
+    return closed
+
+
+def _book_changed() -> None:
+    """A position closed: write the PAPER book now, so a restart a moment later cannot restore a trade
+    the ledger already holds (no-op in LIVE, or before the startup restore ran)."""
+    try:
+        import paper_book
+        paper_book.save()
+    except Exception as exc:
+        logger.debug("[paper_book] save after close failed: {}", exc)
 
 
 _ENTRY_LOCK = asyncio.Lock()
@@ -562,6 +649,12 @@ class BaseAgent(ABC):
                 return f"order guard: {reason}"
         except Exception as exc:
             logger.debug("[{}] order-guard pre-check failed on {}: {}", self.name, snap.symbol, exc)
+        try:                                         # per-agent open-position cap (FNO_MAX_OPEN_POSITIONS)
+            cap_reason = risk_manager.open_cap_reason(self.name)
+            if cap_reason:
+                return cap_reason
+        except Exception as exc:
+            logger.debug("[{}] open-cap pre-check failed on {}: {}", self.name, snap.symbol, exc)
         if signal.get("exchange", "NSE") != "NSE" or type(self)._try_enter is not BaseAgent._try_enter:
             return None                              # options/overridden entry paths size differently
         try:
@@ -573,7 +666,7 @@ class BaseAgent(ABC):
             pct = signal.get("stop_loss_pct", settings.stop_loss_pct) / 100
             stop_px = signal.get("stop_loss") or (ltp * (1 - pct) if action == "BUY" else ltp * (1 + pct))
             pr = portfolio_risk.pre_entry(sym, action, qty, ltp, stop_px, kind="equity",
-                                          underlying=signal.get("underlying"))
+                                          underlying=signal.get("underlying"), agent=self.name)
             if not pr["ok"]:
                 return f"portfolio risk: {pr['reason']}"
             if min(qty, pr["max_quantity"]) * ltp < settings.min_position_value_abs:
@@ -637,7 +730,7 @@ class BaseAgent(ABC):
                                               if action == "BUY" else ltp * (1 + signal.get("stop_loss_pct", settings.stop_loss_pct) / 100))
         pr = portfolio_risk.pre_entry(sym, action, qty, ltp, stop_px,
                                       kind="option" if exch == "NFO" else "equity",
-                                      underlying=signal.get("underlying"))
+                                      underlying=signal.get("underlying"), agent=self.name)
         if not pr["ok"]:
             return self._skip(sym, f"portfolio risk: {pr['reason']}")
         if qty > pr["max_quantity"]:
@@ -719,6 +812,7 @@ class BaseAgent(ABC):
             "side":         action,
             "signal_price": ltp,
         }
+        _book_changed()                     # write the paper book now, not up to 3 s later
 
         ind = snap.indicators
         await send_telegram(
@@ -803,6 +897,27 @@ class BaseAgent(ABC):
         self.state.trades_today = self.state.pnl_today = 0
         self.state.ticks_processed = self.state.signals_fired = 0
         self.state.errors.clear()
+
+    # ── Day state across a restart (paper_book.py) ─────────────────────────
+    # Agents that remember what they did today (one ORB per symbol, losses per symbol) export it so a
+    # mid-session restart does not let them repeat today's trades. Plain JSON values only.
+
+    def export_day_state(self) -> dict:
+        return {}
+
+    def import_day_state(self, state: dict) -> None:
+        return None
+
+    @staticmethod
+    def _dump_day_keyed(d: dict, day) -> list:
+        """{(symbol, date): value} -> [[symbol, "YYYY-MM-DD", value]] for `day` only."""
+        return [[k[0], k[1].isoformat(), v] for k, v in d.items()
+                if isinstance(k, tuple) and len(k) == 2 and k[1] == day]
+
+    @staticmethod
+    def _load_day_keyed(rows) -> dict:
+        from datetime import date as _date
+        return {(r[0], _date.fromisoformat(r[1])): r[2] for r in rows or []}
 
     def get_status(self) -> dict:
         return {

@@ -72,6 +72,7 @@ int(per_symbol_capital // ltp) = quantity
 | `sebi_compliance.py` | Audit log, kill switch (`KillSwitchState`), IP whitelist, approved algo IDs |
 | `symbol_scanner.py` | Scans Nifty 100 universe for liquid, volatile symbols meeting entry criteria |
 | `atomic_bracket.py` | Places entry + SL-M + target orders as a unit; rolls back on partial failure |
+| `paper_book.py` | PAPER only: snapshots the paper book (orders, positions, trailing stops, agent/AI bookkeeping, risk counters) to `PAPER_BOOK_FILE` and restores it after a same-day restart; a watchdog manages restored positions until their agent does; resets the day counters at 09:15 when master is not running and squares off restored intraday/NRML positions at `squareoff_time` (`PERSIST_PAPER_BOOK`) |
 
 ### Live / replay parity (read before changing the entry or exit path)
 

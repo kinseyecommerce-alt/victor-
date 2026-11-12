@@ -91,8 +91,10 @@ class Performance:
     def record_trade(self, strategy: str, symbol: str, side: str, quantity: int, entry_price: float,
                      pnl: float, exchange: str = "NSE", product: str = "MIS",
                      exit_price: Optional[float] = None, note: str = "",
-                     signal_price: Optional[float] = None) -> dict:
-        """Called once per closed trade with its gross P&L. Returns the stored row (net of costs)."""
+                     signal_price: Optional[float] = None, order_id: Optional[str] = None) -> dict:
+        """Called once per closed trade with its gross P&L. Returns the stored row (net of costs).
+        order_id (the entry order) lets a restored paper book tell a trade that already closed from one
+        still open (paper_book.py)."""
         if exit_price is None and quantity and entry_price:
             exit_price = entry_price + (pnl / quantity) * (1 if side == "BUY" else -1)
         cost = trade_cost(entry_price, exit_price or entry_price, quantity, side, exchange, product, symbol)
@@ -101,6 +103,8 @@ class Performance:
                "side": side, "qty": quantity, "entry": round(entry_price, 2),
                "exit": round(exit_price or entry_price, 2), "gross": round(pnl, 2), "cost": cost,
                "net": round(pnl - cost, 2), "product": product, "exchange": exchange, "note": note[:80]}
+        if order_id:
+            row["oid"] = str(order_id)
         if signal_price:
             from execution import slippage_bps
             row["signal"] = round(signal_price, 2)

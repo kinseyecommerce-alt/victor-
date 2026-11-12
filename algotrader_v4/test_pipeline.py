@@ -2055,7 +2055,7 @@ def t_fno_tracked_on_option_premium():
         with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
              patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
              patch.object(_ba, "send_telegram", _noop), \
-             patch.object(_or, "_instruments", return_value=listed):
+             patch.object(_or, "_instruments", return_value=listed):        # default settings: no VaR stub
             asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
                         {"option_symbol": "NIFTY-BUILT-SYMBOL", "exchange": "NFO", "lot_size": 75,
                          "strike": 24000, "option_type": "CE"}))
@@ -5091,6 +5091,359 @@ run("Risk: volatility-targeted size from the stop distance",  t_risk_vol_targete
 run("Risk: event block / scale, correlation block, heat cap", t_risk_event_and_correlation_blocks)
 run("Risk: daily VaR cap limits new entries",                 t_risk_daily_var_cap)
 run("Risk: AI rejects oversize with the max; agents scale",   t_risk_applied_to_ai_and_agents)
+
+
+from pathlib import Path
+
+def _var_book(**by_agent):
+    """Open book with one option position per agent whose VaR (max loss) is the given ₹."""
+    return [{"symbol": f"{a.upper()}OPT", "kind": "option", "notional": v, "max_loss": v, "underlying": "NIFTY",
+             "agent": a} for a, v in by_agent.items()]
+
+def _var_settings(share=40.0):
+    prev = (_ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct, _ai_settings.var_agent_share_pct)
+    _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct = 500000.0, 2.0      # cap ₹10,000
+    _ai_settings.var_agent_share_pct = share                                            # one agent ≤ ₹4,000
+    return prev
+
+def _var_restore(prev):
+    _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct, _ai_settings.var_agent_share_pct = prev
+
+def t_risk_agent_var_share():
+    """12 Nov 2026: the F&O agent filled the whole VaR cap and every intraday/scalping signal was rejected.
+    One agent may use at most VAR_AGENT_SHARE_PCT of the cap; the others can still enter."""
+    assert _ai_settings.__class__.model_fields["var_agent_share_pct"].default == 40.0
+    def body():
+        prev = _var_settings()
+        try:
+            assert _pr.agent_var_budget() == 4000.0
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=3500.0)):
+                assert _pr.agent_var("fno") == 3500.0 and _pr.agent_var("intraday") == 0.0
+                # F&O over its share although the total cap has ₹6,500 room (room for half a lot)
+                r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75, agent="fno")
+                assert not r["ok"] and "agent fno VaR share" in r["reason"] and "less than one lot" in r["reason"], r
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=4000.0)):
+                r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75, agent="fno")
+                assert not r["ok"] and "agent fno VaR share" in r["reason"] and "other agents" in r["reason"], r
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=3500.0)):
+                # another agent can still enter at full size (VaR 100 × 1000 × .02475 = ₹2,475)
+                r = _pr.pre_entry("INTRA1", "BUY", 100, 1000.0, 995.0, agent="intraday")
+                assert r["ok"] and r["max_quantity"] == 100 and r["reason"] == "", r
+                # an agent the share applies to (AI) is cut to it when it asks for more (₹4,000 / ₹24.75 = 161)
+                r = _pr.pre_entry("INTRA1", "BUY", 200, 1000.0, 995.0, agent="ai")
+                assert r["ok"] and r["max_quantity"] == 161 and "agent ai VaR share" in r["reason"], r
+                # replay-validated rule agents are not in VAR_AGENT_SHARE_AGENTS: full size (parity)
+                for rule_agent in ("intraday", "scalping", "swing"):
+                    r = _pr.pre_entry("INTRA1", "BUY", 200, 1000.0, 995.0, agent=rule_agent)
+                    assert r["ok"] and r["max_quantity"] == 200 and r["reason"] == "", (rule_agent, r)
+                # "*" applies the share to every agent
+                prev_list = _ai_settings.var_agent_share_agents
+                _ai_settings.var_agent_share_agents = "*"
+                try:
+                    r = _pr.pre_entry("INTRA1", "BUY", 200, 1000.0, 995.0, agent="scalping")
+                    assert r["ok"] and r["max_quantity"] == 161 and "agent scalping VaR share" in r["reason"], r
+                finally:
+                    _ai_settings.var_agent_share_agents = prev_list
+                # without an agent tag (callers that do not pass one) rule 4 does not apply
+                r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75)
+                assert r["ok"] and r["max_quantity"] == 75, r
+                # the reject-only form used by the F&O agent
+                assert "agent fno VaR share" in _pr.var_check("fno", 1000.0)
+                assert _pr.var_check("intraday", 1000.0) is None
+            # share off (≥ 100 or ≤ 0) → the old behaviour: only the total cap
+            for off in (100.0, 0.0):
+                _ai_settings.var_agent_share_pct = off
+                with _patch.object(_pr, "_open_book", return_value=_var_book(fno=3500.0)):
+                    assert _pr.agent_var_budget() is None
+                    r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75, agent="fno")
+                    assert r["ok"] and r["max_quantity"] == 75, r
+                    assert _pr.var_check("fno", 1000.0) is None
+        finally:
+            _var_restore(prev)
+    _no_corr(body)
+
+def t_risk_agent_var_share_total_cap_still_applies():
+    def body():
+        prev = _var_settings()
+        try:
+            # ₹9,500 used across three agents, each under its own share: the total cap still binds intraday
+            with _patch.object(_pr, "_open_book", return_value=_var_book(ai_opt=3500.0, swing=3500.0, ai=2500.0)):
+                r = _pr.pre_entry("INTRA2", "BUY", 100, 1000.0, 995.0, agent="intraday")
+                assert r["ok"] and r["max_quantity"] == 20 and "daily VaR cap" in r["reason"], r   # ₹500 / ₹24.75
+                assert "daily VaR cap" in _pr.var_check("intraday", 600.0)
+            with _patch.object(_pr, "_open_book", return_value=_var_book(ai_opt=4000.0, swing=4000.0, ai=2000.0)):
+                r = _pr.pre_entry("INTRA2", "BUY", 1, 1000.0, 995.0, agent="intraday")
+                assert not r["ok"] and "daily VaR cap reached" in r["reason"], r
+        finally:
+            _var_restore(prev)
+    _no_corr(body)
+
+def t_risk_open_book_tags_agents():
+    """VaR is attributed by the trailing-stop engine's strategy tag (AI strategies separately)."""
+    p1 = _tsl_eng.register(symbol="VARTAGEQ", strategy="intraday", side="BUY", entry_price=100.0, quantity=10,
+                           order_id="T-VARTAG-1")
+    p2 = _tsl_eng.register(symbol="VARTAGOPT", strategy="ai_opt", side="BUY", entry_price=50.0, quantity=75,
+                           order_id="T-VARTAG-2")
+    _ba._tsl_sl_orders["T-VARTAG-2"] = {"exchange": "NFO", "symbol": "VARTAGOPT", "guard_symbol": "NIFTY", "agent": "ai"}
+    try:
+        book = {b["symbol"]: b for b in _pr._open_book()}
+        assert book["VARTAGEQ"]["agent"] == "intraday" and book["VARTAGOPT"]["agent"] == "ai_opt", book
+        assert _pr.agent_var("ai_opt") >= 3750.0                        # option premium counts in full
+        assert "agent=AGENT" in Path(_ai_mod.__file__).read_text() and "agent=SPREAD_STRATEGY" in Path(_ai_mod.__file__).read_text()
+    finally:
+        _tsl_eng._positions.pop("T-VARTAG-1", None); _tsl_eng._positions.pop("T-VARTAG-2", None)
+        _ba._tsl_sl_orders.pop("T-VARTAG-2", None)
+    assert p1.strategy == "intraday" and p2.strategy == "ai_opt"
+
+def _fno_positions(n):
+    ids = [f"T-FNOCAP-{i}" for i in range(n)]
+    for i, oid in enumerate(ids):
+        _tsl_eng.register(symbol=f"FNOCAP{i}CE", strategy="fno", side="BUY", entry_price=100.0, quantity=75, order_id=oid)
+    return ids
+
+def t_fno_max_open_positions():
+    """FNO_MAX_OPEN_POSITIONS (default 4): the 5th F&O position is skipped with a reason; other agents and the
+    daily MAX_TRADES_FNO cap are unaffected."""
+    from unittest.mock import patch
+    assert _ai_settings.__class__.model_fields["fno_max_open_positions"].default == 4
+    assert _ai_settings.max_trades_fno == 4 and _og_x._max_trades("fno") == _ai_settings.max_trades_fno
+    ids = _fno_positions(3)
+    try:
+        assert _rm_x.open_positions_for("fno") == 3 and _rm_x.open_cap_reason("fno") is None
+        ids += _fno_positions(4)[3:]                                    # the 4th
+        assert _rm_x.open_positions_for("fno") == 4
+        assert "max open F&O positions (4)" in _rm_x.open_cap_reason("fno")
+        for other in ("intraday", "scalping", "swing", "ai"):
+            assert _rm_x.open_cap_reason(other) is None, other
+        def body():
+            agent = FnOAgent()
+            n = len(_te_kite_client._paper_orders)
+            with patch.object(_rm_x, "check_before_order", return_value=(True, "")):
+                asyncio.run(agent._try_enter(_make_snap(symbol="BANKNIFTY", ltp=50000.0), "BUY",
+                            {"option_symbol": "BNTEST50000CE", "exchange": "NFO", "lot_size": 15}))
+            assert len(_te_kite_client._paper_orders) == n, "5th F&O position must not be opened"
+            assert "max open F&O positions" in agent.state.last_skip, agent.state.last_skip
+            assert agent._entry_precheck(_make_snap(symbol="BANKNIFTY", ltp=50000.0), "BUY",
+                                         {"exchange": "NFO"}).startswith("max open F&O positions")
+            # an intraday entry still reaches the broker (VaR rules have their own tests: empty book here)
+            with patch.object(_pr, "_open_book", return_value=[]):
+                oid = _paper_entry(IntradayAgent(), "FNOCAPEQ", 300.0)
+            assert oid in _tsl_eng._positions
+            _ba._close_tracked(oid, "FNOCAPEQ", "BUY", _tsl_eng._positions[oid].quantity, 0.0, "T", "intraday")
+        _with_paper_kite(body)
+        prev = _ai_settings.fno_max_open_positions
+        _ai_settings.fno_max_open_positions = 0                         # 0 = no cap
+        try:
+            assert _rm_x.open_cap_reason("fno") is None
+        finally:
+            _ai_settings.fno_max_open_positions = prev
+    finally:
+        for oid in ids:
+            _tsl_eng._positions.pop(oid, None)
+    assert _rm_x.open_positions_for("fno") == 0
+
+def t_fno_entry_checks_var_share():
+    """FnOAgent entries (which never called pre_entry) now fit the VaR cap and the agent's share."""
+    from unittest.mock import patch
+    import portfolio_risk as _prm
+    class _OptKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 120.0} for i in instruments}
+    def body():
+        _te_kite_client._kite = _OptKite()
+        import options_resolver as _or
+        listed = [{"name": "NIFTY", "instrument_type": "CE", "segment": "NFO-OPT", "strike": 24000.0,
+                   "expiry": datetime.now().date() + timedelta(days=6), "tradingsymbol": "NIFTYVAR24000CE",
+                   "lot_size": 75}]
+        agent = FnOAgent()
+        seen = []
+        def fake_check(a, v):
+            seen.append((a, v)); return "agent fno VaR share reached (test)"
+        n = len(_te_kite_client._paper_orders)
+        prev_on = _ai_settings.fno_var_check_enabled
+        _ai_settings.fno_var_check_enabled = True                       # off by default; opt-in here
+        try:
+          with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+             patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+             patch.object(_or, "_instruments", return_value=listed), \
+             patch.object(_prm, "var_check", fake_check):
+            asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
+                        {"option_symbol": "X", "exchange": "NFO", "lot_size": 75, "strike": 24000, "option_type": "CE"}))
+        finally:
+            _ai_settings.fno_var_check_enabled = prev_on
+        assert len(_te_kite_client._paper_orders) == n, "over-share F&O entry must not be placed"
+        assert seen == [("fno", (120.0 - 84.0) * 75)], seen            # loss at the 30% stop, as the book counts it
+        assert "portfolio risk: agent fno VaR share" in agent.state.last_skip, agent.state.last_skip
+        prev = _ai_settings.fno_var_check_enabled
+        _ai_settings.fno_var_check_enabled = False
+        seen.clear()
+        try:
+            with patch.object(_rm_x, "check_before_order", return_value=(False, "blocked here")), \
+                 patch.object(_or, "_instruments", return_value=listed), \
+                 patch.object(_prm, "var_check", fake_check):
+                asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
+                            {"option_symbol": "X", "exchange": "NFO", "lot_size": 75, "strike": 24000, "option_type": "CE"}))
+            assert seen == [] and agent.state.last_skip.endswith("blocked here"), agent.state.last_skip
+        finally:
+            _ai_settings.fno_var_check_enabled = prev
+    _with_paper_kite(body)
+
+def t_replay_untouched_by_agent_var_rules():
+    src = Path(__file__).with_name("replay_backtest.py").read_text()
+    for name in ("pre_entry", "var_check", "open_cap_reason", "var_agent_share_pct", "fno_max_open_positions"):
+        assert name not in src, name
+
+def t_var_rule_defaults_keep_agents_trading():
+    """Review of the per-agent VaR share: the defaults must not switch the F&O agent off or cut the
+    replay-validated rule agents."""
+    f = _ai_settings.__class__.model_fields
+    assert f["fno_var_check_enabled"].default is False
+    assert f["var_cap_exclude_agents"].default == "fno"
+    assert f["option_var_at_stop"].default is True
+    share = {a.strip() for a in f["var_agent_share_agents"].default.split(",")}
+    assert {"fno", "ai", "ai_opt", "ai_swing_opt", "ai_spread"} <= share
+    assert not share & {"intraday", "scalping", "swing", "*"}, share
+    assert not _pr.share_applies("intraday") and _pr.share_applies("ai_opt") and not _pr.share_applies(None)
+    assert _pr.cap_excluded("fno") and not _pr.cap_excluded("intraday")
+    # option VaR: loss at the stop, or the whole premium when OPTION_VAR_AT_STOP is off / no stop
+    assert _pr.option_max_loss(160.0, 112.0, 75) == 3600.0 and _pr.option_max_loss(160.0, None, 75) == 12000.0
+    prev = _ai_settings.option_var_at_stop
+    _ai_settings.option_var_at_stop = False
+    try:
+        assert _pr.option_max_loss(160.0, 112.0, 75) == 12000.0
+    finally:
+        _ai_settings.option_var_at_stop = prev
+
+def _clean_book(fn):
+    """Run fn with an empty trailing-stop book (earlier tests leave positions that count toward VaR and the
+    capital buckets); the earlier positions are put back afterwards."""
+    saved = dict(_tsl_eng._positions)
+    _tsl_eng._positions.clear()
+    try:
+        return fn()
+    finally:
+        _tsl_eng._positions.clear()
+        _tsl_eng._positions.update(saved)
+
+def _reg_opt(oid, sym, strategy, entry, qty, max_loss=None, guard="NIFTY"):
+    _tsl_eng.register(symbol=sym, strategy=strategy, side="BUY", entry_price=entry, quantity=qty, order_id=oid)
+    e = {"exchange": "NFO", "symbol": sym, "guard_symbol": guard, "agent": strategy}
+    if max_loss is not None:
+        e["max_loss"] = max_loss
+    _ba._tsl_sl_orders[oid] = e
+
+def _unreg(*oids):
+    for oid in oids:
+        _tsl_eng._positions.pop(oid, None); _ba._tsl_sl_orders.pop(oid, None)
+
+def t_fno_book_does_not_block_rule_agents():
+    """12 Nov 2026 again, through the real open book: 4 F&O lots open (the FNO_MAX_OPEN_POSITIONS cap) must not
+    take the VaR cap from intraday/scalping (VAR_CAP_EXCLUDE_AGENTS=fno)."""
+    ids = [f"T-FNOBOOK-{i}" for i in range(4)]
+    def body():
+        prev = _var_settings()
+        try:
+            for i, oid in enumerate(ids):                               # NIFTY lot ₹120 × 75 = ₹9,000 premium each
+                _reg_opt(oid, f"FNOBOOK{i}CE", "fno", 120.0, 75, max_loss=_pr.option_max_loss(120.0, 84.0, 75))
+            pv = _pr.portfolio_var()
+            assert pv["var_1d_95"] == 0.0 and pv["excluded_var"] == 4 * 2700.0 and pv["excluded_agents"] == ["fno"], pv
+            for agent in ("intraday", "scalping"):
+                r = _pr.pre_entry("FNOBOOKEQ", "BUY", 100, 1000.0, 990.0, agent=agent)
+                assert r["ok"] and r["max_quantity"] == 100 and r["reason"] == "", (agent, r)
+                assert _pr.var_check(agent, 2475.0) is None
+            assert _pr.agent_var("fno") == 4 * 2700.0                   # still attributed for display
+            # the old behaviour (fno uses the shared cap) blocks them: what happened on 12 Nov
+            prev_x = _ai_settings.var_cap_exclude_agents
+            _ai_settings.var_cap_exclude_agents = ""
+            try:
+                r = _pr.pre_entry("FNOBOOKEQ", "BUY", 100, 1000.0, 990.0, agent="intraday")
+                assert not r["ok"] and "daily VaR cap reached" in r["reason"], r
+            finally:
+                _ai_settings.var_cap_exclude_agents = prev_x
+        finally:
+            _var_restore(prev)
+            _unreg(*ids)
+    _clean_book(lambda: _no_corr(body))
+
+def t_two_full_size_intraday_entries_reach_broker():
+    """A validated signal reaches the paper broker at full size with a two-position book: the per-agent share
+    does not cut the replay-validated intraday agent (it did: second ₹1L position cut to qty 61)."""
+    syms = ("VARFULLA", "VARFULLB")
+    def body():
+        prev, prev_list = _var_settings(), _ai_settings.var_agent_share_agents
+        qtys = {}
+        try:
+            for mode in ("default", "off", "all"):
+                _ai_settings.var_agent_share_agents = prev_list
+                _ai_settings.var_agent_share_pct = 0.0 if mode == "off" else 40.0
+                if mode == "all":
+                    _ai_settings.var_agent_share_agents = "*"
+                ag = IntradayAgent(); oids = []
+                for s in syms:
+                    try:
+                        oids.append(_paper_entry(ag, s, 1000.0))
+                    except StopIteration:
+                        raise AssertionError(f"{mode} {s}: {ag.state.last_skip}")
+                qtys[mode] = tuple(_tsl_eng._positions[o].quantity for o in oids)
+                for o, s in zip(oids, syms):
+                    _ba._close_tracked(o, s, "BUY", _tsl_eng._positions[o].quantity, 0.0, "T", "intraday")
+        finally:
+            _ai_settings.var_agent_share_agents = prev_list
+            _var_restore(prev)
+        assert qtys["default"] == qtys["off"] and qtys["default"][1] == qtys["default"][0] > 0, qtys
+        assert qtys["all"][1] < qtys["default"][1], qtys              # the test can see a cut when there is one
+    _clean_book(lambda: _with_paper_kite(lambda: _no_corr(body)))
+
+def t_ai_option_var_same_at_entry_and_in_book():
+    """An AI option buy passes pre_entry on its loss at the stop; the open book must then carry the same figure
+    (it carried the whole premium, so one ₹12,000 lot took the whole ₹10,000 cap from every other agent)."""
+    def body():
+        prev = _var_settings()
+        try:
+            ml = _pr.option_max_loss(160.0, 112.0, 75)                  # 30% stop on ₹12,000 premium = ₹3,600
+            r = _pr.pre_entry("AIVAROPT", "BUY", 75, 160.0, kind="option", max_loss=ml, unit_size=75, agent="ai_opt")
+            assert r["ok"] and r["max_quantity"] == 75, r
+            _reg_opt("T-AIVAR-1", "AIVAROPT", "ai_opt", 160.0, 75, max_loss=ml)
+            assert _pr.agent_var("ai_opt") == ml <= _pr.agent_var_budget()
+            assert _pr.portfolio_var()["var_1d_95"] == ml
+            for agent in ("intraday", "scalping", "swing"):             # other agents still enter at full size
+                r = _pr.pre_entry("AIVAREQ", "BUY", 100, 1000.0, 990.0, agent=agent)
+                assert r["ok"] and r["max_quantity"] == 100, (agent, r)
+            # a second AI option lot is over the ai_opt share (₹3,600 + ₹3,600 > ₹4,000)
+            r = _pr.pre_entry("AIVAROPT2", "BUY", 75, 160.0, kind="option", max_loss=ml, unit_size=75, agent="ai_opt")
+            assert not r["ok"] and "agent ai_opt VaR share" in r["reason"], r
+            # an entry without a recorded stop still counts its whole premium
+            _ba._tsl_sl_orders["T-AIVAR-1"].pop("max_loss")
+            assert _pr.agent_var("ai_opt") == 12000.0
+        finally:
+            _var_restore(prev)
+            _unreg("T-AIVAR-1")
+    _clean_book(lambda: _no_corr(body))
+
+def t_ai_option_trade_records_its_var():
+    """The real _place_option_trade stores the VaR pre_entry checked on its trailing-stop entry."""
+    def body():
+        ai = _rt_ai()
+        out = asyncio.run(ai._place_option_trade(_opt_args()))
+        assert out["status"] == "placed", out
+        oid = out["order_id"]
+        e, pos = _ba._tsl_sl_orders[oid], _tsl_eng._positions[oid]
+        assert abs(e["max_loss"] - out["max_loss"]) < 0.01 and e["max_loss"] < pos.entry_price * pos.quantity, (e, out)
+        assert abs(_pr.agent_var("ai_opt") - out["max_loss"]) < 0.01
+        assert asyncio.run(ai._close_position(out["symbol"], "test"))["status"] == "closed"
+    _with_opt_env(body)
+
+run("Risk: VaR rule defaults keep F&O and the rule agents trading",      t_var_rule_defaults_keep_agents_trading)
+run("Risk: 4 open F&O lots do not take the VaR cap from intraday/scalping", t_fno_book_does_not_block_rule_agents)
+run("Risk: two full-size intraday entries reach the paper broker uncut", t_two_full_size_intraday_entries_reach_broker)
+run("Risk: AI option VaR is the same at entry and in the open book",     t_ai_option_var_same_at_entry_and_in_book)
+run("AI: option trade records the VaR it was checked on",               t_ai_option_trade_records_its_var)
+run("Risk: one agent over its VaR share is rejected, others still enter", t_risk_agent_var_share)
+run("Risk: the total VaR cap still applies with per-agent shares",       t_risk_agent_var_share_total_cap_still_applies)
+run("Risk: open book attributes VaR to the strategy tag",                t_risk_open_book_tags_agents)
+run("F&O: 5th open position skipped (FNO_MAX_OPEN_POSITIONS); others unaffected", t_fno_max_open_positions)
+run("F&O: entries checked against the VaR cap and the agent's share",    t_fno_entry_checks_var_share)
+run("Replay: per-agent VaR share and F&O cap are live-only",             t_replay_untouched_by_agent_var_rules)
 run("Market context: every block present, nothing invented",  t_market_context_shape)
 
 # ── Execution quality ─────────────────────────────────────────────────────
@@ -9565,6 +9918,479 @@ def t_auto_start_trading_day_and_catch_up():
 
 run("auto-start: trading day reaches the master agent; missed 09:16 start runs after a restart",
     t_auto_start_trading_day_and_catch_up)
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PAPER BOOK — survives a same-day restart (paper_book.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("PAPER BOOK PERSISTENCE")
+import paper_book as _pb
+import contextlib as _ctx_pb
+import copy as _copy_pb
+import json as _json_pb
+from agents.strategy_agents import ALL_AGENTS as _ALL_pb
+from order_guard import order_guard as _og_pb
+from performance import performance as _perf_pb
+
+
+@_ctx_pb.contextmanager
+def _pb_isolated():
+    """Run with an empty in-memory book and a private snapshot file; put the suite's state back after."""
+    from ai_trader import ai_trader as _ai_pb
+    saved = {
+        "orders": list(_te_kite_client._paper_orders), "positions": _copy_pb.deepcopy(_te_kite_client._paper_positions),
+        "gtts": dict(_te_kite_client._paper_gtts), "tracked": dict(_ba._tsl_sl_orders),
+        "tsl": dict(_tsl_eng._positions), "guard": (dict(_og_pb._active), dict(_og_pb._trade_count), dict(_og_pb._cooldown_until)),
+        "risk": {k: getattr(_rm_x, k) for k in ("daily_realised_pnl", "open_position_count", "trades_today", "wins_today",
+                                                "losses_today", "gross_profit", "gross_loss", "is_trading_halted")},
+        "agents": {n: (a.state.trades_today, a.state.pnl_today, a.state.signals_fired, set(a._exit_only))
+                   for n, a in _ALL_pb.items()},
+        "ai": (dict(_ai_pb._targets), dict(_ai_pb._open), dict(_ai_pb._trail), dict(_ai_pb._spreads), _ai_pb.trades_today),
+        "pb": (_pb._restore_attempted, _pb._last_body, set(_pb._restored), _pb._book_day, _pb._squared_off_day),
+        "env": _os.environ.get("PAPER_BOOK_FILE"), "mode": settings.trading_mode,
+    }
+    d = _tmp0.mkdtemp()
+    _os.environ["PAPER_BOOK_FILE"] = _os.path.join(d, "paper_book.json")
+    try:
+        _pb_wipe()
+        _pb._restore_attempted, _pb._last_body = True, None
+        _pb._restored.clear()
+        _pb._book_day, _pb._squared_off_day = _pb.session_day(), None
+        yield _pb.path()
+    finally:
+        settings.trading_mode = saved["mode"]
+        _te_kite_client._paper_orders[:] = saved["orders"]
+        _te_kite_client._paper_positions[:] = saved["positions"]
+        _te_kite_client._paper_gtts.clear(); _te_kite_client._paper_gtts.update(saved["gtts"])
+        _ba._tsl_sl_orders.clear(); _ba._tsl_sl_orders.update(saved["tracked"])
+        _tsl_eng._positions.clear(); _tsl_eng._positions.update(saved["tsl"])
+        _og_pb._active.clear(); _og_pb._active.update(saved["guard"][0])
+        _og_pb._trade_count.clear(); _og_pb._trade_count.update(saved["guard"][1])
+        _og_pb._cooldown_until.clear(); _og_pb._cooldown_until.update(saved["guard"][2])
+        for k, v in saved["risk"].items():
+            setattr(_rm_x, k, v)
+        for n, (t, p, s, ex) in saved["agents"].items():
+            a = _ALL_pb[n]
+            a.state.trades_today, a.state.pnl_today, a.state.signals_fired = t, p, s
+            a._exit_only.clear(); a._exit_only.update(ex)
+        _ai_pb._targets, _ai_pb._open, _ai_pb._trail, _ai_pb._spreads, _ai_pb.trades_today = saved["ai"]
+        _pb._restore_attempted, _pb._last_body = saved["pb"][0], saved["pb"][1]
+        _pb._restored.clear(); _pb._restored.update(saved["pb"][2])
+        _pb._book_day, _pb._squared_off_day = saved["pb"][3], saved["pb"][4]
+        if saved["env"] is None:
+            _os.environ.pop("PAPER_BOOK_FILE", None)
+        else:
+            _os.environ["PAPER_BOOK_FILE"] = saved["env"]
+
+
+def _pb_wipe():
+    """What a process restart does to the in-memory book."""
+    _te_kite_client._paper_orders.clear(); _te_kite_client._paper_positions.clear(); _te_kite_client._paper_gtts.clear()
+    _ba._tsl_sl_orders.clear(); _tsl_eng._positions.clear()
+    _og_pb._active.clear(); _og_pb._trade_count.clear(); _og_pb._cooldown_until.clear()
+    _rm_x.reset_daily()
+    for a in _ALL_pb.values():
+        a.state.trades_today = a.state.pnl_today = a.state.signals_fired = 0
+        a._exit_only.clear()
+    _pb._restored.clear()
+    _pb._last_body = None
+
+
+def _pb_open_trailed(sym: str) -> str:
+    """A paper intraday position at ₹1000 (stop ₹990) whose trailing stop has activated and moved up."""
+    oid = _paper_entry(_ALL_pb["intraday"], sym, 1000.0)
+    asyncio.run(_tsl_eng.on_tick(sym, 1015.0, 0.0))         # +1.5 %: breakeven, trail active, stop moved
+    pos = _tsl_eng._positions[oid]
+    assert pos.trail_active and pos.best_price == 1015.0 and pos.current_sl > 1000.0, pos.to_dict()
+    return oid
+
+
+def t_paper_book_round_trip():
+    with _pb_isolated() as f:
+        oid = _pb_open_trailed("PBRT")
+        pos0 = _tsl_eng._positions[oid]
+        want = (pos0.entry_price, pos0.current_sl, pos0.best_price, pos0.trail_active, pos0.breakeven_hit, pos0.sl_moves)
+        qty = _paper_pos("PBRT")["quantity"]
+        risk0 = (_rm_x.open_position_count, _ALL_pb["intraday"].state.trades_today, _og_pb._trade_count["intraday"])
+        assert _pb.save() and f.exists()
+        assert not _pb.save(), "an unchanged book must not be rewritten"
+        snap = _json_pb.loads(f.read_text())
+        assert snap["session"] == _pb.now_ist().date().isoformat() and snap["mode"] == "PAPER"
+        _pb_wipe()
+        assert oid not in _ba._tsl_sl_orders and not _te_kite_client._paper_positions
+        out = _pb.restore()
+        assert out["restored"] and out["positions"] == ["PBRT"], out
+        pos = _tsl_eng._positions[oid]
+        assert (pos.entry_price, pos.current_sl, pos.best_price, pos.trail_active, pos.breakeven_hit, pos.sl_moves) == want
+        assert _ba._tsl_sl_orders[oid]["agent"] == "intraday" and _ba._tsl_sl_orders[oid]["sl_order_id"]
+        assert _paper_pos("PBRT")["quantity"] == qty and _paper_pos("PBRT")["buy_value"] == qty * 1000.0
+        assert _order(_ba._tsl_sl_orders[oid]["sl_order_id"])["status"] == "TRIGGER PENDING"
+        assert (_rm_x.open_position_count, _ALL_pb["intraday"].state.trades_today, _og_pb._trade_count["intraday"]) == risk0
+        assert not _og_pb.can_place("PBRT", "intraday", "BUY")[0], "the restored position still blocks a duplicate"
+        assert _tsl_eng.on_sl_hit is not None, "TSL callbacks wired after restore"
+        # trailing keeps working after the restore: a new high moves the stop further up
+        before = pos.current_sl
+        asyncio.run(_tsl_eng.on_tick("PBRT", 1030.0, 0.0))
+        assert pos.current_sl > before
+        _ba._close_tracked(oid, "PBRT", "BUY", qty, 0.0, "T", "intraday")
+
+
+def t_paper_book_stale_ignored():
+    with _pb_isolated() as f:
+        _pb_open_trailed("PBSTALE")
+        _pb.save()
+        snap = _json_pb.loads(f.read_text())
+        snap["session"] = (_pb.now_ist().date() - timedelta(days=1)).isoformat()
+        f.write_text(_json_pb.dumps(snap))
+        _pb_wipe()
+        out = _pb.restore()
+        assert not out["restored"] and "stale" in out["reason"], out
+        assert not _ba._tsl_sl_orders and not _tsl_eng._positions and not _te_kite_client._paper_positions
+        assert _rm_x.open_position_count == 0 and _rm_x.trades_today == 0
+        kept = f.with_name(f"{f.stem}.{snap['session']}.json")          # the old snapshot is kept, not overwritten
+        assert kept.exists() and _json_pb.loads(kept.read_text())["session"] == snap["session"]
+
+
+def t_paper_book_restored_exits_on_stop_once():
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated() as f, patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSTOP")
+        qty = _paper_pos("PBSTOP")["quantity"]
+        _pb.save()
+        before_crash = f.read_text()                 # the snapshot as it was when the server died
+        _pb_wipe()
+        assert _pb.restore()["restored"]
+        assert oid in _pb._restored, "a restored agent position is watched until its agent handles it"
+        stop = _tsl_eng._positions[oid].current_sl
+        n0 = len(_perf_pb.trades)
+        asyncio.run(_pb.on_snap(_make_snap(symbol="PBSTOP", ltp=round(stop - 0.5, 2))))
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions, "stop must close the restored trade"
+        rows = [t for t in _perf_pb.trades if t.get("oid") == oid]
+        assert len(_perf_pb.trades) == n0 + 1 and len(rows) == 1, rows
+        assert rows[0]["entry"] == 1000.0 and rows[0]["qty"] == qty and rows[0]["cost"] > 0, rows[0]
+        assert _paper_pos("PBSTOP")["quantity"] == 0
+        assert _rm_x.open_position_count == 0 and _rm_x.trades_today == 1
+        # the close rewrote the snapshot at once: a restart now restores nothing
+        assert oid not in _json_pb.loads(f.read_text())["tracked"]
+        # ... and even the older snapshot (closed after it was taken) is reconciled, not traded twice
+        f.write_text(before_crash)
+        _pb_wipe()
+        out = _pb.restore()
+        assert out["reconciled"] == ["PBSTOP"] and not out["positions"], out
+        assert oid not in _ba._tsl_sl_orders and _paper_pos("PBSTOP")["quantity"] == 0
+        assert len([t for t in _perf_pb.trades if t.get("oid") == oid]) == 1
+        assert _rm_x.open_position_count == 0 and _og_pb.can_place("PBSTOP", "intraday", "SELL")[0]
+
+
+def t_paper_book_restored_mis_squareoff():
+    from unittest.mock import patch
+    import agents.strategy_agents as _sa_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSQ")
+        _pb.save(); _pb_wipe(); _pb.restore()
+        h, m = (int(x) for x in settings.squareoff_time.split(":"))
+        late = datetime.combine(_pb.now_ist().date(), time(h, m)).replace(tzinfo=_pb.now_ist().tzinfo)
+        n0 = len(_perf_pb.trades)
+        with patch.object(_sa_pb, "now_ist", return_value=late):
+            asyncio.run(_pb.on_snap(_make_snap(symbol="PBSQ", ltp=1012.0)))   # above the stop: only the clock exits
+        assert oid not in _ba._tsl_sl_orders, "MIS square-off must close a restored position"
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _paper_pos("PBSQ")["quantity"] == 0
+
+
+def t_paper_book_never_in_live():
+    with _pb_isolated() as f:
+        _pb_open_trailed("PBLIVE")
+        _pb.save()
+        good = f.read_text()
+        f.unlink()
+        settings.trading_mode = "LIVE"
+        assert not _pb.enabled() and not _pb.save(force=True) and not f.exists(), "LIVE must never write the paper book"
+        f.write_text(good)
+        _pb_wipe()
+        out = _pb.restore()
+        assert not out["restored"] and "LIVE" in out["reason"]
+        assert not _ba._tsl_sl_orders and not _te_kite_client._paper_positions and _rm_x.open_position_count == 0
+        settings.trading_mode = "PAPER"
+        prev = settings.persist_paper_book
+        settings.persist_paper_book = False
+        try:
+            assert not _pb.save(force=True) and not _pb.restore()["restored"]
+        finally:
+            settings.persist_paper_book = prev
+
+
+def t_paper_book_corrupt_file():
+    with _pb_isolated() as f:
+        f.write_text('{"session": "' + _pb.now_ist().date().isoformat() + '", "kite": {"orders": [')
+        out = _pb.restore()                          # must not raise
+        assert not out["restored"] and "unreadable" in out["reason"], out
+        assert not f.exists() and f.with_suffix(".corrupt.json").exists(), "a corrupt snapshot is set aside"
+        # well-formed JSON with a broken position: still no crash, and nothing half-restored
+        f.write_text(_json_pb.dumps({"session": _pb.now_ist().date().isoformat(), "tsl": [{"symbol": "X"}],
+                                     "tracked": {}}))
+        out = _pb.restore()
+        assert not out["restored"] and out["reason"].startswith("error"), out
+        assert not _ba._tsl_sl_orders and not _tsl_eng._positions
+        assert _pb.restore()["reason"] == "no snapshot"
+
+
+def t_paper_book_agent_day_state():
+    sc = _ALL_pb["scalping"]
+    it = _ALL_pb["intraday"]
+    day = _pb.now_ist().date()
+    now = datetime.combine(day, time(10, 5))
+    yesterday = day - timedelta(days=1)
+    sc._orb[("PBDS", day)] = {"h": 101.0, "l": 99.0, "done": True, "broke": None, "retested": False, "n": 1, "replayed": True}
+    sc._orb[("PBDS", yesterday)] = {"h": 1.0}
+    sc._count[("PBDS", day)] = 1; sc._losses[("PBDS", day)] = 1; sc._last["PBDS"] = now
+    it._fired[("PBDS", day)] = {"ORB": True}
+    try:
+        st = _json_pb.loads(_json_pb.dumps({"s": sc.export_day_state(), "i": it.export_day_state()}))
+        assert all(r[1] == day.isoformat() for r in st["s"]["orb"]), "only today's state is carried"
+        for k in (("PBDS", day), ("PBDS", yesterday)):
+            sc._orb.pop(k, None)
+        sc._count.pop(("PBDS", day)); sc._losses.pop(("PBDS", day)); sc._last.pop("PBDS"); it._fired.pop(("PBDS", day))
+        sc.import_day_state(st["s"]); it.import_day_state(st["i"])
+        assert sc._orb[("PBDS", day)]["n"] == 1 and sc._orb[("PBDS", day)]["replayed"]
+        assert sc._count[("PBDS", day)] == 1 and sc._losses[("PBDS", day)] == 1 and sc._last["PBDS"] == now
+        assert it._fired[("PBDS", day)] == {"ORB": True}
+        assert ("PBDS", yesterday) not in sc._orb
+    finally:
+        for d_ in (sc._orb, sc._count, sc._losses, it._fired):
+            for k in [k for k in d_ if k[0] == "PBDS"]:
+                d_.pop(k)
+        sc._last.pop("PBDS", None)
+
+
+def t_paper_book_ai_round_trip():
+    from ai_trader import ai_trader as _ai_pb
+    with _pb_isolated():
+        oid = "PAPER-AIPB0001"
+        _ba._tsl_sl_orders[oid] = {"sl_order_id": None, "product": "MIS", "exchange": "NSE", "symbol": "PBAI",
+                                   "guard_symbol": "PBAI", "agent": "ai", "side": "BUY"}
+        p = _tsl_eng.register("PBAI", "ai", "BUY", 500.0, 10, oid)
+        p.current_sl, p.external_trail = 495.0, True
+        _ai_pb._targets[oid], _ai_pb._open[oid] = 515.0, "PBAI"
+        _ai_pb._trail[oid] = {"risk": 5.0, "milestone": 1.0, "last_review": 0.0, "best_at_review": 506.0}
+        _ai_pb.trades_today = 3
+        _pb.save()
+        _pb_wipe()
+        _ai_pb._targets.pop(oid); _ai_pb._open.pop(oid); _ai_pb._trail.pop(oid); _ai_pb.trades_today = 0
+        out = _pb.restore()
+        assert out["ai_positions"] == 1 and oid not in _pb._restored, out     # the AI's own monitor manages it
+        assert _ai_pb._targets[oid] == 515.0 and _ai_pb._open[oid] == "PBAI" and _ai_pb.trades_today == 3
+        assert _ai_pb._trail[oid]["milestone"] == 1.0 and _tsl_eng._positions[oid].external_trail
+        _ai_pb._targets.pop(oid, None); _ai_pb._open.pop(oid, None); _ai_pb._trail.pop(oid, None)
+
+
+def t_paper_book_watchdog_hands_over_to_agent():
+    """Once the owning agent runs and watches the symbol, its own loop manages the restored position:
+    the watchdog must not drive the same tick a second time."""
+    from unittest.mock import patch
+    a = _ALL_pb["intraday"]
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBHAND")
+        _pb.save(); _pb_wipe(); _pb.restore()
+        stop = _tsl_eng._positions[oid].current_sl
+        snap = _make_snap(symbol="PBHAND", ltp=round(stop - 1, 2), n_candles=max(30, a.min_candles_1min))
+        prev_run, had = a.state.running, "PBHAND" in a._approved
+        a.state.running = True; a._approved.add("PBHAND")
+        try:
+            asyncio.run(_pb.on_snap(snap))
+            assert oid in _ba._tsl_sl_orders, "the running agent owns this tick; the watchdog stays out"
+        finally:
+            a.state.running = prev_run
+            if not had:
+                a._approved.discard("PBHAND")
+        asyncio.run(_pb.on_snap(snap))                    # agent stopped again: the watchdog takes the stop
+        assert oid not in _ba._tsl_sl_orders
+
+
+def t_scheduled_squareoff_records_tracked_once():
+    """The 15:15 job closes tracked MIS positions through the exit path (ledger once, bookkeeping released),
+    and the broker-level square-off does not exit them a second time."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSQJ")
+        qty = _paper_pos("PBSQJ")["quantity"]
+        n0 = len(_perf_pb.trades)
+        asyncio.run(_mav_pb.master_agent._auto_squareoff())
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _paper_pos("PBSQJ")["quantity"] == 0, "flat, not reversed"
+        sells = [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == "PBSQJ"
+                 and o["transaction_type"] == "SELL" and o["status"] == "COMPLETE"]
+        assert len(sells) == 1 and sells[0]["quantity"] == qty
+        assert _rm_x.open_position_count == 0
+
+
+_IST_pb = _pb.now_ist().tzinfo
+_D_pb = date(2026, 11, 12)                  # a Thursday; the next session is Friday
+
+
+def _pb_at(d, hh, mm, ss=0):
+    return datetime.combine(d, time(hh, mm, ss)).replace(tzinfo=_IST_pb)
+
+
+def _pb_blow_day():
+    """A bad day: loss limit breached (halted), the trade caps used up."""
+    _rm_x.daily_realised_pnl, _rm_x.is_trading_halted, _rm_x.trades_today = -9000.0, True, 8
+    _og_pb._trade_count["intraday"] = 99
+    _ALL_pb["intraday"].state.trades_today, _ALL_pb["intraday"].state.pnl_today = 8, -9000.0
+
+
+def _pb_assert_day_clean():
+    assert not _rm_x.is_trading_halted and _rm_x.daily_realised_pnl == 0 and _rm_x.trades_today == 0
+    assert _og_pb._trade_count.get("intraday", 0) == 0 and _og_pb.can_place("PBNEW", "intraday", "BUY")[0]
+    assert _ALL_pb["intraday"].state.trades_today == 0 and _ALL_pb["intraday"].state.pnl_today == 0
+
+
+def t_paper_book_midnight_snapshot_does_not_carry_counters():
+    """The save loop rewrites the snapshot after midnight: it must still say the counters are the previous
+    session's, and they are reset at 09:15 (or at once when restored after 09:15) without master running."""
+    from unittest.mock import patch
+    with _pb_isolated() as f, patch.object(_pb, "now_ist") as clk:
+        clk.return_value = _pb_at(_D_pb, 14, 30)
+        _pb._book_day = _pb.session_day()
+        oid = _pb_open_trailed("PBMID")
+        qty = _paper_pos("PBMID")["quantity"]
+        _pb_blow_day()
+        _pb.save()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 0, 0, 3)
+        assert _pb.save(), "the date in the snapshot changed at midnight"
+        midnight = f.read_text()
+        snap = _json_pb.loads(midnight)
+        assert snap["session"] == "2026-11-13" and snap["book_day"] == "2026-11-12", snap["book_day"]
+        # restart before 09:15: the book is the previous session's, exactly as without a restart ...
+        _pb_wipe()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 8, 50)
+        out = _pb.restore()
+        assert out["restored"] and not out.get("day_reset") and _rm_x.is_trading_halted, out
+        # ... and 09:15 resets it even though master never started (no 09:15 job in this process)
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 9, 15, 3)
+        assert _pb.roll_day_if_due() and not _pb.roll_day_if_due()
+        _pb_assert_day_clean()
+        assert oid in _ba._tsl_sl_orders, "open positions survive the day reset"
+        # restart after 09:15 from the same midnight snapshot: reset at restore, positions still restored
+        f.write_text(midnight)
+        _pb_wipe()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 10, 0)
+        out = _pb.restore()
+        assert out["restored"] and out.get("day_reset") and out["positions"] == ["PBMID"], out
+        _pb_assert_day_clean()
+        assert _json_pb.loads(f.read_text())["book_day"] == "2026-11-13"
+        _ba._close_tracked(oid, "PBMID", "BUY", qty, 0.0, "T", "intraday")
+
+
+def t_paper_book_evening_restore_rolls_next_morning():
+    """An evening redeploy restores today's counters (same session), and the next morning they are reset
+    by the paper book's own rollover; master's 09:15 reset marks the day so nothing resets twice."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_pb, "now_ist") as clk, patch.object(_mav_pb, "send_telegram", _noop):
+        clk.return_value = _pb_at(_D_pb, 14, 30)
+        _pb._book_day = _pb.session_day()
+        _pb_blow_day()
+        _pb.save()
+        _pb_wipe()
+        clk.return_value = _pb_at(_D_pb, 20, 0)
+        out = _pb.restore()
+        assert out["restored"] and _rm_x.is_trading_halted and _og_pb._trade_count["intraday"] == 99
+        assert not _pb.roll_day_if_due(), "still today's session"
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 9, 16)
+        assert _pb.roll_day_if_due()
+        _pb_assert_day_clean()
+        # a process where master runs: its 09:15 reset marks the session, the rollover then does nothing
+        _pb_blow_day()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=2), 9, 15)
+        asyncio.run(_mav_pb.master_agent._daily_reset())
+        _pb_assert_day_clean()
+        assert _pb._book_day == _D_pb + timedelta(days=2) and not _pb.roll_day_if_due()
+
+
+def t_squareoff_failed_exit_still_flattened():
+    """A tracked exit that fails at 15:15 is not excluded from the broker flatten."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSQFAIL")
+        real = _te_kite_client.place_order
+        def flaky(*a, **k):
+            if str(k.get("tag", "")).startswith("SquareOff-"):
+                raise RuntimeError("RMS reject")
+            return real(*a, **k)
+        with patch.object(_te_kite_client, "place_order", side_effect=flaky):
+            asyncio.run(_mav_pb.master_agent._auto_squareoff())
+        assert oid not in _ba._tsl_sl_orders
+        assert _paper_pos("PBSQFAIL")["quantity"] == 0, "the broker-level square-off must flatten it"
+        assert [o["tag"] for o in _te_kite_client._paper_orders
+                if o["tradingsymbol"] == "PBSQFAIL" and o["transaction_type"] == "SELL"
+                and o["status"] == "COMPLETE"] == ["SquareOff"]
+
+
+def t_squareoff_skips_flat_tracked_position():
+    """The exchange stop filled between polls: the broker is flat but the tracking is not. The square-off
+    releases the tracking and sends no exit (a blind SELL would open a fresh short)."""
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBSQFLAT")
+        qty = _paper_pos("PBSQFLAT")["quantity"]
+        sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
+        sl["status"] = "COMPLETE"
+        _te_kite_client._update_paper_position({"tradingsymbol": "PBSQFLAT", "exchange": "NSE", "product": "MIS",
+                                                "transaction_type": "SELL", "quantity": qty, "price": 1005.0})
+        n_orders = len(_te_kite_client._paper_orders)
+        assert _ba.close_tracked_for_squareoff("t") == []
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions
+        assert len(_te_kite_client._paper_orders) == n_orders, "no exit order for a flat position"
+        assert _paper_pos("PBSQFLAT")["quantity"] == 0, "flat, not reversed"
+        assert _rm_x.open_position_count == 0
+
+
+def t_paper_book_restored_fno_squared_off_without_master():
+    """A restored NRML option leg (no time rule in its exit policy) is squared off at SQUAREOFF_TIME by the
+    paper book when master is not running to do it."""
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBFNO")
+        _ba._tsl_sl_orders[oid].update(product="NRML", agent="fno")
+        _paper_pos("PBFNO")["product"] = "NRML"
+        _pb.save(); _pb_wipe(); _pb.restore()
+        assert oid in _pb._restored
+        d = _pb.now_ist().date()
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        h, m = (int(x) for x in settings.squareoff_time.split(":"))
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m) - timedelta(minutes=5)) == []
+        assert oid in _ba._tsl_sl_orders
+        n0 = len(_perf_pb.trades)
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 2)) == ["PBFNO"]
+        assert oid not in _ba._tsl_sl_orders and _paper_pos("PBFNO")["quantity"] == 0 and not _pb._restored
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 5)) == []
+
+
+run("paper book: snapshot/restore round-trip keeps the trailing stop, book and counters", t_paper_book_round_trip)
+run("paper book: a snapshot rewritten after midnight does not carry the day counters", t_paper_book_midnight_snapshot_does_not_carry_counters)
+run("paper book: evening restore keeps today's counters, next morning resets them", t_paper_book_evening_restore_rolls_next_morning)
+run("auto square-off: a failed tracked exit is still flattened at the broker",   t_squareoff_failed_exit_still_flattened)
+run("auto square-off: an already-flat tracked position gets no exit order",      t_squareoff_skips_flat_tracked_position)
+run("paper book: restored F&O leg squared off at SQUAREOFF_TIME without master", t_paper_book_restored_fno_squared_off_without_master)
+run("paper book: watchdog hands a restored position to its running agent",     t_paper_book_watchdog_hands_over_to_agent)
+run("auto square-off: tracked MIS positions reach the ledger once, no reverse", t_scheduled_squareoff_records_tracked_once)
+run("paper book: a snapshot from an earlier day is ignored",                   t_paper_book_stale_ignored)
+run("paper book: restored position exits on its stop, ledger records it once", t_paper_book_restored_exits_on_stop_once)
+run("paper book: restored MIS position is squared off at SQUAREOFF_TIME",      t_paper_book_restored_mis_squareoff)
+run("paper book: LIVE mode (and the setting off) never writes or restores",    t_paper_book_never_in_live)
+run("paper book: corrupt snapshot does not crash startup",                     t_paper_book_corrupt_file)
+run("paper book: scalper/intraday day state survives a restart",               t_paper_book_agent_day_state)
+run("paper book: AI trader targets, trails and counters restored",             t_paper_book_ai_round_trip)
 
 
 # ══════════════════════════════════════════════════════════════════════════

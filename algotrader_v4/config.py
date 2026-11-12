@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # 10:00 on a weekday (so the market is "open" any time you test) and the simulator moves
     # in trending bursts so strategies actually fire. Ignored in every other mode.
     demo_mode: bool = False
+    # PAPER book persistence (paper_book.py): the simulated orders/positions, their trailing stops, the agents'
+    # and AI trader's open-position bookkeeping and today's risk counters are written to PAPER_BOOK_FILE
+    # (default next to performance.json) and restored after a restart on the same IST trading day. Never in LIVE.
+    persist_paper_book: bool = True
+    paper_book_save_interval_s: float = 3.0
+    # The scheduled MIS square-off closes tracked positions through the agents' exit path first (performance
+    # ledger, stop-order cancel, bookkeeping) and only then flattens whatever is left at the broker.
+    squareoff_closes_tracked: bool = True
 
     # Risk
     max_daily_loss: float = 5000.0
@@ -215,6 +223,22 @@ class Settings(BaseSettings):
     # ── Portfolio risk (portfolio_risk.py) — applied to every entry, AI or agent ──
     risk_per_trade_pct:           float = 0.5      # max loss at the stop as % of total capital (vol-targeted size)
     portfolio_var_cap_pct:        float = 2.0      # 1-day 95% VaR of the open book, % of capital
+    var_agent_share_pct:          float = 40.0     # max % of that VaR cap one agent's open positions may use
+                                                   # (keyed by strategy tag; ≤0 or ≥100 turns the per-agent share off)
+    var_agent_share_agents:       str   = "fno,ai,ai_opt,ai_fut,ai_swing,ai_swing_opt,ai_spread"
+                                                   # agents the share applies to. The replay-validated rule agents
+                                                   # (intraday, scalping, swing, ...) are left out so live sizing
+                                                   # stays what replay_backtest validated ("*" = every agent)
+    var_cap_exclude_agents:       str   = "fno"    # agents whose open positions do not count toward the shared VaR
+                                                   # cap other agents are checked against (bounded instead by their
+                                                   # own caps: FNO_MAX_OPEN_POSITIONS, MAX_TRADES_FNO, capital bucket)
+    option_var_at_stop:           bool  = True     # a bought option's VaR is its loss at the stop when the entry
+                                                   # recorded one (same figure at entry and in the open book);
+                                                   # False = the whole premium, at entry and in the book
+    fno_max_open_positions:       int   = 4        # FnOAgent stock/index option positions open at once (0 = no cap)
+    fno_var_check_enabled:        bool  = False    # FnOAgent entries must also fit the VaR rules. Off: at ₹5L capital
+                                                   # one index/stock option lot is over the fno share, so it would
+                                                   # stop F&O trading; the position cap bounds it instead
     max_portfolio_heat:           float = 0.7      # avg pairwise correlation of the book above which no new equity entry
     # ── Bull-vs-bear debate before every AI entry (debate_gate.py) ─────────
     ai_agent_debate_enabled:      bool  = True

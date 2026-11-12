@@ -157,6 +157,14 @@ class IntradayV2Agent(BaseAgent):
         self._prev_vwap_side: dict = {}
         _apply_all_day(self, intraday=True)
 
+    def export_day_state(self) -> dict:
+        day = now_ist().date()
+        return {"orb": self._dump_day_keyed(self._orb, day), "fired": self._dump_day_keyed(self._fired, day)}
+
+    def import_day_state(self, state: dict) -> None:
+        self._orb.update(self._load_day_keyed(state.get("orb")))
+        self._fired.update(self._load_day_keyed(state.get("fired")))
+
     # ── helpers ───────────────────────────────────────────────────────────
     def _range(self, sym, snap, now):
         k = _day_key(sym, now)
@@ -302,6 +310,21 @@ class ScalpV2Agent(BaseAgent):
     @staticmethod
     def _t(minutes) -> time:
         m = int(minutes); return time(m // 60, m % 60)
+
+    def export_day_state(self) -> dict:
+        """The range / break / retest state (restored with replayed=True, so the trades already taken on a
+        range are not re-derived from bars), per-symbol trade and loss counts, and the last signal times."""
+        day = now_ist().date()
+        return {"orb": self._dump_day_keyed(self._orb, day), "count": self._dump_day_keyed(self._count, day),
+                "losses": self._dump_day_keyed(self._losses, day),
+                "last": {s: t.isoformat() for s, t in self._last.items() if t.date() == day}}
+
+    def import_day_state(self, state: dict) -> None:
+        self._orb.update(self._load_day_keyed(state.get("orb")))
+        self._count.update(self._load_day_keyed(state.get("count")))
+        self._losses.update(self._load_day_keyed(state.get("losses")))
+        for s, t in (state.get("last") or {}).items():
+            self._last[s] = datetime.fromisoformat(t)
 
     def _range(self, sym, snap, now):
         k = _day_key(sym, now)
