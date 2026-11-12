@@ -774,6 +774,10 @@ class FnOAgent(BaseAgent):
         atm_iv     = signal.get("atm_iv", 25.0)
         sf         = signal.pop("_gate_size_factor", 1.0)
 
+        cap_reason = risk_manager.open_cap_reason(self.name)     # FNO_MAX_OPEN_POSITIONS
+        if cap_reason:
+            return self._skip(underlying, cap_reason)
+
         # Option premium: the real quote whenever prices come from Kite. The
         # Black-Scholes estimate is only used with the paper simulator, which has
         # no option prices.
@@ -813,14 +817,27 @@ class FnOAgent(BaseAgent):
         if settings.use_kelly_sizing and sf < 1.0:
             qty = max(lot_size, int(lot_size * sf))
 
-        allowed, _ = order_guard.can_place(underlying, self.name, action)
+        allowed, reason = order_guard.can_place(underlying, self.name, action)
         if not allowed:
-            return
+            return self._skip(underlying, f"order guard: {reason}")
         if order_guard.is_symbol_active_anywhere(underlying):
-            return
-        allowed, _ = risk_manager.check_before_order(opt_sym, qty, opt_price, action)
+            return self._skip(underlying, "symbol already active in another agent")
+        allowed, reason = risk_manager.check_before_order(opt_sym, qty, opt_price, action)
         if not allowed:
-            return
+            return self._skip(underlying, f"risk: {reason}")
+        import portfolio_risk
+        sl_pct  = signal.get("stop_loss_pct", 30)
+        tgt_pct = signal.get("target_pct", 65)
+        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
+        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
+        # The option's VaR, as portfolio_risk._open_book will carry it once open (loss at the stop, or the
+        # whole premium with OPTION_VAR_AT_STOP off). FNO_VAR_CHECK_ENABLED is off by default: one lot is
+        # over the fno share at ₹5L capital, and FNO_MAX_OPEN_POSITIONS bounds the agent instead.
+        opt_var = portfolio_risk.option_max_loss(opt_price, sl_px, qty)
+        if settings.fno_var_check_enabled:
+            why = portfolio_risk.var_check(self.name, opt_var)
+            if why:
+                return self._skip(underlying, f"portfolio risk: {why}")
 
         from options_resolver import round_tick
         entry_px = round_tick(opt_price * 1.01)     # marketable LIMIT — options don't take MARKET safely
@@ -848,11 +865,6 @@ class FnOAgent(BaseAgent):
         # Stream the option leg so its exits are driven by the option's own price
         tick_engine.subscribe([{"symbol": opt_sym, "exchange": exch, "seed_price": opt_price}])
         self._exit_only.add(opt_sym)
-
-        sl_pct  = signal.get("stop_loss_pct", 30)
-        tgt_pct = signal.get("target_pct", 65)
-        sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
-        tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
 
         # Protective stop goes in immediately; no position is kept without one.
         # Options take a stop-loss LIMIT ("SL") — brokers reject SL-M on options.
@@ -884,6 +896,7 @@ class FnOAgent(BaseAgent):
             "sl_type":      "SL",
             "sl_buffer_pct": 5.0,
             "exit_limit_buffer_pct": 3.0,
+            "max_loss":     opt_var,        # VaR the open book carries (portfolio_risk)
         }
         tsl_pos = trailing_sl_engine.register(
             symbol=opt_sym, strategy=self.name, side=action,

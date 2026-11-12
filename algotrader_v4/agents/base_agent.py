@@ -649,6 +649,12 @@ class BaseAgent(ABC):
                 return f"order guard: {reason}"
         except Exception as exc:
             logger.debug("[{}] order-guard pre-check failed on {}: {}", self.name, snap.symbol, exc)
+        try:                                         # per-agent open-position cap (FNO_MAX_OPEN_POSITIONS)
+            cap_reason = risk_manager.open_cap_reason(self.name)
+            if cap_reason:
+                return cap_reason
+        except Exception as exc:
+            logger.debug("[{}] open-cap pre-check failed on {}: {}", self.name, snap.symbol, exc)
         if signal.get("exchange", "NSE") != "NSE" or type(self)._try_enter is not BaseAgent._try_enter:
             return None                              # options/overridden entry paths size differently
         try:
@@ -660,7 +666,7 @@ class BaseAgent(ABC):
             pct = signal.get("stop_loss_pct", settings.stop_loss_pct) / 100
             stop_px = signal.get("stop_loss") or (ltp * (1 - pct) if action == "BUY" else ltp * (1 + pct))
             pr = portfolio_risk.pre_entry(sym, action, qty, ltp, stop_px, kind="equity",
-                                          underlying=signal.get("underlying"))
+                                          underlying=signal.get("underlying"), agent=self.name)
             if not pr["ok"]:
                 return f"portfolio risk: {pr['reason']}"
             if min(qty, pr["max_quantity"]) * ltp < settings.min_position_value_abs:
@@ -724,7 +730,7 @@ class BaseAgent(ABC):
                                               if action == "BUY" else ltp * (1 + signal.get("stop_loss_pct", settings.stop_loss_pct) / 100))
         pr = portfolio_risk.pre_entry(sym, action, qty, ltp, stop_px,
                                       kind="option" if exch == "NFO" else "equity",
-                                      underlying=signal.get("underlying"))
+                                      underlying=signal.get("underlying"), agent=self.name)
         if not pr["ok"]:
             return self._skip(sym, f"portfolio risk: {pr['reason']}")
         if qty > pr["max_quantity"]:

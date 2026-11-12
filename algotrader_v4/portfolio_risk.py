@@ -11,6 +11,18 @@ Three rules the per-trade limits don't cover:
 3. Daily VaR cap: the sum of what the open book could lose on a bad day (1.65σ, 95%,
    one day) plus the new trade must stay under PORTFOLIO_VAR_CAP_PCT of capital. Options
    and spreads count their maximum loss; equity and futures count notional × σ.
+4. Per-agent VaR share: one agent's open positions (keyed by the trailing-stop engine's strategy
+   tag: intraday, scalping, swing, fno, ai, ai_opt, ai_fut, ai_swing, ai_spread, ...) may use at most
+   VAR_AGENT_SHARE_PCT of that cap, so a single agent cannot fill the book and starve the others
+   (12 Nov 2026: the F&O agent filled the cap and every intraday/scalping signal was rejected).
+   It applies only to the agents in VAR_AGENT_SHARE_AGENTS (default: fno and the AI strategies). The
+   replay-validated rule agents keep the sizing replay_backtest.py validated (CLAUDE.md, live/replay parity).
+   Agents in VAR_CAP_EXCLUDE_AGENTS (default fno) do not use the shared cap at all: their open positions are
+   left out of the total the others are checked against, and they are bounded by their own caps instead
+   (FNO_MAX_OPEN_POSITIONS, MAX_TRADES_FNO, the capital bucket).
+
+A bought option's VaR is its loss at the stop when the entry recorded one ("max_loss" on the trailing-stop
+entry, OPTION_VAR_AT_STOP), so the figure checked at entry is the figure the open book carries afterwards.
 
 Everything returns a reason string so the AI (or the log) says exactly why a size was cut.
 """
@@ -61,14 +73,18 @@ def _open_book() -> list[dict]:
         exch = e.get("exchange", "NSE")
         is_opt = exch == "NFO" and not pos.symbol.endswith("FUT")
         notional = pos.entry_price * pos.quantity
+        opt_loss = notional
+        if is_opt and settings.option_var_at_stop and e.get("max_loss") is not None:
+            opt_loss = min(float(e["max_loss"]), notional)
         book.append({"symbol": pos.symbol, "kind": "option" if is_opt else ("future" if exch == "NFO" else "equity"),
-                     "notional": notional, "max_loss": notional if is_opt else None,
-                     "underlying": e.get("guard_symbol", pos.symbol)})
+                     "notional": notional, "max_loss": opt_loss if is_opt else None,
+                     "underlying": e.get("guard_symbol", pos.symbol),
+                     "agent": getattr(pos, "strategy", None) or e.get("agent")})
     try:
-        from ai_trader import ai_trader
+        from ai_trader import ai_trader, SPREAD_STRATEGY
         for sid, sp in ai_trader._spreads.items():
             book.append({"symbol": sid, "kind": "spread", "notional": sp["max_loss"], "max_loss": sp["max_loss"],
-                         "underlying": sp["underlying"]})
+                         "underlying": sp["underlying"], "agent": SPREAD_STRATEGY})
     except Exception:
         pass
     return book
@@ -81,12 +97,77 @@ def var_of(entry: dict) -> float:
     return float(entry["notional"]) * daily_vol(ref) * Z_95
 
 
+def _agent_list(raw: str) -> set[str]:
+    return {a.strip() for a in (raw or "").split(",") if a.strip()}
+
+
+def cap_excluded(agent: Optional[str]) -> bool:
+    """True for agents whose positions do not use the shared VaR cap (VAR_CAP_EXCLUDE_AGENTS)."""
+    return bool(agent) and agent in _agent_list(settings.var_cap_exclude_agents)
+
+
+def share_applies(agent: Optional[str]) -> bool:
+    """True when the per-agent VaR share (rule 5) limits this agent (VAR_AGENT_SHARE_AGENTS, "*" = all)."""
+    if not agent:
+        return False
+    names = _agent_list(settings.var_agent_share_agents)
+    return "*" in names or agent in names
+
+
+def option_max_loss(entry_px: float, stop_px: Optional[float], qty: int) -> float:
+    """VaR of a bought option: loss at the stop (OPTION_VAR_AT_STOP) or the whole premium. Use the same
+    figure for pre_entry/var_check and the trailing-stop entry's "max_loss" so the book matches the check."""
+    premium = entry_px * qty
+    if settings.option_var_at_stop and stop_px is not None and 0 <= stop_px < entry_px:
+        return (entry_px - stop_px) * qty
+    return premium
+
+
+def _cap_used(book: list[dict]) -> float:
+    return sum(var_of(b) for b in book if not cap_excluded(b.get("agent")))
+
+
 def portfolio_var() -> dict:
     book = _open_book()
-    total = sum(var_of(b) for b in book)
+    total = _cap_used(book)
+    excluded = sum(var_of(b) for b in book if cap_excluded(b.get("agent")))
     cap = settings.total_capital * settings.portfolio_var_cap_pct / 100
     return {"var_1d_95": round(total, 2), "cap": round(cap, 2), "used_pct": round(total / cap * 100, 1) if cap else None,
-            "positions": len(book)}
+            "positions": len(book), "excluded_var": round(excluded, 2),
+            "excluded_agents": sorted(_agent_list(settings.var_cap_exclude_agents))}
+
+
+def agent_var_budget() -> Optional[float]:
+    """₹ of the portfolio VaR cap one agent may use, or None when the per-agent share is off
+    (VAR_AGENT_SHARE_PCT ≤ 0 or ≥ 100)."""
+    share = settings.var_agent_share_pct
+    if share <= 0 or share >= 100:
+        return None
+    return settings.total_capital * settings.portfolio_var_cap_pct / 100 * share / 100
+
+
+def agent_var(agent: str, book: Optional[list[dict]] = None) -> float:
+    """1-day 95% VaR of the open positions tagged with this agent."""
+    book = _open_book() if book is None else book
+    return sum(var_of(b) for b in book if b.get("agent") == agent)
+
+
+def var_check(agent: Optional[str], new_var: float) -> Optional[str]:
+    """Reject-only form of the VaR rules (4 and 5) for entry paths that trade fixed lots (FnOAgent):
+    the reason the new position's VaR does not fit the portfolio cap or the agent's share, or None.
+    An agent in VAR_CAP_EXCLUDE_AGENTS is not checked against the shared cap (it does not use it)."""
+    book = _open_book()
+    used = _cap_used(book)
+    cap = settings.total_capital * settings.portfolio_var_cap_pct / 100
+    if cap and not cap_excluded(agent) and used + new_var > cap:
+        return f"daily VaR cap reached (₹{used:,.0f} + ₹{new_var:,.0f} of ₹{cap:,.0f})"
+    budget = agent_var_budget() if share_applies(agent) else None
+    if budget is not None:
+        mine = agent_var(agent, book)
+        if mine + new_var > budget:
+            return (f"agent {agent} VaR share reached (₹{mine:,.0f} + ₹{new_var:,.0f} over its "
+                    f"₹{budget:,.0f} = {settings.var_agent_share_pct:g}% of the ₹{cap:,.0f} cap)")
+    return None
 
 
 def size_for_stop(price: float, stop: float) -> int:
@@ -99,11 +180,14 @@ def size_for_stop(price: float, stop: float) -> int:
 
 def pre_entry(symbol: str, side: str, quantity: int, price: float, stop: Optional[float] = None,
               kind: str = "equity", max_loss: Optional[float] = None, underlying: Optional[str] = None,
-              unit_size: int = 1) -> dict:
+              unit_size: int = 1, agent: Optional[str] = None) -> dict:
     """Apply the portfolio rules to a proposed entry.
 
     unit_size: lot size for F&O — max_quantity is rounded down to whole lots, and less than one
     lot means "no".
+    agent: the strategy tag the position will carry in the trailing-stop engine. With it the entry
+    must also fit that agent's share of the VaR cap (rule 5) when VAR_AGENT_SHARE_AGENTS lists it;
+    an agent in VAR_CAP_EXCLUDE_AGENTS skips the shared cap (rule 4).
 
     Returns {"ok": bool, "reason": str, "max_quantity": int, "size_factor": float, "var": {...}}.
     ok=False means do not trade; otherwise quantity must be ≤ max_quantity (the caller either
@@ -158,7 +242,8 @@ def pre_entry(symbol: str, side: str, quantity: int, price: float, stop: Optiona
         new_var = float(max_loss if max_loss is not None else price * max_q)
     else:
         new_var = price * max_q * daily_vol(underlying or symbol) * Z_95
-    if pv["cap"] and pv["var_1d_95"] + new_var > pv["cap"]:
+    per_unit_var = new_var / max(max_q, 1)
+    if pv["cap"] and not cap_excluded(agent) and pv["var_1d_95"] + new_var > pv["cap"]:
         room = pv["cap"] - pv["var_1d_95"]
         if room <= 0:
             return {"ok": False, "reason": f"daily VaR cap reached (₹{pv['var_1d_95']:,.0f} of ₹{pv['cap']:,.0f}); "
@@ -166,6 +251,19 @@ def pre_entry(symbol: str, side: str, quantity: int, price: float, stop: Optiona
         per_unit = new_var / max(max_q, 1)
         max_q = int(room // per_unit) if per_unit > 0 else 0
         reasons.append(f"daily VaR cap ₹{pv['cap']:,.0f} (used ₹{pv['var_1d_95']:,.0f}, room ₹{room:,.0f}) → max qty {max_q}")
+    # 5. this agent's share of the VaR cap
+    budget = agent_var_budget() if share_applies(agent) else None
+    if budget is not None and max_q > 0 and per_unit_var > 0:
+        mine = agent_var(agent)
+        if mine + per_unit_var * max_q > budget:
+            room = budget - mine
+            label = (f"agent {agent} VaR share {settings.var_agent_share_pct:g}% of the cap "
+                     f"(₹{budget:,.0f}; its open positions use ₹{mine:,.0f})")
+            if room < per_unit_var:
+                return {"ok": False, "reason": f"{label} reached; other agents can still enter",
+                        "max_quantity": 0, "size_factor": 0.0, "var": pv}
+            max_q = int(room // per_unit_var)
+            reasons.append(f"{label} → max qty {max_q}")
     if unit_size > 1:
         max_q = (max_q // unit_size) * unit_size
         if max_q < unit_size:

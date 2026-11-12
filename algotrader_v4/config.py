@@ -223,6 +223,22 @@ class Settings(BaseSettings):
     # ── Portfolio risk (portfolio_risk.py) — applied to every entry, AI or agent ──
     risk_per_trade_pct:           float = 0.5      # max loss at the stop as % of total capital (vol-targeted size)
     portfolio_var_cap_pct:        float = 2.0      # 1-day 95% VaR of the open book, % of capital
+    var_agent_share_pct:          float = 40.0     # max % of that VaR cap one agent's open positions may use
+                                                   # (keyed by strategy tag; ≤0 or ≥100 turns the per-agent share off)
+    var_agent_share_agents:       str   = "fno,ai,ai_opt,ai_fut,ai_swing,ai_swing_opt,ai_spread"
+                                                   # agents the share applies to. The replay-validated rule agents
+                                                   # (intraday, scalping, swing, ...) are left out so live sizing
+                                                   # stays what replay_backtest validated ("*" = every agent)
+    var_cap_exclude_agents:       str   = "fno"    # agents whose open positions do not count toward the shared VaR
+                                                   # cap other agents are checked against (bounded instead by their
+                                                   # own caps: FNO_MAX_OPEN_POSITIONS, MAX_TRADES_FNO, capital bucket)
+    option_var_at_stop:           bool  = True     # a bought option's VaR is its loss at the stop when the entry
+                                                   # recorded one (same figure at entry and in the open book);
+                                                   # False = the whole premium, at entry and in the book
+    fno_max_open_positions:       int   = 4        # FnOAgent stock/index option positions open at once (0 = no cap)
+    fno_var_check_enabled:        bool  = False    # FnOAgent entries must also fit the VaR rules. Off: at ₹5L capital
+                                                   # one index/stock option lot is over the fno share, so it would
+                                                   # stop F&O trading; the position cap bounds it instead
     max_portfolio_heat:           float = 0.7      # avg pairwise correlation of the book above which no new equity entry
     # ── Bull-vs-bear debate before every AI entry (debate_gate.py) ─────────
     ai_agent_debate_enabled:      bool  = True
