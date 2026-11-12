@@ -4461,7 +4461,8 @@ def t_ai_spread_stop_and_take_profit():
         assert ai._spreads, "small move: spread stays open"
         asyncio.run(ai._on_snap(_index_snap(23800.0)))              # index falls through the short put
         assert not ai._spreads and any("stop: spread cost" in e["text"] for e in ai.log)
-        assert _og_x._cooldown_until["ai_spread"] > 0, "a losing spread starts the post-loss cooldown"
+        # the mechanical agents' post-loss cooldown does not apply to the AI (it blocked unrelated AI entries)
+        assert not _og_x._cooldown_until.get("ai_spread"), "no post-loss cooldown for the AI"
         _og_x._cooldown_until.clear()
         _index_snap(24000.0)
         asyncio.run(ai._place_option_spread(_spread_args()))
@@ -10933,6 +10934,179 @@ run("SF-4 swing trail is the replay's percent trail, not the 1-minute ATR",     
 run("SF-5 swing holding period exits after MAX_CNC_SESSIONS, as replayed",         t_sf_swing_holding_period_matches_replay)
 run("SF-6/7 F&O trades the nearest listed strike, tracked at the broker fill",     t_sf_fno_trades_nearest_listed_strike)
 run("SF-8 swing CNC entry is protected by a GTT, not a day SL-M",                  t_sf_swing_entry_protected_by_gtt)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# AI trader e2e regressions (Nov 2026): swing holds vs 15:15, guard caps, trail handover, lock stall, option fill
+# ══════════════════════════════════════════════════════════════════════════
+
+def _ai_sq(fn):
+    """Isolated paper book + AI env + private swing file; the master square-off's notifications muted."""
+    import master_agent_v5 as _mav_ai
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), _patch.object(_mav_ai, "send_telegram", _noop):
+        return _with_ai_env(lambda: _with_swing_file(lambda path: fn(_mav_ai.master_agent)))
+
+
+def t_ai_swing_put_survives_squareoff():
+    """AI-1: an NRML swing put is held for days; the 15:15 broker flatten skipped only CNC rows and sold it
+    while the AI kept tracking it (its later exit then opened a naked short)."""
+    def body(master):
+        ai = _rt_ai()
+        _ai_tick("PUTSQ", 1000.0)
+        out = asyncio.run(ai._place_swing_put(_put_args("PUTSQ")))
+        oid, sym, qty = out["order_id"], out["symbol"], out["quantity"]
+        assert _paper_pos(sym)["quantity"] == qty
+        asyncio.run(master._auto_squareoff())
+        assert oid in ai._ai_entries(), "the swing put is still tracked"
+        assert _paper_pos(sym)["quantity"] == qty, "the broker square-off must not sell a held swing put"
+        assert not [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == sym and o["tag"] == "SquareOff"]
+        asyncio.run(ai._close_position(sym, "next-day stop"))
+        assert _paper_pos(sym)["quantity"] == 0, "flat after its own exit, not short"
+    _ai_sq(body)
+
+
+def t_ai_cnc_swing_after_mis_round_trip_survives_squareoff():
+    """AI-5: an MIS round trip earlier in the day left the paper row product MIS; a CNC swing bought later in
+    the same symbol was then sold by the 15:15 MIS square-off."""
+    def body(master):
+        ai = _rt_ai()
+        _ai_tick("SWMIX", 1000.0)
+        for side in ("BUY", "SELL"):
+            _te_kite_client.place_order(tradingsymbol="SWMIX", exchange="NSE", transaction_type=side, quantity=20,
+                                        order_type="MARKET", product="MIS", tag="t")
+        out = asyncio.run(ai._place_swing_trade(_swing_args("SWMIX")))
+        row = _paper_pos("SWMIX")
+        assert row["quantity"] == out["quantity"] and row["product"] == "CNC", row
+        row["product"] = "MIS"                    # even a row that still says MIS keeps the tracked holding
+        asyncio.run(master._auto_squareoff())
+        assert out["order_id"] in ai._ai_entries() and _paper_pos("SWMIX")["quantity"] == out["quantity"]
+        asyncio.run(ai._close_position("SWMIX", "t"))
+        assert _paper_pos("SWMIX")["quantity"] == 0
+    _ai_sq(body)
+
+
+def t_order_guard_ai_limits():
+    """AI-2: the guard capped every AI key at 10 trades/day (AI_AGENT_MAX_TRADES_PER_DAY ignored) and applied
+    the mechanical agents' post-loss cooldown to the AI, while the model was told it had trades left."""
+    prev = _ai_settings.ai_agent_max_trades_per_day
+    _ai_settings.ai_agent_max_trades_per_day = 999
+    def body():
+        for i in range(10):
+            _og_x.register_order(f"OGAI{i}", "ai", "BUY", f"P{i}")
+            _og_x.release_order(f"OGAI{i}", "ai", "BUY", 100.0)
+        assert _og_x.can_place("OGAI10", "ai", "BUY")[0], "11th AI trade with a 999/day limit"
+        _og_x.release_order("OGAI0", "ai", "BUY", -50.0)
+        ok, why = _og_x.can_place("OGTCS", "ai", "BUY")
+        assert ok, why
+        ai = _rt_ai()
+        _ai_tick("OGAIX", 1000.0)
+        assert asyncio.run(ai._place_trade(_trade_args("OGAIX")))["status"] == "placed"
+        asyncio.run(ai._close_position("OGAIX", "t"))
+        _og_x.release_order("OGMECH", "intraday", "BUY", -50.0)
+        assert not _og_x.can_place("OGMECH2", "intraday", "BUY")[0], "mechanical agents keep their cooldown"
+    try:
+        _with_ai_env(body)
+    finally:
+        _ai_settings.ai_agent_max_trades_per_day = prev
+        _og_x._cooldown_until.clear(); _og_x._trade_count.clear()
+
+
+def _ai_cleanup(fn):
+    """Close any AI position a failed assertion left open (the next AI test would hit the position limit)."""
+    try:
+        return fn()
+    finally:
+        ai = _rt_ai()
+        for sym in {e["symbol"] for e in ai._ai_entries().values()}:
+            try:
+                asyncio.run(ai._close_position(sym, "test cleanup"))
+            except Exception:
+                pass
+
+
+def t_ai_trail_handover_returns_to_ai():
+    """AI-3: a position handed to the mechanical trail while the AI was unavailable (restart before the
+    auto-start, provider errors, cost cap) never came back to AI management once the AI recovered."""
+    prev_rt, prev_tr = _ai_settings.ai_agent_realtime, _ai_settings.ai_agent_ai_trailing
+    _ai_settings.ai_agent_realtime = _ai_settings.ai_agent_ai_trailing = True
+    def body():
+        ai = _rt_ai()
+        ai.enabled = True
+        _ai_tick("HOAI", 1000.0)
+        oid = asyncio.run(ai._place_trade(_trade_args("HOAI")))["order_id"]
+        pos = _tsl_eng._positions[oid]
+        held = {oid: _ba._tsl_sl_orders[oid]}
+        assert pos.external_trail and ai._ai_trailing_available()
+        ai._ai_errors = 3
+        ai._handover_if_ai_unavailable(held)
+        assert not pos.external_trail and ai._trail[oid].get("handed_over")
+        assert ai.export_book()["trail"][oid].get("handed_over"), "persisted across a restart"
+        ai._ai_errors = 0
+        ai._handover_if_ai_unavailable(held)
+        assert pos.external_trail and not ai._trail[oid].get("handed_over"), "back under AI management"
+        asyncio.run(ai._close_position("HOAI", "t"))
+    try:
+        _with_ai_env(lambda: _with_key(lambda: _ai_cleanup(body)))
+    finally:
+        _ai_settings.ai_agent_realtime, _ai_settings.ai_agent_ai_trailing = prev_rt, prev_tr
+
+
+def t_ai_tick_monitor_not_blocked_by_action_lock():
+    """AI-4: a model entry holds _action_lock across its debate LLM call; a target hit then blocked the single
+    AI tick monitor on the lock, so other positions' stops went unchecked until the debate finished."""
+    def body():
+        ai = _rt_ai()
+        _ai_tick("LKA", 1000.0); _ai_tick("LKB", 1000.0)
+        a = asyncio.run(ai._place_trade(_trade_args("LKA")))["order_id"]
+        b = asyncio.run(ai._place_trade(_trade_args("LKB")))["order_id"]
+        async def run():
+            await ai._action_lock.acquire()                   # a debate in progress
+            try:
+                await asyncio.wait_for(ai._on_snap(_make_snap(symbol="LKA", ltp=1021.0)), 1.0)   # target hit
+                _ai_tick("LKB", 985.0)
+                await asyncio.wait_for(ai._on_snap(_make_snap(symbol="LKB", ltp=985.0)), 1.0)    # stop hit
+                assert b not in ai._ai_entries(), "the stop runs while the lock is held"
+                assert a in ai._ai_entries(), "the target exit waits for the lock"
+            finally:
+                ai._action_lock.release()
+            for t in list(ai._pending_exits.values()):
+                await t
+            assert a not in ai._ai_entries() and not ai._pending_exits
+        asyncio.run(run())
+    _with_ai_env(lambda: _ai_cleanup(body))
+
+
+def t_ai_option_entry_fills_at_touch():
+    """AI-7: the contract had no tick when the marketable LIMIT (ask × 1.01) went in, so the paper broker
+    filled at the limit and the ledger booked ~1 % of premium as phantom cost / slippage."""
+    def body():
+        ai = _rt_ai()
+        import tick_engine as _te_mod
+        real_q = ai._option_quotes
+        def quotes(cs, spot):
+            out = real_q(cs, spot)
+            for c in cs:
+                _te_mod.tick_engine._latest_tick.pop(c.tradingsymbol, None)     # a freshly chosen contract
+                out[c.tradingsymbol] = {**out[c.tradingsymbol], "ltp": 120.0, "bid": 119.8, "ask": 120.2,
+                                        "estimated": False}
+            return out
+        with _patch.object(ai, "_option_quotes", side_effect=quotes):
+            out = asyncio.run(ai._place_option_trade(_opt_args()))
+        oid = out["order_id"]
+        fill = _order(oid)["price"]
+        assert fill <= 120.2, f"paper fill {fill} above the ask (limit {out['limit_price']})"
+        assert _tsl_eng._positions[oid].entry_price == fill, "the position is registered at its fill"
+        asyncio.run(ai._close_position(out["symbol"], "t"))
+    _with_opt_env(lambda: _ai_cleanup(body))
+
+
+run("AI-1: AI swing put (NRML) survives the 15:15 square-off",                   t_ai_swing_put_survives_squareoff)
+run("AI-5: CNC swing after an MIS round trip survives the 15:15 square-off",     t_ai_cnc_swing_after_mis_round_trip_survives_squareoff)
+run("AI-2: order guard uses the AI's daily limit and no post-loss cooldown",     t_order_guard_ai_limits)
+run("AI-3: a position handed to the mechanical trail returns to the AI",          t_ai_trail_handover_returns_to_ai)
+run("AI-4: tick monitor keeps running stops while _action_lock is held",          t_ai_tick_monitor_not_blocked_by_action_lock)
+run("AI-7: paper AI option entry fills at the touch, registered at its fill",     t_ai_option_entry_fills_at_touch)
 
 
 # ══════════════════════════════════════════════════════════════════════════

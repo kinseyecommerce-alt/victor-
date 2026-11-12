@@ -267,13 +267,17 @@ def squareoff_restored_if_due(now=None) -> list[str]:
             if _tsl_sl_orders[oid].get("product", "MIS") != "CNC" and _tsl_sl_orders[oid].get("kind") != "swing"}
     closed = close_tracked_for_squareoff("restored square-off", only=only)
     # a failed exit is flattened at the (paper) broker, as master's square-off does: restored symbols only
+    from agents.base_agent import overnight_hold_qty
+    hold = overnight_hold_qty()
     for p in kite_client.positions().get("net", []):
         sym = p.get("tradingsymbol")
-        if sym in syms and sym not in closed and p.get("quantity") and p.get("product") != "CNC":
+        net = int(p.get("quantity") or 0) - sum(q for (s, _p), q in hold.items() if s == sym)
+        if sym in syms and sym not in closed and p.get("quantity") and p.get("product") != "CNC" \
+                and net and (net > 0) == (p["quantity"] > 0):
             try:
                 kite_client.place_order(tradingsymbol=sym, exchange=p.get("exchange", "NSE"),
-                                        transaction_type="SELL" if p["quantity"] > 0 else "BUY",
-                                        quantity=abs(int(p["quantity"])), order_type="MARKET",
+                                        transaction_type="SELL" if net > 0 else "BUY",
+                                        quantity=abs(net), order_type="MARKET",
                                         product=p.get("product", "MIS"), tag="SquareOff")
             except Exception as exc:
                 logger.critical("[paper_book] square-off of {} failed: {}", sym, exc)

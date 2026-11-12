@@ -37,6 +37,13 @@ def _loss_cooldown_applies(strategy: str) -> bool:
     return not getattr(agent, "validated_by_replay", False)
 
 
+# The AI trader's order-guard keys (ai_trader.AGENT / *_STRATEGY). Its daily budget is AI_AGENT_MAX_TRADES_PER_DAY,
+# which the AI enforces (and reports to the model) across all of them; the guard fell back to 10/day here and
+# hard-blocked the AI long before its own limit. The per-strategy post-loss cooldown is for the mechanical agents:
+# the AI picks unrelated names on its own evidence, and the model was never told of the block.
+AI_GUARD_KEYS = frozenset({"ai", "ai_opt", "ai_fut", "ai_swing", "ai_swing_opt", "ai_spread", "momentum"})
+
+
 class OrderGuard:
 
     def __init__(self) -> None:
@@ -47,6 +54,8 @@ class OrderGuard:
 
     @staticmethod
     def _max_trades(strategy: str) -> int:
+        if strategy in AI_GUARD_KEYS:
+            return settings.ai_agent_max_trades_per_day
         return {
             "intraday": settings.max_trades_intraday,
             "fno":      settings.max_trades_fno,
@@ -66,7 +75,7 @@ class OrderGuard:
             if self._trade_count[strategy] >= limit:
                 return False, f"Overtrade blocked: {strategy} already at {limit} trades today"
             now = time.time()
-            if now < self._cooldown_until[strategy]:
+            if strategy not in AI_GUARD_KEYS and now < self._cooldown_until[strategy]:
                 remaining = int(self._cooldown_until[strategy] - now)
                 return False, f"Cooldown active for {strategy}: {remaining}s remaining"
             return True, "OK"
@@ -89,7 +98,8 @@ class OrderGuard:
         with self._lock:
             key = (symbol, strategy, side)
             self._active.pop(key, None)
-            if pnl < 0 and settings.cooldown_after_loss_sec > 0 and _loss_cooldown_applies(strategy):
+            if (pnl < 0 and settings.cooldown_after_loss_sec > 0 and strategy not in AI_GUARD_KEYS
+                    and _loss_cooldown_applies(strategy)):
                 self._cooldown_until[strategy] = time.time() + settings.cooldown_after_loss_sec
 
     def is_symbol_active_anywhere(self, symbol: str) -> list[str]:

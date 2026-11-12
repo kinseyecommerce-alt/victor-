@@ -392,10 +392,16 @@ class KiteClient:
             label="cancel_order",
         )
 
-    def squareoff_all_positions(self, exclude: frozenset = frozenset()) -> list[str]:
+    def squareoff_all_positions(self, exclude: frozenset = frozenset(),
+                                hold: Optional[dict] = None) -> list[str]:
         """exclude: symbols whose exit order was just sent elsewhere (a broker position can lag the fill,
-        and squaring it off again would open a reverse position)."""
+        and squaring it off again would open a reverse position).
+        hold: {(symbol, product): signed qty} of tracked overnight positions (base_agent.overnight_hold_qty) —
+        only the quantity beyond them is flattened. The paper book keeps one row per symbol, so there every
+        product's hold counts against the symbol's row."""
         order_ids: list[str] = []
+        hold = hold or {}
+        paper = settings.trading_mode == "PAPER"
         for pos in self.positions().get("net", []):
             if pos.get("quantity", 0) == 0:
                 continue
@@ -403,8 +409,16 @@ class KiteClient:
                 continue
             if pos.get("product") == "CNC":       # delivery (swing) positions are held overnight
                 continue
-            side = "SELL" if pos["quantity"] > 0 else "BUY"
-            qty  = abs(pos["quantity"])
+            sym = pos.get("tradingsymbol")
+            held = (sum(q for (s, _p), q in hold.items() if s == sym) if paper
+                    else hold.get((sym, pos.get("product", "MIS")), 0))
+            net = int(pos["quantity"]) - held
+            if net == 0 or (net > 0) != (pos["quantity"] > 0):
+                if held:
+                    logger.info("Square-off: {} held overnight (qty {}) — left open", sym, held)
+                continue
+            side = "SELL" if net > 0 else "BUY"
+            qty  = abs(net)
             oid  = self.place_order(
                 tradingsymbol=pos["tradingsymbol"],
                 exchange=pos.get("exchange", "NSE"),
@@ -700,6 +714,10 @@ class KiteClient:
                 new_q = old_q + qty_delta
                 if old_q == 0 or (new_q != 0 and (old_q > 0) != (new_q > 0)):
                     pos["average_price"] = px                  # fresh or flipped position
+                    if old_q == 0:
+                        # a fresh position carries its own product (an earlier MIS round trip in the symbol
+                        # left the row MIS, and the 15:15 square-off then sold a CNC swing bought later)
+                        pos["product"] = order.get("product", pos.get("product", "MIS"))
                 elif (old_q > 0) == (qty_delta > 0):           # adding to the position
                     pos["average_price"] = round(
                         (pos["average_price"] * abs(old_q) + px * abs(qty_delta)) / abs(new_q), 2)
