@@ -259,6 +259,17 @@ than 3 sessions remain to expiry), 0.16-delta strikes, held to expiry settlement
 and max drawdown, plus DISCOVERY-only sensitivities: the haircut x2.5 ("net@5") and approximate historical lot sizes.
 The credit is a model value (no skew); treat a pass as a reason to paper-trade, not as a fill record.
 
+## Attention overnight long (`attention.py`)
+
+`python -m stratlab.attention --data <bars3y> --out <scratch dir> [--screen-only]` runs SWING-ATTN-ON-3X (swing
+round 2, pre-registered): on day t, if cumulative volume 09:15-15:20 > 3.0 x the mean full-day volume of the previous
+20 sessions and the 15:20 close > the previous close, buy the stock future (simulated on the cash price, futures
+costs, 2 bps/side) at the 15:21 open and sell at the next session's 09:15 auction print; top 10 volume ratios per
+day, Rs 1 lakh each, one night, no stop. Special sessions (median bar count < 300) on t / t+1, CA_GAPS days and a
+next session beyond the simulated period are excluded. Own fill model (`attn1`, in the ledger key), judged by the
+unchanged `protocol.evaluate` (positional: >= 60 trades). Sensitivities: 5 bps slippage, a 09:16-open exit and CNC
+costs. Tests: `test_pipeline.py` section "STRATLAB ATTENTION OVERNIGHT LONG".
+
 ## Tests
 
 `cd algotrader_v4 && python test_pipeline.py` — the `STRATLAB` section covers: the per-bar view cannot read
@@ -287,3 +298,13 @@ python -m stratlab.ltr --data <bars3y> --hist <day files> --out <scratch dir> [-
 ```
 
 Result on the 3-year data (DISCOVERY only; FINAL never simulated): FAILED SCREEN - PAYTM is 52 % of the excess net.
+
+## Round-2 scalping: SCALP-AUC-FADE-1TO3-0925 (`auction_r2.py`)
+
+A pre-registered parameter variant of the opening-auction fade, using `auction.py`'s fill model (`auction1`) and
+`protocol.evaluate` unchanged: fade the 09:15 auction print when 1.0 % <= |gap| <= 3.0 % (inclusive), exit at the
+09:25 open, top 10 |gap| per day, Rs 1 lakh each, no stop; skip a symbol-day whose previous session was short
+(< 200 bars, dropped by the loader). Slippage 2 bps per side (5 bps stress). Reports long / short split, top-symbol
+share, net without the best 5 dates and a date-clustered t on DISCOVERY and (for a screen passer) FINAL.
+
+    python -m stratlab.auction_r2 --data <bars3y> --out <scratch dir> [--screen-only]

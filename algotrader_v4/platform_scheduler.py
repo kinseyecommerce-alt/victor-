@@ -35,6 +35,9 @@ class PlatformScheduler:
             hour=9, minute=5, day_of_week="mon-fri", id="kite_refresh_last",
         )
         self._sched.add_job(self._kite_login_at_startup, "date", id="kite_login_startup")
+        # a restart after 09:16 (deploy, crash) would otherwise leave the bot stopped for the day
+        self._sched.add_job(self._auto_start_catch_up, "date", id="auto_start_catch_up",
+                            run_date=__import__("datetime").datetime.now() + __import__("datetime").timedelta(seconds=45))
         self._sched.add_job(
             self._pre_market_report, "cron",
             hour=9, minute=0, day_of_week="mon-fri", id="pre_market",
@@ -266,6 +269,15 @@ class PlatformScheduler:
                 f"Renew manually before 09:15:\n{login_url}"
             )
 
+    async def _auto_start_catch_up(self) -> None:
+        """At startup inside market hours (09:16-15:00 IST) run the 09:16 auto-start that was missed."""
+        from ist_clock import now_ist
+        t = now_ist().time()
+        if t.replace(microsecond=0) < __import__("datetime").time(9, 16) or t >= __import__("datetime").time(15, 0):
+            return
+        logger.info("[platform] started inside market hours — running the missed 09:16 auto-start")
+        await self._auto_start_bot()
+
     async def _auto_start_bot(self) -> None:
         if not settings.auto_start_strategies:
             logger.info("[platform] AUTO_START_STRATEGIES not set — skipping auto-start")
@@ -278,7 +290,7 @@ class PlatformScheduler:
                                 f"Bot not started; next session {next_trading_day():%a %d %b}.")
             return
 
-        from master_agent_v5 import master
+        from master_agent_v5 import master_agent as master
         if master.running:
             logger.info("[platform] Bot already running — auto-start skipped")
             return

@@ -9190,6 +9190,245 @@ def t_fwd_record_persists_and_scheduler():
 run("forward test: variants, final vs live rule, fills, slippage, costs", t_fwd_trades_variants_rules)
 run("forward test: 10-a-day cap, 20 % exclusion, missing prices, summary", t_fwd_cap_exclusions_missing)
 run("forward test: record() persists stages, exit builds trades; scheduler jobs", t_fwd_record_persists_and_scheduler)
+section("STRATLAB ROUND-2 SCALPING: SCALP-AUC-FADE-1TO3-0925 (stratlab/auction_r2.py)")
+# ══════════════════════════════════════════════════════════════════════════
+from stratlab import auction_r2 as _slr2  # noqa: E402
+
+
+def t_r2_signal_rule_and_features():
+    assert _slr2.fade_rule(100, 101)[0] == -1 and _slr2.fade_rule(100, 99)[0] == 1     # 1 % inclusive, fade side
+    assert _slr2.fade_rule(100, 103)[0] == -1 and _slr2.fade_rule(100, 97)[0] == 1     # 3 % inclusive
+    assert _slr2.fade_rule(100, 100.99) is None and _slr2.fade_rule(100, 103.01) is None
+    assert _slr2.fade_rule(0, 100) is None
+    sd = _auc_sd(gaps=(0.0, 0.05, -0.02, 0.012, 0.03, -0.005))
+    f = _slr2.session_features(sd)
+    assert f[0][5] is True                                       # no previous session -> skipped
+    for k in range(1, len(f)):
+        assert abs(f[k][1] - float(sd.c[sd.ends[k - 1] - 1])) < 1e-9 and abs(f[k][2] - float(sd.o[sd.starts[k]])) < 1e-9
+        assert f[k][3] == 565 and abs(f[k][4] - float(sd.o[sd.starts[k] + 10])) < 1e-9     # 09:25 open
+    rows = _slr2.candidates_for("AUC", f)
+    assert [(r[0], r[2]) for r in rows] == [(20260107, 1), (20260108, -1), (20260109, -1)], rows   # 5 %, 0.5 % out; 3 % in
+    # a short (dropped) previous session -> skip the next day
+    sd.dropped = [20260107]
+    sd2 = _auc_sd(gaps=(0.0, 0.02, 0.02))
+    sd2.dropped = []
+    f2 = _slr2.session_features(sd2)
+    assert len(_slr2.candidates_for("B", f2)) == 2
+    sd2.days = np.array([20260105, 20260107, 20260108], dtype=np.int32)
+    sd2.dropped = [20260106]
+    assert [r[0] for r in _slr2.candidates_for("B", _slr2.session_features(sd2))] == [20260108]
+
+
+def t_r2_no_lookahead():
+    """Perturbing 09:16-09:24 of day d, everything after its 09:25 open, and all later days leaves day d's trade
+    (signal, entry and exit prices) unchanged."""
+    g = (0.0, 0.02, -0.015, 0.025)
+    base = _slr2.candidates_for("AUC", _slr2.session_features(_auc_sd(gaps=g)))
+    sd = _auc_sd(gaps=g)
+    a = int(sd.starts[1])
+    for arr in (sd.o, sd.h, sd.l, sd.c):
+        arr[a + 1:a + 10] *= 1.04
+        arr[a + 11:] *= 0.9
+    pert = _slr2.candidates_for("AUC", _slr2.session_features(sd))
+    assert pert[0] == base[0], (pert[0], base[0])
+
+
+def t_r2_ranking_and_costs():
+    rows = [(20260105, f"S{i:02d}", -1, 0.010 + i * 0.0015, 500.0, 565, 499.0) for i in range(14)]
+    pick = _slr2.select(rows, _slr2.SPECS[0], 0, 99999999)
+    # gaps 1.0 % .. 2.95 %: all 14 qualify, the 10 largest are S04..S13
+    assert len(pick) == 10 and {r[1] for r in pick} == {f"S{i:02d}" for i in range(4, 14)}
+    rows2 = rows + [(20260105, "S99", -1, 0.031, 500.0, 565, 499.0)]
+    assert "S99" not in {r[1] for r in _slr2.select(rows2, _slr2.SPECS[0], 0, 99999999)}
+    tr = _slr2.settle("X", rows[0], 2e-4)
+    fill, ex = 500.0 * (1 - 2e-4), 499.0 * (1 + 2e-4)
+    assert tr[9] == 200 and abs(tr[5] - fill) < 1e-3 and abs(tr[8] - ex) < 1e-3 and tr[7] == "09:25"
+    from costs import round_trip_cost as _rtc
+    assert abs(tr[11] - _rtc(ex * 200, fill * 200, "equity_mis")) < 1e-6
+    mis = _rtc(1e5, 1e5, "equity_mis") / 1e5 * 1e4
+    assert abs(mis - 8.27) < 0.15, mis                                           # pre-registered 8.27 bps
+    assert abs(mis + 2 * 2.0 - 12.27) < 0.15 and abs(mis + 2 * 5.0 - 18.27) < 0.15
+    assert _slr2.DEFAULT_SLIPPAGE_BPS == 2.0 and _slr2.COST_MODEL.startswith(_sls.COST_MODEL)
+
+
+def t_r2_protocol_final_never_for_failures():
+    seen = []
+    rows = [(20240101 + (d % 28) + (d // 28) * 100, "A", 1, -0.02, 100.0, 565, 99.0) for d in range(200)]
+    base = _slr2.make_simulator(rows)
+
+    def sim_(specs, lo, hi):
+        seen.append((lo, hi))
+        return base(specs, lo, hi)
+    cal = sorted({r[0] for r in rows})
+    res, _tr = _slp.evaluate(_slr2.SPECS, cal, sim_, n_symbols=1, ledger_path=None, cost_model=_slr2.COST_MODEL)
+    assert res[0]["verdict"] == "FAILED SCREEN" and len(seen) == 1
+
+
+run("auction_r2: 1-3 % inclusive band, fade side, 09:25 exit, short-previous-session skip", t_r2_signal_rule_and_features)
+run("auction_r2: later bars cannot change an earlier signal or fill (look-ahead)", t_r2_no_lookahead)
+run("auction_r2: top-10 |gap| per day, qty, slippage and 8.27 / 12.27 / 18.27 bps costs", t_r2_ranking_and_costs)
+run("auction_r2: protocol never simulates FINAL for screen failures", t_r2_protocol_final_never_for_failures)
+
+
+section("STRATLAB ATTENTION OVERNIGHT LONG (stratlab/attention.py)")
+# ══════════════════════════════════════════════════════════════════════════
+from stratlab import attention as _slat  # noqa: E402
+
+
+def _attn_sd(symbol="ATT", n_days=25, shock_day=22, up=True, seed=5, vol_mult=4.0):
+    """One synthetic symbol, 375 bars/day, flat volume 1000/bar; day `shock_day` has `vol_mult` x volume and closes
+    up (or down) vs the previous close by 15:20; the next day opens 1 % higher than that day's close."""
+    rng = np.random.default_rng(seed)
+    date, t, o, c, v = [], [], [], [], []
+    px = 1000.0
+    for k in range(n_days):
+        op = px * (1.01 if k == shock_day + 1 else 1.0)
+        drift = (0.0001 if up else -0.0001) if k == shock_day else 0.0
+        cl = op * np.exp(np.cumsum(rng.normal(drift, 0.00005, 375)))
+        oo = np.concatenate(([op], cl[:-1]))
+        date += [20260105 + k] * 375; t += list(555 + np.arange(375)); o += list(oo); c += list(cl)
+        v += [1000.0 * (vol_mult if k == shock_day else 1.0)] * 375
+        px = float(cl[-1])
+    o, c = np.array(o), np.array(c)
+    return _sld.from_arrays(symbol, date, t, o, np.maximum(o, c), np.minimum(o, c), c, np.array(v))
+
+
+def t_attn_rule():
+    pv = [100.0] * 20
+    assert _slat.attention_rule(301.0, pv, 101, 100) is not None          # 3.01x and up
+    assert _slat.attention_rule(300.0, pv, 101, 100) is None              # exactly 3x is not "> 3x"
+    assert _slat.attention_rule(400.0, pv, 100, 100) is None              # not up
+    assert _slat.attention_rule(400.0, pv[:19], 101, 100) is None         # fewer than 20 sessions of history
+    assert abs(_slat.attention_rule(500.0, [50.0] * 5 + pv, 101, 100) - 5.0) < 1e-9   # only the last 20 count
+    sd = _attn_sd()
+    rows = _slat.session_features(sd)
+    assert len(rows) == 1 and rows[0]["date"] == 20260105 + 22, rows
+    r = rows[0]
+    a = int(sd.starts[22])
+    assert r["entry_t"] == 15 * 60 + 21 and abs(r["entry_px"] - sd.o[a + 366]) < 1e-12      # 15:21 bar open
+    assert abs(r["ratio"] - 4.0 * 366 / 375) < 1e-9                       # 366 bars to 15:20 at 4x / full-day mean
+    a2 = int(sd.starts[23])
+    assert r["exit_date"] == 20260105 + 23 and r["exit_t"] == 555 and abs(r["exit_px"] - sd.o[a2]) < 1e-12
+    assert r["exit2_t"] == 556 and abs(r["exit2_px"] - sd.o[a2 + 1]) < 1e-12
+    assert _slat.session_features(_attn_sd(up=False)) == []               # volume shock on a down day: no signal
+    assert _slat.session_features(_attn_sd(vol_mult=3.0)) == []           # 3x/bar to 15:20 is < 3x a full day
+
+
+def t_attn_no_lookahead():
+    """Perturbing everything after the 15:21 entry bar of day t (except the next 09:15/09:16 bars) and all of the
+    later days changes neither the signal nor the entry; changing the next 09:15 open changes only the exit."""
+    sd = _attn_sd()
+    base = _slat.session_features(sd)[0]
+    a, a2 = int(sd.starts[22]), int(sd.starts[23])
+    cut = a + 367                                                          # first bar after the 15:21 entry bar
+    sd2 = _attn_sd()
+    rng = np.random.default_rng(9)
+    for arr in (sd2.o, sd2.h, sd2.l, sd2.c):
+        arr[cut:a2] *= 1 + rng.normal(0, 0.05, a2 - cut)
+        arr[a2 + 2:] *= 1 + rng.normal(0, 0.05, len(arr) - a2 - 2)
+    sd2.v[cut:] *= 50.0
+    r2 = [r for r in _slat.session_features(sd2) if r["date"] == base["date"]][0]
+    for key in ("ratio", "entry_t", "entry_px", "exit_px", "exit2_px"):
+        assert r2[key] == base[key], key
+    sd3 = _attn_sd()
+    sd3.o[a2] *= 1.02
+    r3 = [r for r in _slat.session_features(sd3) if r["date"] == base["date"]][0]
+    assert r3["ratio"] == base["ratio"] and r3["entry_px"] == base["entry_px"] and r3["exit_px"] != base["exit_px"]
+
+
+def _attn_row(d, sym, ratio, nd=None, px=500.0, xp=505.0):
+    return {"date": d, "symbol": sym, "ratio": ratio, "entry_t": 921, "entry_px": px, "c1520": px,
+            "prev_close": px * 0.99, "exit_date": nd or d + 1, "exit_t": 555, "exit_px": xp,
+            "exit2_t": 556, "exit2_px": xp}
+
+
+def t_attn_exclusions_ranking_costs():
+    row = _attn_row
+    dates = np.array([20260105, 20260106, 20260107, 20260108], dtype=np.int64)
+    assert _slat.eligible(row(20260105, "A", 4), dates, set())
+    assert not _slat.eligible(row(20260105, "A", 4), dates, {20260106})                   # special t+1
+    assert not _slat.eligible(row(20260105, "A", 4), dates, {20260105})                   # special t
+    assert not _slat.eligible(row(20260105, "A", 4, nd=20260107), dates, set())          # session in between
+    assert not _slat.eligible(row(20250404, "SIEMENS", 4, nd=20250407),
+                              np.array([20250404, 20250407]), set())                     # CA gap on t+1
+    assert not _slat.eligible({**row(20260105, "A", 4), "exit_date": None}, dates, set())
+    cnt = {20260105: [375, 375, 375], 20260106: [375, 0, 200], 20260107: [250, 280, 375]}
+    assert _slat.special_days(cnt, list(cnt)) == {20260106, 20260107}
+    rows = [row(20260105, f"S{i:02d}", 3.0 + i) for i in range(14)] + [row(20260108, "Z", 9.0, nd=20260109)]
+    pick = _slat.select(rows, _slat.SPECS[0], 20260101, 20260108)
+    assert len(pick) == 10 and {r["symbol"] for r in pick} == {f"S{i:02d}" for i in range(4, 14)}
+    assert all(r["symbol"] != "Z" for r in pick)                          # exit after the period end: excluded
+    tr = _slat.settle("X", row(20260105, "A", 4), 2e-4)
+    qty = 200
+    fill, ex = 500.0 * 1.0002, 505.0 * 0.9998
+    assert tr[3] == 1 and tr[9] == qty and abs(tr[5] - fill) < 1e-3 and abs(tr[8] - ex) < 1e-3 and tr[6] == 20260106
+    from costs import round_trip_cost as _rtc
+    assert abs(tr[10] - (ex - fill) * qty) < 0.01
+    assert abs(tr[11] - _rtc(fill * qty, ex * qty, "future")) < 1e-6 and abs(tr[12] - (tr[10] - tr[11])) < 0.01
+    fut = _rtc(1e5, 1e5, "future") / 1e5 * 1e4
+    cnc = _rtc(1e5, 1e5, "equity_cnc") / 1e5 * 1e4
+    assert 8 < fut < 13 and 20 < cnc < 30, (fut, cnc)                     # futures ~10 bps, CNC ~24 bps + slippage
+    tc = _slat.settle("X", row(20260105, "A", 4), 2e-4, kind="equity_cnc")
+    assert tc[11] > tr[11]
+
+
+def t_attn_protocol_final_never_for_failures():
+    seen = []
+    days = [20240101 + (d % 28) + (d // 28) * 100 for d in range(200)]
+    rows = [{**_attn_row(d, "A", 4.0, nd=d, px=100.0, xp=99.0)} for d in days]   # always loses
+    base = _slat.make_simulator(rows)
+
+    def sim_(specs, lo, hi):
+        seen.append((lo, hi))
+        return base(specs, lo, hi)
+    res, _tr = _slp.evaluate(_slat.SPECS, sorted(set(days)), sim_, n_symbols=1, ledger_path=None,
+                             cost_model=_slat.COST_MODEL)
+    assert all(r["verdict"] == "FAILED SCREEN" for r in res) and len(seen) == 1, (seen, [r["why"] for r in res])
+    assert _slat.SPECS[0].horizon == "positional" and _slat.DEFAULT_SLIPPAGE_BPS == 2.0
+    assert _slat.COST_MODEL.startswith(_sls.COST_MODEL)
+
+
+run("attention: signal rule, 15:20 volume / up-day, 15:21 entry, 09:15 and 09:16 exits", t_attn_rule)
+run("attention: later bars cannot change the signal or entry (look-ahead)", t_attn_no_lookahead)
+run("attention: exclusions, top-10 ratio per day, period end, futures / CNC costs", t_attn_exclusions_ranking_costs)
+run("attention: protocol never simulates FINAL for screen failures", t_attn_protocol_final_never_for_failures)
+
+
+section("AUTO-START ON A TRADING DAY")
+
+
+def t_auto_start_trading_day_and_catch_up():
+    """On a trading day the 09:16 job reaches the master agent (12 Nov 2026 it crashed on a wrong import
+    and the bot never started); a restart inside market hours runs the missed auto-start."""
+    import platform_scheduler as _ps2, ist_clock as _clk2, asyncio as _aio2
+    from unittest.mock import patch as _p2
+    from datetime import datetime as _dt2
+    import master_agent_v5 as _mav
+    from config import settings as _s2
+    prev = _s2.auto_start_strategies
+    _s2.auto_start_strategies = "intraday"
+    try:
+        with _p2.object(_clk2, "now_ist", return_value=_dt2(2026, 11, 12, 9, 16, tzinfo=_clk2._IST)), \
+             _p2.object(_mav.master_agent, "running", True), \
+             _p2.object(_ps2.kite_client, "profile", side_effect=AssertionError("already running: stop first")):
+            _aio2.run(_ps2.PlatformScheduler()._auto_start_bot())          # must not raise ImportError
+        calls = []
+        sch = _ps2.PlatformScheduler()
+        async def fake():
+            calls.append(1)
+        sch._auto_start_bot = fake
+        for hh, mm, want in ((9, 20, 1), (14, 59, 1), (9, 10, 0), (15, 5, 0)):
+            calls.clear()
+            with _p2.object(_clk2, "now_ist", return_value=_dt2(2026, 11, 12, hh, mm, tzinfo=_clk2._IST)):
+                _aio2.run(sch._auto_start_catch_up())
+            assert len(calls) == want, (hh, mm, calls)
+    finally:
+        _s2.auto_start_strategies = prev
+    assert "auto_start_catch_up" in Path(_ps2.__file__).read_text()
+
+
+run("auto-start: trading day reaches the master agent; missed 09:16 start runs after a restart",
+    t_auto_start_trading_day_and_catch_up)
 
 
 # ══════════════════════════════════════════════════════════════════════════
