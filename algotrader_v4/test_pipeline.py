@@ -11330,6 +11330,27 @@ run("AI-4: tick monitor keeps running stops while _action_lock is held",        
 run("AI-7: paper AI option entry fills at the touch, registered at its fill",     t_ai_option_entry_fills_at_touch)
 
 
+def t_ledger_books_paper_exit_at_touch():
+    """Paper exits fill at the bid/ask (EQ-6); the ledger, risk P&L and the broker must book the same price."""
+    import tick_engine as _te_mod
+    from performance import performance as _perf
+    agent = IntradayAgent()
+    oid = _paper_entry(agent, "LEDTCH", 1000.0)
+    qty = _paper_pos("LEDTCH")["quantity"]
+    _te_mod.tick_engine._latest_tick["LEDTCH"] = Tick(
+        symbol="LEDTCH", ltp=1010.0, bid=1009.5, ask=1010.5, volume=1, change=0.0, change_pct=0.0,
+        high=1010.0, low=1010.0, open=1010.0, timestamp=datetime.now())
+    before = _rm_x.daily_realised_pnl
+    _ba._close_tracked(oid, "LEDTCH", "BUY", qty, (1010.0 - 1000.0) * qty, "T", "intraday")
+    booked = _rm_x.daily_realised_pnl - before
+    assert abs(booked - (1009.5 - 1000.0) * qty) < 1e-6, (booked, qty)
+    rec = [t for t in _perf.trades if t.get("symbol") == "LEDTCH"] if hasattr(_perf, "trades") else []
+    if rec:
+        assert abs(float(rec[-1].get("pnl", rec[-1].get("gross", booked))) - booked) < 1e-6, rec[-1]
+
+run("ledger books a paper exit at the touch the broker filled", t_ledger_books_paper_exit_at_touch)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════

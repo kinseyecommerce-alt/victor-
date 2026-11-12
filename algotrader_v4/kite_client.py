@@ -650,6 +650,7 @@ class KiteClient:
             "product":          product,
             "price":            fill,
             "average_price":    0.0 if resting else fill,
+            "ref_ltp":          0.0 if resting else ltp,   # the LTP at the fill: callers price P&L at it
             "trigger_price":    trigger_price,
             "status":           "TRIGGER PENDING" if resting else "COMPLETE",
             "tag":              tag,
@@ -662,6 +663,15 @@ class KiteClient:
                     transaction_type, tradingsymbol, order_type,
                     quantity, fill or trigger_price, order_id)
         return order_id
+
+    def paper_fill_vs_ltp(self, order_id: str) -> float:
+        """PAPER: fill price minus the LTP at the moment of the fill (the half-spread a marketable order paid,
+        signed), 0.0 when unknown or not a paper order. Lets the ledger book what the paper broker booked."""
+        for r in reversed(self._paper_orders):
+            if r.get("order_id") == order_id:
+                fill, ref = float(r.get("average_price") or 0), float(r.get("ref_ltp") or 0)
+                return fill - ref if fill > 0 and ref > 0 else 0.0
+        return 0.0
 
     def fill_price(self, order_id: str) -> Optional[float]:
         """Average fill price of an order, or None if not (yet) filled / unknown."""

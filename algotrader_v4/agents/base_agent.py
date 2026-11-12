@@ -96,7 +96,7 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     exited = True
     if send_exit:
         try:
-            kite_client.place_order(
+            exit_oid = kite_client.place_order(
                 tradingsymbol=symbol,
                 exchange=entry.get("exchange", "NSE"),
                 transaction_type="SELL" if side == "BUY" else "BUY",
@@ -105,6 +105,12 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
                 tag=tag,
                 **_exit_order(entry, symbol, side, fallback_px),
             )
+            # PAPER: a marketable exit fills at the touch (bid for a SELL, ask for a BUY), while the caller priced
+            # pnl at the LTP — book the half-spread the paper broker charged so ledger, risk and broker agree
+            if exit_oid and settings.trading_mode == "PAPER":
+                d = kite_client.paper_fill_vs_ltp(exit_oid)
+                if d:
+                    pnl += d * quantity if side == "BUY" else -d * quantity
         except Exception as exc:
             exited = False
             logger.critical("[{}] exit order for {} qty={} FAILED: {}", strategy, symbol, quantity, exc)
