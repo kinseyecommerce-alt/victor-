@@ -2062,7 +2062,10 @@ def t_fno_tracked_on_option_premium():
         oid = next(o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == opt)
         try:
             pos = _tsl_eng._positions[oid]
-            assert pos.symbol == opt and pos.entry_price == 120.0, (pos.symbol, pos.entry_price)
+            # entry = the broker's actual fill (the leg is not streaming yet, so the paper LIMIT fills at
+            # ₹121.2), not the ₹120 quote: the ledger and the broker must book the same round trip (RC-4)
+            fill = _order(oid)["average_price"]
+            assert pos.symbol == opt and pos.entry_price == fill == 121.2, (pos.symbol, pos.entry_price, fill)
             sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
             assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING", sl
             entry_order = _order(oid)
@@ -10037,11 +10040,12 @@ def t_paper_book_round_trip():
 
 
 def t_paper_book_stale_ignored():
+    """A snapshot dated in the future (clock trouble) is not used."""
     with _pb_isolated() as f:
         _pb_open_trailed("PBSTALE")
         _pb.save()
         snap = _json_pb.loads(f.read_text())
-        snap["session"] = (_pb.now_ist().date() - timedelta(days=1)).isoformat()
+        snap["session"] = (_pb.now_ist().date() + timedelta(days=1)).isoformat()
         f.write_text(_json_pb.dumps(snap))
         _pb_wipe()
         out = _pb.restore()
@@ -10050,6 +10054,85 @@ def t_paper_book_stale_ignored():
         assert _rm_x.open_position_count == 0 and _rm_x.trades_today == 0
         kept = f.with_name(f"{f.stem}.{snap['session']}.json")          # the old snapshot is kept, not overwritten
         assert kept.exists() and _json_pb.loads(kept.read_text())["session"] == snap["session"]
+
+
+def t_paper_book_earlier_session_keeps_cnc_settles_mis():
+    """RC-1 / RC-3: the process stops on Thursday (a CNC swing holding plus an MIS position that never reached
+    the 15:15 square-off) and starts again on Friday. The swing holding is restored (broker, tracking, stop,
+    guard, open count) and its stop still fires; the MIS position is closed at its last price and lands in the
+    ledger exactly once — neither is silently dropped."""
+    from unittest.mock import patch
+    import performance as _perf_mod
+    async def _noop(*a, **k): return None
+    clk_now = [_pb_at(_D_pb, 14, 30)]
+    with _pb_isolated() as f, patch.object(_pb, "now_ist", side_effect=lambda: clk_now[0]), \
+            patch.object(_perf_mod, "now_ist", side_effect=lambda: clk_now[0]), \
+            patch.object(_ba, "send_telegram", _noop):
+        _pb._book_day = _pb.session_day()
+        mis = _pb_open_trailed("PBOLDMIS")                               # entry ₹1000, trailed
+        mis_qty = _paper_pos("PBOLDMIS")["quantity"]
+        _paper_pos("PBOLDMIS")["last_price"] = 1012.0                    # last mark before the process died
+        cnc = _paper_entry(_ALL_pb["swing"], "PBOLDCNC", 500.0)
+        assert _ba._tsl_sl_orders[cnc]["product"] == "CNC"
+        cnc_qty = _paper_pos("PBOLDCNC")["quantity"]
+        cnc_sl = _ba._tsl_sl_orders[cnc]["sl_order_id"]
+        assert _pb.save(force=True)
+        old = f.read_text()
+        n0 = len(_perf_pb.trades)
+        _pb_wipe()
+        clk_now[0] = _pb_at(_D_pb + timedelta(days=1), 9, 20)           # Friday morning, after 09:15
+        out = _pb.restore()
+        assert out["restored"] and out["stale"] and out.get("day_reset"), out
+        assert out["positions"] == ["PBOLDCNC"] and out["settled"] == ["PBOLDMIS"], out
+        # the CNC holding is back, fully managed
+        assert cnc in _ba._tsl_sl_orders and cnc in _tsl_eng._positions and cnc in _pb._restored
+        assert _paper_pos("PBOLDCNC")["quantity"] == cnc_qty
+        assert _order(cnc_sl)["status"] == "TRIGGER PENDING"
+        assert _rm_x.open_position_count == 1 and not _og_pb.can_place("PBOLDCNC", "swing", "BUY")[0]
+        # the MIS position was closed at its last price and recorded once, the day counters are Friday's
+        rows = [t for t in _perf_pb.trades if t.get("oid") == mis]
+        assert len(rows) == 1 and rows[0]["exit"] == 1012.0 and rows[0]["gross"] == round(12.0 * mis_qty, 2), rows
+        assert "2026-11-12" in rows[0]["note"]
+        assert mis not in _ba._tsl_sl_orders and _paper_pos("PBOLDMIS")["quantity"] == 0
+        assert _rm_x.trades_today == 0 and _rm_x.daily_realised_pnl == 0
+        ids = {o["order_id"] for o in _te_kite_client._paper_orders}
+        assert mis not in ids and cnc not in ids and cnc_sl in ids, "Thursday's filled orders are history"
+        # a second restart from the same Thursday snapshot must not record the MIS trade again
+        f.write_text(old)
+        _pb_wipe()
+        out = _pb.restore()
+        assert out["reconciled"] == ["PBOLDMIS"] and not out["settled"], out
+        assert len([t for t in _perf_pb.trades if t.get("oid") == mis]) == 1
+        assert _rm_x.open_position_count == 1
+        # Friday: the swing stop still fires and reaches the ledger
+        stop = _tsl_eng._positions[cnc].current_sl
+        asyncio.run(_pb.on_snap(_make_snap(symbol="PBOLDCNC", ltp=round(stop - 0.5, 2))))
+        assert cnc not in _ba._tsl_sl_orders and _paper_pos("PBOLDCNC")["quantity"] == 0
+        assert len([t for t in _perf_pb.trades if t.get("oid") == cnc]) == 1
+        assert len(_perf_pb.trades) == n0 + 2
+
+
+def t_daily_reset_keeps_overnight_swing_guarded():
+    """RC-2: master's 09:15 reset (and the paper book's own rollover) clears the order guard and the open
+    count; a CNC swing position held overnight must stay guarded and counted, so the next swing signal on
+    the same symbol is a duplicate, not a second position."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop):
+        sw = _ALL_pb["swing"]
+        oid = _paper_entry(sw, "PBDUP", 500.0)
+        qty = _paper_pos("PBDUP")["quantity"]
+        for reset in (lambda: asyncio.run(_mav_pb.master_agent._daily_reset()),
+                      lambda: (setattr(_pb, "_book_day", _pb.session_day() - timedelta(days=1)),
+                               _pb.roll_day_if_due())):
+            reset()
+            assert _rm_x.open_position_count == 1, _rm_x.open_position_count
+            assert not _og_pb.can_place("PBDUP", "swing", "BUY")[0], "held overnight: still guarded"
+            _paper_entry(sw, "PBDUP", 505.0)                         # the swing agent signals it again
+            assert [o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == "PBDUP"] == [oid]
+            assert _paper_pos("PBDUP")["quantity"] == qty, "no second position on a held symbol"
+        _ba._close_tracked(oid, "PBDUP", "BUY", qty, 0.0, "T", "swing")
 
 
 def t_paper_book_restored_exits_on_stop_once():
@@ -10384,7 +10467,9 @@ run("auto square-off: an already-flat tracked position gets no exit order",     
 run("paper book: restored F&O leg squared off at SQUAREOFF_TIME without master", t_paper_book_restored_fno_squared_off_without_master)
 run("paper book: watchdog hands a restored position to its running agent",     t_paper_book_watchdog_hands_over_to_agent)
 run("auto square-off: tracked MIS positions reach the ledger once, no reverse", t_scheduled_squareoff_records_tracked_once)
-run("paper book: a snapshot from an earlier day is ignored",                   t_paper_book_stale_ignored)
+run("paper book: a snapshot dated in the future is ignored",                   t_paper_book_stale_ignored)
+run("paper book: earlier-session snapshot keeps CNC holdings, settles missed MIS square-off", t_paper_book_earlier_session_keeps_cnc_settles_mis)
+run("daily reset: an overnight swing holding stays guarded and counted",        t_daily_reset_keeps_overnight_swing_guarded)
 run("paper book: restored position exits on its stop, ledger records it once", t_paper_book_restored_exits_on_stop_once)
 run("paper book: restored MIS position is squared off at SQUAREOFF_TIME",      t_paper_book_restored_mis_squareoff)
 run("paper book: LIVE mode (and the setting off) never writes or restores",    t_paper_book_never_in_live)

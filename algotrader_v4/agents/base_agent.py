@@ -194,6 +194,29 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
     return closed
 
 
+def reapply_overnight() -> int:
+    """After the daily counter reset (master._daily_reset, paper_book.roll_day_if_due): positions held from
+    earlier days (CNC delivery / swing, any agent) still exist — re-mark them in the order guard (a second
+    entry on the same symbol stays blocked) and in the open-position count. The AI trader's own entries are
+    re-applied by ai_trader.reapply_overnight. Returns the number of strategy-agent positions re-applied."""
+    n = 0
+    for oid, e in list(_tsl_sl_orders.items()):
+        if e.get("agent") == "ai" or not (e.get("product", "MIS") == "CNC" or e.get("kind") == "swing"):
+            continue
+        pos = trailing_sl_engine._positions.get(oid)
+        strategy = pos.strategy if pos else e.get("agent", "")
+        order_guard.restore_active(e.get("guard_symbol", e.get("symbol")), strategy,
+                                   e.get("side", pos.side if pos else "BUY"), oid)
+        risk_manager.position_opened()
+        n += 1
+    try:
+        from ai_trader import ai_trader
+        ai_trader.reapply_overnight()
+    except Exception as exc:
+        logger.warning("[reset] AI overnight positions not re-applied: {}", exc)
+    return n
+
+
 def _book_changed() -> None:
     """A position closed: write the PAPER book now, so a restart a moment later cannot restore a trade
     the ledger already holds (no-op in LIVE, or before the startup restore ran)."""
