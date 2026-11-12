@@ -2261,11 +2261,12 @@ _ai_settings.prune_enabled = False          # see the top of this file; section 
 
 _MKT_NOW = datetime(2026, 1, 15, 11, 0, 0)
 
-def _ai_tick(sym, ltp, age_s=0):
+def _ai_tick(sym, ltp, age_s=0, half_spread=0.0):
+    """half_spread 0: paper market/marketable orders fill at the LTP (they fill at the touch, see EQ-6)."""
     import tick_engine as _te_mod
     _te_mod.tick_engine.subscribe([{"symbol": sym, "exchange": "NSE"}])
     _te_mod.tick_engine._latest_tick[sym] = Tick(
-        symbol=sym, ltp=ltp, bid=ltp - 0.05, ask=ltp + 0.05, volume=1000, change=0.0,
+        symbol=sym, ltp=ltp, bid=ltp - half_spread, ask=ltp + half_spread, volume=1000, change=0.0,
         change_pct=0.0, high=ltp, low=ltp, open=ltp, timestamp=datetime.now() - timedelta(seconds=age_s))
     _te_mod.tick_engine._latest_ind[sym] = _make_snap(symbol=sym, ltp=ltp).indicators
 
@@ -5461,12 +5462,22 @@ def t_exec_marketable_limit_and_paper_fill():
         assert _ex.entry_order("BUY", tick, 1000.0) == {"order_type": "MARKET"}
     finally:
         _ai_settings.use_limit_entries = prev
-    # paper: a marketable limit fills at the touch, not at its limit; a passive one at its limit
-    _ai_tick("EXQ", 1000.0)
+    # paper: a marketable limit fills at the touch (the ask for a BUY, the bid for a SELL), not at the LTP or
+    # its limit; a passive one at its limit. MARKET orders pay the spread too (EQ-6: it filled at the LTP).
+    _ai_tick("EXQ", 1000.0, half_spread=0.05)
     oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "LIMIT", "MIS", price=1001.5)
-    assert _te_kite_client.fill_price(oid) == 1000.0
+    assert _te_kite_client.fill_price(oid) == 1000.05, _te_kite_client.fill_price(oid)
+    oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "LIMIT", "MIS", price=998.5)
+    assert _te_kite_client.fill_price(oid) == 999.95, _te_kite_client.fill_price(oid)
     oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "LIMIT", "MIS", price=1003.0)
     assert _te_kite_client.fill_price(oid) == 1003.0
+    oid = _te_kite_client.place_order("EXQ", "NSE", "SELL", 1, "MARKET", "MIS")
+    assert _te_kite_client.fill_price(oid) == 999.95
+    oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "MARKET", "MIS")
+    assert _te_kite_client.fill_price(oid) == 1000.05
+    _ai_tick("EXQ", 1000.0, half_spread=30.0)          # a nonsense quote (6 % wide) falls back to the LTP
+    oid = _te_kite_client.place_order("EXQ", "NSE", "BUY", 1, "MARKET", "MIS")
+    assert _te_kite_client.fill_price(oid) == 1000.0
     assert _ex.slippage_bps(1000.0, 1000.5, "BUY") == 5.0 and _ex.slippage_bps(1000.0, 999.0, "SELL") == 10.0
     assert _ex.slippage_bps(1000.0, 999.0, "BUY") == -10.0
 
@@ -7081,6 +7092,152 @@ def t_min_position_value_skips_bucket_remnants():
         _ai_settings.total_capital, _ai_settings.intraday_capital_pct, _ai_settings.max_intraday_positions = prev
 
 run("live path: validated signal reaches the paper broker at full size",  t_live_entry_path_reaches_the_broker)
+
+
+# ── equity agents e2e findings (12 Nov 2026) ──────────────────────────────
+class _EqLive:
+    """PAPER, ₹5L, 2 intraday slots, allocator 1×, an empty trailing book — restored afterwards."""
+    def __enter__(self):
+        import performance as _pf
+        from trailing_sl_engine import trailing_sl_engine as _tse
+        from risk_manager import risk_manager as _rm
+        self.prev = (_ai_settings.trading_mode, _ai_settings.total_capital, _ai_settings.intraday_capital_pct,
+                     _ai_settings.max_intraday_positions, list(_pf.performance.trades), dict(_pf.performance.pruned),
+                     dict(_tse._positions), _rm.open_position_count, _rm.is_trading_halted)
+        _ai_settings.trading_mode = "PAPER"; _ai_settings.total_capital = 500000
+        _ai_settings.intraday_capital_pct = 40; _ai_settings.max_intraday_positions = 2
+        _pf.performance.pruned = {}
+        _tse._positions.clear(); _rm.open_position_count = 0; _rm.is_trading_halted = False
+        import allocator as _al
+        self.p = _patch.object(_al, "size_factor", return_value=1.0); self.p.start()
+        return self
+    def __exit__(self, *a):
+        import performance as _pf
+        from trailing_sl_engine import trailing_sl_engine as _tse
+        from risk_manager import risk_manager as _rm
+        self.p.stop()
+        (_ai_settings.trading_mode, _ai_settings.total_capital, _ai_settings.intraday_capital_pct,
+         _ai_settings.max_intraday_positions) = self.prev[:4]
+        _pf.performance.trades, _pf.performance.pruned = self.prev[4], self.prev[5]
+        _tse._positions.clear(); _tse._positions.update(self.prev[6])
+        _rm.open_position_count, _rm.is_trading_halted = self.prev[7], self.prev[8]
+
+def _eq_paper_qty(sym):
+    from kite_client import kite_client as _kc
+    return sum(int(p.get("quantity", 0)) for p in _kc._paper_positions if p["tradingsymbol"] == sym)
+
+def t_eq1_live_exits_at_the_signal_target():
+    """EQ-1: the live path held through the signal's 2.5R / 1.5R target (the engine only knew its generic +2 % /
+    +3.5 % steps) and gave the move back to breakeven; the replay closes at the target (exit TARGET)."""
+    from agents.intraday_v2 import IntradayV2Agent
+    from agents import base_agent as _bam
+    from tick_engine import tick_engine as _te
+    from trailing_sl_engine import trailing_sl_engine as _tse
+    import performance as _pf
+    with _EqLive():
+        snap = _live_snap("EQ1TGT", 1000.0)
+        _te._latest_tick["EQ1TGT"] = snap.tick
+        a = IntradayV2Agent()
+        asyncio.run(a._try_enter(snap, "BUY", {"symbol": "EQ1TGT", "exchange": "NSE", "side": "BUY", "price": 1000.0,
+                                               "stop_loss": 996.0, "target": 1010.0, "product": "MIS",
+                                               "trigger": "INTRA2-BUY [ORB]"}))
+        oid = next(o for o, e in _bam._tsl_sl_orders.items() if e.get("symbol") == "EQ1TGT")
+        assert _tse._positions[oid].target == 1010.0, "the signal's target reaches the trailing engine"
+        assert _eq_paper_qty("EQ1TGT") > 0
+        for px in (1004.0, 1009.9):                       # breakeven moves, no exit short of the target
+            _ai_tick("EQ1TGT", px); asyncio.run(_tse.on_tick("EQ1TGT", px))
+        assert oid in _tse._positions, "closed before its target"
+        n0 = len(_pf.performance.trades)
+        _ai_tick("EQ1TGT", 1010.2); asyncio.run(_tse.on_tick("EQ1TGT", 1010.2))
+        assert oid not in _tse._positions and oid not in _bam._tsl_sl_orders, "target touched: position closed"
+        assert _eq_paper_qty("EQ1TGT") == 0, "flat at the broker"
+        rec = _pf.performance.trades[-1]
+        assert len(_pf.performance.trades) == n0 + 1 and rec["note"].startswith("TARGET-intraday") and rec["gross"] > 0, rec
+        # the generic engine without a target still behaves as before (AI trader / F&O registrations)
+        p2 = _tse.register("EQ1NOT", "intraday", "BUY", 1000.0, 1, "EQ1NOT-1")
+        asyncio.run(_tse.on_tick("EQ1NOT", 1010.2))
+        assert "EQ1NOT-1" in _tse._positions and not p2.target_hit
+        _tse.deregister("EQ1NOT-1")
+
+def t_eq2_loss_cooldown_spares_replay_validated_agents():
+    """EQ-2: a losing intraday trade froze every other symbol's ORB for COOLDOWN_AFTER_LOSS_SEC (and the refused
+    symbol lost its one ORB of the day). The replay has no cooldown; validated agents are exempt."""
+    from order_guard import OrderGuard
+    prev = _ai_settings.cooldown_after_loss_sec; _ai_settings.cooldown_after_loss_sec = 300
+    try:
+        g = OrderGuard()
+        for strat in ("intraday", "scalping", "swing"):
+            g.register_order("EQ2TCS", strat, "BUY", "o1")
+            g.release_order("EQ2TCS", strat, "BUY", -2305.0)
+            ok_, why = g.can_place("EQ2INFY", strat, "BUY")
+            assert ok_, (strat, why)
+        g.register_order("EQ2TCS", "fno", "BUY", "o2")       # not replay-validated: the cooldown still applies
+        g.release_order("EQ2TCS", "fno", "BUY", -100.0)
+        assert not g.can_place("EQ2INFY", "fno", "BUY")[0]
+    finally:
+        _ai_settings.cooldown_after_loss_sec = prev
+
+def t_eq3_orb_volume_judged_over_the_breakout_bar():
+    """EQ-3: the ORB volume filter ran only on the crossing tick, when the forming minute held a few seconds of
+    volume; later ticks of the same breakout minute were never checked again (no tick-to-tick crossing), so live
+    missed breakouts the replay took on the completed bar. Crossings are now judged against the previous bar."""
+    from agents.intraday_v2 import IntradayV2Agent
+    a = IntradayV2Agent()
+    t0 = datetime(2026, 1, 15, 9, 39, 58)
+    with _with_v2_clock(t0, "UP"):
+        assert a.evaluate_tick(_orb_snap("EQ3LT", t0, 1004.0, 1000.0, 1006.0))[0] == "HOLD"    # previous bar inside
+    t1 = datetime(2026, 1, 15, 9, 40, 2)
+    with _with_v2_clock(t1, "UP"):                     # crossing tick: 2 s of volume in the forming bar
+        assert a.evaluate_tick(_orb_snap("EQ3LT", t1, 1008.0, 1000.0, 1006.0, vol_ratio=0.3))[0] == "HOLD"
+    t2 = datetime(2026, 1, 15, 9, 40, 40)
+    with _with_v2_clock(t2, "UP"):                     # same minute, volume has built up: the breakout trades
+        action, sig = a.evaluate_tick(_orb_snap("EQ3LT", t2, 1008.3, 1000.0, 1006.0, vol_ratio=1.4))
+    assert action == "BUY" and "ORB" in sig["trigger"], action
+    # the next minute (previous bar already closed above the range) is not a fresh breakout
+    b = IntradayV2Agent()
+    with _with_v2_clock(t0, "UP"):
+        b.evaluate_tick(_orb_snap("EQ3B", t0, 1004.0, 1000.0, 1006.0))
+    with _with_v2_clock(t1, "UP"):
+        b.evaluate_tick(_orb_snap("EQ3B", t1, 1008.0, 1000.0, 1006.0, vol_ratio=0.3))
+    t3 = datetime(2026, 1, 15, 9, 41, 5)
+    with _with_v2_clock(t3, "UP"):
+        assert b.evaluate_tick(_orb_snap("EQ3B", t3, 1008.5, 1000.0, 1006.0, vol_ratio=1.4))[0] == "HOLD"
+
+def t_eq4_correlation_and_event_factors_applied_once():
+    """EQ-4: _finish_entry multiplied the size by the correlation and event factors and portfolio_risk.pre_entry
+    applied them again (0.75 → 0.56 of the size). Each applies once."""
+    from agents.intraday_v2 import IntradayV2Agent
+    from tick_engine import tick_engine as _te
+    from kite_client import kite_client as _kc
+    from risk_manager import risk_manager as _rm
+    import correlation_guard as _cg, event_calendar as _ec, market_context as _mc
+    evt = {"size_factor": 0.5, "risk_level": "HIGH", "event_type": "RESULTS", "description": "results",
+           "hours_until": 20}
+    with _EqLive():
+        snap = _live_snap("EQ4ICICI", 1300.0)
+        _te._latest_tick["EQ4ICICI"] = snap.tick
+        base = _rm.calculate_quantity(1300.0, agent="intraday")
+        a = IntradayV2Agent()
+        before = len(_kc._paper_orders)
+        with _patch.object(_cg, "check", return_value={"allowed": True, "size_factor": 0.75, "reason": "r 0.6"}), \
+             _patch.object(_cg, "portfolio_heat", return_value=0.0), \
+             _patch.object(_ec, "get_event_risk", return_value=evt), \
+             _patch.object(_mc, "open_symbols", return_value=["EQ4HDFC"]):
+            asyncio.run(a._finish_entry(snap, "BUY", {"symbol": "EQ4ICICI", "exchange": "NSE", "side": "BUY",
+                                                      "price": 1300.0, "stop_loss": 1297.0, "target": 1307.5,
+                                                      "product": "MIS", "trigger": "INTRA2-BUY [ORB]"}, evt))
+        entries = [o for o in _kc._paper_orders[before:] if o["tradingsymbol"] == "EQ4ICICI"
+                   and o["order_type"] not in ("SL", "SL-M")]
+        assert entries, (a.state.last_skip, a.state.skip_counts)
+        assert entries[0]["quantity"] == int(base * 0.5 * 0.75), (entries[0]["quantity"], base)
+        from agents import base_agent as _bam
+        oid = next(o for o, e in _bam._tsl_sl_orders.items() if e.get("symbol") == "EQ4ICICI")
+        _bam._close_tracked(oid, "EQ4ICICI", "BUY", entries[0]["quantity"], 0.0, "t", "intraday")
+
+run("EQ-1: live intraday/scalp positions exit at the signal's target (replay parity)", t_eq1_live_exits_at_the_signal_target)
+run("EQ-2: one losing trade does not freeze a validated agent's other symbols",       t_eq2_loss_cooldown_spares_replay_validated_agents)
+run("EQ-3: ORB volume judged over the breakout bar, not only its crossing tick",      t_eq3_orb_volume_judged_over_the_breakout_bar)
+run("EQ-4: correlation / event size factors applied once, not squared",                 t_eq4_correlation_and_event_factors_applied_once)
 run("exits: validated agents hold to stop/target; square-off at 15:15",    t_validated_agents_exit_policy_and_candle_depth)
 run("sizing: bucket remnants under 40% of a position are skipped",         t_min_position_value_skips_bucket_remnants)
 

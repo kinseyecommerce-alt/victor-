@@ -189,6 +189,11 @@ class PositionSL:
     breakeven_hit:  bool  = False
     target1_hit:    bool  = False
     target2_hit:    bool  = False
+    # The signal's own target (₹, 0 = none). Validated agents are replay-tested exiting there (replay_backtest
+    # closes at it as TARGET); without it the live position only knew the generic +2 % / +3.5 % steps and rode
+    # through its 2.5R / 1.5R target back to breakeven.
+    target:         float = 0.0
+    target_hit:     bool  = False
 
     # Stats
     sl_moves:       int   = 0     # how many times TSL has tightened
@@ -241,6 +246,7 @@ class PositionSL:
             "breakeven_hit":  self.breakeven_hit,
             "target1_hit":    self.target1_hit,
             "target2_hit":    self.target2_hit,
+            "target":         round(self.target, 2),
             "sl_moves":       self.sl_moves,
             "max_profit_pct": round(self.current_pnl_pct, 2),
             "locked_profit_pct": round(self.locked_profit_pct, 2),
@@ -285,6 +291,7 @@ class TrailingSLEngine:
         quantity:    int,
         order_id:    str,
         atr:         float = 0.0,
+        target:      float = 0.0,
     ) -> PositionSL:
         """
         Register a new open position for trailing SL monitoring.
@@ -303,6 +310,7 @@ class TrailingSLEngine:
             entry_price=entry_price, quantity=quantity,
             order_id=order_id, current_sl=init_sl,
             best_price=entry_price, atr=atr,
+            target=float(target or 0.0),
         )
 
         with self._lock:
@@ -382,6 +390,16 @@ class TrailingSLEngine:
         ai_managed = pos.external_trail
         if ai_managed and not _floor_under_ai():
             return
+
+        # ── 2b. The signal's target (level 0): close there, as the replay does ──
+        if pos.target > 0 and not pos.target_hit and not ai_managed:
+            if (pos.side == "BUY" and ltp >= pos.target) or (pos.side == "SELL" and ltp <= pos.target):
+                pos.target_hit = True
+                pos.status = SLStatus.CANCELLED
+                logger.info("🎯 TARGET hit: {} {} @ ₹{:.2f} (target ₹{:.2f})", pos.symbol, pos.side, ltp, pos.target)
+                if self.on_target_hit:
+                    await self.on_target_hit(pos, ltp, 0)
+                return
 
         # ── 3. Target 2 hit ────────────────────────────────────────────
         if not ai_managed and not pos.target2_hit:
