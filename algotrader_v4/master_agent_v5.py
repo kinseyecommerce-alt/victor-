@@ -356,7 +356,13 @@ class MasterAgent:
                 closed = close_tracked_for_squareoff("auto square-off")
             except Exception as exc:
                 logger.error("[master] tracked square-off failed: {} — flattening the book", exc)
-        ids = closed + kite_client.squareoff_all_positions(exclude=frozenset(closed))
+        from agents.base_agent import overnight_hold_qty
+        try:
+            hold = overnight_hold_qty()          # swing holdings (CNC, NRML swing puts) stay open overnight
+        except Exception as exc:
+            logger.error("[master] overnight holdings unavailable: {}", exc)
+            hold = {}
+        ids = closed + kite_client.squareoff_all_positions(exclude=frozenset(closed), hold=hold)
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
             from n8n_bridge import notify as _n8n

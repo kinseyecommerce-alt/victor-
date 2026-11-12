@@ -1126,6 +1126,17 @@ class TickEngine:
     def latest(self, symbol: str) -> tuple[Optional[Tick], Optional[LiveIndicators]]:
         return self._latest_tick.get(symbol), self._latest_ind.get(symbol)
 
+    def seed_quote(self, symbol: str, ltp: float, bid: float = 0.0, ask: float = 0.0) -> None:
+        """Remember a quote just fetched for a symbol that has no tick yet (a freshly chosen option contract),
+        without building candles. The paper broker prices a marketable order at the last tick; with none it
+        filled at the order's limit (ask × 1.01) and booked that as cost and slippage. A real tick replaces it."""
+        if ltp <= 0 or symbol in self._latest_tick:
+            return
+        from ist_clock import now_ist
+        self._latest_tick[symbol] = Tick(symbol=symbol, ltp=float(ltp), bid=float(bid or 0), ask=float(ask or 0),
+                                         volume=0, change=0.0, change_pct=0.0, high=float(ltp), low=float(ltp),
+                                         open=float(ltp), timestamp=now_ist().replace(tzinfo=None))
+
     def all_latest(self) -> dict[str, dict]:
         result = {}
         for sym in self._latest_tick:

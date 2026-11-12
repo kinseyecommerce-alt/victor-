@@ -194,6 +194,24 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
     return closed
 
 
+def overnight_hold_qty() -> dict[tuple[str, str], int]:
+    """Signed quantity of every tracked position held overnight (CNC delivery, or kind 'swing' such as the AI's
+    NRML swing put), keyed by (symbol, product). The broker-level square-off must leave these alone:
+    squareoff_all_positions skipped only CNC rows, so it sold an NRML swing put (and, in the paper book, a CNC
+    swing whose row kept the product of an earlier MIS round trip) while the agent kept tracking it — its later
+    exit then opened a naked short."""
+    held: dict[tuple[str, str], int] = {}
+    for oid, e in _tsl_sl_orders.items():
+        if e.get("product", "MIS") != "CNC" and e.get("kind") != "swing":
+            continue
+        pos = trailing_sl_engine._positions.get(oid)
+        if pos is None:
+            continue
+        key = (pos.symbol, e.get("product", "MIS"))
+        held[key] = held.get(key, 0) + int(pos.quantity) * (1 if pos.side == "BUY" else -1)
+    return held
+
+
 def _book_changed() -> None:
     """A position closed: write the PAPER book now, so a restart a moment later cannot restore a trade
     the ledger already holds (no-op in LIVE, or before the startup restore ran)."""
