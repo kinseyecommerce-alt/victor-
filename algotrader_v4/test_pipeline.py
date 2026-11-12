@@ -1203,6 +1203,53 @@ def t_v2_scalp_retest_and_loss_stop():
         b.evaluate_tick(snap_at(20, 1012.0)[1])
         assert b.evaluate_tick(snap_at(30, 1007.5, low=1006.5, open_=1006.8, close=1007.5)[1])[0] == "HOLD"
 
+def t_v2_scalp_restart_replay_and_rearm():
+    """A scalper started mid-session rebuilds the break from today's bars (12 Nov 2026 restarts left it blind),
+    re-arms after a retest trade only in all-day mode, and reports what it is watching."""
+    day = datetime(2026, 1, 15, 9, 15)
+    def snap_at(mins, ltp, low=None, close=None, open_=None, sym="RS"):
+        now = day + timedelta(minutes=mins)
+        s = _orb_snap(sym, now, ltp, 1000.0, 1006.0, vwap=1003.0, ema9=ltp + 1, ema21=ltp - 1)
+        c = s.candles_1min[-1]
+        s.candles_1min[-1] = Candle(open_ or c.open, c.high, low if low is not None else c.low, close or c.close, c.volume, c.ts)
+        for i in range(16, min(26, mins - 3)):           # 09:31-09:40: price ran well clear of the range
+            s.candles_1min[i] = Candle(1012.0, 1012.5, 1011.5, 1012.0, 1000, s.candles_1min[i].ts)
+        return s
+    a = ScalpV2Agent()                                   # fresh agent at 09:45: the 09:30-09:44 break is in the bars only
+    with _with_v2_clock(day + timedelta(minutes=30), "UP"):
+        action, sig = a.evaluate_tick(snap_at(30, 1007.5, low=1006.5, open_=1006.8, close=1007.5))
+    assert action == "BUY" and "#" not in sig["trigger"], (action, sig)
+    st = a.get_status()["watching"]
+    assert st["symbols"] == 1 and st["retest_trades"] == 1 and st["finished_for_day"] == 1 and st["max_per_symbol"] == 1, st
+    # validated mode: one retest per symbol per day
+    with _with_v2_clock(day + timedelta(minutes=40), "UP"):
+        a.evaluate_tick(snap_at(40, 1012.0))
+    with _with_v2_clock(day + timedelta(minutes=45), "UP"):
+        assert a.evaluate_tick(snap_at(45, 1007.5, low=1006.5, open_=1006.8, close=1007.5))[0] == "HOLD", "single"
+    # all-day mode re-arms: a fresh break, then a second retest trade
+    b = ScalpV2Agent(); b.RT_MAX_PER_DAY = 3
+    with _with_v2_clock(day + timedelta(minutes=30), "UP"):
+        assert b.evaluate_tick(snap_at(30, 1007.5, low=1006.5, open_=1006.8, close=1007.5, sym="RA"))[0] == "BUY", "b1"
+    with _with_v2_clock(day + timedelta(minutes=40), "UP"):
+        assert b.evaluate_tick(snap_at(40, 1012.0, sym="RA"))[0] == "HOLD", "b2"          # new break, no entry yet
+    with _with_v2_clock(day + timedelta(minutes=45), "UP"):
+        action, sig = b.evaluate_tick(snap_at(45, 1007.5, low=1006.5, open_=1006.8, close=1007.5, sym="RA"))
+    assert action == "BUY" and "#2" in sig["trigger"], (action, sig)
+    # a whipsaw back below the range midpoint during the replay ends the day for that symbol
+    c = ScalpV2Agent()
+    s = snap_at(30, 1007.5, low=1006.5, open_=1006.8, close=1007.5, sym="RW")
+    s.candles_1min[-5] = Candle(1002.0, 1002.5, 1001.0, 1001.5, 1000, s.candles_1min[-5].ts)
+    with _with_v2_clock(day + timedelta(minutes=30), "UP"):
+        assert c.evaluate_tick(s)[0] == "HOLD", "whipsaw"
+    from config import settings as _st3
+    prev = _st3.intraday_all_day; _st3.intraday_all_day = True
+    try:
+        assert ScalpV2Agent().RT_MAX_PER_DAY == 3, "allday"
+    finally:
+        _st3.intraday_all_day = prev
+    assert ScalpV2Agent().RT_MAX_PER_DAY == 1
+
+
 def t_v2_close_hook_reaches_agent():
     from agents import base_agent as _ba
     calls = []
@@ -1221,6 +1268,7 @@ run("v2: opening-range breakout → BUY at 2.5R, once per day",  t_v2_orb_breako
 run("v2: 20-day trend filter blocks counter-trend breakouts",  t_v2_orb_trend_filter_blocks_counter_trend)
 run("v2: breakout window and range limits enforced",           t_v2_orb_window_and_range_limits)
 run("v2: scalper retest entry at 1.5R, stops after a loss",    t_v2_scalp_retest_and_loss_stop)
+run("v2: scalper rebuilds breaks after a restart, re-arms in all-day mode", t_v2_scalp_restart_replay_and_rearm)
 def t_v2_daily_bias_never_blocks_tick_loop():
     """Uncached symbol → no I/O on the tick loop: a background prefetch starts and the filter is off."""
     import daily_data as _dd
@@ -4610,6 +4658,24 @@ def t_perf_pruned_strategy_cannot_trade():
         p.set_enabled("intraday", True)
     _with_ai_env(lambda: _with_perf(body))
 
+def t_perf_prune_off_restores_agents():
+    """PRUNE_ENABLED=false lets a pruned agent trade again and re-enables it at startup (12 Nov 2026: F&O was
+    auto-disabled mid-session of a paper test of every agent)."""
+    def body(p, path):
+        import bot_state as _bs
+        from config import settings as _sp
+        p.set_enabled("fno", False, "last 30 trades lost")
+        assert not p.is_allowed("fno")[0] and not _bs.is_agent_enabled("fno")
+        assert p.restore_pruned() == []                       # pruning on: nothing restored
+        prev = _sp.prune_enabled; _sp.prune_enabled = False
+        try:
+            assert p.is_allowed("fno")[0]
+            assert p.restore_pruned() == ["fno"] and _bs.is_agent_enabled("fno") and "fno" not in p.pruned
+        finally:
+            _sp.prune_enabled = prev
+    _with_perf(body)
+
+
 def t_perf_scoreboard_vs_index():
     def body(p, path):
         p.days = {
@@ -4817,6 +4883,7 @@ run("Costs: realistic Zerodha round-trip estimates",      t_costs_realistic)
 run("Ledger: net-of-cost stats, persisted",               t_perf_ledger_and_stats)
 run("Pruning: losers disabled, winners kept, re-enable",  t_perf_pruning_disables_losers_and_reenable)
 run("Pruning: pruned strategies cannot trade",            t_perf_pruned_strategy_cannot_trade)
+run("Pruning: PRUNE_ENABLED=false re-enables pruned agents", t_perf_prune_off_restores_agents)
 run("Scoreboard: account vs NIFTY per period + verdict",  t_perf_scoreboard_vs_index)
 run("Scoreboard: daily snapshot stores net + index close", t_perf_snapshot_today)
 run("Trend filter: RISK_ON / RISK_OFF / DISABLED",        t_trend_filter_states)

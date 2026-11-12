@@ -167,10 +167,21 @@ class Performance:
             pass
 
     def is_allowed(self, strategy: str) -> tuple[bool, str]:
+        if not settings.prune_enabled:            # pruning switched off (e.g. a paper test of every agent)
+            return True, ""
         p = self._current_prune(strategy)         # a prune of an earlier version of the agent does not apply
         if p:
             return False, f"{STRATEGY_LABELS.get(strategy, strategy)} was disabled automatically ({p['reason']})"
         return True, ""
+
+    def restore_pruned(self) -> list[str]:
+        """With PRUNE_ENABLED=false, re-enable every agent an earlier automatic prune switched off. Returns them."""
+        if settings.prune_enabled:
+            return []
+        back = [s for s in list(self.pruned) if s in ("intraday", "scalping", "swing", "fno")]
+        for s in back:
+            self.set_enabled(s, True, "pruning disabled")
+        return back
 
     def set_enabled(self, strategy: str, enabled: bool, reason: str = "manual") -> dict:
         with self._lock:

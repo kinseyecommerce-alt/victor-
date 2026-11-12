@@ -1915,6 +1915,13 @@ async def on_startup():
     except Exception as exc:
         logger.error("Parameter apply failed: {}", exc)
     from platform_scheduler import platform_scheduler
+    try:
+        from performance import performance as _perf
+        back = _perf.restore_pruned()
+        if back:
+            logger.info("[startup] PRUNE_ENABLED=false — re-enabled auto-pruned agents: {}", back)
+    except Exception as exc:
+        logger.warning("[startup] restoring pruned agents failed: {}", exc)
     platform_scheduler.start()
     try:
         tick_engine.warm_watchlist("startup")   # real prices on the dashboard before Start Bot

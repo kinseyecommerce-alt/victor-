@@ -91,6 +91,7 @@ def _apply_all_day(agent, intraday: bool) -> None:
         agent.VWAP_WINDOW_END_MIN = settings.extended_window_end_min
     else:
         agent.RT_END_MIN = settings.extended_window_end_min
+        agent.RT_MAX_PER_DAY = 3     # after a retest trade the range re-arms for a fresh break and retest
     agent.VERSION = "v2-allday"
 
 
@@ -256,6 +257,7 @@ class ScalpV2Agent(BaseAgent):
     RT_TREND_FILTER  = 1      # only retest in the direction of the 20-day trend (shares IntradayV2Agent's bias)
     RT_SL_MIN_PCT    = 0.25
     RT_SL_MAX_PCT    = 0.7
+    RT_MAX_PER_DAY   = 1      # retest trades per symbol per day (validated: 1); all-day mode re-arms up to 3
 
     START, END     = time(9, 45), time(14, 30)
     ADX_MIN        = 22.0
@@ -299,7 +301,32 @@ class ScalpV2Agent(BaseAgent):
                     r["l"] = c.low if r["l"] is None else min(r["l"], c.low)
             if now.time() >= self._t(self.RT_ORB_END_MIN) and r["h"] is not None:
                 r["done"] = True
+        if r["done"] and not r.get("replayed"):
+            r["replayed"] = True
+            self._replay_since_range(r, snap, now)
         return r
+
+    def _replay_since_range(self, r, snap, now) -> None:
+        """Rebuild the break / peak / give-up state from today's finished bars after the range. Live, the state is
+        built tick by tick from 09:30; after a restart mid-session the agent would otherwise miss every break that
+        happened before it came back (12 Nov 2026: restarted at 09:30 and 10:50)."""
+        h, l = r["h"], r["l"]
+        mid = (h + l) / 2
+        bars = [c for c in snap.candles_1min[:-1]
+                if getattr(c, "ts", None) is not None and c.ts.date() == now.date()
+                and c.ts.time() >= self._t(self.RT_ORB_END_MIN)]
+        for c in bars:
+            if r["retested"]:
+                return
+            if r["broke"] is None:
+                if c.close > h * 1.001: r["broke"] = "UP"; r["peak"] = c.high
+                elif c.close < l * 0.999: r["broke"] = "DOWN"; r["peak"] = c.low
+            elif r["broke"] == "UP":
+                r["peak"] = max(r["peak"], c.high)
+                if c.close < mid: r["retested"] = True
+            else:
+                r["peak"] = min(r["peak"], c.low)
+                if c.close > mid: r["retested"] = True
 
     def _orb_retest(self, snap, ind, sym, ltp, now, t):
         """After the range breaks, the first pullback to the broken level that holds is the entry:
@@ -332,9 +359,9 @@ class ScalpV2Agent(BaseAgent):
             if bias == "DOWN":
                 return "HOLD", None
             if cur.low <= h + touch and cur.close > h and cur.close > cur.open and ind.ema9 > ind.ema21 and ltp > ind.vwap:
-                r["retested"] = True
+                self._fired(r)
                 dist = min(max(ltp - mid, ltp * self.RT_SL_MIN_PCT / 100), ltp * self.RT_SL_MAX_PCT / 100)
-                return self._sig("BUY", sym, ltp, dist, f"ORB_RETEST hi {h:.1f}")
+                return self._sig("BUY", sym, ltp, dist, f"ORB_RETEST hi {h:.1f}" + (f" #{r['n']}" if r["n"] > 1 else ""))
         else:
             r["peak"] = min(r.get("peak", ltp), ltp)
             if r["peak"] > l * 0.996:
@@ -344,10 +371,30 @@ class ScalpV2Agent(BaseAgent):
             if bias == "UP":
                 return "HOLD", None
             if cur.high >= l - touch and cur.close < l and cur.close < cur.open and ind.ema9 < ind.ema21 and ltp < ind.vwap:
-                r["retested"] = True
+                self._fired(r)
                 dist = min(max(mid - ltp, ltp * self.RT_SL_MIN_PCT / 100), ltp * self.RT_SL_MAX_PCT / 100)
-                return self._sig("SELL", sym, ltp, dist, f"ORB_RETEST lo {l:.1f}")
+                return self._sig("SELL", sym, ltp, dist, f"ORB_RETEST lo {l:.1f}" + (f" #{r['n']}" if r["n"] > 1 else ""))
         return "HOLD", None
+
+    def _fired(self, r) -> None:
+        """One more retest trade on this range: done for the day at RT_MAX_PER_DAY, else wait for a fresh break."""
+        r["n"] = r.get("n", 0) + 1
+        if r["n"] >= self.RT_MAX_PER_DAY:
+            r["retested"] = True
+        else:
+            r["broke"] = None; r.pop("peak", None)
+
+    def get_status(self) -> dict:
+        """Adds what the scalper is watching right now, so an idle scalper can be told apart from a blind one."""
+        st = super().get_status()
+        day = max((k[1] for k in self._orb), default=None)          # the session being traded (today, live)
+        rs = [v for k, v in self._orb.items() if k[1] == day]
+        st["watching"] = {"symbols": len(rs), "range_ready": sum(1 for r in rs if r.get("done")),
+                          "broken_waiting_retest": sum(1 for r in rs if r.get("broke") and not r.get("retested")),
+                          "finished_for_day": sum(1 for r in rs if r.get("retested")),
+                          "retest_trades": sum(r.get("n", 0) for r in rs), "max_per_symbol": self.RT_MAX_PER_DAY,
+                          "window": f"{self._t(self.RT_START_MIN):%H:%M}-{self._t(self.RT_END_MIN):%H:%M}"}
+        return st
 
     def _sig(self, side, sym, ltp, dist, note, rr=None):
         rr = rr or self.RT_RR
