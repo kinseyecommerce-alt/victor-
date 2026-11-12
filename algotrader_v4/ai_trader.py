@@ -1429,7 +1429,7 @@ class AITrader:
         if pos:
             from performance import performance
             performance.record_trade(pos.strategy, e["symbol"], "BUY", pos.quantity, pos.entry_price, pnl,
-                                     e.get("exchange", "NSE"), e.get("product", "CNC"), note=note)
+                                     e.get("exchange", "NSE"), e.get("product", "CNC"), note=note, order_id=oid)
         self._open.pop(oid, None)
         self._targets.pop(oid, None)
         self._trail.pop(oid, None)
@@ -1566,6 +1566,63 @@ class AITrader:
             self._record("system", f"restored swing positions: {', '.join(restored)}")
         self._save_swing()
         return restored
+
+    # ── PAPER book persistence (paper_book.py) ────────────────────────────
+
+    def export_book(self) -> dict:
+        """The AI's own bookkeeping for open positions and today's counters (the positions themselves
+        live in base_agent._tsl_sl_orders and the trailing engine, saved by paper_book)."""
+        return {
+            "targets": dict(self._targets), "open": dict(self._open),
+            "trail": {oid: {k: v for k, v in st.items() if k != "last_review"} for oid, st in self._trail.items()},
+            "swing_meta": dict(self._swing_meta), "spreads": dict(self._spreads),
+            "trades_today": self.trades_today, "cycles_today": self.cycles_today,
+            "cost_today_usd": self.cost_today_usd, "tokens_today": dict(self.tokens_today),
+            "events_today": self.events_today, "decisions_today": self.decisions_today,
+        }
+
+    def import_book(self, d: dict, closed: set = frozenset()) -> int:
+        """Restore what export_book saved (same trading day). Positions in `closed` already reached the
+        ledger and are skipped. Returns the number of open AI positions / spreads restored."""
+        import time as _t
+        from agents.base_agent import _tsl_sl_orders
+        self._day = now_ist().date()
+        self.trades_today = int(d.get("trades_today", 0))
+        self.cycles_today = int(d.get("cycles_today", 0))
+        self.cost_today_usd = float(d.get("cost_today_usd", 0.0))
+        self.tokens_today.update(d.get("tokens_today") or {})
+        self.events_today = int(d.get("events_today", 0))
+        self.decisions_today = int(d.get("decisions_today", 0))
+        live = {oid for oid, e in _tsl_sl_orders.items() if e.get("agent") == AGENT}
+        for oid, v in (d.get("targets") or {}).items():
+            if oid in live:
+                self._targets[oid] = v
+        for oid, v in (d.get("open") or {}).items():
+            if oid in live:
+                self._open[oid] = v
+        for oid, st in (d.get("trail") or {}).items():
+            if oid in live:
+                self._trail[oid] = {**st, "last_review": _t.monotonic()}
+        for oid, v in (d.get("swing_meta") or {}).items():
+            if oid in live:
+                self._swing_meta[oid] = v
+        n = 0
+        for sid, sp in (d.get("spreads") or {}).items():
+            if sid in closed or sid in self._spreads:
+                continue
+            self._spreads[sid] = sp
+            tick_engine.subscribe([{"symbol": INDEX_QUOTE[sp["underlying"]], "exchange": "NSE"}]
+                                  + [{"symbol": sp[leg]["symbol"], "exchange": "NFO"} for leg in ("short", "long")])
+            n += 1
+        n += len(live)
+        if n:
+            try:
+                asyncio.get_running_loop()
+                self._ensure_tick_monitor()     # stops, targets, the 15:00 exit and spreads run from the tick feed
+            except RuntimeError:
+                pass
+            self._record("system", f"restored {n} open AI position(s) from the paper book")
+        return n
 
     def reapply_overnight(self) -> None:
         """After the daily counter reset: positions held from earlier days still exist."""
@@ -2199,7 +2256,9 @@ class AITrader:
         from performance import performance
         # two legs ≈ twice the option round-trip costs: record as one trade with double quantity
         performance.record_trade(SPREAD_STRATEGY, sid, "SELL", sp["qty"] * 2, sp["credit"], pnl, "NFO", "MIS",
-                                 exit_price=value, note=reason)
+                                 exit_price=value, note=reason, order_id=sid)
+        from agents.base_agent import _book_changed
+        _book_changed()
         text = (f"CLOSE spread {sp['underlying']} {sp['short']['strike']:g}/{sp['long']['strike']:g} "
                 f"{sp['option_type']} at ₹{value:.2f} (sold ₹{sp['credit']:.2f}) P&L ₹{pnl:,.0f} — {reason[:200]}")
         self._record("close", f"[auto] {text}" if by_code else text)

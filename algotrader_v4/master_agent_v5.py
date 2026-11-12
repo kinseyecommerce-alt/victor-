@@ -342,7 +342,16 @@ class MasterAgent:
             }))
 
     async def _auto_squareoff(self) -> None:
-        ids = kite_client.squareoff_all_positions()
+        closed: list[str] = []
+        if settings.squareoff_closes_tracked:
+            # tracked positions first, through the normal exit path (ledger once, bookkeeping released);
+            # the broker-level square-off below then only meets untracked leftovers
+            from agents.base_agent import close_tracked_for_squareoff
+            try:
+                closed = close_tracked_for_squareoff("auto square-off")
+            except Exception as exc:
+                logger.error("[master] tracked square-off failed: {} — flattening the book", exc)
+        ids = closed + kite_client.squareoff_all_positions(exclude=frozenset(closed))
         if ids:
             await send_telegram(f"<b>Auto square-off</b>\n{len(ids)} positions closed")
             from n8n_bridge import notify as _n8n

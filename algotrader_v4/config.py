@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # 10:00 on a weekday (so the market is "open" any time you test) and the simulator moves
     # in trending bursts so strategies actually fire. Ignored in every other mode.
     demo_mode: bool = False
+    # PAPER book persistence (paper_book.py): the simulated orders/positions, their trailing stops, the agents'
+    # and AI trader's open-position bookkeeping and today's risk counters are written to PAPER_BOOK_FILE
+    # (default next to performance.json) and restored after a restart on the same IST trading day. Never in LIVE.
+    persist_paper_book: bool = True
+    paper_book_save_interval_s: float = 3.0
+    # The scheduled MIS square-off closes tracked positions through the agents' exit path first (performance
+    # ledger, stop-order cancel, bookkeeping) and only then flattens whatever is left at the broker.
+    squareoff_closes_tracked: bool = True
 
     # Risk
     max_daily_loss: float = 5000.0

@@ -1906,6 +1906,8 @@ async def on_startup():
     logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
     asyncio.create_task(symbol_scanner.run())
     asyncio.create_task(_pnl_sampler())
+    import paper_book
+    paper_book.restore()                    # PAPER: today's book from before a restart (never in LIVE; never raises)
     try:
         ai_trader.restore_swing()           # AI swing (delivery) positions from earlier runs
     except Exception as exc:
@@ -1923,10 +1925,26 @@ async def on_startup():
     except Exception as exc:
         logger.warning("[startup] restoring pruned agents failed: {}", exc)
     platform_scheduler.start()
+    paper_book.start()                      # periodic snapshots + watchdog for restored positions
     try:
         tick_engine.warm_watchlist("startup")   # real prices on the dashboard before Start Bot
     except Exception as exc:
         logger.warning("Warm watchlist failed: {}", exc)
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        import paper_book
+        paper_book.save(force=True)         # last snapshot before a redeploy / restart
+    except Exception as exc:
+        logger.error("Paper book save at shutdown failed: {}", exc)
+
+
+@app.get("/paper-book/status", tags=["Orders"])
+async def paper_book_status():
+    import paper_book
+    return paper_book.status()
 
 
 # HIGH-7: reload=False in production — auto-reload bypasses security middleware

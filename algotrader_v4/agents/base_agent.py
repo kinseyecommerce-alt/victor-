@@ -111,10 +111,54 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
         from performance import performance
         performance.record_trade(strategy, symbol, side, quantity, fallback_px, pnl,
                                  entry.get("exchange", "NSE"), entry.get("product", "MIS"), note=tag,
-                                 signal_price=entry.get("signal_price"))
+                                 signal_price=entry.get("signal_price"), order_id=entry_oid)
     except Exception as exc:
         logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
     _notify_agent_result(strategy, symbol, pnl)
+    _book_changed()
+
+
+def close_tracked_for_squareoff(reason: str = "SquareOff") -> list[str]:
+    """The scheduled square-off: close every tracked intraday position (not delivery / swing holdings) through
+    _close_tracked, so each lands in the ledger and releases its bookkeeping. kite_client.squareoff_all_positions
+    alone flattened the book behind the agents' backs: the trade never reached the ledger and its tracking
+    (stop order, trailing stop, order guard, open-position count) was left behind."""
+    from tick_engine import tick_engine
+    closed = []
+    for oid, e in list(_tsl_sl_orders.items()):
+        if e.get("product", "MIS") == "CNC" or e.get("kind") == "swing":
+            continue
+        pos = trailing_sl_engine._positions.get(oid)
+        if pos is None:
+            continue
+        tick, _ = tick_engine.latest(pos.symbol)
+        px = tick.ltp if tick and tick.ltp > 0 else pos.entry_price
+        pnl = (px - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
+        closed.append(pos.symbol)                # its exit is being sent here: never square it off twice
+        try:
+            _close_tracked(oid, pos.symbol, pos.side, pos.quantity, pnl, f"SquareOff-{pos.strategy}"[:20], pos.strategy)
+        except Exception as exc:
+            logger.error("[squareoff] {} close failed: {}", pos.symbol, exc)
+            continue
+        try:
+            from agents.strategy_agents import ALL_AGENTS
+            a = ALL_AGENTS.get(e.get("agent"))
+            if a is not None:
+                a.state.pnl_today += pnl
+        except Exception:
+            pass
+        logger.info("[squareoff] {} {} closed ({}) P&L ₹{:.0f}", pos.strategy, pos.symbol, reason, pnl)
+    return closed
+
+
+def _book_changed() -> None:
+    """A position closed: write the PAPER book now, so a restart a moment later cannot restore a trade
+    the ledger already holds (no-op in LIVE, or before the startup restore ran)."""
+    try:
+        import paper_book
+        paper_book.save()
+    except Exception as exc:
+        logger.debug("[paper_book] save after close failed: {}", exc)
 
 
 _ENTRY_LOCK = asyncio.Lock()
@@ -803,6 +847,27 @@ class BaseAgent(ABC):
         self.state.trades_today = self.state.pnl_today = 0
         self.state.ticks_processed = self.state.signals_fired = 0
         self.state.errors.clear()
+
+    # ── Day state across a restart (paper_book.py) ─────────────────────────
+    # Agents that remember what they did today (one ORB per symbol, losses per symbol) export it so a
+    # mid-session restart does not let them repeat today's trades. Plain JSON values only.
+
+    def export_day_state(self) -> dict:
+        return {}
+
+    def import_day_state(self, state: dict) -> None:
+        return None
+
+    @staticmethod
+    def _dump_day_keyed(d: dict, day) -> list:
+        """{(symbol, date): value} -> [[symbol, "YYYY-MM-DD", value]] for `day` only."""
+        return [[k[0], k[1].isoformat(), v] for k, v in d.items()
+                if isinstance(k, tuple) and len(k) == 2 and k[1] == day]
+
+    @staticmethod
+    def _load_day_keyed(rows) -> dict:
+        from datetime import date as _date
+        return {(r[0], _date.fromisoformat(r[1])): r[2] for r in rows or []}
 
     def get_status(self) -> dict:
         return {

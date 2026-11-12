@@ -392,10 +392,14 @@ class KiteClient:
             label="cancel_order",
         )
 
-    def squareoff_all_positions(self) -> list[str]:
+    def squareoff_all_positions(self, exclude: frozenset = frozenset()) -> list[str]:
+        """exclude: symbols whose exit order was just sent elsewhere (a broker position can lag the fill,
+        and squaring it off again would open a reverse position)."""
         order_ids: list[str] = []
         for pos in self.positions().get("net", []):
             if pos.get("quantity", 0) == 0:
+                continue
+            if pos.get("tradingsymbol") in exclude:
                 continue
             if pos.get("product") == "CNC":       # delivery (swing) positions are held overnight
                 continue

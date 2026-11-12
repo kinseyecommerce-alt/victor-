@@ -9567,6 +9567,324 @@ run("auto-start: trading day reaches the master agent; missed 09:16 start runs a
     t_auto_start_trading_day_and_catch_up)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# PAPER BOOK — survives a same-day restart (paper_book.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("PAPER BOOK PERSISTENCE")
+import paper_book as _pb
+import contextlib as _ctx_pb
+import copy as _copy_pb
+import json as _json_pb
+from agents.strategy_agents import ALL_AGENTS as _ALL_pb
+from order_guard import order_guard as _og_pb
+from performance import performance as _perf_pb
+
+
+@_ctx_pb.contextmanager
+def _pb_isolated():
+    """Run with an empty in-memory book and a private snapshot file; put the suite's state back after."""
+    from ai_trader import ai_trader as _ai_pb
+    saved = {
+        "orders": list(_te_kite_client._paper_orders), "positions": _copy_pb.deepcopy(_te_kite_client._paper_positions),
+        "gtts": dict(_te_kite_client._paper_gtts), "tracked": dict(_ba._tsl_sl_orders),
+        "tsl": dict(_tsl_eng._positions), "guard": (dict(_og_pb._active), dict(_og_pb._trade_count), dict(_og_pb._cooldown_until)),
+        "risk": {k: getattr(_rm_x, k) for k in ("daily_realised_pnl", "open_position_count", "trades_today", "wins_today",
+                                                "losses_today", "gross_profit", "gross_loss", "is_trading_halted")},
+        "agents": {n: (a.state.trades_today, a.state.pnl_today, a.state.signals_fired, set(a._exit_only))
+                   for n, a in _ALL_pb.items()},
+        "ai": (dict(_ai_pb._targets), dict(_ai_pb._open), dict(_ai_pb._trail), dict(_ai_pb._spreads), _ai_pb.trades_today),
+        "pb": (_pb._restore_attempted, _pb._last_body, set(_pb._restored)),
+        "env": _os.environ.get("PAPER_BOOK_FILE"), "mode": settings.trading_mode,
+    }
+    d = _tmp0.mkdtemp()
+    _os.environ["PAPER_BOOK_FILE"] = _os.path.join(d, "paper_book.json")
+    try:
+        _pb_wipe()
+        _pb._restore_attempted, _pb._last_body = True, None
+        _pb._restored.clear()
+        yield _pb.path()
+    finally:
+        settings.trading_mode = saved["mode"]
+        _te_kite_client._paper_orders[:] = saved["orders"]
+        _te_kite_client._paper_positions[:] = saved["positions"]
+        _te_kite_client._paper_gtts.clear(); _te_kite_client._paper_gtts.update(saved["gtts"])
+        _ba._tsl_sl_orders.clear(); _ba._tsl_sl_orders.update(saved["tracked"])
+        _tsl_eng._positions.clear(); _tsl_eng._positions.update(saved["tsl"])
+        _og_pb._active.clear(); _og_pb._active.update(saved["guard"][0])
+        _og_pb._trade_count.clear(); _og_pb._trade_count.update(saved["guard"][1])
+        _og_pb._cooldown_until.clear(); _og_pb._cooldown_until.update(saved["guard"][2])
+        for k, v in saved["risk"].items():
+            setattr(_rm_x, k, v)
+        for n, (t, p, s, ex) in saved["agents"].items():
+            a = _ALL_pb[n]
+            a.state.trades_today, a.state.pnl_today, a.state.signals_fired = t, p, s
+            a._exit_only.clear(); a._exit_only.update(ex)
+        _ai_pb._targets, _ai_pb._open, _ai_pb._trail, _ai_pb._spreads, _ai_pb.trades_today = saved["ai"]
+        _pb._restore_attempted, _pb._last_body = saved["pb"][0], saved["pb"][1]
+        _pb._restored.clear(); _pb._restored.update(saved["pb"][2])
+        if saved["env"] is None:
+            _os.environ.pop("PAPER_BOOK_FILE", None)
+        else:
+            _os.environ["PAPER_BOOK_FILE"] = saved["env"]
+
+
+def _pb_wipe():
+    """What a process restart does to the in-memory book."""
+    _te_kite_client._paper_orders.clear(); _te_kite_client._paper_positions.clear(); _te_kite_client._paper_gtts.clear()
+    _ba._tsl_sl_orders.clear(); _tsl_eng._positions.clear()
+    _og_pb._active.clear(); _og_pb._trade_count.clear(); _og_pb._cooldown_until.clear()
+    _rm_x.reset_daily()
+    for a in _ALL_pb.values():
+        a.state.trades_today = a.state.pnl_today = a.state.signals_fired = 0
+        a._exit_only.clear()
+    _pb._restored.clear()
+    _pb._last_body = None
+
+
+def _pb_open_trailed(sym: str) -> str:
+    """A paper intraday position at ₹1000 (stop ₹990) whose trailing stop has activated and moved up."""
+    oid = _paper_entry(_ALL_pb["intraday"], sym, 1000.0)
+    asyncio.run(_tsl_eng.on_tick(sym, 1015.0, 0.0))         # +1.5 %: breakeven, trail active, stop moved
+    pos = _tsl_eng._positions[oid]
+    assert pos.trail_active and pos.best_price == 1015.0 and pos.current_sl > 1000.0, pos.to_dict()
+    return oid
+
+
+def t_paper_book_round_trip():
+    with _pb_isolated() as f:
+        oid = _pb_open_trailed("PBRT")
+        pos0 = _tsl_eng._positions[oid]
+        want = (pos0.entry_price, pos0.current_sl, pos0.best_price, pos0.trail_active, pos0.breakeven_hit, pos0.sl_moves)
+        qty = _paper_pos("PBRT")["quantity"]
+        risk0 = (_rm_x.open_position_count, _ALL_pb["intraday"].state.trades_today, _og_pb._trade_count["intraday"])
+        assert _pb.save() and f.exists()
+        assert not _pb.save(), "an unchanged book must not be rewritten"
+        snap = _json_pb.loads(f.read_text())
+        assert snap["session"] == _pb.now_ist().date().isoformat() and snap["mode"] == "PAPER"
+        _pb_wipe()
+        assert oid not in _ba._tsl_sl_orders and not _te_kite_client._paper_positions
+        out = _pb.restore()
+        assert out["restored"] and out["positions"] == ["PBRT"], out
+        pos = _tsl_eng._positions[oid]
+        assert (pos.entry_price, pos.current_sl, pos.best_price, pos.trail_active, pos.breakeven_hit, pos.sl_moves) == want
+        assert _ba._tsl_sl_orders[oid]["agent"] == "intraday" and _ba._tsl_sl_orders[oid]["sl_order_id"]
+        assert _paper_pos("PBRT")["quantity"] == qty and _paper_pos("PBRT")["buy_value"] == qty * 1000.0
+        assert _order(_ba._tsl_sl_orders[oid]["sl_order_id"])["status"] == "TRIGGER PENDING"
+        assert (_rm_x.open_position_count, _ALL_pb["intraday"].state.trades_today, _og_pb._trade_count["intraday"]) == risk0
+        assert not _og_pb.can_place("PBRT", "intraday", "BUY")[0], "the restored position still blocks a duplicate"
+        assert _tsl_eng.on_sl_hit is not None, "TSL callbacks wired after restore"
+        # trailing keeps working after the restore: a new high moves the stop further up
+        before = pos.current_sl
+        asyncio.run(_tsl_eng.on_tick("PBRT", 1030.0, 0.0))
+        assert pos.current_sl > before
+        _ba._close_tracked(oid, "PBRT", "BUY", qty, 0.0, "T", "intraday")
+
+
+def t_paper_book_stale_ignored():
+    with _pb_isolated() as f:
+        _pb_open_trailed("PBSTALE")
+        _pb.save()
+        snap = _json_pb.loads(f.read_text())
+        snap["session"] = (_pb.now_ist().date() - timedelta(days=1)).isoformat()
+        f.write_text(_json_pb.dumps(snap))
+        _pb_wipe()
+        out = _pb.restore()
+        assert not out["restored"] and "stale" in out["reason"], out
+        assert not _ba._tsl_sl_orders and not _tsl_eng._positions and not _te_kite_client._paper_positions
+        assert _rm_x.open_position_count == 0 and _rm_x.trades_today == 0
+
+
+def t_paper_book_restored_exits_on_stop_once():
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated() as f, patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSTOP")
+        qty = _paper_pos("PBSTOP")["quantity"]
+        _pb.save()
+        before_crash = f.read_text()                 # the snapshot as it was when the server died
+        _pb_wipe()
+        assert _pb.restore()["restored"]
+        assert oid in _pb._restored, "a restored agent position is watched until its agent handles it"
+        stop = _tsl_eng._positions[oid].current_sl
+        n0 = len(_perf_pb.trades)
+        asyncio.run(_pb.on_snap(_make_snap(symbol="PBSTOP", ltp=round(stop - 0.5, 2))))
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions, "stop must close the restored trade"
+        rows = [t for t in _perf_pb.trades if t.get("oid") == oid]
+        assert len(_perf_pb.trades) == n0 + 1 and len(rows) == 1, rows
+        assert rows[0]["entry"] == 1000.0 and rows[0]["qty"] == qty and rows[0]["cost"] > 0, rows[0]
+        assert _paper_pos("PBSTOP")["quantity"] == 0
+        assert _rm_x.open_position_count == 0 and _rm_x.trades_today == 1
+        # the close rewrote the snapshot at once: a restart now restores nothing
+        assert oid not in _json_pb.loads(f.read_text())["tracked"]
+        # ... and even the older snapshot (closed after it was taken) is reconciled, not traded twice
+        f.write_text(before_crash)
+        _pb_wipe()
+        out = _pb.restore()
+        assert out["reconciled"] == ["PBSTOP"] and not out["positions"], out
+        assert oid not in _ba._tsl_sl_orders and _paper_pos("PBSTOP")["quantity"] == 0
+        assert len([t for t in _perf_pb.trades if t.get("oid") == oid]) == 1
+        assert _rm_x.open_position_count == 0 and _og_pb.can_place("PBSTOP", "intraday", "SELL")[0]
+
+
+def t_paper_book_restored_mis_squareoff():
+    from unittest.mock import patch
+    import agents.strategy_agents as _sa_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSQ")
+        _pb.save(); _pb_wipe(); _pb.restore()
+        h, m = (int(x) for x in settings.squareoff_time.split(":"))
+        late = datetime.combine(_pb.now_ist().date(), time(h, m)).replace(tzinfo=_pb.now_ist().tzinfo)
+        n0 = len(_perf_pb.trades)
+        with patch.object(_sa_pb, "now_ist", return_value=late):
+            asyncio.run(_pb.on_snap(_make_snap(symbol="PBSQ", ltp=1012.0)))   # above the stop: only the clock exits
+        assert oid not in _ba._tsl_sl_orders, "MIS square-off must close a restored position"
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _paper_pos("PBSQ")["quantity"] == 0
+
+
+def t_paper_book_never_in_live():
+    with _pb_isolated() as f:
+        _pb_open_trailed("PBLIVE")
+        _pb.save()
+        good = f.read_text()
+        f.unlink()
+        settings.trading_mode = "LIVE"
+        assert not _pb.enabled() and not _pb.save(force=True) and not f.exists(), "LIVE must never write the paper book"
+        f.write_text(good)
+        _pb_wipe()
+        out = _pb.restore()
+        assert not out["restored"] and "LIVE" in out["reason"]
+        assert not _ba._tsl_sl_orders and not _te_kite_client._paper_positions and _rm_x.open_position_count == 0
+        settings.trading_mode = "PAPER"
+        prev = settings.persist_paper_book
+        settings.persist_paper_book = False
+        try:
+            assert not _pb.save(force=True) and not _pb.restore()["restored"]
+        finally:
+            settings.persist_paper_book = prev
+
+
+def t_paper_book_corrupt_file():
+    with _pb_isolated() as f:
+        f.write_text('{"session": "' + _pb.now_ist().date().isoformat() + '", "kite": {"orders": [')
+        out = _pb.restore()                          # must not raise
+        assert not out["restored"] and "unreadable" in out["reason"], out
+        assert not f.exists() and f.with_suffix(".corrupt.json").exists(), "a corrupt snapshot is set aside"
+        # well-formed JSON with a broken position: still no crash, and nothing half-restored
+        f.write_text(_json_pb.dumps({"session": _pb.now_ist().date().isoformat(), "tsl": [{"symbol": "X"}],
+                                     "tracked": {}}))
+        out = _pb.restore()
+        assert not out["restored"] and out["reason"].startswith("error"), out
+        assert not _ba._tsl_sl_orders and not _tsl_eng._positions
+        assert _pb.restore()["reason"] == "no snapshot"
+
+
+def t_paper_book_agent_day_state():
+    sc = _ALL_pb["scalping"]
+    it = _ALL_pb["intraday"]
+    day = _pb.now_ist().date()
+    now = datetime.combine(day, time(10, 5))
+    yesterday = day - timedelta(days=1)
+    sc._orb[("PBDS", day)] = {"h": 101.0, "l": 99.0, "done": True, "broke": None, "retested": False, "n": 1, "replayed": True}
+    sc._orb[("PBDS", yesterday)] = {"h": 1.0}
+    sc._count[("PBDS", day)] = 1; sc._losses[("PBDS", day)] = 1; sc._last["PBDS"] = now
+    it._fired[("PBDS", day)] = {"ORB": True}
+    try:
+        st = _json_pb.loads(_json_pb.dumps({"s": sc.export_day_state(), "i": it.export_day_state()}))
+        assert all(r[1] == day.isoformat() for r in st["s"]["orb"]), "only today's state is carried"
+        for k in (("PBDS", day), ("PBDS", yesterday)):
+            sc._orb.pop(k, None)
+        sc._count.pop(("PBDS", day)); sc._losses.pop(("PBDS", day)); sc._last.pop("PBDS"); it._fired.pop(("PBDS", day))
+        sc.import_day_state(st["s"]); it.import_day_state(st["i"])
+        assert sc._orb[("PBDS", day)]["n"] == 1 and sc._orb[("PBDS", day)]["replayed"]
+        assert sc._count[("PBDS", day)] == 1 and sc._losses[("PBDS", day)] == 1 and sc._last["PBDS"] == now
+        assert it._fired[("PBDS", day)] == {"ORB": True}
+        assert ("PBDS", yesterday) not in sc._orb
+    finally:
+        for d_ in (sc._orb, sc._count, sc._losses, it._fired):
+            for k in [k for k in d_ if k[0] == "PBDS"]:
+                d_.pop(k)
+        sc._last.pop("PBDS", None)
+
+
+def t_paper_book_ai_round_trip():
+    from ai_trader import ai_trader as _ai_pb
+    with _pb_isolated():
+        oid = "PAPER-AIPB0001"
+        _ba._tsl_sl_orders[oid] = {"sl_order_id": None, "product": "MIS", "exchange": "NSE", "symbol": "PBAI",
+                                   "guard_symbol": "PBAI", "agent": "ai", "side": "BUY"}
+        p = _tsl_eng.register("PBAI", "ai", "BUY", 500.0, 10, oid)
+        p.current_sl, p.external_trail = 495.0, True
+        _ai_pb._targets[oid], _ai_pb._open[oid] = 515.0, "PBAI"
+        _ai_pb._trail[oid] = {"risk": 5.0, "milestone": 1.0, "last_review": 0.0, "best_at_review": 506.0}
+        _ai_pb.trades_today = 3
+        _pb.save()
+        _pb_wipe()
+        _ai_pb._targets.pop(oid); _ai_pb._open.pop(oid); _ai_pb._trail.pop(oid); _ai_pb.trades_today = 0
+        out = _pb.restore()
+        assert out["ai_positions"] == 1 and oid not in _pb._restored, out     # the AI's own monitor manages it
+        assert _ai_pb._targets[oid] == 515.0 and _ai_pb._open[oid] == "PBAI" and _ai_pb.trades_today == 3
+        assert _ai_pb._trail[oid]["milestone"] == 1.0 and _tsl_eng._positions[oid].external_trail
+        _ai_pb._targets.pop(oid, None); _ai_pb._open.pop(oid, None); _ai_pb._trail.pop(oid, None)
+
+
+def t_paper_book_watchdog_hands_over_to_agent():
+    """Once the owning agent runs and watches the symbol, its own loop manages the restored position:
+    the watchdog must not drive the same tick a second time."""
+    from unittest.mock import patch
+    a = _ALL_pb["intraday"]
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBHAND")
+        _pb.save(); _pb_wipe(); _pb.restore()
+        stop = _tsl_eng._positions[oid].current_sl
+        snap = _make_snap(symbol="PBHAND", ltp=round(stop - 1, 2), n_candles=max(30, a.min_candles_1min))
+        prev_run, had = a.state.running, "PBHAND" in a._approved
+        a.state.running = True; a._approved.add("PBHAND")
+        try:
+            asyncio.run(_pb.on_snap(snap))
+            assert oid in _ba._tsl_sl_orders, "the running agent owns this tick; the watchdog stays out"
+        finally:
+            a.state.running = prev_run
+            if not had:
+                a._approved.discard("PBHAND")
+        asyncio.run(_pb.on_snap(snap))                    # agent stopped again: the watchdog takes the stop
+        assert oid not in _ba._tsl_sl_orders
+
+
+def t_scheduled_squareoff_records_tracked_once():
+    """The 15:15 job closes tracked MIS positions through the exit path (ledger once, bookkeeping released),
+    and the broker-level square-off does not exit them a second time."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSQJ")
+        qty = _paper_pos("PBSQJ")["quantity"]
+        n0 = len(_perf_pb.trades)
+        asyncio.run(_mav_pb.master_agent._auto_squareoff())
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _paper_pos("PBSQJ")["quantity"] == 0, "flat, not reversed"
+        sells = [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == "PBSQJ"
+                 and o["transaction_type"] == "SELL" and o["status"] == "COMPLETE"]
+        assert len(sells) == 1 and sells[0]["quantity"] == qty
+        assert _rm_x.open_position_count == 0
+
+
+run("paper book: snapshot/restore round-trip keeps the trailing stop, book and counters", t_paper_book_round_trip)
+run("paper book: watchdog hands a restored position to its running agent",     t_paper_book_watchdog_hands_over_to_agent)
+run("auto square-off: tracked MIS positions reach the ledger once, no reverse", t_scheduled_squareoff_records_tracked_once)
+run("paper book: a snapshot from an earlier day is ignored",                   t_paper_book_stale_ignored)
+run("paper book: restored position exits on its stop, ledger records it once", t_paper_book_restored_exits_on_stop_once)
+run("paper book: restored MIS position is squared off at SQUAREOFF_TIME",      t_paper_book_restored_mis_squareoff)
+run("paper book: LIVE mode (and the setting off) never writes or restores",    t_paper_book_never_in_live)
+run("paper book: corrupt snapshot does not crash startup",                     t_paper_book_corrupt_file)
+run("paper book: scalper/intraday day state survives a restart",               t_paper_book_agent_day_state)
+run("paper book: AI trader targets, trails and counters restored",             t_paper_book_ai_round_trip)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
