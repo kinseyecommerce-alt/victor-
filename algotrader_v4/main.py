@@ -1644,6 +1644,14 @@ async def backtest_bars(symbols: str, days: int = 45):
     return out
 
 
+@app.get("/forward-test", tags=["Research"])
+def forward_test_status(quotes: bool = False):
+    """Live paper forward test of the opening-auction fade: per-variant results under the tested ("final") and the
+    realistic pre-open ("live") signal rule, and how well the 09:07 indicative price predicted the auction price."""
+    import forward_test
+    return forward_test.status(include_quotes=quotes)
+
+
 @app.get("/market-type", tags=["Market Regime"])
 def regime_status():
     """Today's market-type read (pre-open / first hour), the learned model and each strategy's size factor."""

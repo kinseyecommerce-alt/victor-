@@ -9097,6 +9097,87 @@ run("auction: top-10 |gap| per day, 3 % subset, qty, slippage and costs", t_auc_
 run("auction: protocol never simulates FINAL for screen failures", t_auc_protocol_final_never_for_failures)
 
 
+section("AUCTION FADE LIVE FORWARD TEST")
+import forward_test as _fwd
+from pathlib import Path
+
+
+def _fwd_q(ltp=0.0, open_=0.0, pc=100.0):
+    return {"ltp": ltp, "open": open_, "prev_close": pc}
+
+
+def t_fwd_trades_variants_rules():
+    """Gap > 3 % up is faded short at the auction price; the live rule uses the indicative price; 1-3 % excludes > 3 %."""
+    st = {"indicative": {"ABB": _fwd_q(103.5), "ADANIENT": _fwd_q(101.0), "ADANIGREEN": _fwd_q(97.5)},
+          "auction": {}, "open": {"ABB": _fwd_q(104.0, 104.0), "ADANIENT": _fwd_q(102.5, 102.5),
+                                  "ADANIGREEN": _fwd_q(96.5, 96.5)},
+          "exit": {"ABB": _fwd_q(103.0), "ADANIENT": _fwd_q(102.0), "ADANIGREEN": _fwd_q(97.5)}}
+    tr = _fwd.build_trades(st)
+    f3 = tr["AUC-FADE-3PCT"]["final"]
+    assert [t["symbol"] for t in f3] == ["ABB", "ADANIGREEN"], f3
+    abb = f3[0]
+    assert abb["side"] == "SELL" and abb["qty"] == 961 and abb["auction_px"] == 104.0
+    s = _fwd.SLIPPAGE_BPS / 1e4
+    assert abs(abb["entry_fill"] - round(104 * (1 - s), 2)) < 1e-6 and abs(abb["exit_fill"] - round(103 * (1 + s), 2)) < 1e-6
+    from costs import trade_cost as _tc
+    e, x = 104 * (1 - s), 103 * (1 + s)
+    assert abs(abb["gross"] - round((e - x) * 961, 2)) < 0.01 and abs(abb["cost"] - _tc(e, x, 961, "SELL")) < 1e-6
+    assert f3[1]["side"] == "BUY" and f3[1]["net"] == round(f3[1]["gross"] - f3[1]["cost"], 2)
+    # live rule: ABB indicative 3.5 % → in; ADANIGREEN indicative -2.5 % → not in 3 %; ADANIENT +1 % → not in 3 %
+    assert [t["symbol"] for t in tr["AUC-FADE-3PCT"]["live"]] == ["ABB"]
+    assert [t["symbol"] for t in tr["AUC-FADE-1TO3PCT"]["final"]] == ["ADANIENT"]          # 2.5 % in, 3+ % out
+    assert sorted(t["symbol"] for t in tr["AUC-FADE-1TO3PCT"]["live"]) == ["ADANIGREEN"]    # 1.0 % is not > 1 %
+
+
+def t_fwd_cap_exclusions_missing():
+    """At most 10 a day by |gap|; |gap| > 20 % and symbols missing a price are skipped; summary arithmetic."""
+    syms = _fwd.UNIVERSE[:14]
+    st = {"open": {s: _fwd_q(100 + 4 + i, 100 + 4 + i) for i, s in enumerate(syms)},
+          "exit": {s: _fwd_q(100.0) for s in syms}}
+    st["open"][syms[13]] = _fwd_q(125.0, 125.0)               # 25 % gap: excluded
+    st["exit"].pop(syms[12])                                   # no exit price: skipped
+    tr = _fwd.build_trades(st)["AUC-FADE-3PCT"]["final"]
+    assert len(tr) == 10 and syms[13] not in [t["symbol"] for t in tr] and syms[12] not in [t["symbol"] for t in tr]
+    assert tr[0]["symbol"] == syms[11] and all(t["side"] == "SELL" and t["net"] > 0 for t in tr)
+    sm = _fwd.summarize({"2026-11-12": _fwd.build_trades(st)})["AUC-FADE-3PCT/final"]
+    assert sm["trades"] == 10 and sm["days"] == 1 and sm["win_rate"] == 1.0 and abs(sm["net"] - sum(t["net"] for t in tr)) < 0.05
+    q = _fwd.indicative_quality({"indicative": {"ABB": _fwd_q(103.0)}, "open": {"ABB": _fwd_q(104.0, 104.0)}})
+    assert q["symbols"] == 1 and q["gaps_over_2pct"] == 1 and q["caught_by_indicative"] == 1
+
+
+def t_fwd_record_persists_and_scheduler():
+    """record() stores each stage and builds trades at exit in its own file; the scheduler has the four jobs."""
+    import tempfile, kite_client as _kc
+    from config import settings as _st
+    tmp = Path(tempfile.mkdtemp()) / "fwd.json"
+    old_file, old_q, old_src = _fwd.FILE, _kc.kite_client.quote_kite, _st.paper_data_source
+    prices = {"indicative": 104.0, "auction": 104.0, "open": 104.0, "exit": 103.0}
+    stage_now = {}
+    _kc.kite_client.quote_kite = lambda ins: {"NSE:ABB": {"last_price": prices[stage_now["s"]],
+                                                          "ohlc": {"open": 104.0 if stage_now["s"] != "indicative" else 0,
+                                                                   "close": 100.0}}}
+    try:
+        _fwd.FILE = tmp
+        _st.paper_data_source = "KITE"
+        for s in _fwd.STAGES:
+            stage_now["s"] = s
+            r = _fwd.record(s)
+            assert r.get("symbols") == 1, r
+        st = _fwd.status()
+        assert st["summary"]["AUC-FADE-3PCT/final"]["trades"] == 1 and st["summary"]["AUC-FADE-3PCT/live"]["trades"] == 1
+        assert set(st["today"]["stages_recorded"]) == set(_fwd.STAGES) and tmp.exists()
+    finally:
+        _fwd.FILE, _kc.kite_client.quote_kite, _st.paper_data_source = old_file, old_q, old_src
+    import platform_scheduler as _ps
+    src = Path(_ps.__file__).read_text()
+    assert 'forward_{_stage}' in src and '("indicative", (9, 7, 30))' in src and '("exit", (9, 20, 0))' in src
+
+
+run("forward test: variants, final vs live rule, fills, slippage, costs", t_fwd_trades_variants_rules)
+run("forward test: 10-a-day cap, 20 % exclusion, missing prices, summary", t_fwd_cap_exclusions_missing)
+run("forward test: record() persists stages, exit builds trades; scheduler jobs", t_fwd_record_persists_and_scheduler)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
