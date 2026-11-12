@@ -9097,6 +9097,86 @@ run("auction: top-10 |gap| per day, 3 % subset, qty, slippage and costs", t_auc_
 run("auction: protocol never simulates FINAL for screen failures", t_auc_protocol_final_never_for_failures)
 
 
+section("STRATLAB ROUND-2 SCALPING: SCALP-AUC-FADE-1TO3-0925 (stratlab/auction_r2.py)")
+# ══════════════════════════════════════════════════════════════════════════
+from stratlab import auction_r2 as _slr2  # noqa: E402
+
+
+def t_r2_signal_rule_and_features():
+    assert _slr2.fade_rule(100, 101)[0] == -1 and _slr2.fade_rule(100, 99)[0] == 1     # 1 % inclusive, fade side
+    assert _slr2.fade_rule(100, 103)[0] == -1 and _slr2.fade_rule(100, 97)[0] == 1     # 3 % inclusive
+    assert _slr2.fade_rule(100, 100.99) is None and _slr2.fade_rule(100, 103.01) is None
+    assert _slr2.fade_rule(0, 100) is None
+    sd = _auc_sd(gaps=(0.0, 0.05, -0.02, 0.012, 0.03, -0.005))
+    f = _slr2.session_features(sd)
+    assert f[0][5] is True                                       # no previous session -> skipped
+    for k in range(1, len(f)):
+        assert abs(f[k][1] - float(sd.c[sd.ends[k - 1] - 1])) < 1e-9 and abs(f[k][2] - float(sd.o[sd.starts[k]])) < 1e-9
+        assert f[k][3] == 565 and abs(f[k][4] - float(sd.o[sd.starts[k] + 10])) < 1e-9     # 09:25 open
+    rows = _slr2.candidates_for("AUC", f)
+    assert [(r[0], r[2]) for r in rows] == [(20260107, 1), (20260108, -1), (20260109, -1)], rows   # 5 %, 0.5 % out; 3 % in
+    # a short (dropped) previous session -> skip the next day
+    sd.dropped = [20260107]
+    sd2 = _auc_sd(gaps=(0.0, 0.02, 0.02))
+    sd2.dropped = []
+    f2 = _slr2.session_features(sd2)
+    assert len(_slr2.candidates_for("B", f2)) == 2
+    sd2.days = np.array([20260105, 20260107, 20260108], dtype=np.int32)
+    sd2.dropped = [20260106]
+    assert [r[0] for r in _slr2.candidates_for("B", _slr2.session_features(sd2))] == [20260108]
+
+
+def t_r2_no_lookahead():
+    """Perturbing 09:16-09:24 of day d, everything after its 09:25 open, and all later days leaves day d's trade
+    (signal, entry and exit prices) unchanged."""
+    g = (0.0, 0.02, -0.015, 0.025)
+    base = _slr2.candidates_for("AUC", _slr2.session_features(_auc_sd(gaps=g)))
+    sd = _auc_sd(gaps=g)
+    a = int(sd.starts[1])
+    for arr in (sd.o, sd.h, sd.l, sd.c):
+        arr[a + 1:a + 10] *= 1.04
+        arr[a + 11:] *= 0.9
+    pert = _slr2.candidates_for("AUC", _slr2.session_features(sd))
+    assert pert[0] == base[0], (pert[0], base[0])
+
+
+def t_r2_ranking_and_costs():
+    rows = [(20260105, f"S{i:02d}", -1, 0.010 + i * 0.0015, 500.0, 565, 499.0) for i in range(14)]
+    pick = _slr2.select(rows, _slr2.SPECS[0], 0, 99999999)
+    # gaps 1.0 % .. 2.95 %: all 14 qualify, the 10 largest are S04..S13
+    assert len(pick) == 10 and {r[1] for r in pick} == {f"S{i:02d}" for i in range(4, 14)}
+    rows2 = rows + [(20260105, "S99", -1, 0.031, 500.0, 565, 499.0)]
+    assert "S99" not in {r[1] for r in _slr2.select(rows2, _slr2.SPECS[0], 0, 99999999)}
+    tr = _slr2.settle("X", rows[0], 2e-4)
+    fill, ex = 500.0 * (1 - 2e-4), 499.0 * (1 + 2e-4)
+    assert tr[9] == 200 and abs(tr[5] - fill) < 1e-3 and abs(tr[8] - ex) < 1e-3 and tr[7] == "09:25"
+    from costs import round_trip_cost as _rtc
+    assert abs(tr[11] - _rtc(ex * 200, fill * 200, "equity_mis")) < 1e-6
+    mis = _rtc(1e5, 1e5, "equity_mis") / 1e5 * 1e4
+    assert abs(mis - 8.27) < 0.15, mis                                           # pre-registered 8.27 bps
+    assert abs(mis + 2 * 2.0 - 12.27) < 0.15 and abs(mis + 2 * 5.0 - 18.27) < 0.15
+    assert _slr2.DEFAULT_SLIPPAGE_BPS == 2.0 and _slr2.COST_MODEL.startswith(_sls.COST_MODEL)
+
+
+def t_r2_protocol_final_never_for_failures():
+    seen = []
+    rows = [(20240101 + (d % 28) + (d // 28) * 100, "A", 1, -0.02, 100.0, 565, 99.0) for d in range(200)]
+    base = _slr2.make_simulator(rows)
+
+    def sim_(specs, lo, hi):
+        seen.append((lo, hi))
+        return base(specs, lo, hi)
+    cal = sorted({r[0] for r in rows})
+    res, _tr = _slp.evaluate(_slr2.SPECS, cal, sim_, n_symbols=1, ledger_path=None, cost_model=_slr2.COST_MODEL)
+    assert res[0]["verdict"] == "FAILED SCREEN" and len(seen) == 1
+
+
+run("auction_r2: 1-3 % inclusive band, fade side, 09:25 exit, short-previous-session skip", t_r2_signal_rule_and_features)
+run("auction_r2: later bars cannot change an earlier signal or fill (look-ahead)", t_r2_no_lookahead)
+run("auction_r2: top-10 |gap| per day, qty, slippage and 8.27 / 12.27 / 18.27 bps costs", t_r2_ranking_and_costs)
+run("auction_r2: protocol never simulates FINAL for screen failures", t_r2_protocol_final_never_for_failures)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
