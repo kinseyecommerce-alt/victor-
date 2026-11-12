@@ -116,7 +116,7 @@ def snapshot() -> dict:
         "tracked": dict(_tsl_sl_orders),
         "risk": {k: getattr(rm, k) for k in ("daily_realised_pnl", "open_position_count", "trades_today",
                                              "wins_today", "losses_today", "gross_profit", "gross_loss",
-                                             "is_trading_halted")},
+                                             "costs_today", "is_trading_halted")},
         "guard": guard,
         "agents": agents,
         "ai": ai,
@@ -371,7 +371,7 @@ def _restore() -> dict:
     for gid, g in gtts.items():
         kite_client._paper_gtts.setdefault(gid, g)
 
-    for name in ("daily_realised_pnl", "gross_profit", "gross_loss"):
+    for name in ("daily_realised_pnl", "gross_profit", "gross_loss", "costs_today"):
         if name in risk:
             setattr(rm, name, float(risk[name]))
     for name in ("open_position_count", "trades_today", "wins_today", "losses_today"):
@@ -493,6 +493,7 @@ def _reconcile_closed(kite_client, og, rm, agents, e: dict, pos, row: dict) -> N
     gross = float(row.get("gross") or 0.0)
     og.release_order(e.get("guard_symbol", e["symbol"]), pos.strategy, e.get("side", pos.side), gross)
     rm.record_trade(gross)
+    rm.record_cost(float(row.get("cost") or 0.0))
     rm.position_closed()
     a = agents.get(e.get("agent"))
     if a is not None:
@@ -505,6 +506,7 @@ def _reconcile_spread(kite_client, og, rm, sp: dict, row: dict) -> None:
     gross = float(row.get("gross") or 0.0)
     og.release_order(sp["underlying"], "ai_spread", "SELL", gross)
     rm.record_trade(gross)
+    rm.record_cost(float(row.get("cost") or 0.0))
     rm.position_closed()
 
 

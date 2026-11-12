@@ -751,7 +751,7 @@ async def cancel(order_id: str):
 
 @app.post("/orders/squareoff", tags=["Orders"])
 async def squareoff():
-    ids = kite_client.squareoff_all_positions()
+    ids = master_agent.squareoff_book("manual square-off")      # tracked positions through their exit path
     return {"status": "ok", "squared_off": len(ids)}
 
 # HIGH-6: generic error messages, raw exceptions logged server-side only
@@ -1455,7 +1455,8 @@ def dashboard_summary():
                              if risk_manager.gross_loss else None,
             "open_positions": len(positions),
             "max_daily_loss": settings.max_daily_loss,
-            "loss_used_pct": round(min(100.0, max(0.0, -realised) / settings.max_daily_loss * 100), 1)
+            "loss_used_pct": round(min(100.0, max(0.0, -risk_manager.net_realised_pnl())
+                                       / settings.max_daily_loss * 100), 1)
                              if settings.max_daily_loss else 0.0,
             "is_halted": risk_manager.is_trading_halted,
             "ai_cost_usd": ai["cost_today_usd"],
@@ -1848,7 +1849,7 @@ async def n8n_inbound(request: Request):
         return {"status": "stopped"}
 
     elif action == "squareoff":
-        ids = kite_client.squareoff_all_positions()
+        ids = master_agent.squareoff_book("manual square-off")
         return {"status": "ok", "squared_off": len(ids)}
 
     elif action == "start_bot":
