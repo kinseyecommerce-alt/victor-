@@ -524,6 +524,7 @@ class FnOAgent(BaseAgent):
             "option_symbol":     opt_sym,
             "option_type":       best_opt,
             "strike":            strike,
+            "target_strike":     round(self._target_strike(ltp, best_opt, atm_iv), 2),
             "lot_size":          lot_sz,
             "stop_loss_pct":     sl_pct,
             "target_pct":        tgt_pct,
@@ -726,13 +727,20 @@ class FnOAgent(BaseAgent):
 
     # ── Strike selection (delta ~0.40 proxy) ─────────────────────────────────
 
-    def _pick_strike(self, spot: float, opt_type: str, atm_iv: float) -> int:
+    @staticmethod
+    def _target_strike(spot: float, opt_type: str, atm_iv: float) -> float:
+        """The delta ~0.40 strike before rounding to any strike grid."""
         import math
-        step = 100 if spot > 30000 else 50
         iv   = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.12)
         T    = 7.0 / 365.0
         offset = 0.25 * spot * iv * math.sqrt(T)
-        raw    = (spot + offset) if opt_type == "CE" else (spot - offset)
+        return (spot + offset) if opt_type == "CE" else (spot - offset)
+
+    def _pick_strike(self, spot: float, opt_type: str, atm_iv: float) -> int:
+        """Strike on a fixed index-style grid (the built signal symbol / paper simulator only; with Kite data
+        _try_enter trades the listed strike nearest to _target_strike instead)."""
+        step = 100 if spot > 30000 else 50
+        raw  = self._target_strike(spot, opt_type, atm_iv)
         return max(int(round(raw / step) * step), step)
 
     # ── NFO symbol builder ────────────────────────────────────────────────────
@@ -784,21 +792,19 @@ class FnOAgent(BaseAgent):
         if settings.uses_kite_market_data:
             # The signal's symbol is built from fixed weekday rules; trade the real contract
             # from Kite's instrument list (actual expiry and lot size) for that strike instead.
-            from options_resolver import resolve, normalize_underlying
+            # Stock strike steps are ₹1-50 (INFY ₹20 lists 1540/1560, never 1550): a strike on a fixed 50-point
+            # grid was often not listed, or outside the ±3 strikes searched, and the signal was dropped.
+            from options_resolver import resolve_nearest, normalize_underlying
             und = normalize_underlying(underlying) or underlying
             spot = snap.tick.ltp
-            strike = float(signal.get("strike") or 0)
-            contract = None
-            for off in range(-3, 4):
-                c = resolve(und, spot, signal.get("option_type", "CE"), off, now_ist().date())
-                if c and c.live and abs(c.strike - strike) < 1e-6:
-                    contract = c
-                    break
-            if contract is None:
-                logger.warning("[fno] no listed {} {} {} contract — skipping entry",
-                               und, strike, signal.get("option_type"))
-                return
+            opt_type = signal.get("option_type", "CE")
+            target = float(signal.get("target_strike") or signal.get("strike") or 0) \
+                or self._target_strike(spot, opt_type, atm_iv)
+            contract = resolve_nearest(und, spot, opt_type, target, now_ist().date())
+            if contract is None or not contract.live or contract.lot_size <= 0:
+                return self._skip(underlying, f"no listed contract: {und} {opt_type} near {target:.2f}")
             opt_sym, lot_size = contract.tradingsymbol, contract.lot_size
+            signal["strike"] = contract.strike
             try:
                 q = kite_client.quote_kite([f"{exch}:{opt_sym}"])
                 opt_price = float(q.get(f"{exch}:{opt_sym}", {}).get("last_price") or 0.0)
@@ -806,8 +812,7 @@ class FnOAgent(BaseAgent):
                 logger.warning("[fno] option quote failed for {}: {}", opt_sym, exc)
                 opt_price = 0.0
             if opt_price <= 0:
-                logger.warning("[fno] no live premium for {} — skipping entry", opt_sym)
-                return
+                return self._skip(underlying, f"no live premium: {opt_sym}")
         else:
             S         = snap.tick.ltp
             iv        = max((atm_iv / 100.0) if atm_iv > 1.0 else atm_iv, 0.10)
@@ -861,6 +866,15 @@ class FnOAgent(BaseAgent):
             tag="Agent-fno",
         )
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
+        # Track at the broker's fill, not the quote: the marketable LIMIT can fill up to 1 % above it (the
+        # paper broker fills an unstreamed leg at its limit), and the ledger P&L comes from this entry.
+        from execution import fill_after
+        fill = fill_after(order_id, opt_price)
+        if abs(fill - opt_price) > 1e-9:
+            opt_price = fill
+            sl_px   = round(opt_price * (1 - sl_pct / 100), 2)
+            tgt_px  = round(opt_price * (1 + tgt_pct / 100), 2)
+            opt_var = portfolio_risk.option_max_loss(opt_price, sl_px, qty)
 
         # Stream the option leg so its exits are driven by the option's own price
         tick_engine.subscribe([{"symbol": opt_sym, "exchange": exch, "seed_price": opt_price}])
@@ -976,7 +990,7 @@ class SwingAgent(BaseAgent):
     """
     validated_by_replay = True       # replay_backtest on real 1-minute data (swing)
     strategy_rule_exits = False      # exits: GTT stop, target, trailing, holding period (see BaseAgent)
-    VERSION = "v2"                   # rule exits off + live candle-depth fix: judged on its own trades
+    VERSION = "v3"                   # v3: live exits as replayed — % trail (not 1-min ATR), 15-session hold
     name    = "swing"
     product = "CNC"
     min_candles_1min = 30    # the live snapshot carries 60 one-minute candles (200 here meant swing never evaluated); EMA200 comes from the indicator history

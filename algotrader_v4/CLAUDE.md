@@ -72,7 +72,7 @@ int(per_symbol_capital // ltp) = quantity
 | `sebi_compliance.py` | Audit log, kill switch (`KillSwitchState`), IP whitelist, approved algo IDs |
 | `symbol_scanner.py` | Scans Nifty 100 universe for liquid, volatile symbols meeting entry criteria |
 | `atomic_bracket.py` | Places entry + SL-M + target orders as a unit; rolls back on partial failure |
-| `paper_book.py` | PAPER only: snapshots the paper book (orders, positions, trailing stops, agent/AI bookkeeping, risk counters) to `PAPER_BOOK_FILE` and restores it after a same-day restart; a watchdog manages restored positions until their agent does; resets the day counters at 09:15 when master is not running and squares off restored intraday/NRML positions at `squareoff_time` (`PERSIST_PAPER_BOOK`) |
+| `paper_book.py` | PAPER only: snapshots the paper book (orders, positions, trailing stops, agent/AI bookkeeping, risk counters) to `PAPER_BOOK_FILE` and restores it after a same-day restart (after a restart on a later day only the delivery / swing holdings are carried over); a watchdog manages restored positions until their agent does; resets the day counters at 09:15 when master is not running and squares off restored intraday/NRML positions at `squareoff_time` (`PERSIST_PAPER_BOOK`) |
 
 ### Live / replay parity (read before changing the entry or exit path)
 
@@ -84,7 +84,8 @@ the ₹50k order cap rejected ₹1L positions, the ledger pruned v2 agents on v1
 into a loser. Rules that keep them in step:
 
 - Exits: `BaseAgent.rule_exit()` is the single exit-rule policy for both the live loop and the replay. Validated agents
-  (`strategy_rule_exits = False`) exit only by stop, target, trailing stop and the MIS square-off at `squareoff_time`.
+  (`strategy_rule_exits = False`) exit only by stop, target, trailing stop, the MIS square-off at `squareoff_time`
+  and the delivery (CNC) holding period `base_agent.MAX_CNC_SESSIONS` (the replay imports the same constant).
 - Filters: `replay_backtest.LIVE_FILTERS` lets the replay apply live-only filters (MTF, strategy exits) so their effect
   can be measured before they are switched on.
 - Versions: bump an agent's `VERSION` when its logic changes; the performance ledger, pruning and the allocator's live

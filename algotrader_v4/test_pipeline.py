@@ -2062,7 +2062,9 @@ def t_fno_tracked_on_option_premium():
         oid = next(o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == opt)
         try:
             pos = _tsl_eng._positions[oid]
-            assert pos.symbol == opt and pos.entry_price == 120.0, (pos.symbol, pos.entry_price)
+            # tracked at the broker's fill (the paper broker fills the unstreamed leg at its +1 % limit)
+            assert pos.symbol == opt and pos.entry_price == _order(oid)["average_price"] == 121.2, \
+                (pos.symbol, pos.entry_price)
             sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
             assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING", sl
             entry_order = _order(oid)
@@ -10391,6 +10393,265 @@ run("paper book: LIVE mode (and the setting off) never writes or restores",    t
 run("paper book: corrupt snapshot does not crash startup",                     t_paper_book_corrupt_file)
 run("paper book: scalper/intraday day state survives a restart",               t_paper_book_agent_day_state)
 run("paper book: AI trader targets, trails and counters restored",             t_paper_book_ai_round_trip)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SWING / F&O — delivery holdings and option contracts (e2e findings SF-1..SF-8, 12 Nov 2026)
+# ══════════════════════════════════════════════════════════════════════════
+section("SWING / F&O LIFECYCLE")
+import master_agent_v5 as _mav_sf
+import replay_backtest as _rb_sf
+from trailing_sl_engine import TrailingSLEngine as _TSLE_sf, TRAIL_CONFIGS as _TC_sf, SLMode as _SLM_sf
+
+
+def _sf_rows(sym):
+    return [p for p in _te_kite_client._paper_positions if p["tradingsymbol"] == sym]
+
+
+def _sf_row(sym, product):
+    return next((p for p in _sf_rows(sym) if p.get("product") == product), None)
+
+
+def _sf_swing_entry(sym, ltp=1000.0):
+    oid = _paper_entry(_ALL_pb["swing"], sym, ltp)
+    assert _ba._tsl_sl_orders[oid]["product"] == "CNC" and _ba._tsl_sl_orders[oid]["agent"] == "swing"
+    return oid
+
+
+def t_sf_cnc_holding_survives_squareoff_after_mis_round_trip():
+    """SF-1: intraday trades X MIS and closes it, then swing buys X CNC the same day. The paper broker kept one
+    row per symbol with the first order's product ('MIS'), so the 15:15 square-off sold the swing holding while
+    its tracking survived — the later stop sold it again (naked short + phantom ledger loss)."""
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_sf, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        sym = "SFMIXCNC"
+        mis = _paper_entry(_ALL_pb["intraday"], sym, 1000.0)
+        q_mis = _sf_row(sym, "MIS")["quantity"]
+        _ba._close_tracked(mis, sym, "BUY", q_mis, -100.0, "T", "intraday")
+        assert _sf_row(sym, "MIS")["quantity"] == 0
+        sw = _sf_swing_entry(sym)
+        cnc = _sf_row(sym, "CNC")
+        assert cnc is not None and cnc["quantity"] > 0, f"the CNC buy needs its own row: {_sf_rows(sym)}"
+        qty = cnc["quantity"]
+        asyncio.run(_mav_sf.master_agent._auto_squareoff())
+        squared = [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == sym and o["tag"] == "SquareOff"]
+        assert not squared, f"the delivery holding was squared off: {squared}"
+        assert _sf_row(sym, "CNC")["quantity"] == qty and sw in _ba._tsl_sl_orders
+        # the swing stop later closes it exactly once and the book ends flat (never short)
+        pos = _tsl_eng._positions[sw]
+        asyncio.run(_tsl_eng.on_sl_hit(pos, pos.current_sl, (pos.current_sl - pos.entry_price) * qty))
+        assert sw not in _ba._tsl_sl_orders
+        assert all(p["quantity"] == 0 for p in _sf_rows(sym)), _sf_rows(sym)
+
+
+def t_sf_paper_rows_keyed_by_product():
+    """SF-1: the paper broker keeps one net row per (symbol, product), as Kite does; the tracked square-off
+    bounds an MIS exit by the MIS row only."""
+    with _pb_isolated():
+        k = _te_kite_client
+        for prod, qty in (("CNC", 10), ("MIS", 5)):
+            k._update_paper_position({"tradingsymbol": "SFKEY", "exchange": "NSE", "product": prod,
+                                      "transaction_type": "BUY", "quantity": qty, "price": 100.0})
+        assert {(p["product"], p["quantity"]) for p in _sf_rows("SFKEY")} == {("CNC", 10), ("MIS", 5)}
+        k._update_paper_position({"tradingsymbol": "SFKEY", "exchange": "NSE", "product": "MIS",
+                                  "transaction_type": "SELL", "quantity": 5, "price": 101.0})
+        assert _sf_row("SFKEY", "CNC")["quantity"] == 10 and _sf_row("SFKEY", "MIS")["quantity"] == 0
+        k.squareoff_all_positions()
+        assert _sf_row("SFKEY", "CNC")["quantity"] == 10, "delivery rows are never squared off"
+
+
+def t_sf_daily_reset_keeps_swing_holding_in_guard():
+    """SF-2: master's 09:15 reset (and the paper book's own rollover) cleared the order guard and the
+    open-position count; only the AI trader's holdings were re-applied, so SwingAgent bought a symbol it
+    already held a second time."""
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_sf, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        sym = "SFRESET"
+        sw = _sf_swing_entry(sym)
+        assert _rm_x.open_position_count == 1
+        for reset in ("master", "paper_book"):
+            if reset == "master":
+                asyncio.run(_mav_sf.master_agent._daily_reset())
+            else:
+                _pb._book_day = _pb.session_day() - timedelta(days=1)
+                assert _pb.roll_day_if_due()
+            assert _og_pb.is_symbol_active_anywhere(sym) == ["swing"], reset
+            assert not _og_pb.can_place(sym, "swing", "BUY")[0], reset
+            assert _rm_x.open_position_count == 1, (reset, _rm_x.open_position_count)
+        n = len(_te_kite_client._paper_orders)
+        asyncio.run(_ALL_pb["swing"]._try_enter(_make_snap(symbol=sym, ltp=1000.0), "BUY", {"stop_loss": 970.0}))
+        assert len(_te_kite_client._paper_orders) == n, "no second buy of a symbol already held"
+        _ba._close_tracked(sw, sym, "BUY", _sf_row(sym, "CNC")["quantity"], 0.0, "T", "swing")
+        assert _rm_x.open_position_count == 0 and not _og_pb.is_symbol_active_anywhere(sym)
+
+
+def t_sf_restart_next_day_keeps_swing_holding():
+    """SF-3: a restart on a later day restored nothing (stale snapshot): every SwingAgent CNC holding vanished
+    (no exit, no ledger row). Its delivery positions are carried over; intraday rows and day counters are not."""
+    with _pb_isolated() as f:
+        sw = _sf_swing_entry("SFNEXT", 1000.0)
+        mis = _paper_entry(_ALL_pb["intraday"], "SFNEXTI", 500.0)
+        pos0 = _tsl_eng._positions[sw]
+        pos0.current_sl = 975.5
+        qty, gtt = pos0.quantity, _ba._tsl_sl_orders[sw].get("gtt_id")
+        _pb.save()
+        snap = _json_pb.loads(f.read_text())
+        prev = (_pb.now_ist().date() - timedelta(days=3)).isoformat()
+        snap["session"] = snap["book_day"] = prev
+        f.write_text(_json_pb.dumps(snap))
+        _pb_wipe()
+        _pb._book_day = None
+        out = _pb.restore()
+        assert out["restored"] and out["positions"] == ["SFNEXT"], out
+        assert sw in _ba._tsl_sl_orders and mis not in _ba._tsl_sl_orders
+        assert _tsl_eng._positions[sw].current_sl == 975.5 and _tsl_eng._positions[sw].quantity == qty
+        assert _sf_row("SFNEXT", "CNC")["quantity"] == qty and not _sf_rows("SFNEXTI")
+        assert gtt is None or _te_kite_client._paper_gtts[int(gtt)]["status"] == "active"
+        assert _og_pb.is_symbol_active_anywhere("SFNEXT") == ["swing"]
+        assert _rm_x.open_position_count == 1 and _rm_x.trades_today == 0
+        assert _ALL_pb["swing"].state.trades_today == 0 and _ALL_pb["intraday"].state.trades_today == 0
+        n0 = len(_perf_pb.trades)
+        _ba._close_tracked(sw, "SFNEXT", "BUY", qty, (990.0 - 1000.0) * qty, "T", "swing")
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == sw
+        assert _sf_row("SFNEXT", "CNC")["quantity"] == 0
+
+
+def t_sf_swing_trail_is_percent_like_replay():
+    """SF-4: the swing trail was ATR_TRAIL fed the 1-minute ATR live (₹1 behind the best price) but replayed
+    with atr=0 (1 % trail): live cut every winner on its first small pullback. Live and replay must agree."""
+    assert _TC_sf["swing"].mode == _SLM_sf.TRAILING
+    stops = []
+    for atr in (0.67, 0.0):                         # live (1-minute ATR) vs replay (0)
+        eng = _TSLE_sf()
+        p = eng.register(symbol="SFTRAIL", strategy="swing", side="BUY", entry_price=1400.0, quantity=10,
+                         order_id=f"SFT-{atr}")
+        for px in (1420.0, 1441.0):
+            asyncio.run(eng.on_tick("SFTRAIL", px, atr))
+        asyncio.run(eng.on_tick("SFTRAIL", 1433.0, atr))   # a 0.6 % dip after +2.9 %
+        assert p.status.value == "ACTIVE", f"atr={atr}: stopped out on a 0.6 % dip at {p.current_sl}"
+        stops.append(p.current_sl)
+    assert stops[0] == stops[1], stops
+
+
+def t_sf_swing_holding_period_matches_replay():
+    """SF-5: the replay closes a swing trade after MAX_CNC_SESSIONS sessions ('TIME'); live never did."""
+    from unittest.mock import patch
+    import agents.strategy_agents as _sa_sf
+    from ist_clock import is_trading_day
+    assert _rb_sf.MAX_CNC_SESSIONS is _ba.MAX_CNC_SESSIONS == 15
+    d0 = date(2026, 11, 13)
+    days, d = [], d0
+    while len(days) < 15:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            days.append(d)
+    a = _ALL_pb["swing"]
+    row = {"tradingsymbol": "SFHOLD", "quantity": 10, "average_price": 1000.0, "opened": d0.isoformat()}
+    ind = _make_snap(symbol="SFHOLD", ltp=1000.0).indicators
+    for day, want in ((days[13], False), (days[14], True)):
+        with patch.object(_sa_sf, "now_ist", return_value=_pb_at(day, 9, 16)):
+            assert a.rule_exit(row, ind)[0] is want, (day, a.rule_exit(row, ind))
+    with patch.object(_sa_sf, "now_ist", return_value=_pb_at(days[14], 9, 16)):
+        assert a.rule_exit({k: v for k, v in row.items() if k != "opened"}, ind)[0] is False
+    # the live loop passes the entry session and exits the holding through the normal path
+    async def _noop(*a_, **k): return None
+    with _pb_isolated(), patch.object(_ba, "send_telegram", _noop), patch.object(_sa_sf, "send_telegram", _noop, create=True):
+        sw = _sf_swing_entry("SFHOLD")
+        assert _ba._tsl_sl_orders[sw]["opened"] == _sa_sf.now_ist().date().isoformat()
+        _ba._tsl_sl_orders[sw]["opened"] = d0.isoformat()
+        with patch.object(_sa_sf, "now_ist", return_value=_pb_at(days[14], 9, 16)):
+            asyncio.run(a._check_exits_on_tick(_make_snap(symbol="SFHOLD", ltp=1000.0)))
+        assert sw not in _ba._tsl_sl_orders and _sf_row("SFHOLD", "CNC")["quantity"] == 0
+
+
+def _sf_listed(name, step, centre, lot, expiry):
+    return [{"name": name, "instrument_type": t, "segment": "NFO-OPT", "strike": float(k), "expiry": expiry,
+             "tradingsymbol": f"{name}SF{int(k) if float(k).is_integer() else k}{t}", "lot_size": lot}
+            for t in ("CE", "PE") for k in [centre + i * step for i in range(-30, 31)]]
+
+
+def t_sf_fno_trades_nearest_listed_strike():
+    """SF-6/SF-7: a stock strike on a fixed 50-point grid (TATASTEEL 163 → 150, INFY ₹20 steps never list 1550)
+    had to match one of 7 listed strikes exactly, else the signal was dropped silently. The agent now trades the
+    listed strike nearest to its delta-0.4 target, counts drops via _skip, and tracks the trade at the broker's
+    fill (the ledger booked the quote, 1 % under the paper fill)."""
+    from unittest.mock import patch
+    import options_resolver as _or_sf
+    class _OptKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 4.0} for i in instruments}
+    async def _noop(*a, **k): return None
+    exp = datetime.now().date() + timedelta(days=6)
+    listed = _sf_listed("TATASTEEL", 1, 163, 5500, exp) + _sf_listed("INFY", 20, 1500, 400, exp)
+    def body():
+        _te_kite_client._kite = _OptKite()
+        agent = FnOAgent()
+        with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+             patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+             patch.object(_ba, "send_telegram", _noop), \
+             patch.object(_or_sf, "_instruments", return_value=listed):
+            spot = 163.44
+            sig = {"option_symbol": "BUILT", "exchange": "NFO", "lot_size": 1, "option_type": "CE",
+                   "strike": agent._pick_strike(spot, "CE", 25.0),
+                   "target_strike": agent._target_strike(spot, "CE", 25.0), "atm_iv": 25.0}
+            assert sig["strike"] == 150
+            asyncio.run(agent._try_enter(_make_snap(symbol="TATASTEEL", ltp=spot), "BUY", dict(sig)))
+            oid, e = next((o, e) for o, e in _ba._tsl_sl_orders.items() if e["symbol"].startswith("TATASTEELSF"))
+            assert e["symbol"] == f"TATASTEELSF{round(sig['target_strike'])}CE", e["symbol"]
+            assert _tsl_eng._positions[oid].quantity == 5500
+            fill = _order(oid)["average_price"]
+            assert _tsl_eng._positions[oid].entry_price == fill, (_tsl_eng._positions[oid].entry_price, fill)
+            n0 = len(_perf_pb.trades)
+            _ba._close_tracked(oid, e["symbol"], "BUY", 5500, 0.0, "T", "fno")
+            assert _perf_pb.trades[-1]["oid"] == oid and len(_perf_pb.trades) == n0 + 1
+            # INFY lists 1540/1560 only: the 50-grid 1550 snaps to a listed neighbour
+            asyncio.run(agent._try_enter(_make_snap(symbol="INFY", ltp=1548.0), "BUY",
+                        {"exchange": "NFO", "lot_size": 1, "option_type": "CE", "strike": 1550}))
+            oid2, e2 = next((o, e) for o, e in _ba._tsl_sl_orders.items() if e["symbol"].startswith("INFYSF"))
+            assert e2["symbol"] in ("INFYSF1540CE", "INFYSF1560CE") and _tsl_eng._positions[oid2].quantity == 400
+            _ba._close_tracked(oid2, e2["symbol"], "BUY", 400, 0.0, "T", "fno")
+            # an underlying with no listed options is a counted skip, not a silent drop
+            n = len(_te_kite_client._paper_orders)
+            asyncio.run(agent._try_enter(_make_snap(symbol="NOOPTS", ltp=500.0), "BUY",
+                        {"exchange": "NFO", "lot_size": 1, "option_type": "CE", "strike": 500}))
+            assert len(_te_kite_client._paper_orders) == n
+            assert agent.state.skip_counts.get("no listed contract") == 1, agent.state.skip_counts
+    _with_paper_kite(body)
+
+
+def t_sf_swing_entry_protected_by_gtt():
+    """SF-8: a SwingAgent CNC entry was protected by a DAY SL-M, which expires at the close (LIVE: no stop
+    overnight). It gets a GTT like the AI swing path; the GTT follows the trail and is deleted on exit."""
+    with _pb_isolated():
+        sw = _sf_swing_entry("SFGTT", 1000.0)
+        e = _ba._tsl_sl_orders[sw]
+        assert e.get("gtt_id") and not e.get("sl_order_id"), e
+        g = _te_kite_client._paper_gtts[int(e["gtt_id"])]
+        assert g["status"] == "active" and g["quantity"] == _sf_row("SFGTT", "CNC")["quantity"]
+        assert g["trigger"] < 990.0, g                      # just beyond the software stop (₹990)
+        assert not [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == "SFGTT"
+                    and o["order_type"] in ("SL", "SL-M")], "no day stop order on a delivery holding"
+        pos = _tsl_eng._positions[sw]
+        asyncio.run(_tsl_eng.on_tick("SFGTT", 1030.0, 0.0))
+        assert pos.current_sl > 990.0 and g["trigger"] > 990.0, (pos.current_sl, g)
+        _ba._close_tracked(sw, "SFGTT", "BUY", pos.quantity, 0.0, "T", "swing")
+        assert g["status"] == "deleted"
+    # intraday (MIS) entries keep their exchange SL-M
+    with _pb_isolated():
+        oid = _paper_entry(_ALL_pb["intraday"], "SFMISSL", 500.0)
+        assert _order(_ba._tsl_sl_orders[oid]["sl_order_id"])["order_type"] == "SL-M"
+
+
+run("SF-1 swing CNC holding survives the 15:15 square-off after an MIS round trip", t_sf_cnc_holding_survives_squareoff_after_mis_round_trip)
+run("SF-1 paper broker keeps one row per (symbol, product)",                       t_sf_paper_rows_keyed_by_product)
+run("SF-2 09:15 reset keeps swing holdings in the guard and position count",       t_sf_daily_reset_keeps_swing_holding_in_guard)
+run("SF-3 restart on a later day carries the swing holding over",                  t_sf_restart_next_day_keeps_swing_holding)
+run("SF-4 swing trail is the replay's percent trail, not the 1-minute ATR",        t_sf_swing_trail_is_percent_like_replay)
+run("SF-5 swing holding period exits after MAX_CNC_SESSIONS, as replayed",         t_sf_swing_holding_period_matches_replay)
+run("SF-6/7 F&O trades the nearest listed strike, tracked at the broker fill",     t_sf_fno_trades_nearest_listed_strike)
+run("SF-8 swing CNC entry is protected by a GTT, not a day SL-M",                  t_sf_swing_entry_protected_by_gtt)
 
 
 # ══════════════════════════════════════════════════════════════════════════

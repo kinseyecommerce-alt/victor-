@@ -665,13 +665,17 @@ class KiteClient:
                 pos["pnl"] = round(pos["sell_value"] - pos["buy_value"] + pos["quantity"] * pos["last_price"], 2)
 
     def _update_paper_position(self, order: dict) -> None:
+        """One net row per (tradingsymbol, product), as Kite keeps them. A single row per symbol kept the
+        product of the day's first order: a swing CNC buy after an intraday MIS round trip on the same symbol
+        landed in the 'MIS' row, and the 15:15 square-off sold the delivery holding."""
         sym       = order["tradingsymbol"]
+        product   = order.get("product") or "MIS"
         px        = order["price"]
         qty_delta = (order["quantity"] if order["transaction_type"] == "BUY"
                      else -order["quantity"])
         value     = px * order["quantity"]
         for pos in self._paper_positions:
-            if pos["tradingsymbol"] == sym:
+            if pos["tradingsymbol"] == sym and (pos.get("product") or "MIS") == product:
                 pos.setdefault("buy_value", 0.0); pos.setdefault("sell_value", 0.0)
                 pos["buy_value" if qty_delta > 0 else "sell_value"] += value
                 old_q = pos["quantity"]
@@ -687,7 +691,7 @@ class KiteClient:
         self._paper_positions.append({
             "tradingsymbol": sym,
             "exchange":      order["exchange"],
-            "product":       order["product"],
+            "product":       product,
             "quantity":      qty_delta,
             "average_price": px,
             "last_price":    px,
