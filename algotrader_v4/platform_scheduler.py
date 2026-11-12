@@ -66,7 +66,7 @@ class PlatformScheduler:
         )
         # live paper forward test of the opening-auction fade (forward_test.py): pre-open indicative,
         # post-match auction, continuous open, 09:20 exit
-        for _stage, (_h, _m, _s) in (("indicative", (9, 7, 30)), ("auction", (9, 8, 45)),
+        for _stage, (_h, _m, _s) in (("indicative_early", (9, 6, 45)), ("indicative", (9, 7, 30)), ("auction", (9, 8, 45)),
                                      ("open", (9, 15, 5)), ("exit", (9, 20, 0))):
             self._sched.add_job(
                 self._forward_test, "cron", args=[_stage],

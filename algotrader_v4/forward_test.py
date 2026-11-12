@@ -5,7 +5,9 @@ The 3-year lab test of this strategy used the final 09:15 auction price for both
 Live, an order has to go in during the 09:00-09:08 pre-open, when only the indicative price is known.
 So this module records, every trading day:
 
-  09:07:30  "indicative": quotes of the 97 lab symbols while orders can still be placed
+  09:06:45  "indicative_early": quotes while pre-open orders can still be placed (entry closes at a random
+            moment between 09:07 and 09:08) — the "live" rule uses this one
+  09:07:30  "indicative": a second pre-open read, for measuring how the indicative price evolves
   09:08:45  "auction":    quotes just after the call auction has matched
   09:15:05  "open":       quotes at the start of continuous trading (ohlc.open = official open)
   09:20:00  "exit":       quotes at the 5-minute exit
@@ -13,7 +15,12 @@ So this module records, every trading day:
 and builds paper trades for three variants (gap > 3 %, > 2 %, 1-3 %) under two rules:
 
   final  the signal from the final auction price (exactly what the lab tested)
-  live   the signal from the 09:07:30 indicative price (what a real pre-open order can use)
+  live   the signal from the 09:06:45 indicative price (what a real pre-open order can use)
+
+The indicative price is read from ohlc.open (Kite fills it with the equilibrium price during the pre-open; last_price
+stays at the previous close until the auction matches). When Kite gives no indicative price it is recorded as missing,
+not as the previous close. prev_close is Kite's ohlc.close (NSE's official close); the lab used the last 1-minute close,
+so gaps right at the 1/2/3 % thresholds can differ slightly.
 
 Both fill at the auction price ± slippage, exit at the 09:20 price ± slippage, ₹1 lakh notional each, at most
 10 trades per day (largest |gap| first), |gap| > 20 % excluded, 2026 Zerodha MIS costs. Nothing here places an
@@ -48,7 +55,7 @@ UNIVERSE = (
     "WIPRO ZYDUSLIFE"
 ).split()
 
-STAGES = ("indicative", "auction", "open", "exit")
+STAGES = ("indicative_early", "indicative", "auction", "open", "exit")
 VARIANTS = {"AUC-FADE-3PCT": (0.03, None), "AUC-FADE-2PCT": (0.02, None), "AUC-FADE-1TO3PCT": (0.01, 0.03)}
 RULES = ("final", "live")
 NOTIONAL = 100_000
@@ -60,12 +67,15 @@ _EPS = 1e-9
 
 # ── storage ──────────────────────────────────────────────────────────────────
 def _load() -> dict:
+    if not FILE.exists():
+        return {"days": {}}
     try:
-        if FILE.exists():
-            return json.loads(FILE.read_text())
-    except Exception as exc:
-        logger.warning("[forward] cannot read {}: {}", FILE, exc)
-    return {"days": {}}
+        return json.loads(FILE.read_text())
+    except Exception as exc:                          # keep the bad file instead of overwriting the history
+        bad = FILE.with_name(f"{FILE.name}.corrupt-{now_ist().strftime('%Y%m%d%H%M%S')}")
+        logger.error("[forward] cannot read {} ({}); moved it to {}", FILE, exc, bad)
+        FILE.replace(bad)
+        return {"days": {}}
 
 
 def _save(state: dict) -> None:
@@ -101,6 +111,16 @@ def eligible(g: Optional[float], lo: float, hi: Optional[float]) -> bool:
     return a > lo + _EPS and (hi is None or a <= hi + _EPS)
 
 
+def indicative_price(stages: dict, sym: str, stage: str = "indicative_early") -> float:
+    """The pre-open indicative price, or 0.0 when Kite gives none (never the previous close)."""
+    q = (stages.get(stage) or {}).get(sym) or {}
+    pc = q.get("prev_close") or prev_close(stages, sym)
+    for px in (q.get("open") or 0.0, q.get("ltp") or 0.0):
+        if px > 0 and px != pc:
+            return px
+    return 0.0
+
+
 def auction_price(stages: dict, sym: str) -> float:
     """The final auction price: the official open once continuous trading starts, else the post-match quote."""
     o = (stages.get("open") or {}).get(sym) or {}
@@ -109,7 +129,7 @@ def auction_price(stages: dict, sym: str) -> float:
 
 
 def prev_close(stages: dict, sym: str) -> float:
-    for st in ("open", "auction", "indicative", "exit"):
+    for st in ("open", "auction", "indicative_early", "indicative", "exit"):
         pc = ((stages.get(st) or {}).get(sym) or {}).get("prev_close")
         if pc:
             return pc
@@ -129,17 +149,14 @@ def build_trades(stages: dict, slippage_bps: float = SLIPPAGE_BPS) -> dict:
                 xp = (exits.get(sym) or {}).get("ltp") or 0.0
                 if not (pc and ap and xp):
                     continue
-                if rule == "final":
-                    g_sig = gap(ap, pc)
-                else:
-                    ind = (stages.get("indicative") or {}).get(sym) or {}
-                    g_sig = gap(ind.get("ltp") or 0.0, pc)
+                sig_px = ap if rule == "final" else indicative_price(stages, sym)
+                g_sig = gap(sig_px, pc)
                 if not eligible(g_sig, lo, hi):
                     continue
-                cands.append((abs(g_sig), sym, g_sig, pc, ap, xp))
+                cands.append((abs(g_sig), sym, g_sig, pc, ap, xp, sig_px))
             cands.sort(key=lambda c: (-c[0], c[1]))
-            for _, sym, g_sig, pc, ap, xp in cands[:MAX_PER_DAY]:
-                qty = int(NOTIONAL // ap)
+            for _, sym, g_sig, pc, ap, xp, sig_px in cands[:MAX_PER_DAY]:
+                qty = int(NOTIONAL // sig_px)                    # sized on what is known when the order goes in
                 if qty <= 0:
                     continue
                 side = "SELL" if g_sig > 0 else "BUY"            # fade the gap
@@ -160,26 +177,29 @@ def build_trades(stages: dict, slippage_bps: float = SLIPPAGE_BPS) -> dict:
 
 
 def indicative_quality(stages: dict) -> dict:
-    """How well the 09:07:30 indicative price predicted the final auction price (the live strategy's key unknown)."""
-    diffs, agree, n_big = [], 0, 0
-    for sym in UNIVERSE:
-        pc, ap = prev_close(stages, sym), auction_price(stages, sym)
-        ind = ((stages.get("indicative") or {}).get(sym) or {}).get("ltp") or 0.0
-        gi, ga = gap(ind, pc), gap(ap, pc)
-        if gi is None or ga is None:
-            continue
-        diffs.append((ind / ap - 1) * 1e4)
-        if abs(ga) > 0.02:
-            n_big += 1
-            agree += eligible(gi, 0.02, None) and math.copysign(1, gi) == math.copysign(1, ga)
-    if not diffs:
-        return {"symbols": 0}
-    diffs.sort()
-    return {"symbols": len(diffs), "median_abs_bps": round(sorted(abs(d) for d in diffs)[len(diffs) // 2], 2),
-            "mean_bps": round(sum(diffs) / len(diffs), 2), "same_as_prev_close": sum(
-                1 for sym in UNIVERSE if ((stages.get("indicative") or {}).get(sym) or {}).get("ltp")
-                and ((stages.get("indicative") or {}).get(sym) or {}).get("ltp") == prev_close(stages, sym)),
-            "gaps_over_2pct": n_big, "caught_by_indicative": agree}
+    """How well the pre-open indicative price predicted the final auction price (the live strategy's key unknown)."""
+    out = {}
+    for stage in ("indicative_early", "indicative"):
+        diffs, agree, n_big, missing = [], 0, 0, 0
+        for sym in UNIVERSE:
+            pc, ap = prev_close(stages, sym), auction_price(stages, sym)
+            ga = gap(ap, pc)
+            if ga is None:
+                continue
+            ind = indicative_price(stages, sym, stage)
+            gi = gap(ind, pc)
+            if abs(ga) > 0.02:
+                n_big += 1
+                agree += bool(gi is not None and eligible(gi, 0.02, None) and (gi > 0) == (ga > 0))
+            if gi is None:
+                missing += 1
+                continue
+            diffs.append(abs(ind / ap - 1) * 1e4)
+        diffs.sort()
+        out[stage] = {"with_indicative": len(diffs), "missing": missing,
+                      "median_abs_err_bps": round(diffs[len(diffs) // 2], 2) if diffs else None,
+                      "gaps_over_2pct": n_big, "caught_by_indicative": agree}
+    return out
 
 
 def summarize(trades_by_day: dict) -> dict:
@@ -194,7 +214,7 @@ def summarize(trades_by_day: dict) -> dict:
                 "trades": len(ts), "net": round(sum(t["net"] for t in ts), 2),
                 "gross": round(sum(t["gross"] for t in ts), 2), "costs": round(sum(t["cost"] for t in ts), 2),
                 "win_rate": round(sum(t["net"] > 0 for t in ts) / len(ts), 3) if ts else None,
-                "profit_factor": round(wins / losses, 2) if losses else (None if not ts else float("inf")),
+                "profit_factor": round(wins / losses, 2) if losses else None,          # None: no losing trade yet
                 "avg_net_bps": round(sum(t["net_bps"] for t in ts) / len(ts), 2) if ts else None}
     return out
 
@@ -236,7 +256,7 @@ def status(include_quotes: bool = False) -> dict:
     return {
         "strategy": "opening-auction fade (stratlab/auction.py), paper forward test; separate ledger, no broker orders",
         "rules": {"final": "signal from the final auction price (as tested)",
-                  "live": "signal from the 09:07:30 indicative price (what a real pre-open order can use)"},
+                  "live": "signal from the 09:06:45 indicative price (what a real pre-open order can use)"},
         "summary": summarize(trades),
         "today": {"date": today, "stages_recorded": t.get("at", {}),
                   "trades": t.get("trades"), "indicative_quality": t.get("indicative_quality"),

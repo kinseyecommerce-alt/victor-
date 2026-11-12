@@ -9108,7 +9108,8 @@ def _fwd_q(ltp=0.0, open_=0.0, pc=100.0):
 
 def t_fwd_trades_variants_rules():
     """Gap > 3 % up is faded short at the auction price; the live rule uses the indicative price; 1-3 % excludes > 3 %."""
-    st = {"indicative": {"ABB": _fwd_q(103.5), "ADANIENT": _fwd_q(101.0), "ADANIGREEN": _fwd_q(97.5)},
+    st = {"indicative_early": {"ABB": _fwd_q(100.0, 103.5), "ADANIENT": _fwd_q(100.0, 101.0),
+                               "ADANIGREEN": _fwd_q(100.0, 97.5)},
           "auction": {}, "open": {"ABB": _fwd_q(104.0, 104.0), "ADANIENT": _fwd_q(102.5, 102.5),
                                   "ADANIGREEN": _fwd_q(96.5, 96.5)},
           "exit": {"ABB": _fwd_q(103.0), "ADANIENT": _fwd_q(102.0), "ADANIGREEN": _fwd_q(97.5)}}
@@ -9117,6 +9118,7 @@ def t_fwd_trades_variants_rules():
     assert [t["symbol"] for t in f3] == ["ABB", "ADANIGREEN"], f3
     abb = f3[0]
     assert abb["side"] == "SELL" and abb["qty"] == 961 and abb["auction_px"] == 104.0
+    assert tr["AUC-FADE-3PCT"]["live"][0]["qty"] == 966                                     # sized on 103.5
     s = _fwd.SLIPPAGE_BPS / 1e4
     assert abs(abb["entry_fill"] - round(104 * (1 - s), 2)) < 1e-6 and abs(abb["exit_fill"] - round(103 * (1 + s), 2)) < 1e-6
     from costs import trade_cost as _tc
@@ -9141,8 +9143,13 @@ def t_fwd_cap_exclusions_missing():
     assert tr[0]["symbol"] == syms[11] and all(t["side"] == "SELL" and t["net"] > 0 for t in tr)
     sm = _fwd.summarize({"2026-11-12": _fwd.build_trades(st)})["AUC-FADE-3PCT/final"]
     assert sm["trades"] == 10 and sm["days"] == 1 and sm["win_rate"] == 1.0 and abs(sm["net"] - sum(t["net"] for t in tr)) < 0.05
-    q = _fwd.indicative_quality({"indicative": {"ABB": _fwd_q(103.0)}, "open": {"ABB": _fwd_q(104.0, 104.0)}})
-    assert q["symbols"] == 1 and q["gaps_over_2pct"] == 1 and q["caught_by_indicative"] == 1
+    q = _fwd.indicative_quality({"indicative_early": {"ABB": _fwd_q(100.0, 103.0), "ADANIENT": _fwd_q(100.0, 0.0)},
+                                 "open": {"ABB": _fwd_q(104.0, 104.0), "ADANIENT": _fwd_q(103.0, 103.0)}})["indicative_early"]
+    assert q["with_indicative"] == 1 and q["missing"] == 1 and q["gaps_over_2pct"] == 2 and q["caught_by_indicative"] == 1
+    # no indicative (open 0, ltp = prev close) is missing, never a 0 % gap
+    assert _fwd.indicative_price({"indicative_early": {"X": _fwd_q(100.0, 0.0)}}, "X") == 0.0
+    import json as _j
+    _j.dumps(_fwd.summarize({"d": _fwd.build_trades(st)}), allow_nan=False)                # all winners: still valid JSON
 
 
 def t_fwd_record_persists_and_scheduler():
@@ -9151,10 +9158,10 @@ def t_fwd_record_persists_and_scheduler():
     from config import settings as _st
     tmp = Path(tempfile.mkdtemp()) / "fwd.json"
     old_file, old_q, old_src = _fwd.FILE, _kc.kite_client.quote_kite, _st.paper_data_source
-    prices = {"indicative": 104.0, "auction": 104.0, "open": 104.0, "exit": 103.0}
+    prices = {"indicative_early": 100.0, "indicative": 100.0, "auction": 104.0, "open": 104.0, "exit": 103.0}
     stage_now = {}
     _kc.kite_client.quote_kite = lambda ins: {"NSE:ABB": {"last_price": prices[stage_now["s"]],
-                                                          "ohlc": {"open": 104.0 if stage_now["s"] != "indicative" else 0,
+                                                          "ohlc": {"open": 104.0,
                                                                    "close": 100.0}}}
     try:
         _fwd.FILE = tmp
@@ -9170,7 +9177,14 @@ def t_fwd_record_persists_and_scheduler():
         _fwd.FILE, _kc.kite_client.quote_kite, _st.paper_data_source = old_file, old_q, old_src
     import platform_scheduler as _ps
     src = Path(_ps.__file__).read_text()
-    assert 'forward_{_stage}' in src and '("indicative", (9, 7, 30))' in src and '("exit", (9, 20, 0))' in src
+    assert 'forward_{_stage}' in src and '("indicative_early", (9, 6, 45))' in src and '("exit", (9, 20, 0))' in src
+    bad = Path(tempfile.mkdtemp()) / "fwd.json"
+    bad.write_text("{not json")
+    _fwd.FILE = bad
+    try:
+        assert _fwd._load() == {"days": {}} and not bad.exists() and list(bad.parent.glob("fwd.json.corrupt-*"))
+    finally:
+        _fwd.FILE = old_file
 
 
 run("forward test: variants, final vs live rule, fills, slippage, costs", t_fwd_trades_variants_rules)
