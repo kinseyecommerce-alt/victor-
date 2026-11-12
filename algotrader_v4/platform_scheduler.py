@@ -16,6 +16,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from agents.base_agent import send_telegram
 from config import settings
 from kite_client import kite_client
+from ist_clock import now_ist as _now_ist   # tz-aware IST: the container clock is UTC
 
 
 class PlatformScheduler:
@@ -37,7 +38,7 @@ class PlatformScheduler:
         self._sched.add_job(self._kite_login_at_startup, "date", id="kite_login_startup")
         # a restart after 09:16 (deploy, crash) would otherwise leave the bot stopped for the day
         self._sched.add_job(self._auto_start_catch_up, "date", id="auto_start_catch_up",
-                            run_date=__import__("datetime").datetime.now() + __import__("datetime").timedelta(seconds=45))
+                            run_date=_now_ist() + __import__("datetime").timedelta(seconds=45))
         self._sched.add_job(
             self._pre_market_report, "cron",
             hour=9, minute=0, day_of_week="mon-fri", id="pre_market",

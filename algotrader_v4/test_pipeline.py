@@ -9425,6 +9425,9 @@ def t_auto_start_trading_day_and_catch_up():
     finally:
         _s2.auto_start_strategies = prev
     assert "auto_start_catch_up" in Path(_ps2.__file__).read_text()
+    # the catch-up must be scheduled ~45 s from now in IST, not at the container's UTC wall time read as IST
+    src2 = Path(_ps2.__file__).read_text()
+    assert "run_date=_now_ist() +" in src2 and _ps2._now_ist().tzinfo is not None
 
 
 run("auto-start: trading day reaches the master agent; missed 09:16 start runs after a restart",
