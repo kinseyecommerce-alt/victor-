@@ -854,6 +854,10 @@ class FnOAgent(BaseAgent):
             logger.warning("[fno] SEBI blocked {} {}: {}", action, opt_sym, sebi_reason)
             return
 
+        # Stream the option leg (before the order, so a paper fill can use its price) — its exits are driven
+        # by the option's own price
+        tick_engine.subscribe([{"symbol": opt_sym, "exchange": exch, "seed_price": opt_price}])
+        from execution import fill_after
         order_id = kite_client.place_order(
             tradingsymbol=opt_sym, exchange=exch,
             transaction_type=action, quantity=qty,
@@ -861,9 +865,10 @@ class FnOAgent(BaseAgent):
             tag="Agent-fno",
         )
         sebi_compliance.record_order_id(self.name, opt_sym, order_id)
-
-        # Stream the option leg so its exits are driven by the option's own price
-        tick_engine.subscribe([{"symbol": opt_sym, "exchange": exch, "seed_price": opt_price}])
+        # the real average price: the trailing stop, the ledger's entry (P&L, costs) and the VaR use the fill,
+        # not the quote (a paper or live fill of the marketable LIMIT is up to 1 % above it)
+        fill = fill_after(order_id, opt_price)
+        opt_var = portfolio_risk.option_max_loss(fill, sl_px, qty)
         self._exit_only.add(opt_sym)
 
         # Protective stop goes in immediately; no position is kept without one.
@@ -900,7 +905,7 @@ class FnOAgent(BaseAgent):
         }
         tsl_pos = trailing_sl_engine.register(
             symbol=opt_sym, strategy=self.name, side=action,
-            entry_price=opt_price, quantity=qty, order_id=order_id,
+            entry_price=fill, quantity=qty, order_id=order_id,
         )
         tsl_pos.current_sl = sl_px     # same stop as the exchange order (see base_agent)
         __import__('agents.base_agent', fromlist=['_book_changed'])._book_changed()                     # write the paper book now, not up to 3 s later

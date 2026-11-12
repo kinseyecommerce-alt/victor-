@@ -612,6 +612,14 @@ class KiteClient:
             fill = ltp if marketable else price
         else:
             fill = price if price > 0 else ltp
+        if not resting and fill <= 0:
+            # no tick for the symbol in this process yet (a restored position right after a restart): the paper
+            # book's own last price, never ₹0 — a ₹0 fill booked the whole notional as a loss at the broker
+            fill = next((float(p.get("last_price") or 0) for p in self._paper_positions
+                         if p.get("tradingsymbol") == tradingsymbol), 0.0)
+            if fill <= 0:
+                logger.warning("[PAPER] {} {} {}: no price for the symbol yet — filled at ₹0",
+                               order_type, transaction_type, tradingsymbol)
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,

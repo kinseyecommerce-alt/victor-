@@ -2062,10 +2062,11 @@ def t_fno_tracked_on_option_premium():
         oid = next(o for o, e in _ba._tsl_sl_orders.items() if e["symbol"] == opt)
         try:
             pos = _tsl_eng._positions[oid]
-            assert pos.symbol == opt and pos.entry_price == 120.0, (pos.symbol, pos.entry_price)
+            entry_order = _order(oid)
+            # tracked (and booked) at the broker's fill, not the quote (the marketable LIMIT fills up to 1 % above)
+            assert pos.symbol == opt and pos.entry_price == entry_order["price"] > 0, (pos.symbol, pos.entry_price)
             sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
             assert sl["order_type"] == "SL" and sl["status"] == "TRIGGER PENDING", sl
-            entry_order = _order(oid)
             assert entry_order["order_type"] == "LIMIT" and entry_order["tradingsymbol"] == opt
             assert opt in agent._exit_only and opt in _te_mod.tick_engine.symbols()
             # An index tick must not touch the option position (this used to fire target 2)
@@ -9943,7 +9944,8 @@ def _pb_isolated():
         "gtts": dict(_te_kite_client._paper_gtts), "tracked": dict(_ba._tsl_sl_orders),
         "tsl": dict(_tsl_eng._positions), "guard": (dict(_og_pb._active), dict(_og_pb._trade_count), dict(_og_pb._cooldown_until)),
         "risk": {k: getattr(_rm_x, k) for k in ("daily_realised_pnl", "open_position_count", "trades_today", "wins_today",
-                                                "losses_today", "gross_profit", "gross_loss", "is_trading_halted")},
+                                                "losses_today", "gross_profit", "gross_loss", "costs_today",
+                                                "is_trading_halted")},
         "agents": {n: (a.state.trades_today, a.state.pnl_today, a.state.signals_fired, set(a._exit_only))
                    for n, a in _ALL_pb.items()},
         "ai": (dict(_ai_pb._targets), dict(_ai_pb._open), dict(_ai_pb._trail), dict(_ai_pb._spreads), _ai_pb.trades_today),
@@ -10391,6 +10393,117 @@ run("paper book: LIVE mode (and the setting off) never writes or restores",    t
 run("paper book: corrupt snapshot does not crash startup",                     t_paper_book_corrupt_file)
 run("paper book: scalper/intraday day state survives a restart",               t_paper_book_agent_day_state)
 run("paper book: AI trader targets, trails and counters restored",             t_paper_book_ai_round_trip)
+
+
+# ── Ledger / risk (Nov 2026 e2e): manual square-off, ₹0 fills, costs in the loss limit, agent day P&L ──
+
+def _lr_tick(sym, px):
+    import tick_engine as _te_mod
+    _te_mod.tick_engine._latest_tick[sym] = Tick(symbol=sym, ltp=px, bid=px, ask=px, volume=1, change=0.0,
+                                                 change_pct=0.0, high=px, low=px, open=px, timestamp=datetime.now())
+
+
+def t_manual_squareoff_closes_tracked():
+    """LR-1: the dashboard 'Square off' (POST /orders/squareoff) and the 'squareoff' control action closed the
+    broker book behind the agents' backs: no ledger row, and the still-armed trailing stop later sold a second
+    time (an untracked naked short and a fake ledger trade). They now go through the tracked exit path."""
+    from unittest.mock import patch
+    import main as _main
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBMSQ")
+        qty = _paper_pos("PBMSQ")["quantity"]
+        _lr_tick("PBMSQ", 1012.0)
+        n0, pnl0 = len(_perf_pb.trades), _rm_x.daily_realised_pnl
+        out = asyncio.run(_main.squareoff())
+        assert out["squared_off"] == 1, out
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions, "tracking released"
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _perf_pb.trades[-1]["gross"] == 12.0 * qty
+        assert _rm_x.daily_realised_pnl - pnl0 == 12.0 * qty and _rm_x.open_position_count == 0
+        assert _paper_pos("PBMSQ")["quantity"] == 0
+        n_orders = len(_te_kite_client._paper_orders)
+        asyncio.run(_tsl_eng.on_tick("PBMSQ", 950.0, 0.0))           # through the old stop: nothing left to sell
+        assert len(_te_kite_client._paper_orders) == n_orders and _paper_pos("PBMSQ")["quantity"] == 0
+        assert len(_perf_pb.trades) == n0 + 1
+
+
+def t_restored_squareoff_without_tick_not_at_zero():
+    """LR-2: a restored MIS position squared off before its symbol ticked in the new process sold at ₹0 (the whole
+    notional lost at the broker) while the ledger booked a flat trade. The exit uses the book's last price."""
+    import tick_engine as _te_mod
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBNOTICK")
+        qty = _paper_pos("PBNOTICK")["quantity"]
+        _lr_tick("PBNOTICK", 1008.0)
+        _te_kite_client.positions()                                    # marks the paper book: last price 1008
+        _pb.save(); _pb_wipe(); _pb.restore()
+        _te_mod.tick_engine._latest_tick.pop("PBNOTICK", None)        # new process: no tick yet
+        d = _pb.now_ist().date()
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        h, m = (int(x) for x in settings.squareoff_time.split(":"))
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 2)) == ["PBNOTICK"]
+        sells = [o for o in _te_kite_client._paper_orders if o["tradingsymbol"] == "PBNOTICK"
+                 and o["transaction_type"] == "SELL" and o["status"] == "COMPLETE"]
+        assert len(sells) == 1 and sells[0]["price"] == 1008.0, sells
+        p = _paper_pos("PBNOTICK")
+        assert p["quantity"] == 0 and round(p["sell_value"] - p["buy_value"], 2) == 8.0 * qty
+        assert _perf_pb.trades[-1]["oid"] == oid and _perf_pb.trades[-1]["gross"] == 8.0 * qty
+
+
+def t_daily_loss_limit_after_costs():
+    """LR-4: the MAX_DAILY_LOSS halt compared only the gross P&L; the ledger's transaction costs let the account
+    lose more than the limit net and keep opening positions."""
+    with _pb_isolated():
+        prev = settings.max_daily_loss
+        settings.max_daily_loss = 1000.0
+        try:
+            _rm_x.reset_daily()
+            _rm_x.record_trade(-990.0)                             # gross: still inside the limit
+            _perf_pb.record_trade("intraday", "LRCOST", "BUY", 100, 1000.0, -990.0)
+            assert _rm_x.costs_today > 10, _rm_x.costs_today
+            assert _rm_x.net_realised_pnl() < -1000
+            ok, why = _rm_x.check_before_order("HDFCBANK", 1, 100.0, "BUY")
+            assert not ok and "Daily loss limit" in why, why
+            assert _rm_x.status()["net_daily_pnl"] == round(-990.0 - _rm_x.costs_today, 2)
+            _rm_x.reset_daily()
+            assert _rm_x.costs_today == 0.0
+        finally:
+            settings.max_daily_loss = prev
+            _perf_pb.trades = [t for t in _perf_pb.trades if t["symbol"] != "LRCOST"]
+
+
+def t_agent_pnl_today_counts_stop_exits():
+    """LR-5: an agent's pnl_today (strategy cards, get_status) missed every stop / trailing-stop / target exit,
+    so a losing day showed as a winning one. Every exit through _close_tracked now counts, once."""
+    from unittest.mock import patch
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_ba, "send_telegram", _noop):
+        a = _ALL_pb["intraday"]
+        a.state.pnl_today = 0.0
+        oid = _paper_entry(a, "PBPNL", 1000.0)
+        qty = _paper_pos("PBPNL")["quantity"]
+        stop = _tsl_eng._positions[oid].current_sl
+        _lr_tick("PBPNL", stop - 1)
+        asyncio.run(_tsl_eng.on_tick("PBPNL", stop - 1, 0.0))        # stop hit
+        assert oid not in _ba._tsl_sl_orders
+        row = _perf_pb.trades[-1]
+        assert row["oid"] == oid and row["gross"] < 0
+        assert round(a.state.pnl_today, 2) == row["gross"], (a.state.pnl_today, row["gross"])
+        _og_pb._cooldown_until.clear()                                # the post-loss cooldown is not under test
+        _paper_entry(a, "PBPNL2", 1000.0)
+        _lr_tick("PBPNL2", 1010.0)
+        closed = _ba.close_tracked_for_squareoff("t")                 # square-off: counted once, not twice
+        assert closed == ["PBPNL2"]
+        assert round(a.state.pnl_today, 2) == round(row["gross"] + 10.0 * _paper_pos("PBPNL2")["buy_value"] / 1000.0, 2)
+
+
+run("manual square-off closes tracked positions once, no stop re-sell",         t_manual_squareoff_closes_tracked)
+run("restored square-off before the first tick does not fill at ₹0",            t_restored_squareoff_without_tick_not_at_zero)
+run("daily loss limit is measured after transaction costs",                    t_daily_loss_limit_after_costs)
+run("agent pnl_today counts stop exits and square-offs once",                  t_agent_pnl_today_counts_stop_exits)
 
 
 # ══════════════════════════════════════════════════════════════════════════

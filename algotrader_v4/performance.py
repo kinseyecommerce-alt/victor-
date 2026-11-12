@@ -116,6 +116,11 @@ class Performance:
             self._save()
         if newly:
             self._announce_prune(strategy, newly)
+        try:
+            from risk_manager import risk_manager           # the daily loss limit is measured after costs
+            risk_manager.record_cost(cost)
+        except Exception as exc:
+            logger.error("[perf] cost not charged to the risk manager: {}", exc)
         return row
 
     # ── pruning ──────────────────────────────────────────────────────────

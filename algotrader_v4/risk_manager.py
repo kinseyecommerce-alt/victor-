@@ -47,7 +47,12 @@ class RiskManager:
         self.losses_today: int         = 0
         self.gross_profit: float       = 0.0
         self.gross_loss: float         = 0.0
+        self.costs_today: float        = 0.0   # transaction costs of today's closed trades (performance ledger)
         self.is_trading_halted: bool   = False
+
+    def net_realised_pnl(self) -> float:
+        """Today's realised P&L after transaction costs — what the daily loss limit is measured on."""
+        return self.daily_realised_pnl - self.costs_today
 
     def check_before_order(
         self,
@@ -96,10 +101,13 @@ class RiskManager:
         return True, "OK"
 
     def _check_daily_loss(self) -> tuple[bool, str]:
-        if self.daily_realised_pnl < -settings.max_daily_loss:
+        # net of costs: record_trade gets the gross P&L, and the costs of hundreds of round trips a day let the
+        # account lose more than MAX_DAILY_LOSS while still opening positions
+        net = self.net_realised_pnl()
+        if net < -settings.max_daily_loss:
             return False, (
                 f"Daily loss limit ₹{settings.max_daily_loss:.0f} breached "
-                f"(current P&L ₹{self.daily_realised_pnl:.0f})"
+                f"(current P&L ₹{net:.0f} after ₹{self.costs_today:.0f} costs)"
             )
         return True, "OK"
 
@@ -207,6 +215,10 @@ class RiskManager:
             self.gross_loss += -pnl
         logger.info("Trade P&L ₹{:.0f} | Day total ₹{:.0f}", pnl, self.daily_realised_pnl)
 
+    def record_cost(self, cost: float) -> None:
+        """Transaction costs of a closed trade (the ledger computes them); counted against the daily loss limit."""
+        self.costs_today += max(0.0, float(cost or 0.0))
+
     def position_opened(self) -> None:
         self.open_position_count += 1
 
@@ -221,12 +233,15 @@ class RiskManager:
         self.losses_today        = 0
         self.gross_profit        = 0.0
         self.gross_loss          = 0.0
+        self.costs_today         = 0.0
         self.is_trading_halted   = False
         logger.info("Risk manager reset for new trading day")
 
     def status(self) -> dict:
         return {
             "daily_pnl":          self.daily_realised_pnl,
+            "costs_today":        round(self.costs_today, 2),
+            "net_daily_pnl":      round(self.net_realised_pnl(), 2),
             "open_positions":     self.open_position_count,
             "trades_today":       self.trades_today,
             "is_halted":          self.is_trading_halted,

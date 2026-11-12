@@ -119,6 +119,14 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
                                  signal_price=entry.get("signal_price"), order_id=entry_oid)
     except Exception as exc:
         logger.error("[perf] trade not recorded for {}: {}", symbol, exc)
+    try:
+        # every exit (stop, trailing stop, target, rule, square-off) lands here: the agent's day P&L too
+        from agents.strategy_agents import ALL_AGENTS
+        a = ALL_AGENTS.get(entry.get("agent") or strategy)
+        if a is not None:
+            a.state.pnl_today += pnl
+    except Exception:
+        pass
     _notify_agent_result(strategy, symbol, pnl)
     _book_changed()
     return exited
@@ -144,9 +152,12 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
     # the broker keeps one net row per (symbol, product); the paper book one per symbol
     by_product = settings.trading_mode != "PAPER"
     open_qty: dict[tuple, int] = {}
+    last_px: dict[str, float] = {}
     for p in net_rows:
         key = (p.get("tradingsymbol"), (p.get("product") or "MIS") if by_product else "")
         open_qty[key] = open_qty.get(key, 0) + int(p.get("quantity") or 0)
+        if float(p.get("last_price") or 0) > 0:
+            last_px[p.get("tradingsymbol")] = float(p["last_price"])
     closed = []
     for oid, e in list(_tsl_sl_orders.items()):
         if only is not None and oid not in only:
@@ -160,7 +171,8 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
         key = (pos.symbol, e.get("product", "MIS") if by_product else "")
         qty = min(int(pos.quantity), max(0, open_qty.get(key, 0) * sign))
         tick, _ = tick_engine.latest(pos.symbol)
-        px = tick.ltp if tick and tick.ltp > 0 else pos.entry_price
+        # no tick yet (right after a restart): the broker's last price, which is what the exit fills at
+        px = tick.ltp if tick and tick.ltp > 0 else (last_px.get(pos.symbol) or pos.entry_price)
         tag = f"SquareOff-{pos.strategy}"[:20]
         try:
             if qty <= 0:
@@ -183,13 +195,6 @@ def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] =
             continue
         if exited:
             closed.append(pos.symbol)            # its exit went out: the broker flatten must not send a second one
-        try:
-            from agents.strategy_agents import ALL_AGENTS
-            a = ALL_AGENTS.get(e.get("agent"))
-            if a is not None:
-                a.state.pnl_today += pnl
-        except Exception:
-            pass
         logger.info("[squareoff] {} {} closed ({}) P&L ₹{:.0f}", pos.strategy, pos.symbol, reason, pnl)
     return closed
 
@@ -862,7 +867,6 @@ class BaseAgent(ABC):
                 pnl = (snap.tick.ltp - pos.get("average_price", 0.0)) * pos["quantity"]
             _close_tracked(entry_oid, sym, entry.get("side", "BUY" if side == "SELL" else "SELL"),
                            qty, pnl, f"Agent-{self.name}-EXIT", self.name)
-            self.state.pnl_today += pnl
             _dot = "\U0001f534" if pnl < 0 else "\U0001f7e2"
             await send_telegram(
                 f"{_dot} <b>[{self.name.upper()}]</b> EXIT {sym}\n"
