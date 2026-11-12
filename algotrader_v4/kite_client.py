@@ -397,8 +397,7 @@ class KiteClient:
         """exclude: symbols whose exit order was just sent elsewhere (a broker position can lag the fill,
         and squaring it off again would open a reverse position).
         hold: {(symbol, product): signed qty} of tracked overnight positions (base_agent.overnight_hold_qty) —
-        only the quantity beyond them is flattened. The paper book keeps one row per symbol, so there every
-        product's hold counts against the symbol's row."""
+        only the quantity beyond them is flattened, row by row (symbol, product)."""
         order_ids: list[str] = []
         hold = hold or {}
         paper = settings.trading_mode == "PAPER"
@@ -410,8 +409,13 @@ class KiteClient:
             if pos.get("product") == "CNC":       # delivery (swing) positions are held overnight
                 continue
             sym = pos.get("tradingsymbol")
-            held = (sum(q for (s, _p), q in hold.items() if s == sym) if paper
-                    else hold.get((sym, pos.get("product", "MIS")), 0))
+            held = hold.get((sym, pos.get("product", "MIS")), 0)
+            if paper:
+                # the paper book keeps one row per (symbol, product); a snapshot from before that kept one row
+                # per symbol, so a hold whose product has no open row of its own counts against this row
+                open_products = {p.get("product", "MIS") for p in self._paper_positions
+                                 if p.get("tradingsymbol") == sym and p.get("quantity")}
+                held += sum(q for (s, p), q in hold.items() if s == sym and p not in open_products)
             net = int(pos["quantity"]) - held
             if net == 0 or (net > 0) != (pos["quantity"] > 0):
                 if held:

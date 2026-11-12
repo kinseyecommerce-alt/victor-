@@ -268,6 +268,20 @@ def overnight_hold_qty() -> dict[tuple[str, str], int]:
     return held
 
 
+def reapply_overnight() -> int:
+    """After the daily counter reset (master._daily_reset, paper_book.roll_day_if_due): positions held from
+    earlier days (CNC delivery / swing, any agent) still exist — re-mark them in the order guard and the
+    open-position count: the strategy agents' (reapply_overnight_tracked) and the AI trader's
+    (ai_trader.reapply_overnight). Returns the number of strategy-agent positions re-applied."""
+    n = reapply_overnight_tracked()
+    try:
+        from ai_trader import ai_trader
+        ai_trader.reapply_overnight()
+    except Exception as exc:
+        logger.warning("[reset] AI overnight positions not re-applied: {}", exc)
+    return n
+
+
 def _book_changed() -> None:
     """A position closed: write the PAPER book now, so a restart a moment later cannot restore a trade
     the ledger already holds (no-op in LIVE, or before the startup restore ran)."""

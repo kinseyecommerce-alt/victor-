@@ -380,10 +380,8 @@ class MasterAgent:
         order_guard.reset_daily()
         for a in ALL_AGENTS.values():
             a.reset_daily()
-        from ai_trader import ai_trader
-        ai_trader.reapply_overnight()        # swing positions held from earlier days still count
-        from agents.base_agent import reapply_overnight_tracked
-        reapply_overnight_tracked()          # ... and so do the rule agents' (SwingAgent) CNC holdings
+        from agents.base_agent import reapply_overnight
+        reapply_overnight()                  # positions held from earlier days still count (every agent, AI too)
         import paper_book
         paper_book.mark_day_reset()          # PAPER book: its own rollover must not reset a second time
         await send_telegram("<b>New trading day</b> — counters reset")

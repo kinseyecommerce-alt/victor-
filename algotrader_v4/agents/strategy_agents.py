@@ -922,7 +922,7 @@ class FnOAgent(BaseAgent):
             symbol=opt_sym, strategy=self.name, side=action,
             entry_price=fill, quantity=qty, order_id=order_id,
         )
-        tsl_pos.current_sl = sl_px     # same stop as the exchange order (see base_agent)
+        tsl_pos.current_sl = sl_px    # same stop as the exchange order (see base_agent)
         __import__('agents.base_agent', fromlist=['_book_changed'])._book_changed()                     # write the paper book now, not up to 3 s later
 
         await send_telegram(
