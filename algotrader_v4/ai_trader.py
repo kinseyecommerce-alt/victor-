@@ -918,7 +918,7 @@ class AITrader:
             reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
         if self._intraday_count() >= settings.ai_agent_max_open_positions:
             reject(f"max open intraday AI positions ({settings.ai_agent_max_open_positions}) reached")
-        pr = portfolio_risk.pre_entry(sym, side, qty, ltp, sl, kind="equity")
+        pr = portfolio_risk.pre_entry(sym, side, qty, ltp, sl, kind="equity", agent=AGENT)
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
@@ -1147,7 +1147,7 @@ class AITrader:
             reject(f"premium ₹{entry_px * qty:,.0f} exceeds ₹{settings.ai_agent_max_option_premium:,.0f} "
                    f"(₹{per_lot:,.0f}/lot → max {int(settings.ai_agent_max_option_premium // per_lot)} lots)")
         pr = portfolio_risk.pre_entry(c.tradingsymbol, "BUY", qty, entry_px, kind="option", unit_size=c.lot_size,
-                                      max_loss=(entry_px - round_tick(entry_px * (1 - slp / 100))) * qty, underlying=und)
+                                      max_loss=(entry_px - round_tick(entry_px * (1 - slp / 100))) * qty, underlying=und, agent=OPT_STRATEGY)
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
@@ -1299,7 +1299,7 @@ class AITrader:
                 reject(f"daily AI trade limit ({settings.ai_agent_max_trades_per_day}) reached")
             if len(self._swing_entries()) >= settings.ai_agent_max_swing_positions:
                 reject(f"max swing positions ({settings.ai_agent_max_swing_positions}) reached")
-        pr = portfolio_risk.pre_entry(sym, "BUY", qty, ltp, sl, kind="equity")
+        pr = portfolio_risk.pre_entry(sym, "BUY", qty, ltp, sl, kind="equity", agent=_strategy)
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
@@ -1689,7 +1689,7 @@ class AITrader:
         if order_guard.is_symbol_active_anywhere(und):
             reject(f"{und} already has an open option or future position")
         pr = portfolio_risk.pre_entry(c.tradingsymbol, side, qty, entry_px, sl, kind="future", underlying=und,
-                                      unit_size=c.lot_size)
+                                      unit_size=c.lot_size, agent=FUT_STRATEGY)
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
@@ -1846,7 +1846,7 @@ class AITrader:
             reject(f"premium ₹{entry_px * qty:,.0f} exceeds ₹{settings.ai_agent_max_swing_put_premium:,.0f} "
                    f"(₹{per_lot:,.0f}/lot)")
         pr = portfolio_risk.pre_entry(c.tradingsymbol, "BUY", qty, entry_px, kind="option", unit_size=c.lot_size,
-                                      max_loss=entry_px * slp / 100 * qty, underlying=und)
+                                      max_loss=entry_px * slp / 100 * qty, underlying=und, agent=SWING_OPT_STRATEGY)
         if not pr["ok"]:
             reject(pr["reason"])
         if qty > pr["max_quantity"]:
@@ -2072,7 +2072,7 @@ class AITrader:
         if margin > settings.ai_agent_max_spread_margin:
             reject(f"margin ₹{margin:,.0f} exceeds ₹{settings.ai_agent_max_spread_margin:,.0f}")
         pr = portfolio_risk.pre_entry(short.tradingsymbol, "SELL", qty, credit, kind="spread", max_loss=max_loss,
-                                      underlying=und, unit_size=short.lot_size)
+                                      underlying=und, unit_size=short.lot_size, agent=SPREAD_STRATEGY)
         if not pr["ok"]:
             reject(pr["reason"])
         ok, msg = order_guard.can_place(und, SPREAD_STRATEGY, "SELL")

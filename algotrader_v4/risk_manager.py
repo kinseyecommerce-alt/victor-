@@ -127,6 +127,20 @@ class RiskManager:
             max_pos = 1   # lot-based agents (fno): return full bucket
         return bucket_total / max(max_pos, 1)
 
+    def open_positions_for(self, agent_name: str) -> int:
+        """Positions the trailing engine currently watches for this agent (strategy tag)."""
+        from trailing_sl_engine import trailing_sl_engine, SLStatus
+        return sum(1 for pos in list(trailing_sl_engine._positions.values())
+                   if getattr(pos, "strategy", None) == agent_name and pos.status == SLStatus.ACTIVE)
+
+    def open_cap_reason(self, agent_name: str) -> str | None:
+        """Per-agent open-position cap (currently F&O only): the skip reason, or None."""
+        if agent_name == "fno" and settings.fno_max_open_positions > 0:
+            n = self.open_positions_for(agent_name)
+            if n >= settings.fno_max_open_positions:
+                return f"max open F&O positions ({settings.fno_max_open_positions}) reached ({n} open)"
+        return None
+
     def bucket_exposure(self, agent_name: str) -> float:
         """₹ value of positions the trailing engine currently tracks for every agent that shares
         this agent's capital bucket (intraday + scalping share the MIS bucket)."""

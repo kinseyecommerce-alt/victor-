@@ -2055,7 +2055,8 @@ def t_fno_tracked_on_option_premium():
         with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
              patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
              patch.object(_ba, "send_telegram", _noop), \
-             patch.object(_or, "_instruments", return_value=listed):
+             patch("portfolio_risk.var_check", return_value=None), \
+             patch.object(_or, "_instruments", return_value=listed):        # VaR rules: section 19
             asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
                         {"option_symbol": "NIFTY-BUILT-SYMBOL", "exchange": "NFO", "lot_size": 75,
                          "strike": 24000, "option_type": "CE"}))
@@ -5091,6 +5092,197 @@ run("Risk: volatility-targeted size from the stop distance",  t_risk_vol_targete
 run("Risk: event block / scale, correlation block, heat cap", t_risk_event_and_correlation_blocks)
 run("Risk: daily VaR cap limits new entries",                 t_risk_daily_var_cap)
 run("Risk: AI rejects oversize with the max; agents scale",   t_risk_applied_to_ai_and_agents)
+
+
+from pathlib import Path
+
+def _var_book(**by_agent):
+    """Open book with one option position per agent whose VaR (max loss) is the given ₹."""
+    return [{"symbol": f"{a.upper()}OPT", "kind": "option", "notional": v, "max_loss": v, "underlying": "NIFTY",
+             "agent": a} for a, v in by_agent.items()]
+
+def _var_settings(share=40.0):
+    prev = (_ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct, _ai_settings.var_agent_share_pct)
+    _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct = 500000.0, 2.0      # cap ₹10,000
+    _ai_settings.var_agent_share_pct = share                                            # one agent ≤ ₹4,000
+    return prev
+
+def _var_restore(prev):
+    _ai_settings.total_capital, _ai_settings.portfolio_var_cap_pct, _ai_settings.var_agent_share_pct = prev
+
+def t_risk_agent_var_share():
+    """12 Nov 2026: the F&O agent filled the whole VaR cap and every intraday/scalping signal was rejected.
+    One agent may use at most VAR_AGENT_SHARE_PCT of the cap; the others can still enter."""
+    assert _ai_settings.__class__.model_fields["var_agent_share_pct"].default == 40.0
+    def body():
+        prev = _var_settings()
+        try:
+            assert _pr.agent_var_budget() == 4000.0
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=3500.0)):
+                assert _pr.agent_var("fno") == 3500.0 and _pr.agent_var("intraday") == 0.0
+                # F&O over its share although the total cap has ₹6,500 room (room for half a lot)
+                r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75, agent="fno")
+                assert not r["ok"] and "agent fno VaR share" in r["reason"] and "less than one lot" in r["reason"], r
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=4000.0)):
+                r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75, agent="fno")
+                assert not r["ok"] and "agent fno VaR share" in r["reason"] and "other agents" in r["reason"], r
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=3500.0)):
+                # another agent can still enter at full size (VaR 100 × 1000 × .02475 = ₹2,475)
+                r = _pr.pre_entry("INTRA1", "BUY", 100, 1000.0, 995.0, agent="intraday")
+                assert r["ok"] and r["max_quantity"] == 100 and r["reason"] == "", r
+                # ... and is cut to its own share when it asks for more (₹4,000 / ₹24.75 = 161)
+                r = _pr.pre_entry("INTRA1", "BUY", 200, 1000.0, 995.0, agent="scalping")
+                assert r["ok"] and r["max_quantity"] == 161 and "agent scalping VaR share" in r["reason"], r
+                # without an agent tag (callers that do not pass one) rule 4 does not apply
+                r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75)
+                assert r["ok"] and r["max_quantity"] == 75, r
+                # the reject-only form used by the F&O agent
+                assert "agent fno VaR share" in _pr.var_check("fno", 1000.0)
+                assert _pr.var_check("intraday", 1000.0) is None
+            # share off (≥ 100 or ≤ 0) → the old behaviour: only the total cap
+            for off in (100.0, 0.0):
+                _ai_settings.var_agent_share_pct = off
+                with _patch.object(_pr, "_open_book", return_value=_var_book(fno=3500.0)):
+                    assert _pr.agent_var_budget() is None
+                    r = _pr.pre_entry("NIFTYX", "BUY", 75, 20.0, kind="option", max_loss=1000.0, unit_size=75, agent="fno")
+                    assert r["ok"] and r["max_quantity"] == 75, r
+                    assert _pr.var_check("fno", 1000.0) is None
+        finally:
+            _var_restore(prev)
+    _no_corr(body)
+
+def t_risk_agent_var_share_total_cap_still_applies():
+    def body():
+        prev = _var_settings()
+        try:
+            # ₹9,500 used across three agents, each under its own share: the total cap still binds intraday
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=3500.0, swing=3500.0, ai=2500.0)):
+                r = _pr.pre_entry("INTRA2", "BUY", 100, 1000.0, 995.0, agent="intraday")
+                assert r["ok"] and r["max_quantity"] == 20 and "daily VaR cap" in r["reason"], r   # ₹500 / ₹24.75
+                assert "daily VaR cap" in _pr.var_check("intraday", 600.0)
+            with _patch.object(_pr, "_open_book", return_value=_var_book(fno=4000.0, swing=4000.0, ai=2000.0)):
+                r = _pr.pre_entry("INTRA2", "BUY", 1, 1000.0, 995.0, agent="intraday")
+                assert not r["ok"] and "daily VaR cap reached" in r["reason"], r
+        finally:
+            _var_restore(prev)
+    _no_corr(body)
+
+def t_risk_open_book_tags_agents():
+    """VaR is attributed by the trailing-stop engine's strategy tag (AI strategies separately)."""
+    p1 = _tsl_eng.register(symbol="VARTAGEQ", strategy="intraday", side="BUY", entry_price=100.0, quantity=10,
+                           order_id="T-VARTAG-1")
+    p2 = _tsl_eng.register(symbol="VARTAGOPT", strategy="ai_opt", side="BUY", entry_price=50.0, quantity=75,
+                           order_id="T-VARTAG-2")
+    _ba._tsl_sl_orders["T-VARTAG-2"] = {"exchange": "NFO", "symbol": "VARTAGOPT", "guard_symbol": "NIFTY", "agent": "ai"}
+    try:
+        book = {b["symbol"]: b for b in _pr._open_book()}
+        assert book["VARTAGEQ"]["agent"] == "intraday" and book["VARTAGOPT"]["agent"] == "ai_opt", book
+        assert _pr.agent_var("ai_opt") >= 3750.0                        # option premium counts in full
+        assert "agent=AGENT" in Path(_ai_mod.__file__).read_text() and "agent=SPREAD_STRATEGY" in Path(_ai_mod.__file__).read_text()
+    finally:
+        _tsl_eng._positions.pop("T-VARTAG-1", None); _tsl_eng._positions.pop("T-VARTAG-2", None)
+        _ba._tsl_sl_orders.pop("T-VARTAG-2", None)
+    assert p1.strategy == "intraday" and p2.strategy == "ai_opt"
+
+def _fno_positions(n):
+    ids = [f"T-FNOCAP-{i}" for i in range(n)]
+    for i, oid in enumerate(ids):
+        _tsl_eng.register(symbol=f"FNOCAP{i}CE", strategy="fno", side="BUY", entry_price=100.0, quantity=75, order_id=oid)
+    return ids
+
+def t_fno_max_open_positions():
+    """FNO_MAX_OPEN_POSITIONS (default 4): the 5th F&O position is skipped with a reason; other agents and the
+    daily MAX_TRADES_FNO cap are unaffected."""
+    from unittest.mock import patch
+    assert _ai_settings.__class__.model_fields["fno_max_open_positions"].default == 4
+    assert _ai_settings.max_trades_fno == 4 and _og_x._max_trades("fno") == _ai_settings.max_trades_fno
+    ids = _fno_positions(3)
+    try:
+        assert _rm_x.open_positions_for("fno") == 3 and _rm_x.open_cap_reason("fno") is None
+        ids += _fno_positions(4)[3:]                                    # the 4th
+        assert _rm_x.open_positions_for("fno") == 4
+        assert "max open F&O positions (4)" in _rm_x.open_cap_reason("fno")
+        for other in ("intraday", "scalping", "swing", "ai"):
+            assert _rm_x.open_cap_reason(other) is None, other
+        def body():
+            agent = FnOAgent()
+            n = len(_te_kite_client._paper_orders)
+            with patch.object(_rm_x, "check_before_order", return_value=(True, "")):
+                asyncio.run(agent._try_enter(_make_snap(symbol="BANKNIFTY", ltp=50000.0), "BUY",
+                            {"option_symbol": "BNTEST50000CE", "exchange": "NFO", "lot_size": 15}))
+            assert len(_te_kite_client._paper_orders) == n, "5th F&O position must not be opened"
+            assert "max open F&O positions" in agent.state.last_skip, agent.state.last_skip
+            assert agent._entry_precheck(_make_snap(symbol="BANKNIFTY", ltp=50000.0), "BUY",
+                                         {"exchange": "NFO"}).startswith("max open F&O positions")
+            # an intraday entry still reaches the broker (VaR rules have their own tests: empty book here)
+            with patch.object(_pr, "_open_book", return_value=[]):
+                oid = _paper_entry(IntradayAgent(), "FNOCAPEQ", 300.0)
+            assert oid in _tsl_eng._positions
+            _ba._close_tracked(oid, "FNOCAPEQ", "BUY", _tsl_eng._positions[oid].quantity, 0.0, "T", "intraday")
+        _with_paper_kite(body)
+        prev = _ai_settings.fno_max_open_positions
+        _ai_settings.fno_max_open_positions = 0                         # 0 = no cap
+        try:
+            assert _rm_x.open_cap_reason("fno") is None
+        finally:
+            _ai_settings.fno_max_open_positions = prev
+    finally:
+        for oid in ids:
+            _tsl_eng._positions.pop(oid, None)
+    assert _rm_x.open_positions_for("fno") == 0
+
+def t_fno_entry_checks_var_share():
+    """FnOAgent entries (which never called pre_entry) now fit the VaR cap and the agent's share."""
+    from unittest.mock import patch
+    import portfolio_risk as _prm
+    class _OptKite(_FakeKite):
+        def quote(self, instruments):
+            return {i: {"last_price": 120.0} for i in instruments}
+    def body():
+        _te_kite_client._kite = _OptKite()
+        import options_resolver as _or
+        listed = [{"name": "NIFTY", "instrument_type": "CE", "segment": "NFO-OPT", "strike": 24000.0,
+                   "expiry": datetime.now().date() + timedelta(days=6), "tradingsymbol": "NIFTYVAR24000CE",
+                   "lot_size": 75}]
+        agent = FnOAgent()
+        seen = []
+        def fake_check(a, v):
+            seen.append((a, v)); return "agent fno VaR share reached (test)"
+        n = len(_te_kite_client._paper_orders)
+        with patch.object(_rm_x, "check_before_order", return_value=(True, "")), \
+             patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO", "")), \
+             patch.object(_or, "_instruments", return_value=listed), \
+             patch.object(_prm, "var_check", fake_check):
+            asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
+                        {"option_symbol": "X", "exchange": "NFO", "lot_size": 75, "strike": 24000, "option_type": "CE"}))
+        assert len(_te_kite_client._paper_orders) == n, "over-share F&O entry must not be placed"
+        assert seen == [("fno", 120.0 * 75)], seen
+        assert "portfolio risk: agent fno VaR share" in agent.state.last_skip, agent.state.last_skip
+        prev = _ai_settings.fno_var_check_enabled
+        _ai_settings.fno_var_check_enabled = False
+        seen.clear()
+        try:
+            with patch.object(_rm_x, "check_before_order", return_value=(False, "blocked here")), \
+                 patch.object(_or, "_instruments", return_value=listed), \
+                 patch.object(_prm, "var_check", fake_check):
+                asyncio.run(agent._try_enter(_make_snap(symbol="NIFTY", ltp=24000.0), "BUY",
+                            {"option_symbol": "X", "exchange": "NFO", "lot_size": 75, "strike": 24000, "option_type": "CE"}))
+            assert seen == [] and agent.state.last_skip.endswith("blocked here"), agent.state.last_skip
+        finally:
+            _ai_settings.fno_var_check_enabled = prev
+    _with_paper_kite(body)
+
+def t_replay_untouched_by_agent_var_rules():
+    src = Path(__file__).with_name("replay_backtest.py").read_text()
+    for name in ("pre_entry", "var_check", "open_cap_reason", "var_agent_share_pct", "fno_max_open_positions"):
+        assert name not in src, name
+
+run("Risk: one agent over its VaR share is rejected, others still enter", t_risk_agent_var_share)
+run("Risk: the total VaR cap still applies with per-agent shares",       t_risk_agent_var_share_total_cap_still_applies)
+run("Risk: open book attributes VaR to the strategy tag",                t_risk_open_book_tags_agents)
+run("F&O: 5th open position skipped (FNO_MAX_OPEN_POSITIONS); others unaffected", t_fno_max_open_positions)
+run("F&O: entries checked against the VaR cap and the agent's share",    t_fno_entry_checks_var_share)
+run("Replay: per-agent VaR share and F&O cap are live-only",             t_replay_untouched_by_agent_var_rules)
 run("Market context: every block present, nothing invented",  t_market_context_shape)
 
 # ── Execution quality ─────────────────────────────────────────────────────

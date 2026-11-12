@@ -11,6 +11,10 @@ Three rules the per-trade limits don't cover:
 3. Daily VaR cap: the sum of what the open book could lose on a bad day (1.65σ, 95%,
    one day) plus the new trade must stay under PORTFOLIO_VAR_CAP_PCT of capital. Options
    and spreads count their maximum loss; equity and futures count notional × σ.
+4. Per-agent VaR share: one agent's open positions (keyed by the trailing-stop engine's strategy
+   tag: intraday, scalping, swing, fno, ai, ai_opt, ai_fut, ai_swing, ai_spread, ...) may use at most
+   VAR_AGENT_SHARE_PCT of that cap, so a single agent cannot fill the book and starve the others
+   (12 Nov 2026: the F&O agent filled the cap and every intraday/scalping signal was rejected).
 
 Everything returns a reason string so the AI (or the log) says exactly why a size was cut.
 """
@@ -63,12 +67,13 @@ def _open_book() -> list[dict]:
         notional = pos.entry_price * pos.quantity
         book.append({"symbol": pos.symbol, "kind": "option" if is_opt else ("future" if exch == "NFO" else "equity"),
                      "notional": notional, "max_loss": notional if is_opt else None,
-                     "underlying": e.get("guard_symbol", pos.symbol)})
+                     "underlying": e.get("guard_symbol", pos.symbol),
+                     "agent": getattr(pos, "strategy", None) or e.get("agent")})
     try:
-        from ai_trader import ai_trader
+        from ai_trader import ai_trader, SPREAD_STRATEGY
         for sid, sp in ai_trader._spreads.items():
             book.append({"symbol": sid, "kind": "spread", "notional": sp["max_loss"], "max_loss": sp["max_loss"],
-                         "underlying": sp["underlying"]})
+                         "underlying": sp["underlying"], "agent": SPREAD_STRATEGY})
     except Exception:
         pass
     return book
@@ -89,6 +94,38 @@ def portfolio_var() -> dict:
             "positions": len(book)}
 
 
+def agent_var_budget() -> Optional[float]:
+    """₹ of the portfolio VaR cap one agent may use, or None when the per-agent share is off
+    (VAR_AGENT_SHARE_PCT ≤ 0 or ≥ 100)."""
+    share = settings.var_agent_share_pct
+    if share <= 0 or share >= 100:
+        return None
+    return settings.total_capital * settings.portfolio_var_cap_pct / 100 * share / 100
+
+
+def agent_var(agent: str, book: Optional[list[dict]] = None) -> float:
+    """1-day 95% VaR of the open positions tagged with this agent."""
+    book = _open_book() if book is None else book
+    return sum(var_of(b) for b in book if b.get("agent") == agent)
+
+
+def var_check(agent: Optional[str], new_var: float) -> Optional[str]:
+    """Reject-only form of the VaR rules (3 and 4) for entry paths that trade fixed lots (FnOAgent):
+    the reason the new position's VaR does not fit the portfolio cap or the agent's share, or None."""
+    book = _open_book()
+    used = sum(var_of(b) for b in book)
+    cap = settings.total_capital * settings.portfolio_var_cap_pct / 100
+    if cap and used + new_var > cap:
+        return f"daily VaR cap reached (₹{used:,.0f} + ₹{new_var:,.0f} of ₹{cap:,.0f})"
+    budget = agent_var_budget() if agent else None
+    if budget is not None:
+        mine = agent_var(agent, book)
+        if mine + new_var > budget:
+            return (f"agent {agent} VaR share reached (₹{mine:,.0f} + ₹{new_var:,.0f} over its "
+                    f"₹{budget:,.0f} = {settings.var_agent_share_pct:g}% of the ₹{cap:,.0f} cap)")
+    return None
+
+
 def size_for_stop(price: float, stop: float) -> int:
     """Largest quantity whose loss at the stop stays within RISK_PER_TRADE_PCT of capital."""
     dist = abs(price - stop)
@@ -99,11 +136,13 @@ def size_for_stop(price: float, stop: float) -> int:
 
 def pre_entry(symbol: str, side: str, quantity: int, price: float, stop: Optional[float] = None,
               kind: str = "equity", max_loss: Optional[float] = None, underlying: Optional[str] = None,
-              unit_size: int = 1) -> dict:
+              unit_size: int = 1, agent: Optional[str] = None) -> dict:
     """Apply the portfolio rules to a proposed entry.
 
     unit_size: lot size for F&O — max_quantity is rounded down to whole lots, and less than one
     lot means "no".
+    agent: the strategy tag the position will carry in the trailing-stop engine. With it the entry
+    must also fit that agent's share of the VaR cap (rule 4); None skips rule 4.
 
     Returns {"ok": bool, "reason": str, "max_quantity": int, "size_factor": float, "var": {...}}.
     ok=False means do not trade; otherwise quantity must be ≤ max_quantity (the caller either
@@ -158,6 +197,7 @@ def pre_entry(symbol: str, side: str, quantity: int, price: float, stop: Optiona
         new_var = float(max_loss if max_loss is not None else price * max_q)
     else:
         new_var = price * max_q * daily_vol(underlying or symbol) * Z_95
+    per_unit_var = new_var / max(max_q, 1)
     if pv["cap"] and pv["var_1d_95"] + new_var > pv["cap"]:
         room = pv["cap"] - pv["var_1d_95"]
         if room <= 0:
@@ -166,6 +206,19 @@ def pre_entry(symbol: str, side: str, quantity: int, price: float, stop: Optiona
         per_unit = new_var / max(max_q, 1)
         max_q = int(room // per_unit) if per_unit > 0 else 0
         reasons.append(f"daily VaR cap ₹{pv['cap']:,.0f} (used ₹{pv['var_1d_95']:,.0f}, room ₹{room:,.0f}) → max qty {max_q}")
+    # 5. this agent's share of the VaR cap
+    budget = agent_var_budget() if agent else None
+    if budget is not None and max_q > 0 and per_unit_var > 0:
+        mine = agent_var(agent)
+        if mine + per_unit_var * max_q > budget:
+            room = budget - mine
+            label = (f"agent {agent} VaR share {settings.var_agent_share_pct:g}% of the cap "
+                     f"(₹{budget:,.0f}; its open positions use ₹{mine:,.0f})")
+            if room < per_unit_var:
+                return {"ok": False, "reason": f"{label} reached; other agents can still enter",
+                        "max_quantity": 0, "size_factor": 0.0, "var": pv}
+            max_q = int(room // per_unit_var)
+            reasons.append(f"{label} → max qty {max_q}")
     if unit_size > 1:
         max_q = (max_q // unit_size) * unit_size
         if max_q < unit_size:

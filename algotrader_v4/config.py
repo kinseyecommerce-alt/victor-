@@ -215,6 +215,10 @@ class Settings(BaseSettings):
     # ── Portfolio risk (portfolio_risk.py) — applied to every entry, AI or agent ──
     risk_per_trade_pct:           float = 0.5      # max loss at the stop as % of total capital (vol-targeted size)
     portfolio_var_cap_pct:        float = 2.0      # 1-day 95% VaR of the open book, % of capital
+    var_agent_share_pct:          float = 40.0     # max % of that VaR cap one agent's open positions may use
+                                                   # (keyed by strategy tag; ≤0 or ≥100 turns the per-agent share off)
+    fno_max_open_positions:       int   = 4        # FnOAgent stock/index option positions open at once (0 = no cap)
+    fno_var_check_enabled:        bool  = True     # FnOAgent entries must fit the VaR cap and the agent's VaR share
     max_portfolio_heat:           float = 0.7      # avg pairwise correlation of the book above which no new equity entry
     # ── Bull-vs-bear debate before every AI entry (debate_gate.py) ─────────
     ai_agent_debate_enabled:      bool  = True
