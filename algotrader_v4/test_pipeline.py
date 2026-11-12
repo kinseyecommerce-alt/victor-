@@ -9394,6 +9394,43 @@ run("attention: exclusions, top-10 ratio per day, period end, futures / CNC cost
 run("attention: protocol never simulates FINAL for screen failures", t_attn_protocol_final_never_for_failures)
 
 
+section("AUTO-START ON A TRADING DAY")
+
+
+def t_auto_start_trading_day_and_catch_up():
+    """On a trading day the 09:16 job reaches the master agent (12 Nov 2026 it crashed on a wrong import
+    and the bot never started); a restart inside market hours runs the missed auto-start."""
+    import platform_scheduler as _ps2, ist_clock as _clk2, asyncio as _aio2
+    from unittest.mock import patch as _p2
+    from datetime import datetime as _dt2
+    import master_agent_v5 as _mav
+    from config import settings as _s2
+    prev = _s2.auto_start_strategies
+    _s2.auto_start_strategies = "intraday"
+    try:
+        with _p2.object(_clk2, "now_ist", return_value=_dt2(2026, 11, 12, 9, 16, tzinfo=_clk2._IST)), \
+             _p2.object(_mav.master_agent, "running", True), \
+             _p2.object(_ps2.kite_client, "profile", side_effect=AssertionError("already running: stop first")):
+            _aio2.run(_ps2.PlatformScheduler()._auto_start_bot())          # must not raise ImportError
+        calls = []
+        sch = _ps2.PlatformScheduler()
+        async def fake():
+            calls.append(1)
+        sch._auto_start_bot = fake
+        for hh, mm, want in ((9, 20, 1), (14, 59, 1), (9, 10, 0), (15, 5, 0)):
+            calls.clear()
+            with _p2.object(_clk2, "now_ist", return_value=_dt2(2026, 11, 12, hh, mm, tzinfo=_clk2._IST)):
+                _aio2.run(sch._auto_start_catch_up())
+            assert len(calls) == want, (hh, mm, calls)
+    finally:
+        _s2.auto_start_strategies = prev
+    assert "auto_start_catch_up" in Path(_ps2.__file__).read_text()
+
+
+run("auto-start: trading day reaches the master agent; missed 09:16 start runs after a restart",
+    t_auto_start_trading_day_and_catch_up)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
