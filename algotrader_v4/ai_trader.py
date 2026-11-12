@@ -1581,12 +1581,13 @@ class AITrader:
             "events_today": self.events_today, "decisions_today": self.decisions_today,
         }
 
-    def import_book(self, d: dict, closed: set = frozenset()) -> int:
+    def import_book(self, d: dict, closed: set = frozenset(), day=None) -> int:
         """Restore what export_book saved (same trading day). Positions in `closed` already reached the
-        ledger and are skipped. Returns the number of open AI positions / spreads restored."""
+        ledger and are skipped. `day`: the date the saved counters belong to (an earlier day's are reset by
+        _roll_day). Returns the number of open AI positions / spreads restored."""
         import time as _t
         from agents.base_agent import _tsl_sl_orders
-        self._day = now_ist().date()
+        self._day = day or now_ist().date()
         self.trades_today = int(d.get("trades_today", 0))
         self.cycles_today = int(d.get("cycles_today", 0))
         self.cost_today_usd = float(d.get("cost_today_usd", 0.0))

@@ -9594,7 +9594,7 @@ def _pb_isolated():
         "agents": {n: (a.state.trades_today, a.state.pnl_today, a.state.signals_fired, set(a._exit_only))
                    for n, a in _ALL_pb.items()},
         "ai": (dict(_ai_pb._targets), dict(_ai_pb._open), dict(_ai_pb._trail), dict(_ai_pb._spreads), _ai_pb.trades_today),
-        "pb": (_pb._restore_attempted, _pb._last_body, set(_pb._restored)),
+        "pb": (_pb._restore_attempted, _pb._last_body, set(_pb._restored), _pb._book_day, _pb._squared_off_day),
         "env": _os.environ.get("PAPER_BOOK_FILE"), "mode": settings.trading_mode,
     }
     d = _tmp0.mkdtemp()
@@ -9603,6 +9603,7 @@ def _pb_isolated():
         _pb_wipe()
         _pb._restore_attempted, _pb._last_body = True, None
         _pb._restored.clear()
+        _pb._book_day, _pb._squared_off_day = _pb.session_day(), None
         yield _pb.path()
     finally:
         settings.trading_mode = saved["mode"]
@@ -9623,6 +9624,7 @@ def _pb_isolated():
         _ai_pb._targets, _ai_pb._open, _ai_pb._trail, _ai_pb._spreads, _ai_pb.trades_today = saved["ai"]
         _pb._restore_attempted, _pb._last_body = saved["pb"][0], saved["pb"][1]
         _pb._restored.clear(); _pb._restored.update(saved["pb"][2])
+        _pb._book_day, _pb._squared_off_day = saved["pb"][3], saved["pb"][4]
         if saved["env"] is None:
             _os.environ.pop("PAPER_BOOK_FILE", None)
         else:
@@ -9873,7 +9875,158 @@ def t_scheduled_squareoff_records_tracked_once():
         assert _rm_x.open_position_count == 0
 
 
+_IST_pb = _pb.now_ist().tzinfo
+_D_pb = date(2026, 11, 12)                  # a Thursday; the next session is Friday
+
+
+def _pb_at(d, hh, mm, ss=0):
+    return datetime.combine(d, time(hh, mm, ss)).replace(tzinfo=_IST_pb)
+
+
+def _pb_blow_day():
+    """A bad day: loss limit breached (halted), the trade caps used up."""
+    _rm_x.daily_realised_pnl, _rm_x.is_trading_halted, _rm_x.trades_today = -9000.0, True, 8
+    _og_pb._trade_count["intraday"] = 99
+    _ALL_pb["intraday"].state.trades_today, _ALL_pb["intraday"].state.pnl_today = 8, -9000.0
+
+
+def _pb_assert_day_clean():
+    assert not _rm_x.is_trading_halted and _rm_x.daily_realised_pnl == 0 and _rm_x.trades_today == 0
+    assert _og_pb._trade_count.get("intraday", 0) == 0 and _og_pb.can_place("PBNEW", "intraday", "BUY")[0]
+    assert _ALL_pb["intraday"].state.trades_today == 0 and _ALL_pb["intraday"].state.pnl_today == 0
+
+
+def t_paper_book_midnight_snapshot_does_not_carry_counters():
+    """The save loop rewrites the snapshot after midnight: it must still say the counters are the previous
+    session's, and they are reset at 09:15 (or at once when restored after 09:15) without master running."""
+    from unittest.mock import patch
+    with _pb_isolated() as f, patch.object(_pb, "now_ist") as clk:
+        clk.return_value = _pb_at(_D_pb, 14, 30)
+        _pb._book_day = _pb.session_day()
+        oid = _pb_open_trailed("PBMID")
+        qty = _paper_pos("PBMID")["quantity"]
+        _pb_blow_day()
+        _pb.save()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 0, 0, 3)
+        assert _pb.save(), "the date in the snapshot changed at midnight"
+        midnight = f.read_text()
+        snap = _json_pb.loads(midnight)
+        assert snap["session"] == "2026-11-13" and snap["book_day"] == "2026-11-12", snap["book_day"]
+        # restart before 09:15: the book is the previous session's, exactly as without a restart ...
+        _pb_wipe()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 8, 50)
+        out = _pb.restore()
+        assert out["restored"] and not out.get("day_reset") and _rm_x.is_trading_halted, out
+        # ... and 09:15 resets it even though master never started (no 09:15 job in this process)
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 9, 15, 3)
+        assert _pb.roll_day_if_due() and not _pb.roll_day_if_due()
+        _pb_assert_day_clean()
+        assert oid in _ba._tsl_sl_orders, "open positions survive the day reset"
+        # restart after 09:15 from the same midnight snapshot: reset at restore, positions still restored
+        f.write_text(midnight)
+        _pb_wipe()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 10, 0)
+        out = _pb.restore()
+        assert out["restored"] and out.get("day_reset") and out["positions"] == ["PBMID"], out
+        _pb_assert_day_clean()
+        assert _json_pb.loads(f.read_text())["book_day"] == "2026-11-13"
+        _ba._close_tracked(oid, "PBMID", "BUY", qty, 0.0, "T", "intraday")
+
+
+def t_paper_book_evening_restore_rolls_next_morning():
+    """An evening redeploy restores today's counters (same session), and the next morning they are reset
+    by the paper book's own rollover; master's 09:15 reset marks the day so nothing resets twice."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_pb, "now_ist") as clk, patch.object(_mav_pb, "send_telegram", _noop):
+        clk.return_value = _pb_at(_D_pb, 14, 30)
+        _pb._book_day = _pb.session_day()
+        _pb_blow_day()
+        _pb.save()
+        _pb_wipe()
+        clk.return_value = _pb_at(_D_pb, 20, 0)
+        out = _pb.restore()
+        assert out["restored"] and _rm_x.is_trading_halted and _og_pb._trade_count["intraday"] == 99
+        assert not _pb.roll_day_if_due(), "still today's session"
+        clk.return_value = _pb_at(_D_pb + timedelta(days=1), 9, 16)
+        assert _pb.roll_day_if_due()
+        _pb_assert_day_clean()
+        # a process where master runs: its 09:15 reset marks the session, the rollover then does nothing
+        _pb_blow_day()
+        clk.return_value = _pb_at(_D_pb + timedelta(days=2), 9, 15)
+        asyncio.run(_mav_pb.master_agent._daily_reset())
+        _pb_assert_day_clean()
+        assert _pb._book_day == _D_pb + timedelta(days=2) and not _pb.roll_day_if_due()
+
+
+def t_squareoff_failed_exit_still_flattened():
+    """A tracked exit that fails at 15:15 is not excluded from the broker flatten."""
+    from unittest.mock import patch
+    import master_agent_v5 as _mav_pb
+    async def _noop(*a, **k): return None
+    with _pb_isolated(), patch.object(_mav_pb, "send_telegram", _noop), patch.object(_ba, "send_telegram", _noop):
+        oid = _pb_open_trailed("PBSQFAIL")
+        real = _te_kite_client.place_order
+        def flaky(*a, **k):
+            if str(k.get("tag", "")).startswith("SquareOff-"):
+                raise RuntimeError("RMS reject")
+            return real(*a, **k)
+        with patch.object(_te_kite_client, "place_order", side_effect=flaky):
+            asyncio.run(_mav_pb.master_agent._auto_squareoff())
+        assert oid not in _ba._tsl_sl_orders
+        assert _paper_pos("PBSQFAIL")["quantity"] == 0, "the broker-level square-off must flatten it"
+        assert [o["tag"] for o in _te_kite_client._paper_orders
+                if o["tradingsymbol"] == "PBSQFAIL" and o["transaction_type"] == "SELL"
+                and o["status"] == "COMPLETE"] == ["SquareOff"]
+
+
+def t_squareoff_skips_flat_tracked_position():
+    """The exchange stop filled between polls: the broker is flat but the tracking is not. The square-off
+    releases the tracking and sends no exit (a blind SELL would open a fresh short)."""
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBSQFLAT")
+        qty = _paper_pos("PBSQFLAT")["quantity"]
+        sl = _order(_ba._tsl_sl_orders[oid]["sl_order_id"])
+        sl["status"] = "COMPLETE"
+        _te_kite_client._update_paper_position({"tradingsymbol": "PBSQFLAT", "exchange": "NSE", "product": "MIS",
+                                                "transaction_type": "SELL", "quantity": qty, "price": 1005.0})
+        n_orders = len(_te_kite_client._paper_orders)
+        assert _ba.close_tracked_for_squareoff("t") == []
+        assert oid not in _ba._tsl_sl_orders and oid not in _tsl_eng._positions
+        assert len(_te_kite_client._paper_orders) == n_orders, "no exit order for a flat position"
+        assert _paper_pos("PBSQFLAT")["quantity"] == 0, "flat, not reversed"
+        assert _rm_x.open_position_count == 0
+
+
+def t_paper_book_restored_fno_squared_off_without_master():
+    """A restored NRML option leg (no time rule in its exit policy) is squared off at SQUAREOFF_TIME by the
+    paper book when master is not running to do it."""
+    with _pb_isolated():
+        oid = _pb_open_trailed("PBFNO")
+        _ba._tsl_sl_orders[oid].update(product="NRML", agent="fno")
+        _paper_pos("PBFNO")["product"] = "NRML"
+        _pb.save(); _pb_wipe(); _pb.restore()
+        assert oid in _pb._restored
+        d = _pb.now_ist().date()
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        h, m = (int(x) for x in settings.squareoff_time.split(":"))
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m) - timedelta(minutes=5)) == []
+        assert oid in _ba._tsl_sl_orders
+        n0 = len(_perf_pb.trades)
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 2)) == ["PBFNO"]
+        assert oid not in _ba._tsl_sl_orders and _paper_pos("PBFNO")["quantity"] == 0 and not _pb._restored
+        assert len(_perf_pb.trades) == n0 + 1 and _perf_pb.trades[-1]["oid"] == oid
+        assert _pb.squareoff_restored_if_due(_pb_at(d, h, m, 5)) == []
+
+
 run("paper book: snapshot/restore round-trip keeps the trailing stop, book and counters", t_paper_book_round_trip)
+run("paper book: a snapshot rewritten after midnight does not carry the day counters", t_paper_book_midnight_snapshot_does_not_carry_counters)
+run("paper book: evening restore keeps today's counters, next morning resets them", t_paper_book_evening_restore_rolls_next_morning)
+run("auto square-off: a failed tracked exit is still flattened at the broker",   t_squareoff_failed_exit_still_flattened)
+run("auto square-off: an already-flat tracked position gets no exit order",      t_squareoff_skips_flat_tracked_position)
+run("paper book: restored F&O leg squared off at SQUAREOFF_TIME without master", t_paper_book_restored_fno_squared_off_without_master)
 run("paper book: watchdog hands a restored position to its running agent",     t_paper_book_watchdog_hands_over_to_agent)
 run("auto square-off: tracked MIS positions reach the ledger once, no reverse", t_scheduled_squareoff_records_tracked_once)
 run("paper book: a snapshot from an earlier day is ignored",                   t_paper_book_stale_ignored)

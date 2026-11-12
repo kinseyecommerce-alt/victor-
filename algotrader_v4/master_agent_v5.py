@@ -150,6 +150,11 @@ class MasterAgent:
 
     def start(self, strategies: list[str], watchlist: list[dict]) -> dict:
         self.running = True
+        try:
+            import paper_book
+            paper_book.roll_day_if_due()     # PAPER: never start a session on an earlier session's counters
+        except Exception as exc:
+            logger.error("[master_v5] paper book day rollover failed: {}", exc)
         report: dict[str, dict] = {}
 
         for strat in strategies:
@@ -364,6 +369,8 @@ class MasterAgent:
             a.reset_daily()
         from ai_trader import ai_trader
         ai_trader.reapply_overnight()        # swing positions held from earlier days still count
+        import paper_book
+        paper_book.mark_day_reset()          # PAPER book: its own rollover must not reset a second time
         await send_telegram("<b>New trading day</b> — counters reset")
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("system", {"type": "daily_reset"}))

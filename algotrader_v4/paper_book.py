@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import tempfile
+from datetime import date, time as dtime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +45,12 @@ _save_task: Optional[asyncio.Task] = None
 _watch_task: Optional[asyncio.Task] = None
 _WATCH_NAME = "paper_book"
 last_restore: dict = {}
+# The trading session the in-memory day counters (risk, order guard, agents, AI) belong to. A session runs
+# from DAY_START (09:15, master's daily reset) to the next day's 09:15, so a snapshot written after midnight
+# still says its counters are the previous session's. Set at restore, advanced by every daily reset.
+_book_day: Optional[date] = None
+_squared_off_day: Optional[date] = None   # restored positions squared off by this module on that date
+DAY_START = dtime(9, 15)
 
 
 def path() -> Path:
@@ -101,6 +108,7 @@ def snapshot() -> dict:
     return {
         "schema": SCHEMA,
         "session": now_ist().date().isoformat(),
+        "book_day": (_book_day or session_day()).isoformat(),
         "mode": settings.trading_mode,
         "kite": {"orders": list(kite_client._paper_orders), "positions": list(kite_client._paper_positions),
                  "gtts": {str(k): v for k, v in kite_client._paper_gtts.items()}},
@@ -165,16 +173,109 @@ def _flatten_paper(kite_client, symbol: str, price: float, note: str) -> None:
 
 def restore() -> dict:
     """Startup: re-load today's paper book. Never raises; returns a summary."""
-    global _restore_attempted, last_restore
+    global _restore_attempted, last_restore, _book_day
+    _book_day = session_day()                     # fresh (empty) counters belong to the current session
     try:
         out = _restore()
     except Exception as exc:                      # a broken snapshot must never stop the server
         logger.error("[paper_book] restore failed, starting with an empty paper book: {}", exc)
         _quarantine()
         out = {"restored": False, "reason": f"error: {str(exc)[:200]}"}
+        _book_day = session_day()
     _restore_attempted = True
     last_restore = out
+    if out.get("restored") and roll_day_if_due():
+        out["day_reset"] = True                   # the restored counters were an earlier session's
     return out
+
+
+# ── Day rollover (independent of master.start()) ──────────────────────────────
+
+def session_day(now=None) -> date:
+    """The trading session a moment belongs to: from 09:15 (master's daily reset) to the next 09:15."""
+    now = now or now_ist()
+    return now.date() if now.time() >= DAY_START else now.date() - timedelta(days=1)
+
+
+def _parse_day(v) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(v)) if v else None
+    except ValueError:
+        return None
+
+
+def mark_day_reset(now=None) -> None:
+    """master._daily_reset just reset every day counter: they belong to the current session now."""
+    global _book_day
+    _book_day = session_day(now)
+
+
+def roll_day_if_due(now=None) -> bool:
+    """Reset the day counters exactly as master._daily_reset does when the session they belong to is over.
+    master's 09:15 job only exists once master.start() ran, and after a restart the bot is started at 09:16
+    (or, as a catch-up, only until 15:00), so a restored or evening process would otherwise carry one day's
+    halted flag, day P&L and trade caps into the next. PAPER (persistence on) only; returns True on a reset."""
+    if not enabled() or not _restore_attempted:
+        return False
+    cur = session_day(now)
+    if _book_day == cur:
+        return False
+    prev = _book_day
+    mark_day_reset(now)
+    from risk_manager import risk_manager as rm
+    from order_guard import order_guard as og
+    rm.reset_daily()
+    og.reset_daily()
+    for a in _agents().values():
+        a.reset_daily()
+    try:
+        from ai_trader import ai_trader
+        ai_trader.reapply_overnight()             # swing positions held from earlier days still count
+    except Exception as exc:
+        logger.warning("[paper_book] AI overnight positions not re-applied: {}", exc)
+    logger.warning("[paper_book] new trading session {} — day counters of {} reset", cur, prev)
+    save(force=True)
+    return True
+
+
+def squareoff_restored_if_due(now=None) -> list[str]:
+    """Restored intraday positions (MIS / NRML F&O legs, not CNC / swing) are closed at SQUAREOFF_TIME even
+    when master is not running to do it (after a restart past the 15:00 auto-start catch-up, for example).
+    Same path as master's square-off; a position master already closed is no longer tracked, so nothing is
+    exited twice. Restored positions only, and once per day."""
+    global _squared_off_day
+    if not _restored or not enabled():
+        return []
+    now = now or now_ist()
+    h, m = (int(x) for x in settings.squareoff_time.split(":"))
+    if now.weekday() >= 5 or now.time() < dtime(h, m) or _squared_off_day == now.date():
+        return []
+    from agents.base_agent import close_tracked_for_squareoff, _tsl_sl_orders
+    from kite_client import kite_client
+    only = {oid for oid in _restored if oid in _tsl_sl_orders}
+    _restored.intersection_update(_tsl_sl_orders)
+    if not only:
+        return []
+    _squared_off_day = now.date()
+    syms = {_tsl_sl_orders[oid].get("symbol") for oid in only
+            if _tsl_sl_orders[oid].get("product", "MIS") != "CNC" and _tsl_sl_orders[oid].get("kind") != "swing"}
+    closed = close_tracked_for_squareoff("restored square-off", only=only)
+    # a failed exit is flattened at the (paper) broker, as master's square-off does: restored symbols only
+    for p in kite_client.positions().get("net", []):
+        sym = p.get("tradingsymbol")
+        if sym in syms and sym not in closed and p.get("quantity") and p.get("product") != "CNC":
+            try:
+                kite_client.place_order(tradingsymbol=sym, exchange=p.get("exchange", "NSE"),
+                                        transaction_type="SELL" if p["quantity"] > 0 else "BUY",
+                                        quantity=abs(int(p["quantity"])), order_type="MARKET",
+                                        product=p.get("product", "MIS"), tag="SquareOff")
+            except Exception as exc:
+                logger.critical("[paper_book] square-off of {} failed: {}", sym, exc)
+    _restored.intersection_update(_tsl_sl_orders)
+    if closed:
+        logger.warning("[paper_book] squared off restored position(s) at {}: {}", settings.squareoff_time,
+                       ", ".join(closed))
+    return closed
 
 
 def _quarantine() -> None:
@@ -187,6 +288,7 @@ def _quarantine() -> None:
 
 
 def _restore() -> dict:
+    global _book_day
     if settings.trading_mode != "PAPER":
         return {"restored": False, "reason": "LIVE mode: the broker holds the book"}
     if not enabled():
@@ -253,6 +355,7 @@ def _restore() -> dict:
         if name in risk:
             setattr(rm, name, int(risk[name]))
     rm.is_trading_halted = bool(risk.get("is_trading_halted", False))
+    _book_day = _parse_day(d.get("book_day")) or _parse_day(d.get("session"))   # the session these counters are from
 
     with og._lock:
         for sym, strat, side, oid, placed in g_active:
@@ -311,7 +414,7 @@ def _restore() -> dict:
                 _reconcile_spread(kite_client, og, rm, spreads[sid], closed[sid])
                 reconciled.append(sid)
             from ai_trader import ai_trader
-            ai_n = ai_trader.import_book(ai_d, closed=set(closed))
+            ai_n = ai_trader.import_book(ai_d, closed=set(closed), day=_book_day)
         except Exception as exc:
             logger.error("[paper_book] AI book not restored: {}", exc)
 
@@ -419,6 +522,11 @@ def _ensure_watchdog() -> None:
 async def _save_loop() -> None:
     while True:
         await asyncio.sleep(max(0.5, float(settings.paper_book_save_interval_s)))
+        for step in (roll_day_if_due, squareoff_restored_if_due):
+            try:
+                step()
+            except Exception as exc:
+                logger.error("[paper_book] {} failed: {}", step.__name__, exc)
         save()
 
 
@@ -435,5 +543,5 @@ def start() -> None:
 
 def status() -> dict:
     f = path()
-    return {"enabled": enabled(), "file": str(f), "exists": f.exists(),
+    return {"enabled": enabled(), "file": str(f), "exists": f.exists(), "book_day": str(_book_day or ""),
             "watching_restored": len(_restored), "last_restore": last_restore}
