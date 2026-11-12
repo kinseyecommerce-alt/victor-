@@ -1250,6 +1250,32 @@ def t_v2_scalp_restart_replay_and_rearm():
     assert ScalpV2Agent().RT_MAX_PER_DAY == 1
 
 
+def t_v2_range_from_full_buffer_after_restart():
+    """A live snapshot holds only the last 60 bars; after a restart past ~10:15 the 09:15-09:30 range comes from
+    the tick engine's full buffer (12 Nov 2026: 0 of 49 scalper ranges were ready at 11:00)."""
+    from tick_engine import tick_engine as _te2, TickBuffer as _TB
+    day = datetime(2026, 1, 15, 9, 15)
+    now = day + timedelta(minutes=105)                                   # 11:00
+    s = _orb_snap("FB1", now, 1012.0, 1000.0, 1006.0, vwap=1003.0, ema9=1013.0, ema21=1011.0)
+    full = list(s.candles_1min)
+    s.candles_1min = full[-60:]                                          # what a live snapshot carries
+    assert s.candles_1min[0].ts.time() > datetime(2026, 1, 15, 9, 30).time()
+    prev = _te2._bufs_1min.get("FB1")
+    _te2._bufs_1min["FB1"] = _TB(60, maxlen=400); _te2._bufs_1min["FB1"].prepend_history(full)
+    try:
+        sc, it = ScalpV2Agent(), IntradayV2Agent()
+        with _with_v2_clock(now, "UP"):
+            sc.evaluate_tick(s); it.evaluate_tick(s)
+        r = sc._orb[("FB1", now.date())]
+        assert r["done"] and r["h"] == 1006.0 and r["l"] == 1000.0 and r["broke"] == "UP", r
+        ri = it._orb.get(("FB1", now.date()))
+        assert ri and ri["done"] and ri["h"] == 1006.0, ri
+        assert sc.get_status()["watching"]["range_ready"] == 1
+    finally:
+        if prev is None: _te2._bufs_1min.pop("FB1", None)
+        else: _te2._bufs_1min["FB1"] = prev
+
+
 def t_v2_close_hook_reaches_agent():
     from agents import base_agent as _ba
     calls = []
@@ -1269,6 +1295,7 @@ run("v2: 20-day trend filter blocks counter-trend breakouts",  t_v2_orb_trend_fi
 run("v2: breakout window and range limits enforced",           t_v2_orb_window_and_range_limits)
 run("v2: scalper retest entry at 1.5R, stops after a loss",    t_v2_scalp_retest_and_loss_stop)
 run("v2: scalper rebuilds breaks after a restart, re-arms in all-day mode", t_v2_scalp_restart_replay_and_rearm)
+run("v2: opening range read from the full buffer after a late restart", t_v2_range_from_full_buffer_after_restart)
 def t_v2_daily_bias_never_blocks_tick_loop():
     """Uncached symbol → no I/O on the tick loop: a background prefetch starts and the filter is off."""
     import daily_data as _dd
