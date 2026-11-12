@@ -124,6 +124,23 @@ def _close_tracked(entry_oid: str, symbol: str, side: str, quantity: int,
     return exited
 
 
+def reapply_overnight_tracked() -> int:
+    """After the daily counter reset (order_guard.reset_daily clears every active order, risk_manager.reset_daily
+    zeroes the open-position count): re-mark every position still held from an earlier day — delivery (CNC) or
+    swing, any agent, the strategy SwingAgent as well as the AI trader — so the same stock is not bought a
+    second time and the open-position cap still counts it. Returns how many were re-marked."""
+    n = 0
+    for oid, e in list(_tsl_sl_orders.items()):
+        if e.get("product", "MIS") != "CNC" and e.get("kind") != "swing":
+            continue
+        pos = trailing_sl_engine._positions.get(oid)
+        strategy = pos.strategy if pos else e.get("agent", "")
+        order_guard.restore_active(e.get("guard_symbol") or e.get("symbol"), strategy, e.get("side", "BUY"), oid)
+        risk_manager.position_opened()
+        n += 1
+    return n
+
+
 def close_tracked_for_squareoff(reason: str = "SquareOff", only: Optional[set] = None) -> list[str]:
     """The scheduled square-off: close every tracked intraday position (not delivery / swing holdings) through
     _close_tracked, so each lands in the ledger and releases its bookkeeping. kite_client.squareoff_all_positions

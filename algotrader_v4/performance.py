@@ -293,18 +293,29 @@ class Performance:
     def snapshot_today(self, ai_cost_usd: float = 0.0) -> dict:
         """Store today's net P&L (and the API spend) with the benchmark closes. Idempotent."""
         today = now_ist().date().isoformat()
-        rows = [t for t in self.trades if t["t"][:10] == today]
-        snap = {"date": today, "gross": round(sum(t["gross"] for t in rows), 2),
+        snap = self._day_row(today, ai_cost_usd)
+        # earlier days with trades but no snapshot (the 15:35 job did not run: restart, outage) — fill them in
+        # from the ledger, or their P&L is missing from every week/month/year total
+        missed = sorted({t["t"][:10] for t in self.trades} - set(self.days) - {today})
+        if missed and len(self.trades) >= MAX_TRADES and missed[0] == self.trades[0]["t"][:10]:
+            missed = missed[1:]              # the ledger was trimmed: its oldest day may be incomplete
+        rows = {d: self._day_row(d, 0.0) for d in missed if d < today}
+        with self._lock:
+            self.days.update(rows)
+            self.days[today] = snap
+            self._save()
+        return snap
+
+    def _day_row(self, day: str, ai_cost_usd: float) -> dict:
+        rows = [t for t in self.trades if t["t"][:10] == day]
+        snap = {"date": day, "gross": round(sum(t["gross"] for t in rows), 2),
                 "costs": round(sum(t["cost"] for t in rows), 2),
                 "ai_cost_inr": round(ai_cost_usd * settings.usd_inr, 2), "trades": len(rows)}
         snap["net"] = round(snap["gross"] - snap["costs"] - snap["ai_cost_inr"], 2)
         for name in BENCHMARKS:
             closes = self._benchmark_closes(name)
-            prior = [c for d, c in closes if d <= today]
+            prior = [c for d, c in closes if d <= day]
             snap[name.lower()] = prior[-1] if prior else None
-        with self._lock:
-            self.days[today] = snap
-            self._save()
         return snap
 
     # ── scoreboard ───────────────────────────────────────────────────────
