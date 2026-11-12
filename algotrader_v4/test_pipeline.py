@@ -10048,6 +10048,8 @@ def t_paper_book_stale_ignored():
         assert not out["restored"] and "stale" in out["reason"], out
         assert not _ba._tsl_sl_orders and not _tsl_eng._positions and not _te_kite_client._paper_positions
         assert _rm_x.open_position_count == 0 and _rm_x.trades_today == 0
+        kept = f.with_name(f"{f.stem}.{snap['session']}.json")          # the old snapshot is kept, not overwritten
+        assert kept.exists() and _json_pb.loads(kept.read_text())["session"] == snap["session"]
 
 
 def t_paper_book_restored_exits_on_stop_once():

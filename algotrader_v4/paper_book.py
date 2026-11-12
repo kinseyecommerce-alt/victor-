@@ -310,6 +310,11 @@ def _restore() -> dict:
     if d.get("session") != today:
         logger.info("[paper_book] snapshot is from {} — not today's session ({}); starting fresh",
                     d.get("session"), today)
+        try:                                   # keep it: the next save would overwrite it (e.g. overnight CNC swing)
+            f = path()
+            f.with_name(f"{f.stem}.{d.get('session') or 'old'}.json").write_text(raw)
+        except Exception as exc:
+            logger.warning("[paper_book] could not keep the old snapshot: {}", exc)
         return {"restored": False, "reason": f"stale snapshot from {d.get('session')}"}
     if d.get("mode", "PAPER") != "PAPER":
         return {"restored": False, "reason": "snapshot not from PAPER mode"}

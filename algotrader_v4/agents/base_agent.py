@@ -812,6 +812,7 @@ class BaseAgent(ABC):
             "side":         action,
             "signal_price": ltp,
         }
+        _book_changed()                     # write the paper book now, not up to 3 s later
 
         ind = snap.indicators
         await send_telegram(

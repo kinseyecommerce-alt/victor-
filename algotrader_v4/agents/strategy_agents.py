@@ -903,6 +903,7 @@ class FnOAgent(BaseAgent):
             entry_price=opt_price, quantity=qty, order_id=order_id,
         )
         tsl_pos.current_sl = sl_px     # same stop as the exchange order (see base_agent)
+        __import__('agents.base_agent', fromlist=['_book_changed'])._book_changed()                     # write the paper book now, not up to 3 s later
 
         await send_telegram(
             f"<b>[FNO]</b> {action} {opt_sym} ≈₹{opt_price:.1f}\n"
