@@ -403,14 +403,14 @@ def r3_futures_stk_rsi2_ob_short_nifty(d, p):
 
 @strategy("r3_futures_stk_keltner_ext_short", "futures", "overbought_short",
           "Close above 20-day SMA + 3 x ATR14 with RSI14 > 80: short the stock future next open, 2 ATR stop, hold 5",
-          {"sma": 20, "k": 3.0, "rsi_n": 14, "rsi_thr": 80, "stop_atr": 2.0, "hold": 5}, horizon="positional")
+          {"sma": 20, "k": 3.0, "rsi_thr": 80, "stop_atr": 2.0, "hold": 5}, horizon="positional")   # RSI period fixed at 14 (catalogue: <= 5 params)
 def r3_futures_stk_keltner_ext_short(d, p):
     if len(d) < 40 or not _ca_clean(d):
         return None
     c, a = float(d.c[-1]), _atr14(d)
     if not _ok(a) or not c > float(d.c[-p.sma:].mean()) + p.k * a:
         return None
-    r = float(_rsi(d.c, p.rsi_n)[-1])
+    r = float(_rsi(d.c, 14)[-1])
     if not (_ok(r) and r > p.rsi_thr):
         return None
     return Swing(SHORT, stop=c + p.stop_atr * a, max_hold=p.hold)
