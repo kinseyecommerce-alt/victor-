@@ -326,3 +326,31 @@ today's EOD raises `LookAheadError`). Tests: `<scratchpad>/nse/tests_nsedata.py`
 
     python -m stratlab.nsedata --check
     python -m stratlab.nsedata --data <bars3y> --out <scratch> --specs stratlab.my_module:SPECS [--screen-only]
+
+## Old era 2012-01-01 .. 2023-11-09: daily-only out-of-sample round (`data_daily.py`, `oldera_fo.py`, `protocol_oos.py`)
+
+The decade before the 3-year data was never used by any strategy. It is judged as ONE out-of-sample block, once per
+strategy, with gates frozen in `protocol_oos.GATES` (fingerprint recorded with every judgement and in the
+pre-registration file): net > 0 in H1 (2012-01-01..2017-12-31) AND H2 (2018-01-01..2023-11-09), PF >= 1.15 over the
+era, >= 60 trades (positional) in EACH half, top symbol <= 35 % of net (skipped for one-instrument strategies); the
+5 bps run (index 2.5 bps, options haircut x2.5) is reported, not a gate. protocol.py is not used for the verdict and
+not changed; its constants are imported.
+
+* Data: NSE bhavcopy (`<scratch>/nse_old`, read-only): official open / high / low / volume, close = NSE LAST traded
+  price (the minute lab's daily close is the 15:29 minute close; `STRATLAB_DAILY_CLOSE=close` for the official close),
+  back-adjusted for splits / bonuses / large demergers, renames merged (MUNDRAPORT -> ADANIPORTS ...), delisted names
+  kept, special sessions (Muhurat, DR-test Saturdays, 2017-07-10) dropped with a causal turnover rule. Index futures run
+  on NIFTY / BANKNIFTY official daily bars; `d.nifty` / `d.vix` are official closes.
+* Universe: point-in-time monthly top 100 by 60-session turnover (`universe_monthly.csv`); a stock strategy may open a
+  position only on a member decision day (`data_daily.gate`, the strategy function is wrapped, not edited).
+* nsedata: `oldera_fo.use()` points it at `<scratch>/nse_old_view` (delivery, F&O bhavcopy with filled lots,
+  participant OI, ban list, index spot); the availability rule (EOD of D usable from D+1's open) is unchanged.
+* Eligible: positional @strategy specs without `decision_time` (minus three hard-coded-calendar specs) and the monthly /
+  expiry-week real-price option specs of options_r4. `python -m stratlab.protocol_oos --list` prints both lists with
+  reasons. Tests: `python -m stratlab.tests_oldera` (no catalogue strategy is run on the old era by the tests).
+
+```
+python -m stratlab.data_daily --build && python -m stratlab.oldera_fo --build-view
+python -m stratlab.protocol_oos --preregister <scratch>/oldera_oos/PREREGISTERED_OOS.json
+python -m stratlab.protocol_oos --out <scratch>/oldera_oos/run1 --prereg <scratch>/oldera_oos/PREREGISTERED_OOS.json --jobs 4
+```
