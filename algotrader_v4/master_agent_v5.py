@@ -30,7 +30,7 @@ from market_regime import regime_detector, Regime, REGIME_PLANS
 from adaptive_engine import adaptive_engine
 from agents.base_agent import send_telegram
 from agents.strategy_agents import ALL_AGENTS
-from bot_state import is_agent_enabled
+from bot_state import is_agent_enabled, LEGACY_AGENTS
 
 
 MASTER_PROMPT = """You are the MASTER TRADING INTELLIGENCE for an NSE/BSE algorithmic trading system.
@@ -135,6 +135,11 @@ class _RuleBased(Exception):
     """Internal: take the rule-based directive path."""
 
 
+def legacy_blocked(strat: str) -> bool:
+    """VALIDATED_ONLY: the legacy tick agents (bot_state.LEGACY_AGENTS) have no lab-validated edge and never start."""
+    return bool(getattr(settings, "validated_only", False)) and strat in LEGACY_AGENTS
+
+
 class MasterAgent:
 
     def __init__(self) -> None:
@@ -157,9 +162,17 @@ class MasterAgent:
             logger.error("[master_v5] paper book day rollover failed: {}", exc)
         report: dict[str, dict] = {}
 
+        blocked = [s for s in strategies if legacy_blocked(s)]
+        if blocked:
+            logger.warning("[master_v5] VALIDATED_ONLY: legacy agents not started: {} (set VALIDATED_ONLY=false to "
+                           "revert)", ", ".join(blocked))
+            for s in blocked:
+                report[s] = {"total": 0, "approved": 0, "symbols": [], "disabled": "VALIDATED_ONLY"}
+        strategies = [s for s in strategies if s not in blocked]
+
         for strat in strategies:
             agent = ALL_AGENTS.get(strat)
-            if not agent:
+            if not agent or getattr(agent, "scheduled", False):
                 continue
             if not is_agent_enabled(strat):
                 continue
@@ -184,6 +197,13 @@ class MasterAgent:
             if self._agent_watchlists.get(strat):
                 q = tick_engine.add_subscriber(f"agent_{strat}")
                 agent.start(q)
+        # lab-validated agents run on platform_scheduler jobs (no tick loop): a started bot allows their entries
+        for name, agent in ALL_AGENTS.items():
+            if getattr(agent, "scheduled", False) and is_agent_enabled(name):
+                agent.start()
+                if settings.validated_only:
+                    report[name] = {"total": 0, "approved": 0, "symbols": [], "scheduled": True,
+                                    "lab_id": getattr(agent, "LAB_ID", "")}
 
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
         self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review")
@@ -209,7 +229,9 @@ class MasterAgent:
         logger.info("[master_v5] started — tick-driven 1s")
         asyncio.create_task(send_telegram(
             f"<b>AlgoTrader Pro v5</b> started\nMode: {settings.trading_mode} | Tick: 1s\n"
-            + "\n".join(f"  {s}: {r['approved']}/{r['total']} symbols" for s, r in report.items())
+            + "\n".join(f"  {s}: " + (r["disabled"] if r.get("disabled") else
+                                       "scheduled (validated)" if r.get("scheduled") else
+                                       f"{r['approved']}/{r['total']} symbols") for s, r in report.items())
         ))
         from n8n_bridge import notify as _n8n
         asyncio.create_task(_n8n("system", {"type": "bot_started", "mode": settings.trading_mode}))
@@ -441,6 +463,9 @@ class MasterAgent:
             d += timedelta(days=1)
         if today != d or not settings.momentum_enabled:
             return
+        if getattr(settings, "validated_only", False):
+            logger.info("[master] VALIDATED_ONLY: momentum rotation skipped (no lab-validated edge)")
+            return
         from ai_trader import ai_trader
         res = await ai_trader.run_momentum_rebalance()
         done = res.get("done", {})
@@ -495,8 +520,8 @@ class MasterAgent:
         if mode == "plan":
             return list(plan.paused), list(plan.active)
         paused = list(plan.paused) if (mode == "extreme_only" and regime == Regime.HIGH_VOLATILE) else []
-        return paused, [s for s in ALL_AGENTS if s not in paused
-                        and not getattr(ALL_AGENTS[s], "scheduled", False)]   # validated agents: scheduler-driven
+        return paused, [s for s, a in ALL_AGENTS.items()
+                        if s not in paused and not getattr(a, "scheduled", False)]   # scheduled: not regime-run
 
     def _apply_regime_plan(self, regime: Regime, plan) -> None:
         paused, active = self._regime_pauses(regime, plan)
@@ -508,6 +533,10 @@ class MasterAgent:
 
         for strat in active:
             agent = ALL_AGENTS.get(strat)
+            if agent and getattr(agent, "scheduled", False):
+                continue                       # scheduled jobs, not ticks; regime plans are not in the tested rule
+            if legacy_blocked(strat):
+                continue
             if agent and not agent.state.running:
                 if not is_agent_enabled(strat):
                     continue
@@ -519,13 +548,13 @@ class MasterAgent:
     def _apply_directives(self, d: dict) -> None:
         for strat, directive in d.get("agent_directives", {}).items():
             agent = ALL_AGENTS.get(strat)
-            if not agent:
+            if not agent or getattr(agent, "scheduled", False):
                 continue
             action = directive.get("action", "run")
             if action == "pause" and agent.state.running:
                 agent.stop()
             elif action in ("run", "reduce_size") and not agent.state.running:
-                if not is_agent_enabled(strat):
+                if not is_agent_enabled(strat) or legacy_blocked(strat):
                     continue
                 if self._agent_watchlists.get(strat):
                     q = tick_engine.add_subscriber(f"agent_{strat}")

@@ -71,6 +71,29 @@ class Settings(BaseSettings):
     min_position_value_abs: float = 25000.0   # risk-cut equity positions below this ₹ value are skipped (flat costs)
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
+    # ── Validated strategies (pre-registered lab protocol: DISCOVERY H1/H2 screen + one FINAL look) ──
+    # VALIDATED_ONLY=true: the legacy tick agents (intraday, scalping, swing, fno) and the momentum rotation are off and
+    # the three validated agents trade; false = today's behaviour (validated entries off, their exits still run)
+    validated_only: bool = True
+    validated_notional_scale: float = 1.0             # ₹1 L per stock trade × this (auction, attention)
+    validated_special_sessions: str = ""              # "YYYY-MM-DD,..." special/short sessions (Muhurat, DR drills)
+    # AUC-FADE (agents/validated_auction.py); limits scale with validated_notional_scale in the agent
+    validated_auction_enabled: bool = True
+    validated_auction_variant: Literal["3PCT", "2PCT"] = "3PCT"
+    validated_auction_max_gross: float = 1_000_000.0  # 10 × ₹1 L
+    validated_auction_daily_loss_stop: float = 16_000.0   # lab worst day 3PCT −₹10,860 (2PCT −₹13,527 → use 20,000)
+    validated_auction_dd_kill: float = 37_000.0           # 1.5 × lab max DD ₹24,605 (2PCT: 45,000)
+    # SWING-ATTN-ON-3X (agents/validated_attention.py); limits scale with validated_notional_scale in the agent
+    validated_attention_enabled: bool = True
+    validated_attention_max_gross: float = 1_000_000.0
+    validated_attention_daily_loss_stop: float = 10_000.0   # lab worst exit day −₹6,286
+    validated_attention_dd_kill: float = 20_000.0           # 1.5 × lab max drawdown ₹12,951
+    # VRP-STRANGLE-016-WINGED (agents/validated_strangle.py); limits scale with lots / 2 in the agent
+    validated_strangle_enabled: bool = True
+    validated_vrp_lots: int = 2                             # as tested
+    validated_vrp_max_margin: float = 250_000.0             # lab margin ≈ ₹1.08–1.32 L for 2 lots
+    validated_vrp_max_loss: float = 75_000.0                # max risk per structure; lab worst −₹51,922 (2 lots)
+    validated_vrp_dd_kill: float = 195_000.0                # 1.5 × lab max drawdown ₹129,760
     squareoff_time: str = "15:15"     # MIS flatten time; the agents were validated with 15:15 (broker auto square-off ~15:20-15:25)
 
     # Backtest gate thresholds
@@ -268,15 +291,6 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
-
-    # ── Validated strategies (pre-registered lab protocol; agents/validated_*.py) ──
-    validated_only: bool = True                       # disables legacy agents, enables the validated ones; revert = False
-    validated_notional_scale: float = 1.0             # ₹1 L per stock trade × this (auction, attention)
-    validated_auction_enabled: bool = True
-    validated_auction_variant: Literal["3PCT", "2PCT"] = "3PCT"
-    validated_auction_max_gross: float = 1_000_000.0  # 10 × ₹1 L
-    validated_auction_daily_loss_stop: float = 16_000.0   # lab worst day 3PCT −₹10,860 (2PCT −₹13,527 → use 20,000)
-    validated_auction_dd_kill: float = 37_000.0           # 1.5 × lab max DD ₹24,605 (2PCT: 45,000)
 
     @field_validator("squareoff_time")
     @classmethod

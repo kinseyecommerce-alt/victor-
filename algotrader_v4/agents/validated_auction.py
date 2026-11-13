@@ -121,6 +121,8 @@ class AuctionFadeAgent(ValidatedAgent):
     product = "MIS"
     COST_KIND = None               # ledger trade_cost NSE MIS → equity_mis, the lab's cost kind
     ENABLE_SETTING = "validated_auction_enabled"
+    SETTING = "auction"
+    FLATTEN_CLOSED_ON_RESTORE = True
     LAB_FINGERPRINT = LAB_FINGERPRINT
 
     @property

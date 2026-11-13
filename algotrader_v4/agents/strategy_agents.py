@@ -1470,3 +1470,8 @@ ALL_AGENTS: dict[str, BaseAgent] = {
 # (getattr(agent, "scheduled", False)); PAPER only. See agents/validated_base.py.
 from agents.validated_auction import AuctionFadeAgent   # noqa: E402
 ALL_AGENTS["auc_fade"] = AuctionFadeAgent()
+# Lab-protocol agents (pre-registered stratlab screen + FINAL), run by platform_scheduler jobs, not by ticks
+from agents.validated_attention import AttentionOvernightAgent   # noqa: E402
+ALL_AGENTS["attn_on"] = AttentionOvernightAgent()
+from agents.validated_strangle import WingedStrangleAgent   # noqa: E402
+ALL_AGENTS["vrp_winged"] = WingedStrangleAgent()

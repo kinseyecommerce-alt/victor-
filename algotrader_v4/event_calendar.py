@@ -118,6 +118,7 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
         return dict(_SAFE_RESULT)
 
 
+
 def has_results_today(symbol: str) -> bool:
     """Return True if *symbol* has earnings / annual results scheduled for today."""
     today = date.today()
@@ -210,6 +211,7 @@ def _parse_corporate_actions(data: list) -> None:
         ))
         is_corporate = any(kw in purpose_lower for kw in (
             "dividend", "bonus", "split", "rights", "buyback", "demerger",
+            "consolidat", "reduction of capital",
         ))
         if not (is_results or is_corporate):
             continue
