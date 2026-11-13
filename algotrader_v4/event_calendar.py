@@ -47,6 +47,8 @@ _SAFE_RESULT: dict = {
 _event_cache: dict[str, list] = {}
 # "MARKET" key holds broad macro events (RBI, budget, etc.) not tied to a single symbol.
 _MARKET_KEY = "__MARKET__"
+# when refresh_calendar last completed (None: never loaded in this process) — validated agents flag days without it
+_loaded_at: Optional[datetime] = None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -102,6 +104,25 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
         return dict(_SAFE_RESULT)
 
 
+_PRICE_ADJUSTING = ("split", "bonus", "demerger", "consolidat", "reduction of capital")
+
+
+def price_adjusting_actions(symbol: str, d) -> list[str]:
+    """Corporate actions of `symbol` whose ex-date is `d` and that adjust the price (split, bonus, demerger,
+    consolidation, capital reduction) — the gaps the lab's adjusted data / CA_GAPS exclude. From the cache."""
+    out = []
+    for ev in _event_cache.get(symbol, []):
+        if ev.get("event_type") != "CORPORATE_ACTION":
+            continue
+        dt = ev.get("dt")
+        if dt is None or dt.date() != d:
+            continue
+        desc = str(ev.get("description", "")).lower()
+        if any(k in desc for k in _PRICE_ADJUSTING):
+            out.append(ev.get("description", ""))
+    return out
+
+
 def has_results_today(symbol: str) -> bool:
     """Return True if *symbol* has earnings / annual results scheduled for today."""
     today = date.today()
@@ -127,6 +148,8 @@ async def refresh_calendar() -> None:
             return_exceptions=True,
         )
         _inject_rbi_dates()
+        global _loaded_at
+        _loaded_at = datetime.now()
         logger.info(
             "[events] calendar loaded — {} symbols cached",
             sum(1 for k in _event_cache if k != _MARKET_KEY),
@@ -180,6 +203,7 @@ def _parse_corporate_actions(data: list) -> None:
         ))
         is_corporate = any(kw in purpose_lower for kw in (
             "dividend", "bonus", "split", "rights", "buyback", "demerger",
+            "consolidat", "reduction of capital",
         ))
         if not (is_results or is_corporate):
             continue

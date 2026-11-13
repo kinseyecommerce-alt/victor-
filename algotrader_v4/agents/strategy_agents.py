@@ -1465,3 +1465,7 @@ ALL_AGENTS: dict[str, BaseAgent] = {
     "swing":    SwingAgent(),
     "scalping": ScalpV2Agent(),
 }
+
+# Lab-protocol agents (pre-registered stratlab screen + FINAL), run by platform_scheduler jobs, not by ticks
+from agents.validated_attention import AttentionOvernightAgent   # noqa: E402
+ALL_AGENTS["attn_on"] = AttentionOvernightAgent()

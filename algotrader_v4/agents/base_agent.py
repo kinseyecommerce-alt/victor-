@@ -271,6 +271,15 @@ def overnight_hold_qty() -> dict[tuple[str, str], int]:
             continue
         key = (pos.symbol, e.get("product", "MIS"))
         held[key] = held.get(key, 0) + int(pos.quantity) * (1 if pos.side == "BUY" else -1)
+    # the lab-validated agents' overnight positions (attention CNC longs, strangle NRML legs) are held too
+    try:
+        from agents.strategy_agents import ALL_AGENTS
+        for a in ALL_AGENTS.values():
+            if getattr(a, "scheduled", False):
+                for key, q in a.overnight_holdings().items():
+                    held[key] = held.get(key, 0) + int(q)
+    except Exception as exc:
+        logger.error("[squareoff] validated overnight holdings unavailable: {}", exc)
     return held
 
 

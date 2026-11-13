@@ -159,7 +159,7 @@ class MasterAgent:
 
         for strat in strategies:
             agent = ALL_AGENTS.get(strat)
-            if not agent:
+            if not agent or getattr(agent, "scheduled", False):
                 continue
             if not is_agent_enabled(strat):
                 continue
@@ -184,6 +184,10 @@ class MasterAgent:
             if self._agent_watchlists.get(strat):
                 q = tick_engine.add_subscriber(f"agent_{strat}")
                 agent.start(q)
+        # lab-validated agents run on platform_scheduler jobs (no tick loop): a started bot allows their entries
+        for name, agent in ALL_AGENTS.items():
+            if getattr(agent, "scheduled", False) and is_agent_enabled(name):
+                agent.start()
 
         sq_h, sq_m = [int(x) for x in settings.squareoff_time.split(":")]
         self._scheduler.add_job(self._master_review,   "interval", seconds=60,  id="master_review")
@@ -495,7 +499,8 @@ class MasterAgent:
         if mode == "plan":
             return list(plan.paused), list(plan.active)
         paused = list(plan.paused) if (mode == "extreme_only" and regime == Regime.HIGH_VOLATILE) else []
-        return paused, [s for s in ALL_AGENTS if s not in paused]
+        return paused, [s for s, a in ALL_AGENTS.items()
+                        if s not in paused and not getattr(a, "scheduled", False)]   # scheduled: not regime-run
 
     def _apply_regime_plan(self, regime: Regime, plan) -> None:
         paused, active = self._regime_pauses(regime, plan)
@@ -507,6 +512,8 @@ class MasterAgent:
 
         for strat in active:
             agent = ALL_AGENTS.get(strat)
+            if agent and getattr(agent, "scheduled", False):
+                continue                       # scheduled jobs, not ticks; regime plans are not in the tested rule
             if agent and not agent.state.running:
                 if not is_agent_enabled(strat):
                     continue
@@ -518,7 +525,7 @@ class MasterAgent:
     def _apply_directives(self, d: dict) -> None:
         for strat, directive in d.get("agent_directives", {}).items():
             agent = ALL_AGENTS.get(strat)
-            if not agent:
+            if not agent or getattr(agent, "scheduled", False):
                 continue
             action = directive.get("action", "run")
             if action == "pause" and agent.state.running:

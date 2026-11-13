@@ -95,6 +95,23 @@ into a loser. Rules that keep them in step:
 - Verify end to end with `test_pipeline.py`'s live-path test (a validated signal must reach the paper broker at full
   size) after touching sizing, risk or filters.
 
+#### Validated agents (lab protocol): SWING-ATTN-ON-3X (`agents/validated_attention.py`)
+
+- Scheduled (`platform_scheduler` jobs `validated_*`, no tick loop), PAPER only. The rule function and constants are
+  imported from `stratlab.attention`; `LAB_FINGERPRINT` (pinned in the tests) changes with them, which forces a
+  `VERSION` bump.
+- None of the legacy guards applies (trade gate, debate, MTF, allocator, risk_manager limits, order_guard, pruning,
+  trailing stops, GTT): none was in the tested rule. SEBI pre-order checks do. Per-agent daily loss stop, drawdown
+  kill and kill switch block entries only; open positions always exit by the rule.
+- Carrier: a CNC delivery long (the app has no stock futures), booked at the lab's futures costs
+  (`performance.record_trade(cost_kind="future", charge_risk=False)`); each row also carries `cost_cnc`.
+- Quote ↔ bar mapping: 15:21 quote volume = Σ minute volumes 09:15..15:20, LTP = 15:20 close, ask = 15:21 open, next
+  session's official open = 09:15 bar open. Session history comes from `validated_data` (built by
+  `summarize_sessions` with the lab's cleaning and 200-bar rule). `test_pipeline.py`'s lab-parity test replays every
+  day of the 3-year data set through this code (774/774 lab trades matched).
+- Overnight positions are listed in `base_agent.overnight_hold_qty()` and persisted in the paper book's
+  `validated` block.
+
 ### Agent Enable/Disable
 
 Agent enabled state lives in `bot_state.py` (not `main.py`) to avoid circular imports. The `/settings/agent-enables` endpoint reads/writes this. `master_agent_v5._apply_directives()` checks enabled state before resuming any strategy.

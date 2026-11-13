@@ -38,9 +38,21 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "scalping": "ALGO-SCALP-004",
     "manual":   "ALGO-MANUAL-005",
     "ai":       "ALGO-AI-006",
+    "attn_on":  "ALGO-ATTN-008",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
+    "attn_on": {
+        "name": "Attention overnight long (SWING-ATTN-ON-3X, lab-validated)",
+        "description": ("Volume 09:15-15:20 > 3x the 20-session mean daily volume and 15:20 close > previous close: "
+                        "buy at the 15:21 price, sell at the next session's 09:15 opening auction; top 10 volume "
+                        "ratios per day, Rs 1 lakh each (stratlab/attention.py)"),
+        "instruments": "NSE equities (CNC carrier for the lab's stock-future position; PAPER only)",
+        "order_types": ["LIMIT", "MARKET"],
+        "holding_period": "One night: 15:21 entry, next session 09:15 exit",
+        "risk_controls": "No stop / target (none tested); per-agent daily loss stop and drawdown kill",
+        "parameters": {"vol_mult": 3.0, "lookback": 20, "max_per_day": 10, "notional": 100000},
+    },
     "intraday": {
         "name": "VWAP Momentum Intraday",
         "description": "Buys when price > VWAP, EMA9 > EMA21, RSI 45-67, MACD histogram positive, volume ratio >= 1.3",

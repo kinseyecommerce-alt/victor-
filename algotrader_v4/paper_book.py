@@ -107,7 +107,15 @@ def snapshot() -> dict:
     except Exception as exc:
         logger.debug("[paper_book] AI book not exported: {}", exc)
         ai = {}
+    validated = {}
+    for name, a in _agents().items():
+        if getattr(a, "scheduled", False):
+            try:
+                validated[name] = a.export_book()
+            except Exception as exc:
+                logger.error("[paper_book] {} validated book not exported: {}", name, exc)
     return {
+        "validated": validated,
         "schema": SCHEMA,
         "session": now_ist().date().isoformat(),
         "book_day": (_book_day or session_day()).isoformat(),
@@ -430,6 +438,14 @@ def _restore() -> dict:
                 a._exit_only.add(e["symbol"])      # option legs: their ticks only drive exits (as on entry)
             _restored.add(oid)
         restored.append(e["symbol"])
+
+    # lab-validated agents (scheduled): their positions are not in _tsl_sl_orders; the broker rows above carry them
+    for name, a in agents.items():
+        if getattr(a, "scheduled", False):
+            try:
+                a.import_book((d.get("validated") or {}).get(name, {}), closed=set(closed), stale=stale)
+            except Exception as exc:
+                logger.error("[paper_book] {} validated book not restored: {}", name, exc)
 
     settled = _settle_missed_squareoff(kite_client, d) if stale else []
     for sym in settled:

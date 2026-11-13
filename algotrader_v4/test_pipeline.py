@@ -602,7 +602,8 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 6   # intraday, fno, swing, scalping, manual, ai
+    # the six original algos; the lab-validated agents add their own ids (ALGO-ATTN-008 ...)
+    assert {"intraday", "fno", "swing", "scalping", "manual", "ai"} <= set(APPROVED_ALGO_IDS)
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -687,7 +688,7 @@ def t_sebi_strategy_disclosure():
 def t_sebi_full_disclosure():
     sc = SEBICompliance()
     doc = sc.get_disclosure_document()
-    assert len(doc["algo_strategies"]) == 6
+    assert len(doc["algo_strategies"]) >= 6      # + the lab-validated agents' own algo ids
 
 def t_sebi_ip_empty_allows_all():
     sc = SEBICompliance()
@@ -929,8 +930,10 @@ def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
                           candles_1min=candles, candles_5min=candles[:6])
 
 def t_agents_4():
-    assert len(ALL_AGENTS) == 4
-    assert set(ALL_AGENTS.keys()) == {"intraday","fno","swing","scalping"}
+    # four tick-driven strategy agents; the lab-validated agents (scheduled jobs) are registered next to them
+    tick = {k for k, a in ALL_AGENTS.items() if not getattr(a, "scheduled", False)}
+    assert tick == {"intraday","fno","swing","scalping"}, tick
+    assert {k for k, a in ALL_AGENTS.items() if getattr(a, "scheduled", False)} <= {"auc_fade", "attn_on", "vrp_winged"}
 
 def t_intraday_returns_action():
     agent = IntradayAgent()
@@ -11349,6 +11352,605 @@ def t_ledger_books_paper_exit_at_touch():
         assert abs(float(rec[-1].get("pnl", rec[-1].get("gross", booked))) - booked) < 1e-6, rec[-1]
 
 run("ledger books a paper exit at the touch the broker filled", t_ledger_books_paper_exit_at_touch)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# VALIDATED AGENTS — SWING-ATTN-ON-3X (agents/validated_attention.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("VALIDATED AGENTS — SWING-ATTN-ON-3X attention overnight long (agents/validated_attention.py)")
+import contextlib as _ctx_va
+import validated_data as _VD
+import agents.validated_attention as _VA
+import agents.validated_base as _VB
+import bot_state as _bs_va
+from stratlab import attention as _T_va
+from costs import round_trip_cost as _rtc_va
+
+_DA = date(2026, 11, 11)                      # Wednesday; previous session Mon 11-09 (11-10 holiday), next Thu 11-12
+_DA_NEXT = date(2026, 11, 12)
+_VA_SIG = ["NHPC", "IOC", "NTPC", "ONGC", "SBIN", "ITC", "GAIL", "BPCL", "COALINDIA", "TATASTEEL", "WIPRO", "VEDL"]
+
+
+def _va_at(d, hh, mm, ss=0):
+    return datetime.combine(d, time(hh, mm, ss)).replace(tzinfo=_IST_pb)
+
+
+def _va_sessions(day, n=25, vol=100_000.0, close=100.0):
+    """n full sessions on the trading days before `day` (previous close `close`, full-day volume `vol`)."""
+    out, d = [], day
+    for _ in range(n):
+        d = _VD.previous_trading_day(d)
+        out.append(_VD.SessionSummary(d.year * 10000 + d.month * 100 + d.day, 375, vol, close, 555))
+    return out[::-1]
+
+
+def _va_quote(ltp, vol, ask=None, bid=None, open_=0.0):
+    return {"ltp": ltp, "open": open_, "prev_close": 100.0, "bid": bid or ltp - 0.05, "ask": ask or ltp + 0.05,
+            "volume": vol}
+
+
+def _va_signal_quotes(n=12):
+    """n signalling symbols with distinct volume ratios (3.5x, 3.6x, ...), all up on the day."""
+    return {s: _va_quote(101.0 + i, 350_000 + 10_000 * i) for i, s in enumerate(_VA_SIG[:n])}
+
+
+@_ctx_va.contextmanager
+def _va_env(now, quotes=None, store_syms=None, n_sessions=25):
+    """A fresh attention agent at IST `now` with a synthetic session store and fake Kite quotes; PAPER+KITE;
+    private ledger, paper book and snapshot file."""
+    from agents.strategy_agents import ALL_AGENTS as _ALL
+    clk = [now]
+    qfn = quotes if callable(quotes) else (lambda instruments, _q=quotes or {}: dict(_q))
+    p, _ = _fresh_perf()
+    a = _VA.AttentionOvernightAgent()
+    a.state.running = True
+    syms = store_syms if store_syms is not None else list(_VD.UNIVERSE)
+    prev_cache = _VD._cache
+    prev = {k: getattr(settings, k) for k in ("trading_mode", "paper_data_source", "validated_only",
+                                             "validated_attention_enabled", "validated_notional_scale")}
+    prev_en = _bs_va.is_agent_enabled("attn_on")
+    import tick_engine as _te_va
+    async def _sleep(s):
+        clk[0] = clk[0] + timedelta(seconds=s)
+    with _pb_isolated():
+        prev_agent = _ALL.get("attn_on")
+        _ALL["attn_on"] = a
+        for s in _VA_SIG:
+            _te_va.tick_engine._latest_tick.pop(s, None)
+        settings.trading_mode, settings.paper_data_source = "PAPER", "KITE"
+        settings.validated_only, settings.validated_attention_enabled, settings.validated_notional_scale = True, True, 1.0
+        _bs_va._agent_enabled["attn_on"] = True
+        _VD.set_store({s: _va_sessions(clk[0].date(), n_sessions) for s in syms})
+        try:
+            with _patch.object(_VA, "now_ist", side_effect=lambda: clk[0]), \
+                 _patch.object(_perf_mod, "now_ist", side_effect=lambda: clk[0]), \
+                 _patch.object(_pb, "now_ist", side_effect=lambda: clk[0]), \
+                 _patch.object(_perf_mod, "performance", p), \
+                 _patch.object(_VA.VD, "quotes", side_effect=lambda ins: qfn(ins)), \
+                 _patch.object(_VA.VD, "ca_calendar_loaded", return_value=True), \
+                 _patch.object(_VA.VD, "price_adjusting_actions", return_value=[]), \
+                 _patch.object(_VA.asyncio, "sleep", _sleep), \
+                 _patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO-ATTN-008", "ok")):
+                yield a, clk, p
+        finally:
+            _ALL["attn_on"] = prev_agent
+            for k, v in prev.items():
+                setattr(settings, k, v)
+            _bs_va._agent_enabled["attn_on"] = prev_en
+            _VD._cache = prev_cache
+
+
+def _va_rows(sym, product="CNC"):
+    return [r for r in _te_kite_client._paper_positions if r["tradingsymbol"] == sym and r.get("product") == product]
+
+
+def _va_orders(tag):
+    return [o for o in _te_kite_client._paper_orders if o.get("tag") == tag]
+
+
+# ── pure rule ──
+def t_va_lab_constants_and_fingerprint():
+    assert (_T_va.VOL_MULT, _T_va.LOOKBACK, _T_va.MAX_PER_DAY, _T_va.NOTIONAL) == (3.0, 20, 10, 100_000.0)
+    assert (_T_va.DECISION_T, _T_va.ENTRY_LATEST, _T_va.OPEN_T, _T_va.EXIT_LATEST) == (920, 924, 555, 570)
+    # pinned: a change to stratlab.attention's rule or constants must come with a VERSION bump
+    assert _VA.LAB_FINGERPRINT == "7aeeaffc15b1aacb", _VA.LAB_FINGERPRINT
+    a = _VA.AttentionOvernightAgent()
+    assert a.VERSION == "SWING-ATTN-ON-3X/attn1/v1" and a.LAB_ID == "SWING-ATTN-ON-3X"
+    assert a.product == "CNC" and a.COST_KIND == "future" and a.scheduled and not a.strategy_rule_exits
+    assert _VA.T.attention_rule is _T_va.attention_rule, "the rule is imported from the lab, not copied"
+
+
+def t_va_rule_boundaries():
+    p20 = (100_000.0,) * 20
+    mk = lambda s, vol, c, pc=100.0, px=100.0: _VA.AttentionInput(s, vol, c, pc, p20, px)
+    planned, skips = _VA.plan_attention([mk("AAA", 300_000.0, 101.0),            # ratio exactly 3.0: not traded
+                                         mk("BBB", 300_001.0, 101.0),            # just above: traded
+                                         mk("CCC", 500_000.0, 100.0),            # close == prev close: not traded
+                                         mk("DDD", 500_000.0, 99.0)], {})
+    assert [p.symbol for p in planned] == ["BBB"] and skips == {"AAA": "no_signal", "CCC": "no_signal",
+                                                                "DDD": "no_signal"}, (planned, skips)
+    p = planned[0]
+    assert (p.side, p.qty, p.entry_t, p.exit_t) == (1, 1000, "15:21", "09:15")
+    planned, _ = _VA.plan_attention([mk("Q", 400_000.0, 101.0, px=333.0)], {})
+    assert planned[0].qty == int(100_000 // 333.0) == 300
+    planned, _ = _VA.plan_attention([mk("Q", 400_000.0, 101.0, px=150_000.0)], {})
+    assert planned[0].qty == 1, "qty is at least 1 (lab: max(1, int(NOTIONAL // px)))"
+    # fewer than 20 sessions of history: no signal
+    short = _VA.AttentionInput("S", 900_000.0, 101.0, 100.0, (100_000.0,) * 19, 100.0)
+    assert _VA.plan_attention([short], {})[0] == []
+
+
+def t_va_top10_ties_by_symbol():
+    p20 = (100_000.0,) * 20
+    ins = [_VA.AttentionInput(f"S{i:02d}", 400_000.0 + (i // 2) * 1000, 101.0, 100.0, p20, 100.0) for i in range(14)]
+    planned, skips = _VA.plan_attention(ins, {})
+    got = [p.symbol for p in planned]
+    want = [x.symbol for x in sorted(ins, key=lambda x: (-x.cum_vol_1520, x.symbol))][:10]
+    assert got == want and len(got) == 10, got
+    assert got[:2] == ["S12", "S13"], "equal ratios rank by symbol"
+    assert sum(1 for v in skips.values() if v == "rank") == 4
+
+
+def t_va_exclusions():
+    ca = lambda s, d: ["Split"] if (s, d) in {("AAA", _DA), ("BBB", _DA_NEXT)} else []
+    assert _VA.attention_exclusions(_DA, _DA_NEXT, set(), ca, ["AAA", "BBB", "CCC"]) == \
+        {"AAA": "corporate_action", "BBB": "corporate_action"}
+    for special in ({_DA}, {_DA_NEXT}, {date(2026, 11, 11) + timedelta(hours=0)}):
+        assert set(_VA.attention_exclusions(_DA, _DA_NEXT, special, ca, ["CCC"]).values()) == {"special_session"}
+    fri, mon = date(2026, 11, 6), date(2026, 11, 9)
+    assert _VA.attention_exclusions(fri, mon, {date(2026, 11, 8)}, lambda s, d: [], ["X"]) == {"X": "special_session"}, \
+        "a special session (Sunday Muhurat) strictly between t and the next session excludes the night"
+    assert _VA.attention_exclusions(fri, mon, {date(2026, 11, 10)}, lambda s, d: [], ["X"]) == {}
+    # the lab's own CA list
+    assert _VA.lab_ca("VEDL", date(2026, 4, 30)) and not _VA.lab_ca("VEDL", date(2026, 4, 29))
+
+
+def t_va_scale_to_cap():
+    pts = [_VB.PlannedTrade(f"S{i}", 1, 1000, 100.0, "15:21", "09:15", 4.0 - i / 10) for i in range(10)]
+    same, f = _VA.scale_to_cap(pts, 1_000_000.0)
+    assert same == pts and f is None
+    half, f = _VA.scale_to_cap(pts, 500_000.0)
+    assert f == 0.5 and [p.symbol for p in half] == [p.symbol for p in pts] and all(p.qty == 500 for p in half), \
+        "a capital cap scales every name down, never drops one"
+
+
+def t_va_summarize_sessions():
+    def cand(d, hh, mm, c=100.0, v=10.0):
+        return {"date": datetime(d.year, d.month, d.day, hh, mm, tzinfo=_IST_pb), "open": c, "high": c, "low": c,
+                "close": c, "volume": v}
+    d1, d2 = date(2026, 11, 5), date(2026, 11, 6)
+    rows = [cand(d1, 9, 14, 1.0, 1e6), cand(d1, 15, 30, 1.0, 1e6)]                  # outside 09:15..15:29: dropped
+    rows += [cand(d1, 9, 15 + i // 60 * 0, 100.0, 1.0) for i in range(0)]
+    t0 = 9 * 60 + 15
+    rows += [cand(d1, (t0 + i) // 60, (t0 + i) % 60, 100.0 + i / 100, 2.0) for i in range(375)]
+    rows += [cand(d1, 15, 29, 777.0, 5.0)]                                           # duplicate minute: last wins
+    rows += [cand(d2, (t0 + i) // 60, (t0 + i) % 60, 50.0, 1.0) for i in range(150)]  # short session (< 200 bars)
+    rows += [{**cand(d2, 15, 0, 50.0), "close": 0.0}]                                 # non-positive price: dropped
+    s = _VD.summarize_sessions(rows)
+    assert [x.day for x in s] == [20261105, 20261106]
+    assert s[0].bars == 375 and s[0].first_t == 555 and s[0].last_close == 777.0 and s[0].volume == 374 * 2.0 + 5.0, s[0]
+    assert s[1].bars == 150 and _VD.valid_sessions(s) == [s[0]]
+    assert _VD.prev_close_from(s, date(2026, 11, 9)) == 777.0, "the previous FULL session's last close"
+    assert _VD.prev20_from(s, date(2026, 11, 9)) is None
+    many = _va_sessions(_DA, 22)
+    assert _VD.prev20_from(many, _DA) == (100_000.0,) * 20 and _VD.prev_close_from(many, _DA) == 100.0
+
+
+# ── live path ──
+def t_va_live_path_end_to_end():
+    """Acceptance: a signal reaches the paper broker at the tested size and product (CNC carrier), survives the
+    15:15 square-off, a same-day restart and an overnight (stale-snapshot) restart, exits at the next session's
+    09:15 auction print, and is booked once in the ledger at the lab's futures costs (CNC cost alongside)."""
+    import master_agent_v5 as _mav_va
+    q = _va_signal_quotes(12)
+    with _va_env(_va_at(_DA, 15, 21, 0), q) as (a, clk, p):
+        out = asyncio.run(a.decide_and_enter())
+        want = [s for s in _VA_SIG[::-1] if s in q][:10]          # largest ratios first
+        assert out["opened"] == want, out
+        ins = _va_orders("VAL-ATTN-IN")
+        assert len(ins) == 10 and all(o["product"] == "CNC" and o["transaction_type"] == "BUY"
+                                      and o["status"] == "COMPLETE" for o in ins)
+        for s in want:
+            pos = next(x for x in a.positions() if x.symbol == s)
+            assert pos.qty == int(100_000 // q[s]["ask"]) and pos.entry_px == q[s]["ask"] and pos.overnight
+            assert _va_rows(s)[0]["quantity"] == pos.qty
+        assert a.state.skip_counts.get("rank") == 2 and a.state.skip_counts.get("no_data:quote") == 97 - 12
+        # entry is once a day
+        asyncio.run(a.decide_and_enter())
+        assert len(_va_orders("VAL-ATTN-IN")) == 10 and a.state.skip_counts.get("already_entered") == 1
+        # a square-off after the entry (dashboard button / restored square-off) leaves the overnight longs alone
+        held = _ba.overnight_hold_qty()
+        assert all(held.get((s, "CNC")) == _va_rows(s)[0]["quantity"] for s in want)
+        with _patch.object(_mav_va, "send_telegram", _noop_async):
+            _mav_va.MasterAgent.squareoff_book("test square-off")
+        assert all(_va_rows(s)[0]["quantity"] > 0 for s in want) and len(a.positions()) == 10
+        # same-day restart
+        clk[0] = _va_at(_DA, 15, 30)
+        assert _pb.save(force=True)
+        snap_day = _json_pb.loads(_pb.path().read_text())
+        assert len(snap_day["validated"]["attn_on"]["positions"]) == 10
+        _pb_wipe(); a._positions.clear(); a.days_done.clear()
+        out = _pb.restore()
+        assert out["restored"] and not out["stale"] and len(a.positions()) == 10, out
+        assert a.done_today("entry"), "no second entry after a same-day restart"
+        # overnight: the process restarts next morning from yesterday's snapshot
+        _pb.save(force=True)
+        clk[0] = _va_at(_DA_NEXT, 9, 0)
+        _pb_wipe(); a._positions.clear()
+        out = _pb.restore()
+        assert out["restored"] and out["stale"] and len(a.positions()) == 10, out
+        assert all(_va_rows(s)[0]["quantity"] == next(x.qty for x in a.positions() if x.symbol == s) for s in want)
+        # 09:15:05 next session: sell at the official open (call-auction print)
+        clk[0] = _va_at(_DA_NEXT, 9, 15, 5)
+        q2 = {s: {**_va_quote(110.0, 1), "open": 105.0 + i} for i, s in enumerate(want)}
+        closed = asyncio.run(a.exit_at_open(q2))
+        assert sorted(closed) == sorted(want) and not a.positions()
+        outs = _va_orders("VAL-ATTN-OUT")
+        assert len(outs) == 10 and all(o["fill_kind"] == "AUCTION" and o["product"] == "CNC" for o in outs)
+        assert all(o["average_price"] == q2[o["tradingsymbol"]]["open"] for o in outs)
+        assert all(_va_rows(s)[0]["quantity"] == 0 for s in want)
+        rows = [t for t in p.trades if t["strategy"] == "attn_on"]
+        assert len(rows) == 10 and len({t["oid"] for t in rows}) == 10
+        for t in rows:
+            e, x, n = q[t["symbol"]]["ask"], q2[t["symbol"]]["open"], t["qty"]
+            assert t["exit"] == round(x, 2) and t["gross"] == round((x - e) * n, 2)
+            assert t["cost"] == _rtc_va(e * n, x * n, "future"), "booked at the lab's futures costs"
+            assert t["cost_cnc"] == _rtc_va(e * n, x * n, "equity_cnc") and t["version"] == a.VERSION
+        # nothing books twice: a second exit run, and a restart from the pre-exit snapshot
+        assert asyncio.run(a.exit_at_open(q2)) == []
+        a.import_book(snap_day["validated"]["attn_on"], closed={t["oid"] for t in rows}, stale=True)
+        assert not a.positions(), "positions the ledger already closed are not restored"
+        assert len([t for t in p.trades if t["strategy"] == "attn_on"]) == 10
+        st = a.get_status()
+        assert st["live"]["n"] == 10 and st["live_cnc_costs"]["n"] == 10 and st["live_readiness"]["ready"] is False
+
+
+def t_va_entry_window_and_blocks():
+    q = _va_signal_quotes(3)
+    with _va_env(_va_at(_DA, 15, 24, 30), q) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert not _va_orders("VAL-ATTN-IN") and a.state.skip_counts.get("entry_window_missed") == 1
+    with _va_env(_va_at(_DA, 15, 21), q) as (a, clk, p):
+        for attr, val, why in (("validated_attention_enabled", False, "kill_switch"),
+                               ("validated_only", False, "validated_only_off"),
+                               ("paper_data_source", "SIM", "no_kite_data")):
+            old = getattr(settings, attr)
+            setattr(settings, attr, val)
+            asyncio.run(a.decide_and_enter())
+            setattr(settings, attr, old)
+            assert a.state.skip_counts.get(why) == 1, (why, a.state.skip_counts)
+        _bs_va._agent_enabled["attn_on"] = False
+        asyncio.run(a.decide_and_enter())
+        _bs_va._agent_enabled["attn_on"] = True
+        a.stop()
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("disabled") == 1 and a.state.skip_counts.get("stopped") == 1
+        assert not _va_orders("VAL-ATTN-IN") and not a.done_today("entry"), "a blocked batch can still run later"
+        assert any(r["outcome"] == "skip" and r["reason"] == "kill_switch" for r in a.day_log)
+
+
+def t_va_live_mode_refused():
+    q = _va_signal_quotes(3)
+    with _va_env(_va_at(_DA, 15, 21), q) as (a, clk, p):
+        settings.trading_mode = "LIVE"
+        n0 = len(_te_kite_client._paper_orders)
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("live_mode_refused") == 1 and len(_te_kite_client._paper_orders) == n0
+        try:
+            _te_kite_client.paper_fill_at("NHPC", "NSE", "SELL", 1, "CNC", 100.0, "x", "AUCTION")
+            raise AssertionError("paper_fill_at must raise in LIVE")
+        except RuntimeError:
+            pass
+        a._positions["X"] = _VB.ValidatedPosition("X", "attn_on", "NHPC", "NSE", "CNC", "BUY", 10, 100.0, 100.0,
+                                                  _va_at(_DA - timedelta(days=2), 15, 21).isoformat(), True)
+        clk[0] = _va_at(_DA, 9, 15, 5)
+        assert asyncio.run(a.exit_at_open({"NHPC": _va_quote(100, 1, open_=101.0)})) == []
+        assert len(_te_kite_client._paper_orders) == n0 and a.positions(), "LIVE: nothing is sent"
+
+
+def t_va_kill_switch_still_exits():
+    with _va_env(_va_at(_DA, 15, 21), _va_signal_quotes(2)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert len(a.positions()) == 2
+        settings.validated_attention_enabled = False
+        _bs_va._agent_enabled["attn_on"] = False
+        a.stop()
+        clk[0] = _va_at(_DA_NEXT, 9, 15, 5)
+        assert len(asyncio.run(a.exit_at_open({s: _va_quote(100, 1, open_=102.0) for s in _VA_SIG[:2]}))) == 2
+        assert not a.positions() and len([t for t in p.trades if t["strategy"] == "attn_on"]) == 2
+
+
+def t_va_history_and_store_gaps():
+    q = _va_signal_quotes(3)
+    with _va_env(_va_at(_DA, 15, 21), q, n_sessions=19) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert not _va_orders("VAL-ATTN-IN") and a.state.skip_counts.get("no_data:history") == 3
+    with _va_env(_va_at(_DA, 15, 21), q, store_syms=["NHPC", "IOC"]) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert sorted(x.symbol for x in a.positions()) == ["IOC", "NHPC"]
+        assert a.state.skip_counts.get("no_data:history") == 1, "a symbol missing from the store is skipped alone"
+    with _va_env(_va_at(_DA, 15, 21), q) as (a, clk, p):
+        _VD.set_store({s: _va_sessions(date(2026, 11, 5), 25) for s in _VD.UNIVERSE})   # stops before 11-09
+        asyncio.run(a.decide_and_enter())
+        assert not _va_orders("VAL-ATTN-IN") and a.state.skip_counts.get("no_data:store_stale") == 1
+
+
+def t_va_quote_retries():
+    calls = []
+    def flaky(ins, ok_after=2):
+        calls.append(1)
+        return _va_signal_quotes(2) if len(calls) > ok_after else {}
+    with _va_env(_va_at(_DA, 15, 21), flaky) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert len(calls) == 3 and len(a.positions()) == 2 and clk[0] == _va_at(_DA, 15, 21, 20)
+    calls.clear()
+    with _va_env(_va_at(_DA, 15, 21), lambda ins: (calls.append(1), {})[1]) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert len(calls) == 3 and a.state.skip_counts.get("quote_failed") == 1 and not a.positions()
+
+
+def t_va_exclusions_in_live_flow():
+    q = _va_signal_quotes(4)
+    with _va_env(_va_at(_DA, 15, 21), q) as (a, clk, p):
+        with _patch.object(_VA.VD, "price_adjusting_actions",
+                           side_effect=lambda s, d: ["Demerger"] if (s, d) == ("NTPC", _DA_NEXT) else []):
+            asyncio.run(a.decide_and_enter())
+        assert sorted(x.symbol for x in a.positions()) == ["IOC", "NHPC", "ONGC"]
+        assert a.state.skip_counts.get("corporate_action") == 1
+    with _va_env(_va_at(_DA, 15, 21), q) as (a, clk, p):
+        settings.validated_special_sessions = "2026-11-12"
+        try:
+            asyncio.run(a.decide_and_enter())
+        finally:
+            settings.validated_special_sessions = ""
+        assert not a.positions() and a.state.skip_counts.get("special_session") == 4
+    with _va_env(_va_at(_DA, 15, 21), q) as (a, clk, p):
+        with _patch.object(_VA.VD, "ca_calendar_loaded", return_value=False):
+            asyncio.run(a.decide_and_enter())
+        assert len(a.positions()) == 4 and a.flags.get("ca_calendar_unavailable") == _DA.isoformat()
+
+
+def t_va_exit_retry_and_late():
+    with _va_env(_va_at(_DA, 15, 21), _va_signal_quotes(2)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        clk[0] = _va_at(_DA_NEXT, 9, 15, 5)
+        seq = [{"NHPC": _va_quote(100, 1, open_=0.0), "IOC": _va_quote(100, 1, open_=0.0)},
+               {"NHPC": _va_quote(100, 1, open_=103.0), "IOC": _va_quote(100, 1, open_=0.0)}]
+        later = lambda ins: seq.pop(0) if seq else {"IOC": _va_quote(99.0, 1, open_=0.0)}
+        with _patch.object(_VA.VD, "quotes", side_effect=later):
+            closed = asyncio.run(a.exit_at_open(seq.pop(0)))
+        assert closed == ["NHPC", "IOC"], closed
+        rows = {t["symbol"]: t for t in p.trades if t["strategy"] == "attn_on"}
+        assert rows["NHPC"]["exit"] == 103.0 and "deviation" not in rows["NHPC"]
+        assert rows["IOC"]["exit"] == 99.0 and rows["IOC"]["deviation"] == "late_exit"
+        assert a.deviations.get("late_exit") == 1 and clk[0].time() >= _VA.EXIT_DEADLINE
+        outs = {o["tradingsymbol"]: o for o in _va_orders("VAL-ATTN-OUT")}
+        assert outs["NHPC"]["fill_kind"] == "AUCTION" and outs["IOC"]["fill_kind"] == "LTP"
+
+
+def t_va_catch_up_after_restart():
+    with _va_env(_va_at(_DA, 15, 21), _va_signal_quotes(2)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        clk[0] = _va_at(_DA_NEXT, 10, 0)              # down over the 09:15 exit
+        with _patch.object(_VA.VD, "quotes", return_value={s: _va_quote(104.0, 1, open_=102.0) for s in _VA_SIG[:2]}):
+            out = asyncio.run(a.catch_up())
+        assert sorted(out["exited"]) == ["IOC", "NHPC"] and not a.positions()
+        rows = [t for t in p.trades if t["strategy"] == "attn_on"]
+        assert all(t["exit"] == 104.0 and t["deviation"] == "late_exit" for t in rows), \
+            "after 09:30 the LTP, never the (hindsight) official open"
+    with _va_env(_va_at(_DA, 15, 22, 10), _va_signal_quotes(2)) as (a, clk, p):
+        out = asyncio.run(a.catch_up())
+        assert out["entry"]["opened"] and a.done_today("entry")
+        assert asyncio.run(a.catch_up()) == {}
+
+
+def t_va_daily_loss_stop_and_drawdown_kill():
+    with _va_env(_va_at(_DA, 15, 21), _va_signal_quotes(2)) as (a, clk, p):
+        p.record_trade("attn_on", "NHPC", "BUY", 100, 100.0, -10_500.0, "NSE", "CNC", cost_kind="future",
+                       charge_risk=False)
+        assert a.realised_today() < -10_000
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("daily_loss_stop") == 1 and not a.positions()
+        clk[0] = _va_at(_DA_NEXT, 15, 21)              # next day: the daily stop no longer applies
+        p.record_trade("attn_on", "NHPC", "BUY", 100, 100.0, -10_000.0, "NSE", "CNC", cost_kind="future",
+                       charge_risk=False)
+        _VD.set_store({s: _va_sessions(_DA_NEXT, 25) for s in _VD.UNIVERSE})
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("drawdown_kill") == 1 and not _bs_va.is_agent_enabled("attn_on")
+        assert a.drawdown() >= 20_000
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("drawdown_kill") == 2, "stays killed until re-enabled by hand"
+        _bs_va._agent_enabled["attn_on"] = True        # manual re-enable: drawdown measured afresh
+        clk[0] = _va_at(date(2026, 11, 13), 15, 21)
+        _VD.set_store({s: _va_sessions(clk[0].date(), 25) for s in _VD.UNIVERSE})
+        asyncio.run(a.decide_and_enter())
+        assert len(a.positions()) == 2 and a.drawdown() == 0.0
+
+
+def t_va_parity_audit():
+    def bars(d, vol_per_bar, close_1520, open_1521):
+        rows, t0 = [], 9 * 60 + 15
+        for i in range(375):
+            t = t0 + i
+            c = close_1520 if t == 920 else 100.0
+            o = open_1521 if t == 921 else 100.0
+            rows.append({"date": datetime(d.year, d.month, d.day, t // 60, t % 60), "open": o, "high": max(o, c),
+                         "low": min(o, c), "close": c, "volume": vol_per_bar})
+        return rows
+    with _va_env(_va_at(_DA, 15, 21), _va_signal_quotes(2)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        clk[0] = _va_at(_DA, 15, 40)
+        rows = {"NHPC": bars(_DA, 350_000 / 366, 101.0, 101.05), "IOC": bars(_DA, 360_000 / 366, 102.0, 102.05),
+                "NTPC": bars(_DA, 100.0, 101.0, 101.0)}
+        assert _VA.bar_features(rows["NHPC"])["entry_t"] == 921
+        res = a.parity_audit(rows)
+        assert res["audited"] and res["bars_only"] == [] and res["quotes_only"] == [], res
+        rows["NTPC"] = bars(_DA, 500_000 / 366, 101.0, 101.0)
+        res = a.parity_audit(rows)
+        assert res["bars_only"] == ["NTPC"] and a.deviations.get("parity_mismatch") == 1
+
+
+def t_va_pruning_exempt_and_no_telegram():
+    p, _ = _fresh_perf()
+    prev = _ai_settings.prune_enabled
+    _ai_settings.prune_enabled = True
+    try:
+        for _ in range(40):
+            p.record_trade("attn_on", "NHPC", "BUY", 100, 100.0, -500.0, "NSE", "CNC", cost_kind="future",
+                           charge_risk=False)
+        assert "attn_on" not in p.pruned and p.is_allowed("attn_on")[0]
+    finally:
+        _ai_settings.prune_enabled = prev
+    async def _boom(*a, **k):
+        raise AssertionError("validated jobs must not send Telegram")
+    with _va_env(_va_at(_DA, 15, 21), _va_signal_quotes(2)) as (a, clk, p), \
+            _patch.object(_ba, "send_telegram", _boom):
+        import platform_scheduler as _ps_va
+        asyncio.run(_ps_va.PlatformScheduler()._validated_call("attn_on", "decide_and_enter"))
+        clk[0] = _va_at(_DA_NEXT, 9, 15, 5)
+        with _patch.object(_ps_va, "_now_ist", side_effect=lambda: clk[0]), \
+             _patch.object(_VA.VD, "quotes", return_value={s: _va_quote(100, 1, open_=101.0) for s in _VA_SIG[:2]}):
+            asyncio.run(_ps_va.PlatformScheduler()._validated_open())
+        assert not a.positions() and len([t for t in p.trades if t["strategy"] == "attn_on"]) == 2
+        assert not a.state.errors, a.state.errors
+
+
+def t_va_lab_parity():
+    """Acceptance gate: every day of the lab's 3-year data set through the live decision code. Inputs come from the
+    lab's minute bars mapped to the live quotes (volume = Σ 09:15..15:20 bar volumes, ltp = 15:20 close, entry =
+    15:21 bar open, next-day open = first bar before 09:30); the session store is built by
+    validated_data.summarize_sessions from Kite-shaped candles. Compared with r2_swing_out's FINAL trade list."""
+    import csv as _csv
+    import json as _json
+    from collections import defaultdict as _dd
+    import validated_parity as _VP
+    from stratlab import data as _SDm, sim as _sim
+    rel = ("r2_swing_out/trades_SWING-ATTN-ON-3X.csv", "r2_swing_out/report.json")
+    if not _VP.available(*rel):
+        print("      SKIP (no lab data)")
+        return
+    man, cdir, syms, summ, cal = _VP.load("r2_swing_out")
+    store = _VP.Store(summ)
+    rep = _json.load(open(_os.path.join(_VP.PARITY_LAB, rel[1])))
+    special = {20240302, 20240518, 20251021, 20261108}
+    assert set(rep["special_days"]) == special
+    special_d = {_VP.to_date(d) for d in special}
+    period_ends = (rep["split"]["h2"][1], rep["split"]["final"][1])        # DISC and FINAL are simulated apart
+    feat, raw = {}, _dd(dict)
+    for s in syms:
+        sd = _SDm.load_symbol(cdir, s)
+        f = {}
+        for k in range(sd.n_sessions):
+            a0, b0 = int(sd.starts[k]), int(sd.ends[k])
+            tt = sd.t[a0:b0]
+            rec = {"first_open": float(sd.o[a0]), "first_t": int(tt[0])}
+            j = int(np.searchsorted(tt, _T_va.DECISION_T, side="right")) - 1
+            if j >= 0 and int(tt[j]) >= _T_va.DECISION_EARLIEST and j + 1 < len(tt) \
+                    and int(tt[j + 1]) <= _T_va.ENTRY_LATEST:
+                rec.update(volume=float(sd.v[a0:a0 + j + 1].sum()), ltp=float(sd.c[a0 + j]),
+                           entry=float(sd.o[a0 + j + 1]), entry_t=int(tt[j + 1]))
+            f[int(sd.days[k])] = rec
+        feat[s] = f
+        for r in _T_va.session_features(sd):           # the lab's own candidates (for explaining differences)
+            raw[r["date"]][s] = r
+    lab = _dd(dict)
+    with open(_os.path.join(_VP.PARITY_LAB, rel[0])) as fh:
+        for r in _csv.DictReader(fh):
+            lab[int(r["date"])][r["symbol"]] = r
+    matched = total = sig_days = 0
+    bad, explained = [], _dd(list)
+    plans, excls = {}, {}
+    for i, d in enumerate(cal):
+        nd = cal[i + 1] if i + 1 < len(cal) else None
+        inputs = []
+        for s in syms:
+            f = feat[s].get(d)
+            if not f or "volume" not in f:
+                continue                                   # no quote (no full session / no 15:20 bar)
+            st = store.before(s, d)
+            pc, p20 = _VD.prev_close_from(st, d), _VD.prev20_from(st, d)
+            if pc is None or p20 is None:
+                continue
+            inputs.append(_VA.AttentionInput(s, f["volume"], f["ltp"], pc, p20, f["entry"]))
+        excl = _VA.attention_exclusions(_VP.to_date(d), _VP.to_date(nd), special_d, _VA.lab_ca,
+                                        [x.symbol for x in inputs]) if nd else {}
+        planned, _ = _VA.plan_attention(inputs, excl)
+        live = {p_.symbol: p_ for p_ in planned}
+        plans[d] = live
+        excls[d] = excl
+        labd = lab.get(d, {})
+        sig_days += bool(live or labd)
+        total += len(labd)
+        for s, r in labd.items():
+            p_ = live.get(s)
+            if p_ is None:
+                continue
+            f, fn = feat[s][d], feat[s].get(nd, {})
+            got = (s, 1, _sim._hm(f["entry_t"]), str(nd), _sim._hm(fn.get("first_t", -1)), p_.qty)
+            want = (r["symbol"], int(r["side"]), r["entry_t"], r["exit_date"], r["exit_t"], int(r["qty"]))
+            fills = (abs(round(p_.entry_ref * (1 + 0.0002), 4) - float(r["entry"])) < 1e-3
+                     and abs(round(fn.get("first_open", 0) * (1 - 0.0002), 4) - float(r["exit"])) < 1e-3)
+            if got == want and fills:
+                matched += 1
+            else:
+                bad.append((d, s, got, want, fills))
+        live_only, lab_only = set(live) - set(labd), set(labd) - set(live)
+        if live_only or lab_only:
+            why = {}
+            for s in live_only:                            # dropped by the lab for what it learned afterwards
+                rr = raw[d].get(s)
+                if rr is None:
+                    why[s] = None
+                elif d in period_ends or rr["exit_date"] is None:
+                    why[s] = "period_end"
+                elif not np.isfinite(rr["exit_px"]) or rr["exit_date"] != nd:
+                    why[s] = "lookahead_exit"
+                else:
+                    why[s] = None
+            floor = min((live[s].key for s in live_only), default=None)
+            for s in lab_only:                             # bumped out of the top 10 by such a candidate
+                why[s] = "bumped" if (len(live) == _T_va.MAX_PER_DAY and floor is not None
+                                      and raw[d][s]["ratio"] < floor) else None
+            if all(why.values()):
+                explained[",".join(sorted(set(why.values())))].append((d, sorted(live_only), sorted(lab_only)))
+            else:
+                bad.append((d, "set", why))
+    # the spec's sample days, explicitly
+    for d, n in ((20240603, 7), (20241230, 7), (20250627, 7), (20251020, 0), (20261105, 1)):
+        assert len(plans[d]) == n == len(lab.get(d, {})), (d, sorted(plans[d]), sorted(lab.get(d, {})))
+    assert {r["exit_date"] for r in lab[20251017].values()} == {"20251020"}
+    assert {r["exit_date"] for r in lab[20251231].values()} == {"20260101"}
+    assert excls[20260429].get("VEDL") == "corporate_action" and "VEDL" not in plans[20260429], \
+        "VEDL is excluded on the eve of its CA gap (2026-04-30)"
+    assert set(excls[20240517].values()) == {"special_session"}, \
+        "the night into the 2024-05-18 special session is excluded (the lab's only excluded signal: NAUKRI)"
+    n_div = sum(len(v) for v in explained.values())
+    print(f"      parity: {len(cal)} days, {sig_days} with a signal (live or lab); trades matched {matched}/{total}; "
+          f"days the lab's selection used later information: {n_div} {dict(explained)}")
+    assert not bad, bad[:5]
+    assert matched == total and total == 774, (matched, total)
+    assert n_div <= 3, explained
+
+
+run("attention: lab constants imported, LAB_FINGERPRINT pinned, CNC carrier at futures costs", t_va_lab_constants_and_fingerprint)
+run("attention: ratio exactly 3.0 / close == prev close not traded; qty floor(1e5/px) ≥ 1; < 20 sessions", t_va_rule_boundaries)
+run("attention: top 10 by volume ratio, ties by symbol", t_va_top10_ties_by_symbol)
+run("attention: special-session (t, t+1, in between) and corporate-action exclusions", t_va_exclusions)
+run("attention: a capital cap scales every quantity, never drops a name", t_va_scale_to_cap)
+run("attention: summarize_sessions keeps 09:15-15:29, drops < 200-bar sessions, previous FULL session", t_va_summarize_sessions)
+run("attention LIVE PATH: CNC entry at size → square-off → restarts → 09:15 auction exit → ledger once", t_va_live_path_end_to_end)
+run("attention: entry_window_missed after 15:24; kill switch / VALIDATED_ONLY / data / disabled / stopped", t_va_entry_window_and_blocks)
+run("attention: LIVE mode refused (no orders; paper_fill_at raises)", t_va_live_mode_refused)
+run("attention: kill switch blocks entries, the overnight exit still runs", t_va_kill_switch_still_exits)
+run("attention: < 20 sessions, symbol missing from the store, stale store", t_va_history_and_store_gaps)
+run("attention: whole-batch quote retried at +10 s / +20 s, then quote_failed", t_va_quote_retries)
+run("attention: CA / special-session exclusions and the CA-calendar flag in the live flow", t_va_exclusions_in_live_flow)
+run("attention: missing open retried until 09:29:50, then LTP late_exit", t_va_exit_retry_and_late)
+run("attention: catch-up after a restart (late exit at LTP, in-window entry once)", t_va_catch_up_after_restart)
+run("attention: daily loss stop and drawdown kill (until re-enabled by hand)", t_va_daily_loss_stop_and_drawdown_kill)
+run("attention: 15:40 parity audit from the day's minute bars", t_va_parity_audit)
+run("attention: exempt from pruning; scheduler jobs never send Telegram", t_va_pruning_exempt_and_no_telegram)
+run("attention LAB PARITY: 3 years of lab days through the live decision code", t_va_lab_parity)
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     min_position_value_abs: float = 25000.0   # risk-cut equity positions below this ₹ value are skipped (flat costs)
     stop_loss_pct: float = 1.5
     target_pct: float = 3.0
+    # ── Validated strategies (pre-registered lab protocol: DISCOVERY H1/H2 screen + one FINAL look) ──
+    validated_only: bool = True                       # the validated agents trade only while this is on
+    validated_notional_scale: float = 1.0             # ₹1 L per stock trade × this (auction, attention)
+    validated_special_sessions: str = ""              # "YYYY-MM-DD,..." special/short sessions (Muhurat, DR drills)
+    # SWING-ATTN-ON-3X (agents/validated_attention.py); limits scale with validated_notional_scale in the agent
+    validated_attention_enabled: bool = True
+    validated_attention_max_gross: float = 1_000_000.0
+    validated_attention_daily_loss_stop: float = 10_000.0   # lab worst exit day −₹6,286
+    validated_attention_dd_kill: float = 20_000.0           # 1.5 × lab max drawdown ₹12,951
     squareoff_time: str = "15:15"     # MIS flatten time; the agents were validated with 15:15 (broker auto square-off ~15:20-15:25)
 
     # Backtest gate thresholds

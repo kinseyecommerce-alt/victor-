@@ -89,6 +89,15 @@ class PlatformScheduler:
                 hour=_h, minute=_m, second=_s, day_of_week="mon-fri", id=f"forward_{_stage}",
                 misfire_grace_time=20,
             )
+        # lab-validated PAPER agents (agents/validated_*.py): fixed IST times of the tested rules
+        for _fn, _id, _t, _grace in ((self._validated_preflight, "validated_preflight", (8, 55, 0), 300),
+                                     (self._validated_open, "validated_open", (9, 15, 5), 50),
+                                     (self._validated_attn_entry, "validated_attn_entry", (15, 21, 0), 150),
+                                     (self._validated_store, "validated_store", (15, 40, 0), 600)):
+            self._sched.add_job(_fn, "cron", hour=_t[0], minute=_t[1], second=_t[2], day_of_week="mon-fri",
+                                id=_id, misfire_grace_time=_grace)
+        self._sched.add_job(self._validated_catch_up, "date", id="validated_catch_up",
+                            run_date=_now_ist() + __import__("datetime").timedelta(seconds=60))
         self._sched.add_job(
             self._refresh_universe, "cron",
             hour=16, minute=30, day_of_week="mon-fri", id="universe_refresh",
@@ -123,6 +132,77 @@ class PlatformScheduler:
             await getattr(master, name)()
         except Exception as exc:
             logger.error("[platform] {} failed: {}", name, exc)
+
+    # ── lab-validated agents (PAPER) ──────────────────────────────────────────
+    @staticmethod
+    def _validated_agents() -> dict:
+        from agents.strategy_agents import ALL_AGENTS
+        return {n: a for n, a in ALL_AGENTS.items() if getattr(a, "scheduled", False)}
+
+    async def _validated_call(self, name: str, method: str, *args):
+        """Run one agent job; an exception is logged and counted in the agent's state.errors."""
+        a = self._validated_agents().get(name)
+        if a is None or not hasattr(a, method):
+            return None
+        try:
+            r = getattr(a, method)(*args)
+            return await r if asyncio.iscoroutine(r) else r
+        except Exception as exc:
+            a.state.errors.append(f"{method}: {str(exc)[:200]}")
+            logger.exception("[validated] {}.{} failed: {}", name, method, exc)
+            return None
+
+    async def _validated_preflight(self) -> None:
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        import validated_data as VD
+        try:
+            if not VD.store_fresh(_now_ist().date()):
+                await asyncio.to_thread(VD.refresh_store)
+        except Exception as exc:
+            logger.error("[validated] session store refresh failed: {}", exc)
+        try:
+            import event_calendar
+            await event_calendar.refresh_calendar()
+        except Exception as exc:
+            logger.error("[validated] corporate-action calendar refresh failed: {}", exc)
+        for name, a in self._validated_agents().items():
+            a.start()
+            logger.info("[validated] {} preflight: entries {}", name, a.entry_block_reason() or "allowed")
+
+    async def _validated_open(self) -> None:
+        """09:15:05: one quote of the universe; attention exits at the open, then the auction fade enters."""
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        import validated_data as VD
+        q = await asyncio.to_thread(VD.quotes, [f"NSE:{s}" for s in VD.UNIVERSE])
+        await self._validated_call("attn_on", "exit_at_open", q)
+        await self._validated_call("auc_fade", "enter", q)
+
+    async def _validated_attn_entry(self) -> None:
+        from ist_clock import is_trading_day
+        if is_trading_day():
+            await self._validated_call("attn_on", "decide_and_enter")
+
+    async def _validated_store(self) -> None:
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        import validated_data as VD
+        try:
+            await asyncio.to_thread(VD.refresh_store)
+        except Exception as exc:
+            logger.error("[validated] session store refresh failed: {}", exc)
+            return
+        for name, a in self._validated_agents().items():
+            if hasattr(a, "parity_audit"):
+                await self._validated_call(name, "parity_audit")
+
+    async def _validated_catch_up(self) -> None:
+        for name in self._validated_agents():
+            await self._validated_call(name, "catch_up", _now_ist())
 
     async def _refresh_universe(self) -> None:
         """After the close: replay the opening-range agents on the NIFTY 100 for the next session's universe."""
