@@ -10,6 +10,9 @@ DATA (normalised files in NSE_DIR, default <scratchpad>/nse, override with env S
   participant_oi.csv.gz  participant-wise OI (Client / DII / FII / Pro / TOTAL), contracts
   participant_vol.csv.gz participant-wise traded contracts
   ban.csv.gz             F&O ban list, one row per (trade date, symbol)
+  fii_stats.csv.gz       FII derivative statistics (buy / sell contracts and ₹ cr, OI) per instrument group.
+                         PARTIAL: 2023-11-01..2025-11-18 only (the fetch stopped); FINAL-period decisions get no rows,
+                         so a strategy needing it cannot be judged on FINAL - prefer participant().
 All dates are int yyyymmdd. Symbols are the bars3y names (ZOMATO -> ETERNAL, MCDOWELL-N -> UNITDSPR mapped for
 every date); indices are "NIFTY" and "BANKNIFTY".
 
@@ -37,7 +40,7 @@ Field notes
     freely, but not close / volume / deliv_qty with the bars across corporate actions. ADANIPOWER has no rows
     2023-12-14..2024-03-15 (BE series).
   * F&O `oi` is in units (shares / index units), `contracts` is the number of contracts traded. Old-format
-    bhavcopy (to 2024-02) has no `underlying` and no `lot`; `spot` below comes from delivery.csv close (stocks)
+    bhavcopy (2023-11-01..2023-12-29; UDiFF from 2024-01-01) has no `underlying` and no `lot`; `spot` below comes from delivery.csv close (stocks)
     and the lab's NIFTY / BANKNIFTY daily closes (indices) instead.
   * option `close` is NSE's close (last trade; a theoretical price when the strike did not trade: contracts == 0).
     On the expiry day the old format's option `settle` is the underlying's final settlement price.
@@ -45,7 +48,9 @@ Field notes
 
 OPTION SIMULATOR (OptionSpec / run_option_specs, see their docstrings): entry and exits at a session's EOD close,
 expiry settlement at intrinsic vs the expiring future's final settlement price, costs via
-options_replay.leg_cost (= costs.round_trip_cost(..., "option") per leg + exercise STT on long ITM settlement)
+options_replay.leg_cost (= costs.round_trip_cost(buy_value, sell_value, "option") per leg + exercise STT on long ITM
+settlement); lots from options_vrp.LOT_SCHEDULE (NIFTY 75, 65 from 2025-12-31; BANKNIFTY 35, 30) with a DISCOVERY-
+only sensitivity on the exchange's historical lots (bhavcopy lot column)
 plus a haircut of max(0.05, 1 % of price) per leg per fill; judged by protocol.evaluate exactly like
 options_vrp.py (same calendar = NIFTY minute sessions, same DISCOVERY / FINAL split, per-data-directory FINAL
 ledger, no --peek-final).
@@ -280,6 +285,7 @@ def _load(force: bool = False):
     _S["daily_fut"], _S["daily_opt"] = {}, {}
     _load_participants()
     _load_ban()
+    _load_fii()
     _S["spot_idx"] = _index_spot()
 
 
@@ -301,6 +307,19 @@ def _load_participants():
                 wide[f"{ct}_{c}"] = g[c].to_numpy(float)
         wide["date"] = dates
         _S[f"part_{kind}"] = wide
+
+
+def _load_fii():
+    import pandas as pd
+    p = os.path.join(NSE_DIR, "fii_stats.csv.gz")
+    out = {}
+    if os.path.exists(p):
+        df = pd.read_csv(p)
+        df["date"] = _iso_to_int(df["date"])
+        for ins, g in df.sort_values("date").groupby("instrument"):
+            out[str(ins)] = {"date": g.date.to_numpy(np.int64),
+                             **{c: g[c].to_numpy(float) for c in g.columns if c not in ("date", "instrument")}}
+    _S["fii"] = out
 
 
 def _load_ban():
@@ -438,7 +457,7 @@ def fut_oi(sym: str, before: int, n: int = 1) -> Rows:
     """Futures (stock or index) per session, last n sessions strictly before `before`: date, oi (all expiries,
     units), chg_oi, contracts (traded, all expiries), near_expiry, near_close, near_settle, near_oi, next_close
     (next expiry's close), spot (official cash close / index close), basis_pct = 100*(near_close/spot-1),
-    dte (calendar days to near expiry), lot (NaN before 2024-02: old bhavcopy has no lot column)."""
+    dte (calendar days to near expiry), lot (NaN before 2024-01-01: old bhavcopy has no lot column)."""
     _load()
     r = _daily_fut(sym)
     if r is None:
@@ -536,6 +555,22 @@ def participant(before: int, n: int = 1, kind: str = "oi") -> Rows:
     p.FII_fut_idx_long / (p.FII_fut_idx_long + p.FII_fut_idx_short)."""
     _load()
     t = _S.get(f"part_{kind}")
+    if t is None:
+        return Rows({"date": np.array([])})
+    return _tail(t, slice(0, len(t["date"])), _clip(before), n, list(t.keys()))
+
+
+FII_STATS_GROUPS = ("INDEX FUTURES", "INDEX OPTIONS", "STOCK FUTURES", "STOCK OPTIONS", "NIFTY FUTURES",
+                    "NIFTY OPTIONS", "BANKNIFTY FUTURES", "BANKNIFTY OPTIONS", "FINNIFTY FUTURES", "FINNIFTY OPTIONS",
+                    "MIDCPNIFTY FUTURES", "MIDCPNIFTY OPTIONS", "NIFTYNXT50 FUTURES", "NIFTYNXT50 OPTIONS")
+
+
+def fii_stats(before: int, n: int = 1, instrument: str = "INDEX FUTURES") -> Rows:
+    """FII derivative statistics for one instrument group (FII_STATS_GROUPS), last n sessions strictly before
+    `before`: date, buy_contracts, buy_amt_cr, sell_contracts, sell_amt_cr, oi_contracts, oi_amt_cr.
+    PARTIAL COVERAGE 2023-11-01..2025-11-18 (empty / stale afterwards: check r.date[-1])."""
+    _load()
+    t = _S.get("fii", {}).get(instrument)
     if t is None:
         return Rows({"date": np.array([])})
     return _tail(t, slice(0, len(t["date"])), _clip(before), n, list(t.keys()))
@@ -744,11 +779,28 @@ def final_settlement(sym: str, expiry: int) -> float:
     return _spot(sym, int(expiry))
 
 
-def lot_size(sym: str, day: int) -> int:
+def lot_size(sym: str, day: int, historical: bool = False) -> int:
     """Lot size used by the simulator. NIFTY: options_vrp.LOT_SCHEDULE (75, 65 from 2025-12-31); BANKNIFTY:
     35, 30 from 2025-12-31 (same NSE circular FAOP70616, as sim.LOT_SIZES); stocks: the bhavcopy lot in force
-    on `day` (the earliest known one before the bhavcopy carried lots, 2024-02)."""
+    on `day` (the earliest known one before the bhavcopy carried lots, 2024-01-01).
+    historical=True (sensitivity only): indices use the exchange's lot of `day` from the option bhavcopy (largest
+    lot listed that day), before 2024-01-01 options_vrp.LOT_SCHEDULE_HISTORICAL (NIFTY) / 15 (BANKNIFTY)."""
     _load()
+    if historical and sym in INDICES:
+        t = _chain_table(sym)
+        if t is not None:
+            a, b = np.searchsorted(t["date"], int(day), "left"), np.searchsorted(t["date"], int(day), "right")
+            l = t["lot"][a:b]
+            if np.isfinite(l).any():
+                return int(np.nanmax(l))
+        if sym == "BANKNIFTY":
+            return 15
+        from .options_vrp import LOT_SCHEDULE_HISTORICAL
+        lot = LOT_SCHEDULE_HISTORICAL[0][1]
+        for f, n in LOT_SCHEDULE_HISTORICAL:
+            if _d(int(day)) >= f:
+                lot = n
+        return int(lot)
     if sym == "NIFTY":
         from .options_vrp import LOT_SCHEDULE
         sch = LOT_SCHEDULE
@@ -801,6 +853,9 @@ class Asof:
 
     def participant(self, n=1, kind="oi"):
         return participant(self.before, n, kind)
+
+    def fii_stats(self, n=1, instrument="INDEX FUTURES"):
+        return fii_stats(self.before, n, instrument)
 
     def chain(self, expiry="near", sym=None):
         return options_chain(sym or self.symbol, self.before, expiry)
@@ -989,7 +1044,8 @@ def _mark(pos: Position, day: int) -> float:
     return v
 
 
-def _simulate_one(spec: OptionSpec, sym: str, calendar: list, lo: int, hi: int, mult: float = 1.0):
+def _simulate_one(spec: OptionSpec, sym: str, calendar: list, lo: int, hi: int, mult: float = 1.0,
+                  hist_lots: bool = False):
     """Trades of one spec on one underlying, entries in [lo, hi], every exit at the latest at the last session
     <= hi (reason period_end). Returns (trade tuples, details, skipped)."""
     fo = set(int(x) for x in fo_sessions())
@@ -1043,7 +1099,7 @@ def _simulate_one(spec: OptionSpec, sym: str, calendar: list, lo: int, hi: int, 
         if not ok:
             skipped += 1
             continue
-        pos = Position(sym, day, plan, lot_size(sym, day), fills)
+        pos = Position(sym, day, plan, lot_size(sym, day, historical=hist_lots), fills)
         pos.marks.append((day, _mark(pos, day)))
     return trades, dets, skipped
 
@@ -1074,7 +1130,7 @@ def _masked(day: int):
     """Temporarily replace every in-memory table with a copy holding only rows dated < day."""
     _load()
     saved = {k: _S[k] for k in ("dv", "dv_ix", "fut", "fut_ix", "agg", "agg_ix", "chains", "daily_fut", "daily_opt",
-                                "part_oi", "part_vol", "ban", "spot_idx")}
+                                "part_oi", "part_vol", "ban", "spot_idx", "fii")}
 
     def cut(t):
         if t is None:
@@ -1094,20 +1150,22 @@ def _masked(day: int):
         _S["daily_fut"], _S["daily_opt"] = {}, {}
         _S["part_oi"], _S["part_vol"] = cut(saved["part_oi"]), cut(saved["part_vol"])
         _S["ban"] = {k: v for k, v in saved["ban"].items() if k <= day}
+        _S["fii"] = {k: cut(v) for k, v in saved["fii"].items()}
         _S["spot_idx"] = {k: (v[0][v[0] < day], v[1][v[0] < day]) for k, v in saved["spot_idx"].items()}
         yield
     finally:
         _S.update(saved)
 
 
-def make_simulator(calendar: list, mult: float = 1.0, audit: bool = True, details: dict | None = None):
+def make_simulator(calendar: list, mult: float = 1.0, audit: bool = True, details: dict | None = None,
+                   hist_lots: bool = False):
     def simulate(specs, lo, hi):
         out = {}
         for sp in specs:
             try:
                 trs, sk, la = [], 0, None
                 for sym in sp.underlyings:
-                    t, det, s = _simulate_one(sp, sym, calendar, lo, hi, mult)
+                    t, det, s = _simulate_one(sp, sym, calendar, lo, hi, mult, hist_lots)
                     trs += t
                     sk += s
                     if details is not None:
@@ -1160,6 +1218,7 @@ def run_option_specs(specs: list, data_dir: str, out_dir: str, cache_dir: str = 
         results.append(r)
         sens = make_simulator(cal, mult=SENS_MULT, audit=False)([sp], *split.discovery).get(sp.id, {})
         sc5 = P.screen(sens.get("trades", []), split, sp.horizon, single_underlying=bool(sp.underlying))
+        hist = make_simulator(cal, audit=False, hist_lots=True)([sp], *split.discovery).get(sp.id, {})
         sc = r["screen"] or {}
         d = sc.get("disc", {})
         L.append(f"{sp.id}  ({sp.desc}; underlyings {','.join(sp.underlyings)})")
@@ -1172,6 +1231,8 @@ def run_option_specs(specs: list, data_dir: str, out_dir: str, cache_dir: str = 
             s5 = P.stats(sens.get("trades", []))
             L.append(f"    net@5 (haircut x{SENS_MULT:g}) DISCOVERY ₹{s5['net']:,.0f} PF {s5['pf']} -> screen "
                      f"{'PASS' if sc5['passed'] else 'FAIL: ' + ', '.join(sc5['reasons'])}")
+            sh = P.stats(hist.get("trades", []))
+            L.append(f"    historical exchange lots DISCOVERY ₹{sh['net']:,.0f} PF {sh['pf']} (sensitivity only)")
         if r.get("final"):
             f = r["final"]
             L.append(f"    FINAL n={f['trades']} net ₹{f['net']:,.0f} PF {f['pf']} win {f['win_pct']}%")
@@ -1189,6 +1250,7 @@ def run_option_specs(specs: list, data_dir: str, out_dir: str, cache_dir: str = 
                      "disc_trades": d.get("trades"), "disc_net": d.get("net"), "disc_pf": d.get("pf"),
                      "h1_net": sc.get("h1", {}).get("net"), "h2_net": sc.get("h2", {}).get("net"),
                      "sens_disc_net": P.stats(sens.get("trades", []))["net"], "sens_screen_passed": sc5["passed"],
+                     "hist_lot_disc_net": P.stats(hist.get("trades", []))["net"],
                      "final_trades": (fv or {}).get("trades", ""), "final_net": (fv or {}).get("net", ""),
                      "final_pf": (fv or {}).get("pf", ""), "cost_model": cost_model()})
     L.append(P.luck_reminder(results))
