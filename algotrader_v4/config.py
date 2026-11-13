@@ -269,6 +269,15 @@ class Settings(BaseSettings):
     port: int = 8000
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
 
+    # ── Validated strategies (pre-registered lab protocol; agents/validated_*.py) ──
+    validated_only: bool = True                       # disables legacy agents, enables the validated ones; revert = False
+    validated_notional_scale: float = 1.0             # ₹1 L per stock trade × this (auction, attention)
+    validated_auction_enabled: bool = True
+    validated_auction_variant: Literal["3PCT", "2PCT"] = "3PCT"
+    validated_auction_max_gross: float = 1_000_000.0  # 10 × ₹1 L
+    validated_auction_daily_loss_stop: float = 16_000.0   # lab worst day 3PCT −₹10,860 (2PCT −₹13,527 → use 20,000)
+    validated_auction_dd_kill: float = 37_000.0           # 1.5 × lab max DD ₹24,605 (2PCT: 45,000)
+
     @field_validator("squareoff_time")
     @classmethod
     def validate_squareoff_time(cls, v: str) -> str:

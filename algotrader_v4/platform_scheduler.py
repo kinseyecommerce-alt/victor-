@@ -89,6 +89,16 @@ class PlatformScheduler:
                 hour=_h, minute=_m, second=_s, day_of_week="mon-fri", id=f"forward_{_stage}",
                 misfire_grace_time=20,
             )
+        # validated (lab-protocol) agents, PAPER only (agents/validated_*.py): fixed, tested times
+        for _fn, _id, (_h, _m, _s), _grace in (
+                (self._validated_preflight, "validated_preflight", (8, 55, 0), 300),
+                (self._validated_open, "validated_open", (9, 15, 5), 50),
+                (self._validated_auc_exit, "validated_auc_exit", (9, 20, 0), 60),
+                (self._validated_store, "validated_store", (15, 40, 0), 600)):
+            self._sched.add_job(_fn, "cron", hour=_h, minute=_m, second=_s, day_of_week="mon-fri", id=_id,
+                                misfire_grace_time=_grace)
+        self._sched.add_job(self._validated_catch_up, "date", id="validated_catch_up",
+                            run_date=_now_ist() + __import__("datetime").timedelta(seconds=60))
         self._sched.add_job(
             self._refresh_universe, "cron",
             hour=16, minute=30, day_of_week="mon-fri", id="universe_refresh",
@@ -168,6 +178,83 @@ class PlatformScheduler:
                 await send_telegram(f"🧪 <b>Auction-fade forward test</b>\n{lines}")
         except Exception as exc:
             logger.error("[platform] forward test ({}) failed: {}", stage, exc)
+
+    # ── validated (lab-protocol) agents ───────────────────────────────────────
+    @staticmethod
+    def _validated_agents() -> dict:
+        from agents.strategy_agents import ALL_AGENTS
+        return {n: a for n, a in ALL_AGENTS.items() if getattr(a, "scheduled", False)}
+
+    @staticmethod
+    async def _validated_call(agent, method: str, *args):
+        """Run one agent job; an exception is logged and counted in the agent's errors, never raised."""
+        fn = getattr(agent, method, None)
+        if fn is None:
+            return None
+        try:
+            r = fn(*args)
+            if asyncio.iscoroutine(r):
+                r = await r
+            return r
+        except Exception as exc:
+            agent.state.errors.append(f"{method}: {exc}"[:200])
+            logger.exception("[platform] {}.{} failed: {}", agent.name, method, exc)
+            return None
+
+    async def _validated_preflight(self) -> None:
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        import validated_data
+        try:
+            if not validated_data.store_fresh(_now_ist().date()):
+                await asyncio.to_thread(validated_data.refresh_store)
+            import event_calendar
+            await event_calendar.refresh_calendar()
+        except Exception as exc:
+            logger.error("[platform] validated preflight data refresh failed: {}", exc)
+        for a in self._validated_agents().values():
+            a.state.running = True
+            logger.info("[platform] {} preflight: entry block = {}, store fresh = {}", a.name,
+                        a.entry_block_reason_readonly(), validated_data.store_fresh(_now_ist().date()))
+
+    async def _validated_open(self) -> None:
+        """09:15:05: one quote batch for the lab universe; overnight exits at the open first, then auction entries."""
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        import validated_data
+        q = await asyncio.to_thread(validated_data.quotes, validated_data.UNIVERSE)
+        ag = self._validated_agents()
+        if "attn_on" in ag:
+            await self._validated_call(ag["attn_on"], "exit_at_open", q)
+        if "auc_fade" in ag:
+            await self._validated_call(ag["auc_fade"], "enter", q)
+
+    async def _validated_auc_exit(self) -> None:
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        a = self._validated_agents().get("auc_fade")
+        if a is not None:
+            await self._validated_call(a, "exit")
+
+    async def _validated_store(self) -> None:
+        from ist_clock import is_trading_day
+        if not is_trading_day():
+            return
+        import validated_data
+        try:
+            await asyncio.to_thread(validated_data.refresh_store)
+        except Exception as exc:
+            logger.error("[platform] validated store refresh failed: {}", exc)
+            return
+        for a in self._validated_agents().values():
+            await self._validated_call(a, "parity_audit")
+
+    async def _validated_catch_up(self) -> None:
+        for a in self._validated_agents().values():
+            await self._validated_call(a, "catch_up", _now_ist())
 
     async def _allocate(self, reason: str) -> None:
         """The AI capital manager's two daily calls (09:08 before auto-start, 12:30)."""

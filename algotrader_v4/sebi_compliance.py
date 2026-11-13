@@ -38,9 +38,21 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "scalping": "ALGO-SCALP-004",
     "manual":   "ALGO-MANUAL-005",
     "ai":       "ALGO-AI-006",
+    "auc_fade": "ALGO-AUC-007",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
+    "auc_fade": {
+        "name": "Opening-auction fade (validated, stratlab/auction.py AUC-FADE-3PCT)",
+        "description": "Fade the 09:15 call-auction print when |gap vs previous close| > 3 % (2 % variant "
+                       "selectable) and <= 20 %: short an up-gap, buy a down-gap at the auction price; exit at "
+                       "09:20; the 10 largest |gap| per day (ties by symbol), Rs 1 lakh each",
+        "instruments": "NSE equities (MIS)",
+        "order_types": ["MARKET (pre-open, filled at the auction price)", "LIMIT (marketable exit)"],
+        "holding_period": "5 minutes (09:15 to 09:20)",
+        "risk_controls": "No stop or target (as tested); per-agent daily loss stop and drawdown kill",
+        "parameters": {"min_gap": 0.03, "max_gap": 0.20, "max_per_day": 10, "notional": 100000, "exit": "09:20"},
+    },
     "intraday": {
         "name": "VWAP Momentum Intraday",
         "description": "Buys when price > VWAP, EMA9 > EMA21, RSI 45-67, MACD histogram positive, volume ratio >= 1.3",

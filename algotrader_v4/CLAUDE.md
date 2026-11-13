@@ -95,6 +95,24 @@ into a loser. Rules that keep them in step:
 - Verify end to end with `test_pipeline.py`'s live-path test (a validated signal must reach the paper broker at full
   size) after touching sizing, risk or filters.
 
+#### Validated agents (lab-protocol) — `agents/validated_*.py`
+
+Strategies that passed stratlab's pre-registered protocol run as PAPER-only, scheduler-driven agents
+(`scheduled = True`, never started on the tick engine). So far: `auc_fade` (AUC-FADE-3PCT, `stratlab/auction.py`).
+
+- Imports, not copies: rule functions and constants come from the lab module; `LAB_FINGERPRINT` (sha1 of their
+  source + constants) is pinned in `test_pipeline.py`, so a lab change fails the test until `VERSION` is bumped.
+- Guards bypassed (each would resize, delay or drop a tested trade): Claude/debate gate, MTF, Kelly, event sizing,
+  correlation guard, allocator/bucket room, portfolio VaR, regime pauses, order_guard, risk_manager counters and
+  halts, pruning, trailing SL / SL-M / GTT. Kept: the SEBI kill switch / pause (`sebi_compliance.pre_order_check`).
+  Own overlays instead: kill switch (`VALIDATED_AUCTION_ENABLED` / dashboard toggle; entries only), daily loss stop,
+  drawdown kill (disables the agent until a manual re-enable). Ledger rows use `charge_risk=False`.
+- Quote ↔ bar mapping (parity test `t_va_lab_parity`): auction price = Kite `ohlc.open` at 09:15:05 = the 09:15 bar
+  open; `prev_close` = last 1-minute close of the previous valid (≥ 200-bar) session from `validated_data`'s store
+  (Kite minute candles through `summarize_sessions`, the same function the parity test uses), not `ohlc.close`.
+- `VALIDATED_ONLY` (default true) gates the validated agents' entries; false = no validated entries (exits still run).
+- Every early return logs through `_note()` → `_skip()` + the per-day `day_log` in `/agents` status.
+
 ### Agent Enable/Disable
 
 Agent enabled state lives in `bot_state.py` (not `main.py`) to avoid circular imports. The `/settings/agent-enables` endpoint reads/writes this. `master_agent_v5._apply_directives()` checks enabled state before resuming any strategy.

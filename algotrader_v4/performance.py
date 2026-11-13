@@ -39,6 +39,7 @@ STRATEGY_LABELS = {
     "intraday": "Intraday agent", "scalping": "Scalping agent", "swing": "Swing agent", "fno": "F&O agent",
     "ai": "AI intraday", "ai_opt": "AI option buy", "ai_fut": "AI future", "ai_swing": "AI swing",
     "ai_swing_opt": "AI swing put", "ai_spread": "AI credit spread", "momentum": "Momentum rotation",
+    "auc_fade": "Auction fade (validated)",
 }
 
 
@@ -91,18 +92,30 @@ class Performance:
     def record_trade(self, strategy: str, symbol: str, side: str, quantity: int, entry_price: float,
                      pnl: float, exchange: str = "NSE", product: str = "MIS",
                      exit_price: Optional[float] = None, note: str = "",
-                     signal_price: Optional[float] = None, order_id: Optional[str] = None) -> dict:
+                     signal_price: Optional[float] = None, order_id: Optional[str] = None,
+                     cost_kind: Optional[str] = None, charge_risk: bool = True,
+                     extra: Optional[dict] = None) -> dict:
         """Called once per closed trade with its gross P&L. Returns the stored row (net of costs).
         order_id (the entry order) lets a restored paper book tell a trade that already closed from one
-        still open (paper_book.py)."""
+        still open (paper_book.py). cost_kind: charge costs.round_trip_cost of that kind instead of the
+        instrument's own class (a validated strategy booked at its lab cost assumption); charge_risk=False keeps
+        the cost out of risk_manager (validated agents have their own loss stops); extra is merged into the row."""
         if exit_price is None and quantity and entry_price:
             exit_price = entry_price + (pnl / quantity) * (1 if side == "BUY" else -1)
-        cost = trade_cost(entry_price, exit_price or entry_price, quantity, side, exchange, product, symbol)
+        if cost_kind:
+            from costs import round_trip_cost
+            ev, xv = entry_price * quantity, (exit_price if exit_price is not None else entry_price) * quantity
+            buy_v, sell_v = (ev, xv) if side == "BUY" else (xv, ev)
+            cost = round_trip_cost(buy_v, sell_v, cost_kind)
+        else:
+            cost = trade_cost(entry_price, exit_price or entry_price, quantity, side, exchange, product, symbol)
         row = {"t": now_ist().isoformat(timespec="seconds"), "strategy": strategy, "version": _version(strategy),
                "symbol": symbol,
                "side": side, "qty": quantity, "entry": round(entry_price, 2),
-               "exit": round(exit_price or entry_price, 2), "gross": round(pnl, 2), "cost": cost,
-               "net": round(pnl - cost, 2), "product": product, "exchange": exchange, "note": note[:80]}
+               "exit": round(exit_price or entry_price, 2), "gross": round(pnl, 2),
+               "cost": cost, "net": round(pnl - cost, 2), "product": product, "exchange": exchange, "note": note[:80]}
+        if extra:
+            row.update({k: v for k, v in extra.items() if k not in row})
         if order_id:
             row["oid"] = str(order_id)
         if signal_price:
@@ -116,11 +129,12 @@ class Performance:
             self._save()
         if newly:
             self._announce_prune(strategy, newly)
-        try:
-            from risk_manager import risk_manager           # the daily loss limit is measured after costs
-            risk_manager.record_cost(cost)
-        except Exception as exc:
-            logger.error("[perf] cost not charged to the risk manager: {}", exc)
+        if charge_risk:
+            try:
+                from risk_manager import risk_manager           # the daily loss limit is measured after costs
+                risk_manager.record_cost(cost)
+            except Exception as exc:
+                logger.error("[perf] cost not charged to the risk manager: {}", exc)
         return row
 
     # ── pruning ──────────────────────────────────────────────────────────
@@ -141,6 +155,12 @@ class Performance:
     def _evaluate_pruning(self, strategy: str) -> Optional[str]:
         if not settings.prune_enabled or self._current_prune(strategy):
             return None
+        try:
+            import bot_state
+            if strategy in getattr(bot_state, "VALIDATED_AGENTS", ()):
+                return None              # lab-protocol agents: their drawdown kill replaces pruning
+        except Exception:
+            pass
         rows = self._strategy_trades(strategy)[-settings.prune_lookback_trades:]
         if len(rows) < settings.prune_min_trades:
             return None

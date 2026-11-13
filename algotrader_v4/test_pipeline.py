@@ -602,7 +602,7 @@ section("7. SEBI COMPLIANCE")
 from sebi_compliance import SEBICompliance, KillSwitchState, APPROVED_ALGO_IDS
 
 def t_sebi_5_algos():
-    assert len(APPROVED_ALGO_IDS) == 6   # intraday, fno, swing, scalping, manual, ai
+    assert len(APPROVED_ALGO_IDS) == 7   # intraday, fno, swing, scalping, manual, ai, auc_fade
 
 def t_sebi_algo_id_format():
     assert all(v.startswith("ALGO-") for v in APPROVED_ALGO_IDS.values())
@@ -687,7 +687,7 @@ def t_sebi_strategy_disclosure():
 def t_sebi_full_disclosure():
     sc = SEBICompliance()
     doc = sc.get_disclosure_document()
-    assert len(doc["algo_strategies"]) == 6
+    assert len(doc["algo_strategies"]) == 7
 
 def t_sebi_ip_empty_allows_all():
     sc = SEBICompliance()
@@ -704,7 +704,7 @@ def t_sebi_otr_tracking():
     sc.pre_order_check("intraday","RELIANCE","NSE","BUY",1,"MARKET",100.0,"sig","RANGING")
     assert sc.status()["orders_placed_today"] == 1
 
-run("6 approved algo IDs registered",          t_sebi_5_algos)
+run("7 approved algo IDs registered",          t_sebi_5_algos)
 run("algo IDs have ALGO- prefix",              t_sebi_algo_id_format)
 run("pre_order_check approves valid order",    t_sebi_approves_valid)
 run("rejects unregistered strategy",           t_sebi_rejects_unknown_strategy)
@@ -718,7 +718,7 @@ run("record_order_id increments executed",     t_sebi_record_executed)
 run("audit log records today's orders",        t_sebi_audit_log_today)
 run("audit log filters by strategy",           t_sebi_audit_filter_strategy)
 run("strategy disclosure returns algo_id",     t_sebi_strategy_disclosure)
-run("full disclosure has 6 strategies",        t_sebi_full_disclosure)
+run("full disclosure has 7 strategies",        t_sebi_full_disclosure)
 run("empty whitelist allows all IPs",          t_sebi_ip_empty_allows_all)
 run("whitelist blocks non-whitelisted IPs",    t_sebi_ip_whitelist)
 run("OTR counter increments per check",        t_sebi_otr_tracking)
@@ -929,8 +929,9 @@ def _make_snap(symbol="RELIANCE", ltp=2800.0, rsi=52.0, trend="UP",
                           candles_1min=candles, candles_5min=candles[:6])
 
 def t_agents_4():
-    assert len(ALL_AGENTS) == 4
-    assert set(ALL_AGENTS.keys()) == {"intraday","fno","swing","scalping"}
+    legacy = {k for k, a in ALL_AGENTS.items() if not getattr(a, "scheduled", False)}
+    assert legacy == {"intraday","fno","swing","scalping"}
+    assert set(ALL_AGENTS) - legacy == {"auc_fade"}       # validated (scheduled) agents
 
 def t_intraday_returns_action():
     agent = IntradayAgent()
@@ -1362,7 +1363,7 @@ run("v2: trade-close hook reaches the agent",                  t_v2_close_hook_r
 run("v2: daily trend bias never blocks the tick loop",         t_v2_daily_bias_never_blocks_tick_loop)
 
 
-run("ALL_AGENTS has 4 strategy agents",          t_agents_4)
+run("ALL_AGENTS has 4 tick agents + validated auc_fade",          t_agents_4)
 run("IntradayAgent.evaluate_tick returns valid", t_intraday_returns_action)
 run("IntradayAgent → BUY on bullish setup",      t_intraday_buy_signal)
 run("IntradayAgent → HOLD on RSI overbought",    t_intraday_hold_overbought)
@@ -11349,6 +11350,642 @@ def t_ledger_books_paper_exit_at_touch():
         assert abs(float(rec[-1].get("pnl", rec[-1].get("gross", booked))) - booked) < 1e-6, rec[-1]
 
 run("ledger books a paper exit at the touch the broker filled", t_ledger_books_paper_exit_at_touch)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+section("VALIDATED AGENTS — AUC-FADE opening-auction fade (agents/validated_auction.py)")
+# ══════════════════════════════════════════════════════════════════════════
+import contextlib as _ctx_va
+import copy as _copy_va
+import json as _json_va
+import stratlab.auction as _A_va
+import validated_data as _vd
+import agents.validated_auction as _va
+import bot_state as _bs_va
+import event_calendar as _ec_va
+import performance as _perf_mod_va
+import tick_engine as _te_mod_va
+from agents.validated_auction import AuctionFadeAgent, AuctionInput, plan_auction
+from agents.strategy_agents import ALL_AGENTS as _ALL_va
+from costs import trade_cost as _tc_va
+from ist_clock import _IST as _IST_va
+from performance import performance as _perf_va
+from sebi_compliance import sebi_compliance as _sebi_va, KillSwitchState as _KSS_va
+
+_D_va = date(2026, 11, 13)                       # a Friday session; the previous one is Thursday 2026-11-12
+_PIN_FINGERPRINT_va = "acce4b191d400eb4a0ccb30ab805e4250f8c709f"
+
+
+def _va_at(d, hh, mm, ss=0):
+    return datetime.combine(d, time(hh, mm, ss)).replace(tzinfo=_IST_va)
+
+
+class _VaClock:
+    def __init__(self, t):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _va_q(px, bid=None, ask=None, open_=None):
+    return {"ltp": px, "open": px if open_ is None else open_, "prev_close": 0.0, "bid": bid or 0.0,
+            "ask": ask or 0.0, "volume": 1000}
+
+
+@_ctx_va.contextmanager
+def _va_env(now, prev_closes: dict, quotes, agent=None, prev_day: int = 20261112):
+    """PAPER with Kite data, a fixed IST clock (sleeps advance it), a store of previous sessions, fake quotes
+    (dict or callable(symbols)), an empty paper book / ledger; everything put back afterwards."""
+    clock = _VaClock(now)
+
+    async def _adv(s):
+        clock.t = clock.t + timedelta(seconds=s)
+
+    st = settings
+    saved = {k: getattr(st, k) for k in ("trading_mode", "paper_data_source", "validated_only",
+                                         "validated_auction_enabled", "validated_auction_variant",
+                                         "validated_notional_scale")}
+    saved_en = _bs_va.is_agent_enabled("auc_fade")
+    saved_book = (list(_te_kite_client._paper_orders), _copy_va.deepcopy(_te_kite_client._paper_positions))
+    store = {"symbols": {s: [_vd.SessionSummary(prev_day, 375, 1e6, pc, 555, pc)] for s, pc in prev_closes.items()},
+             "updated": None}
+    qfn = quotes if callable(quotes) else (lambda ins: {s: quotes[s] for s in ins if s in quotes})
+    a = agent or AuctionFadeAgent()
+    patches = [_patch.object(_va, "now_ist", clock), _patch.object(_va, "_sleep", _adv),
+               _patch.object(_pb, "now_ist", clock), _patch.object(_perf_mod_va, "now_ist", clock),
+               _patch.object(_vd, "quotes", lambda ins: qfn(list(ins))), _patch.object(_vd, "_store", store),
+               _patch.object(_perf_va, "trades", []), _patch.object(_te_mod_va.tick_engine, "_latest_tick", {}),
+               _patch.object(_sebi_va, "_state", _KSS_va.ACTIVE),
+               _patch.object(_ec_va, "_price_actions", {}), _patch.object(_ec_va, "_loaded_at", now)]
+    try:
+        for p in patches:
+            p.start()
+        st.trading_mode, st.paper_data_source, st.validated_only = "PAPER", "KITE", True
+        st.validated_auction_enabled, st.validated_auction_variant, st.validated_notional_scale = True, "3PCT", 1.0
+        _bs_va.set_agent_enabled("auc_fade", True)
+        _te_kite_client._paper_orders.clear(); _te_kite_client._paper_positions.clear()
+        a._pos.clear(); a._day = {}; a.day_log = []; a._kill = None; a._dd_since = None; a.deviations.clear()
+        a.state.running = True
+        yield a, clock
+    finally:
+        for p in reversed(patches):
+            p.stop()
+        for k, v in saved.items():
+            setattr(st, k, v)
+        _bs_va.set_agent_enabled("auc_fade", saved_en)
+        _te_kite_client._paper_orders[:] = saved_book[0]
+        _te_kite_client._paper_positions[:] = saved_book[1]
+        a._pos.clear(); a._day = {}; a.day_log = []; a._kill = None; a._dd_since = None
+        a.state.running = False
+
+
+def _va_orders(tag):
+    return [o for o in _te_kite_client._paper_orders if o.get("tag") == tag]
+
+
+def _va_row(sym):
+    return next((p for p in _te_kite_client._paper_positions if p["tradingsymbol"] == sym
+                 and p.get("product") == "MIS"), None)
+
+
+# ABB +4 % (fade: SELL), ADANIENT −5 % (BUY), AMBUJACEM −6 % (BUY), ADANIGREEN +0.33 % (no signal),
+# ADANIPORTS open missing, ADANIPOWER no previous session in the store
+_VA_PC = {"ABB": 100.0, "ADANIENT": 200.0, "AMBUJACEM": 50.0, "ADANIGREEN": 300.0, "ADANIPORTS": 400.0}
+_VA_OPEN = {"ABB": _va_q(104.0), "ADANIENT": _va_q(190.0), "AMBUJACEM": _va_q(47.0), "ADANIGREEN": _va_q(301.0),
+            "ADANIPORTS": _va_q(401.0, open_=0.0), "ADANIPOWER": _va_q(520.0)}
+
+
+def _lab_pick_va(inputs, spec_id):
+    """What stratlab.auction.select picks from the same gaps (the lab's own code)."""
+    rows = []
+    for x in inputs:
+        sig = _A_va.auction_rule(x.prev_close, x.auction_px, _va.LOOSEST_GAP)
+        if sig:
+            rows.append((20260101, x.symbol, sig[0], sig[1], x.auction_px, 560, x.auction_px))
+    spec = next(s for s in _A_va.SPECS if s.id == spec_id)
+    return [(r[1], r[2]) for r in _A_va.select(rows, spec, 0, 99999999)]
+
+
+def t_va_constants_fingerprint():
+    assert _va.A is _A_va, "rules are imported from the lab module, not copied"
+    assert (_A_va.MAX_ABS_GAP, _A_va.MAX_PER_DAY, _A_va.NOTIONAL, _A_va.FILL_MODEL) == (0.20, 10, 100_000.0, "auction1")
+    assert plan_auction.__defaults__ == (_A_va.NOTIONAL, _A_va.MAX_PER_DAY)
+    assert _va.LAB_FINGERPRINT == _PIN_FINGERPRINT_va, \
+        f"stratlab/auction.py changed ({_va.LAB_FINGERPRINT}): re-run the protocol, bump VERSION, re-pin"
+    a = AuctionFadeAgent()
+    assert a.VERSION == "AUC-FADE-3PCT/auction1/v1" and a.LAB_ID == "AUC-FADE-3PCT" and a.min_gap == 0.03
+    assert _perf_mod_va._version("auc_fade") == a.VERSION
+    assert tuple(_vd.UNIVERSE) == tuple(_fwd.UNIVERSE) and len(_vd.UNIVERSE) == 97
+    assert a.scheduled and a.product == "MIS" and "auc_fade" in _bs_va.VALIDATED_AGENTS
+
+
+def t_va_boundaries_match_lab_select():
+    ins = [AuctionInput("EX3", 100.0, 103.0), AuctionInput("EX301", 100.0, 103.01),
+           AuctionInput("DN301", 100.0, 96.99), AuctionInput("BIG", 100.0, 120.01),
+           AuctionInput("AT20", 100.0, 120.0), AuctionInput("EX2", 100.0, 102.0), AuctionInput("ZERO", 0.0, 100.0)]
+    got3 = [(p.symbol, p.side) for p in plan_auction(ins, 0.03)[0]]
+    assert got3 == _lab_pick_va(ins, "AUC-FADE-3PCT"), (got3, _lab_pick_va(ins, "AUC-FADE-3PCT"))
+    assert ("EX301", -1) in got3 and ("DN301", 1) in got3 and ("AT20", -1) in got3
+    assert not {"BIG", "EX2", "ZERO"} & {s for s, _ in got3}
+    # an exact 3.00 % gap: the lab's select() compares the float gap (103/100 − 1 = 0.030000000000000027) without
+    # the epsilon auction_rule applies, so the lab TRADES it — parity, not the docstring, decides
+    assert ("EX3" in {s for s, _ in got3}) == ("EX3" in {s for s, _ in _lab_pick_va(ins, "AUC-FADE-3PCT")})
+    got2 = [(p.symbol, p.side) for p in plan_auction(ins, 0.02)[0]]
+    assert got2 == _lab_pick_va(ins, "AUC-FADE-2PCT") and "EX2" not in {s for s, _ in got2}   # exact 2 %: not > 2 %
+    rng = np.random.default_rng(7)
+    for _ in range(300):                         # random days: identical to the lab's selection every time
+        ins = [AuctionInput(f"S{i:02d}", 100.0, float(np.round(100 * (1 + rng.uniform(-0.25, 0.25)), 2)))
+               for i in range(30)]
+        for sid, mg in (("AUC-FADE-3PCT", 0.03), ("AUC-FADE-2PCT", 0.02)):
+            assert [(p.symbol, p.side) for p in plan_auction(ins, mg)[0]] == _lab_pick_va(ins, sid)
+
+
+def t_va_top10_ties_variant_qty():
+    ins = [AuctionInput(f"T{i:02d}", 100.0, 105.0) for i in range(12)] + [AuctionInput("BIGGEST", 100.0, 90.0)]
+    plan, skips = plan_auction(ins, 0.03)
+    assert [p.symbol for p in plan] == ["BIGGEST"] + [f"T{i:02d}" for i in range(9)]
+    assert plan[0].side == 1 and all(p.side == -1 for p in plan[1:])
+    assert skips["T10"] == skips["T11"] == "not_top10"
+    p = plan_auction([AuctionInput("Q", 1300.0, 1234.5)], 0.03)[0][0]
+    assert p.qty == int(100_000 // 1234.5) == 81 and p.entry_t == "09:15" and p.exit_t == "09:20"
+    assert plan_auction([AuctionInput("Q", 1300.0, 1234.5)], 0.03, notional=200_000)[0][0].qty == 162
+    assert plan_auction([AuctionInput("Q", 210_000.0, 200_000.0)], 0.03)[0][0].qty == 1           # at least 1
+    capped, f = _va.apply_gross_cap(plan, 500_000.0)
+    assert f is not None and [c.symbol for c in capped] == [p.symbol for p in plan], "the cap never drops a name"
+    assert sum(c.qty * c.entry_ref for c in capped) <= 500_000.0 + 1e-6
+    a, old = AuctionFadeAgent(), settings.validated_auction_variant
+    try:
+        settings.validated_auction_variant = "2PCT"
+        assert a.min_gap == 0.02 and a.VERSION == "AUC-FADE-2PCT/auction1/v1"
+        assert a.LAB_EXPECTATION["FINAL"]["pf"] == 1.08
+    finally:
+        settings.validated_auction_variant = old
+
+
+def t_va_entry_fills_at_open_full_size():
+    """A signal reaches the paper broker at the tested size and product, filled exactly at the official open."""
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN) as (a, clock):
+        r = asyncio.run(a.enter())
+        assert r == {"entered": 3, "planned": 3}, r
+        ins = {o["tradingsymbol"]: o for o in _va_orders("VAL-AUC-IN")}
+        assert set(ins) == {"ABB", "ADANIENT", "AMBUJACEM"}
+        for sym, side, px in (("ABB", "SELL", 104.0), ("ADANIENT", "BUY", 190.0), ("AMBUJACEM", "BUY", 47.0)):
+            o = ins[sym]
+            assert (o["transaction_type"], o["product"], o["price"], o["average_price"], o["fill_kind"],
+                    o["quantity"], o["status"]) == (side, "MIS", px, px, "AUCTION", int(100_000 // px), "COMPLETE"), o
+            assert _te_kite_client.paper_fill_vs_ltp(o["order_id"]) == 0.0
+            assert _va_row(sym)["quantity"] == (1 if side == "BUY" else -1) * int(100_000 // px)
+        assert len(a.positions()) == 3 and not _perf_va.trades, "nothing booked before the exit"
+        log = {(e["symbol"], e["reason"]) for e in a.day_log}
+        assert ("ADANIPORTS", "no_data:open") in log and ("ADANIPOWER", "no_data:prev_close") in log
+        assert ("ADANIGREEN", "no_signal") in log and a.state.skip_counts.get("no_signal", 0) >= 1
+        assert a.state.skip_counts.get("no_data", 0) >= 90               # every symbol without data, counted
+        assert clock.t == _va_at(_D_va, 9, 15, 50), "three retries for the missing open, then decided"
+        assert asyncio.run(a.enter())["skipped"] == "already_entered" and len(_va_orders("VAL-AUC-IN")) == 3
+        assert a.day_state()["planned"] == [["AMBUJACEM", 1, 2127], ["ADANIENT", 1, 526], ["ABB", -1, 961]]
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN) as (a, clock):
+        settings.validated_notional_scale = 2.0
+        asyncio.run(a.enter())
+        assert {o["tradingsymbol"]: o["quantity"] for o in _va_orders("VAL-AUC-IN")}["ABB"] == int(200_000 // 104.0)
+    with _va_env(_va_at(_D_va, 9, 16, 1), _VA_PC, _VA_OPEN) as (a, clock):
+        assert asyncio.run(a.enter())["skipped"] == "entry_window_missed" and not _va_orders("VAL-AUC-IN")
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, {}) as (a, clock):
+        assert asyncio.run(a.enter())["skipped"] == "quote_failed" and a.state.skip_counts["quote_failed"] == 1
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN) as (a, clock):
+        _ec_va._price_actions = {"ABB": [(_D_va, "Face Value Split (Sub-Division) From Rs 2 To Rs 1")]}
+        asyncio.run(a.enter())
+        assert "ABB" not in {o["tradingsymbol"] for o in _va_orders("VAL-AUC-IN")}
+        assert a.state.skip_counts.get("corporate_action") == 1
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN) as (a, clock):
+        _sebi_va._state = _KSS_va.KILLED
+        assert asyncio.run(a.enter())["entered"] == 0 and a.state.skip_counts.get("sebi") == 3
+
+
+def t_va_exit_at_touch_retry_late_ledger():
+    """09:20 exit at the quote touch; a symbol quoted late is retried every 10 s; one never quoted is exited at
+    its last price at 09:29:50 (late_exit). Booked once each in the ledger at equity_mis costs, outside risk."""
+    def quotes(ins):
+        t = clock_ref[0].t.time()
+        out = {"ABB": _va_q(103.0, 102.9, 103.1)}
+        if t >= time(9, 20, 20):
+            out["ADANIENT"] = _va_q(195.0, 194.9, 195.1)
+        return {s: out[s] for s in ins if s in out} if t >= time(9, 20) else {s: _VA_OPEN[s] for s in ins if s in _VA_OPEN}
+    clock_ref = []
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, quotes) as (a, clock):
+        clock_ref.append(clock)
+        asyncio.run(a.enter())
+        oids = {p.symbol: p.oid for p in a.positions()}
+        costs0 = _rm_x.costs_today
+        clock.t = _va_at(_D_va, 9, 20, 0)
+        r = asyncio.run(a.exit())
+        assert r == {"closed": 3, "open": 0}, r
+        rows = {t["symbol"]: t for t in _perf_va.trades}
+        assert set(rows) == {"ABB", "ADANIENT", "AMBUJACEM"} and len(_perf_va.trades) == 3
+        abb, ade, amb = rows["ABB"], rows["ADANIENT"], rows["AMBUJACEM"]
+        assert (abb["side"], abb["entry"], abb["exit"], abb["qty"], abb["oid"]) == ("SELL", 104.0, 103.1, 961, oids["ABB"])
+        assert abs(abb["gross"] - round((104.0 - 103.1) * 961, 2)) < 0.01
+        assert abb["cost"] == _tc_va(104.0, 103.1, 961, "SELL", "NSE", "MIS", "ABB")          # equity_mis, as the lab
+        assert abb["version"] == a.VERSION and abb["note"] == "09:20 exit" and abb["exit_kind"] == "normal"
+        assert (ade["exit"], ade["exit_kind"]) == (194.9, "normal"), "quoted at 09:20:20: SELL at the bid"
+        assert (amb["exit"], amb["exit_kind"]) == (47.0, "late_exit"), "never quoted: last price at 09:29:50"
+        assert a.deviations == {"late_exit": 1} and clock.t >= _va_at(_D_va, 9, 29, 50)
+        assert all(_va_row(s)["quantity"] == 0 for s in rows), "paper rows flat"
+        assert _rm_x.costs_today == costs0, "validated costs do not feed risk_manager"
+        assert abs(a.state.pnl_today - sum(t["net"] for t in _perf_va.trades)) < 0.05
+        assert a.realised_today() == round(sum(t["net"] for t in _perf_va.trades), 2)
+        assert {o["tradingsymbol"]: o["transaction_type"] for o in _va_orders("VAL-AUC-OUT")} == \
+            {"ABB": "BUY", "ADANIENT": "SELL", "AMBUJACEM": "SELL"}
+        assert asyncio.run(a.exit()) == {"closed": 0, "open": 0} and len(_perf_va.trades) == 3
+
+
+def t_va_squareoff_flattened_reconciled():
+    """An auction position still open at 15:15 is flattened by the broker square-off (it is not an overnight
+    holding); the agent books it once at the row's last price as a counted deviation."""
+    with _va_env(_va_at(_D_va, 9, 15, 5), {"ABB": 100.0}, {"ABB": _va_q(104.0)}) as (a, clock):
+        asyncio.run(a.enter())
+        from agents.base_agent import overnight_hold_qty
+        assert ("ABB", "MIS") not in overnight_hold_qty() and a.overnight_holdings() == {}
+        _te_kite_client.squareoff_all_positions()
+        assert _va_row("ABB")["quantity"] == 0
+        clock.t = _va_at(_D_va, 15, 16)
+        out = asyncio.run(a.catch_up())
+        assert out == {} and not a.positions() and len(_perf_va.trades) == 1
+        assert _perf_va.trades[0]["note"] == "flattened_by_squareoff" and a.deviations == {"flattened_by_squareoff": 1}
+
+
+def t_va_live_refused_kill_switch():
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN) as (a, clock):
+        settings.trading_mode = "LIVE"
+        assert asyncio.run(a.enter())["skipped"] == "live_mode_refused" and not _va_orders("VAL-AUC-IN")
+        try:
+            _te_kite_client.paper_fill_at("ABB", "NSE", "BUY", 1, "MIS", 100.0, "X", "AUCTION")
+            raise AssertionError("paper_fill_at must refuse LIVE")
+        except RuntimeError:
+            pass
+        settings.trading_mode = "PAPER"
+        settings.validated_auction_enabled = False
+        assert asyncio.run(a.enter())["skipped"] == "kill_switch" and not _va_orders("VAL-AUC-IN")
+        settings.validated_auction_enabled = True
+        _bs_va.set_agent_enabled("auc_fade", False)
+        assert asyncio.run(a.enter())["skipped"] == "disabled"
+        _bs_va.set_agent_enabled("auc_fade", True)
+        settings.validated_only = False
+        assert asyncio.run(a.enter())["skipped"] == "validated_only_off"
+        settings.validated_only = True
+        a.state.running = False
+        assert asyncio.run(a.enter())["skipped"] == "stopped"
+        a.state.running = True
+        settings.paper_data_source = "SIM"
+        assert asyncio.run(a.enter())["skipped"] == "no_kite_data"
+        settings.paper_data_source = "KITE"
+        assert asyncio.run(a.enter())["entered"] == 3
+        settings.validated_auction_enabled = False            # the kill switch blocks entries only
+        _bs_va.set_agent_enabled("auc_fade", False)
+        clock.t = _va_at(_D_va, 9, 20)
+        _vd.quotes = lambda ins: {s: _va_q(100.0, 99.9, 100.1) for s in ins}
+        assert asyncio.run(a.exit())["closed"] == 3 and not a.positions() and len(_perf_va.trades) == 3
+
+
+def t_va_daily_loss_stop_and_drawdown_kill():
+    def row(day, net):
+        return {"t": f"{day}T09:20:00+05:30", "strategy": "auc_fade", "version": "AUC-FADE-3PCT/auction1/v1",
+                "symbol": "X", "side": "BUY", "qty": 1, "entry": 100.0, "exit": 100.0, "gross": net, "cost": 0.0,
+                "net": net}
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN) as (a, clock):
+        _perf_va.trades[:] = [row("2026-11-13", -16_000.0)]
+        assert a.entry_block_reason() == "daily_loss_stop"
+        assert asyncio.run(a.enter())["skipped"] == "daily_loss_stop" and not _va_orders("VAL-AUC-IN")
+        settings.validated_notional_scale = 2.0                               # limits scale with the notional
+        assert a.entry_block_reason() is None
+        settings.validated_notional_scale = 1.0
+        _perf_va.trades[:] = [row("2026-11-11", 10_000.0), row("2026-11-12", -47_000.0)]  # dd 47k ≥ 37k
+        assert a.get_status()["entry_block"] == "drawdown_kill" and _bs_va.is_agent_enabled("auc_fade"), \
+            "status is read-only"
+        assert asyncio.run(a.enter())["skipped"] == "drawdown_kill" and not _bs_va.is_agent_enabled("auc_fade")
+        assert a._kill and a.entry_block_reason() == "drawdown_kill" and not _va_orders("VAL-AUC-IN")
+        _bs_va.set_agent_enabled("auc_fade", True)                            # manual re-enable
+        assert a.entry_block_reason() is None and a._kill is None and a.drawdown() == 0.0
+        assert asyncio.run(a.enter())["entered"] == 3
+        assert a.export_book()["dd_since"] == _va_at(_D_va, 9, 15, 5).isoformat(timespec="seconds")
+
+
+def t_va_restart_same_day_and_stale():
+    """paper_book round trips: a same-day restart keeps the positions without a second entry and books the
+    09:20 exit once; a restart from an earlier snapshot whose ledger already has the exit does not book it again;
+    an earlier session's snapshot with auction positions still open books each missed exit once."""
+    a = _ALL_va["auc_fade"]
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN, agent=a) as (a, clock), _pb_isolated() as f:
+        _te_kite_client._paper_orders.clear(); _te_kite_client._paper_positions.clear()
+        asyncio.run(a.enter())
+        oids = sorted(p.oid for p in a.positions())
+        assert _pb.save(force=True)
+        snap = _json_va.loads(f.read_text())
+        assert sorted(p["oid"] for p in snap["validated"]["auc_fade"]["positions"]) == oids
+        before_exit = f.read_text()
+        # restart at 09:15:40 (still inside the entry window)
+        _pb_wipe(); a._pos.clear(); a._day = {}; a.day_log = []
+        clock.t = _va_at(_D_va, 9, 15, 40)
+        out = _pb.restore()
+        assert out["restored"] and sorted(p.oid for p in a.positions()) == oids, out
+        assert a.day_state().get("entry_done") and all(_va_row(s)["quantity"] for s in ("ABB", "ADANIENT", "AMBUJACEM"))
+        asyncio.run(a.catch_up(clock.t))
+        assert len(_va_orders("VAL-AUC-IN")) == 3, "no second entry after the restart"
+        clock.t = _va_at(_D_va, 9, 20)
+        _vd.quotes = lambda ins: {s: _va_q(100.0, 99.9, 100.1) for s in ins}
+        asyncio.run(a.exit())
+        assert len(_perf_va.trades) == 3 and sorted(t["oid"] for t in _perf_va.trades) == oids
+        # crash: the last snapshot on disk is the one from before the exit
+        f.write_text(before_exit)
+        _pb_wipe(); a._pos.clear(); a._day = {}
+        _pb.restore()
+        assert not a.positions() and len(_perf_va.trades) == 3, "already in the ledger: not restored, not re-booked"
+        assert all(_va_row(s)["quantity"] == 0 for s in ("ABB", "ADANIENT", "AMBUJACEM")), "paper rows reconciled"
+
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN, agent=a) as (a, clock), _pb_isolated() as f:
+        _te_kite_client._paper_orders.clear(); _te_kite_client._paper_positions.clear()
+        asyncio.run(a.enter())
+        assert _pb.save(force=True)
+        stale = f.read_text()
+        # the process stayed down until Monday 09:05
+        _pb_wipe(); a._pos.clear(); a._day = {}
+        clock.t = _va_at(date(2026, 11, 16), 9, 5)
+        out = _pb.restore()
+        assert out["restored"] and out["stale"], out
+        assert not a.positions() and len(_perf_va.trades) == 3
+        assert all(t["note"] == "missed_exit 2026-11-13" for t in _perf_va.trades)
+        assert {t["symbol"]: t["exit"] for t in _perf_va.trades} == {"ABB": 104.0, "ADANIENT": 190.0, "AMBUJACEM": 47.0}
+        assert a.deviations.get("missed_exit") == 3
+        assert all(_va_row(s)["quantity"] == 0 for s in ("ABB", "ADANIENT", "AMBUJACEM"))
+        f.write_text(stale)                                   # restored again from the same old snapshot
+        _pb_wipe(); a._pos.clear()
+        _pb.restore()
+        assert not a.positions() and len(_perf_va.trades) == 3, "a missed exit is booked once"
+        assert all(_va_row(s)["quantity"] == 0 for s in ("ABB", "ADANIENT", "AMBUJACEM"))
+
+
+def t_va_status_parity_audit_scheduler():
+    with _va_env(_va_at(_D_va, 9, 15, 5), _VA_PC, _VA_OPEN) as (a, clock):
+        asyncio.run(a.enter())
+        st = a.get_status()
+        _json_va.dumps(st, default=str)
+        assert st["lab_id"] == "AUC-FADE-3PCT" and st["fingerprint"] == _PIN_FINGERPRINT_va and len(st["positions"]) == 3
+        assert st["lab_expectation"]["DISC"]["net_bps"] == 46.63 and st["live_readiness"]["ready"] is False
+        assert st["candidates_today"][0]["symbol"] == "AMBUJACEM"
+        # 15:40: the day's bars agree with the quotes → match; a drifted bar open → counted mismatch
+        for s, pc in _VA_PC.items():
+            o = _VA_OPEN[s]["open"]
+            _vd._store["symbols"][s].append(_vd.SessionSummary(20261113, 375, 1e6, o or pc, 555, o or pc))
+        assert a.parity_audit()["match"] and not a.deviations
+        _vd._store["symbols"]["ABB"][-1] = _vd.SessionSummary(20261113, 375, 1e6, 102.0, 555, 102.0)   # +2 %: no
+        assert not a.parity_audit()["match"] and a.deviations == {"parity_mismatch": 1}
+    import platform_scheduler as _ps_va
+    src = Path(_ps_va.__file__).read_text()
+    for job in ('"validated_open", (9, 15, 5)', '"validated_auc_exit", (9, 20, 0)', '"validated_store", (15, 40, 0)',
+                '"validated_preflight", (8, 55, 0)', 'id="validated_catch_up"'):
+        assert job in src, job
+    from master_agent_v5 import master_agent as _m_va
+    from market_regime import Regime as _R_va, REGIME_PLANS as _P_va
+    assert "auc_fade" not in _m_va._regime_pauses(_R_va.RANGING, _P_va[_R_va.RANGING])[1], "never tick-started"
+    assert _perf_va._evaluate_pruning("auc_fade") is None
+    for p in (Path(_va.__file__), Path(_va.__file__).with_name("validated_base.py"), Path(_vd.__file__)):
+        assert "send_telegram" not in p.read_text(), f"{p.name}: no Telegram from validated code"
+
+
+run("AUC-FADE: lab constants imported, fingerprint pinned, VERSION",                  t_va_constants_fingerprint)
+run("AUC-FADE: thresholds / 20 % cap / sides identical to stratlab.auction.select",   t_va_boundaries_match_lab_select)
+run("AUC-FADE: top 10 by |gap| (ties by symbol), qty, gross cap, 3PCT/2PCT switch",   t_va_top10_ties_variant_qty)
+run("AUC-FADE: entry filled at the official open, MIS, full size; skips counted",     t_va_entry_fills_at_open_full_size)
+run("AUC-FADE: 09:20 exit at the touch, retry, late_exit; ledger once, equity_mis",   t_va_exit_at_touch_retry_late_ledger)
+run("AUC-FADE: a position flattened at 15:15 is reconciled once",                     t_va_squareoff_flattened_reconciled)
+run("AUC-FADE: LIVE refused; kill switch / disable / stop block entries, not exits", t_va_live_refused_kill_switch)
+run("AUC-FADE: daily loss stop and drawdown kill (scaled, manual re-enable)",          t_va_daily_loss_stop_and_drawdown_kill)
+run("AUC-FADE: paper_book restart same-day / crash / stale: booked once",              t_va_restart_same_day_and_stale)
+run("AUC-FADE: status, 15:40 parity audit, scheduler jobs, no Telegram",              t_va_status_parity_audit_scheduler)
+
+
+
+# ── Lab-parity acceptance test (real 3-year bars + the lab's FINAL trade lists) ─────────────────────────────
+_PARITY_BARS_va = _os.getenv("VALIDATED_PARITY_BARS",
+                             "/tmp/claude-0/-home-user-victor-/10a63b67-92f5-5498-8eb5-0d5b292e5470/scratchpad/bars3y")
+_PARITY_LAB_va = _os.getenv("VALIDATED_PARITY_LAB",
+                            "/tmp/claude-0/-home-user-victor-/10a63b67-92f5-5498-8eb5-0d5b292e5470/scratchpad/dd")
+_AUC_SPEC_DAYS_va = (20231204, 20231207, 20250922, 20260309, 20261026, 20261105)
+_AUC_2PCT_DAYS_va = (20231204, 20260204)
+
+
+def _va_hm(t):
+    return f"{int(t) // 60:02d}:{int(t) % 60:02d}"
+
+
+def _va_lab_rows(path):
+    import csv as _csv
+    with open(path) as fh:
+        return list(_csv.DictReader(fh))
+
+
+def _va_parity_load(days_needed):
+    """Per symbol, from the lab's npz cache (I/O only): every sample day's session plus the previous sessions back
+    to a valid one, as Kite-candle dicts through validated_data.summarize_sessions (the live store builder), and
+    the day's exit bar (first bar at/after 09:20, before 09:30). Also the full-history scan of the known
+    look-ahead divergences, with the lab's own session_features."""
+    from stratlab import data as _D
+    man = _D.prepare(_PARITY_BARS_va)
+    cdir = man["cache_dir"]
+    syms = sorted(man["symbols"])
+    store = {d: {} for d in days_needed}
+    opens = {d: {} for d in days_needed}
+    exits = {d: {} for d in days_needed}
+    noexit, short, cal, cands = [], [], set(), []
+    for s in syms:
+        with np.load(_os.path.join(cdir, _D._cache_name(s))) as z:
+            raw = {k: z[k] for k in z.files}
+        starts, ends = _D._bounds(raw["date"])
+        rdays = raw["date"][starts]
+        nbars = ends - starts
+        sd = _D.load_symbol(cdir, s)
+        cal.update(int(x) for x in sd.days)
+        for d in days_needed:
+            k = int(np.searchsorted(rdays, d))
+            idx = []
+            j = k - 1
+            while j >= 0:                                  # previous sessions back to the last valid one
+                idx.append(j)
+                if nbars[j] >= _D.MIN_SESSION_BARS or len(idx) >= 10:
+                    break
+                j -= 1
+            if k < len(rdays) and rdays[k] == d:
+                idx.append(k)
+                a_, b_ = int(starts[k]), int(ends[k])
+                tt = raw["t"][a_:b_]
+                jj = int(np.searchsorted(tt, _A_va.EXIT_T))
+                if jj < len(tt) and int(tt[jj]) < _A_va.EXIT_LATEST:
+                    exits[d][s] = (int(tt[jj]), float(raw["o"][a_ + jj]))
+            rows = []
+            for j in sorted(idx):
+                a_, b_ = int(starts[j]), int(ends[j])
+                dd = int(rdays[j])
+                base = datetime(dd // 10000, dd // 100 % 100, dd % 100)
+                for i in range(a_, b_):
+                    rows.append({"date": base + timedelta(minutes=int(raw["t"][i])), "open": float(raw["o"][i]),
+                                 "high": float(raw["h"][i]), "low": float(raw["l"][i]), "close": float(raw["c"][i]),
+                                 "volume": float(raw["v"][i])})
+            summ = _vd.summarize_sessions(rows)
+            prev = [x for x in summ if x.day < d]
+            if prev:
+                store[d][s] = prev
+            today = [x for x in summ if x.day == d]
+            if today:
+                opens[d][s] = today[0].first_open if today[0].first_t == _A_va.AUCTION_T else 0.0
+        # look-ahead divergences over all 3 years: a signal whose exit bar is missing (lab drops it before
+        # ranking) and a signal on a session the lab drops for being short (< 200 bars)
+        feats = _A_va.session_features(sd)
+        cands.extend(_A_va.candidates_for(s, feats, _va.LOOSEST_GAP))
+        for date_, pc, apx, xt, xp in feats:
+            if np.isfinite(apx) and not np.isfinite(xp):
+                sig = _A_va.auction_rule(pc, apx, _va.LOOSEST_GAP)
+                if sig:
+                    noexit.append((date_, s, sig[0], sig[1], apx, -1, float("nan")))
+        for dd in sd.dropped or []:
+            k = int(np.searchsorted(rdays, dd))
+            if raw["t"][int(starts[k])] != _A_va.AUCTION_T:
+                continue
+            prev_valid = [x for x in range(len(sd.days)) if sd.days[x] < dd]
+            if not prev_valid:
+                continue
+            pc = float(sd.c[int(sd.ends[prev_valid[-1]]) - 1])
+            sig = _A_va.auction_rule(pc, float(raw["o"][int(starts[k])]), _va.LOOSEST_GAP)
+            if sig:
+                short.append((dd, s, sig[0], sig[1], float(raw["o"][int(starts[k])]), -1, float("nan")))
+        del raw, sd
+    return syms, store, opens, exits, noexit, short, sorted(cal), cands
+
+
+def _va_divergent_days(cands, extra, spec_id):
+    """Days where adding the candidates the live agent cannot exclude in advance (missing exit bar / short
+    session) changes the lab's own selection (stratlab.auction.select on the lab's own candidate rows)."""
+    spec = next(x for x in _A_va.SPECS if x.id == spec_id)
+    lab = {}
+    for r in _A_va.select(cands, spec, 0, 99999999):
+        lab.setdefault(r[0], []).append((r[1], r[2]))
+    live = {}
+    for r in _A_va.select(cands + extra, spec, 0, 99999999):
+        live.setdefault(r[0], []).append((r[1], r[2]))
+    return {d for d in set(lab) | set(live) if sorted(lab.get(d, [])) != sorted(live.get(d, []))}, lab
+
+
+def _va_run_day(d, store, opens, exits, ca, variant):
+    """The live agent's own enter() / exit() on day d from Kite-shaped data. Returns [(sym, side, '09:15', exit_t,
+    qty, entry_fill, exit_fill)]."""
+    def quotes(ins):
+        if clock_ref[0].t.time() < time(9, 20):
+            return {s: _va_q(opens[s], open_=opens[s]) for s in ins if s in opens}
+        return {s: _va_q(exits[s][1], exits[s][1], exits[s][1]) for s in ins if s in exits}
+    clock_ref = []
+    day = date(d // 10000, d // 100 % 100, d % 100)
+    with _va_env(_va_at(day, 9, 15, 5), {}, quotes) as (a, clock):
+        clock_ref.append(clock)
+        settings.validated_auction_variant = variant
+        _vd._store["symbols"] = dict(store)
+        _ec_va._price_actions = ca
+        asyncio.run(a.enter())
+        ins = {o["tradingsymbol"]: o for o in _va_orders("VAL-AUC-IN")}
+        assert all(o["product"] == "MIS" and o["fill_kind"] == "AUCTION" for o in ins.values())
+        clock.t = _va_at(day, 9, 20, 0)
+        asyncio.run(a.exit())
+        outs = {o["tradingsymbol"]: o for o in _va_orders("VAL-AUC-OUT")}
+        assert not a.positions() and len(_perf_va.trades) == len(ins), "every entry booked exactly once"
+        res = []
+        for s, o in sorted(ins.items()):
+            side = 1 if o["transaction_type"] == "BUY" else -1
+            res.append((s, side, "09:15", _va_hm(exits[s][0]), o["quantity"], o["price"], outs[s]["price"]))
+        return res
+
+
+def t_va_lab_parity():
+    import os as _o
+    f3 = _o.path.join(_PARITY_LAB_va, "auction_final", "trades_AUC-FADE-3PCT.csv")
+    f2 = _o.path.join(_PARITY_LAB_va, "auction_final", "trades_AUC-FADE-2PCT.csv")
+    if not (_o.path.isdir(_PARITY_BARS_va) and _o.path.exists(f3) and _o.path.exists(f2)):
+        print("     SKIP (no lab data)")
+        return "skip"
+    from stratlab.ltr import CA_GAPS
+    lab3, lab2 = _va_lab_rows(f3), _va_lab_rows(f2)
+    days3 = sorted({int(r["date"]) for r in lab3})
+    days2 = sorted({int(r["date"]) for r in lab2})
+    # sample: the spec days + every k-th 3PCT trading day (≥ 40 days with signals) + 2PCT days + empty days
+    k = max(1, len(days3) // 44)
+    sample3 = sorted(set(_AUC_SPEC_DAYS_va) | set(days3[::k]))
+    sample2 = sorted(set(_AUC_2PCT_DAYS_va) | set(days2[5::max(1, len(days2) // 10)]))
+    # need the calendar for the empty days first: a cheap pass over one load is part of _va_parity_load
+    needed = sorted(set(sample3) | set(sample2) | {20240101, 20240102, 20240103, 20240104, 20240105})
+    syms, store, opens, exits, noexit, short, cal, cands = _va_parity_load(needed)
+    assert set(syms) == set(_vd.UNIVERSE), "the live universe is the lab's"
+    empty = [d for d in cal if d >= 20240101 and d not in set(days3)][:2]
+    assert set(empty) <= set(needed), empty
+    ca = {}
+    for (s, dd), why in CA_GAPS.items():
+        ca.setdefault(s, []).append((date(dd // 10000, dd // 100 % 100, dd % 100), why))
+    assert not [r for r in lab2 if (r["symbol"], int(r["date"])) in CA_GAPS], "the lab never traded a CA gap"
+    div3, sel3 = _va_divergent_days(cands, noexit + short, "AUC-FADE-3PCT")
+    div2, sel2 = _va_divergent_days(cands, noexit + short, "AUC-FADE-2PCT")
+    # the lab's code re-run on the same bars reproduces its FINAL CSVs (so the CSVs are the reference)
+    for lab, sel in ((lab3, sel3), (lab2, sel2)):
+        csv_days = {}
+        for r in lab:
+            csv_days.setdefault(int(r["date"]), []).append((r["symbol"], int(r["side"])))
+        assert {d: sorted(v) for d, v in csv_days.items()} == {d: sorted(v) for d, v in sel.items()}
+    print(f"     known look-ahead divergence over 3 years: {len(noexit)} signals with no 09:20-09:29 exit bar "
+          f"{[(e[0], e[1], round(e[3] * 100, 2)) for e in noexit]}, "
+          f"short sessions {[(e[0], e[1], round(e[3] * 100, 2)) for e in short]}; "
+          f"{len(short)} signals on short (<200 bar) sessions → 3PCT days affected {sorted(div3)}, "
+          f"2PCT days affected {sorted(div2)}")
+    assert len(div3) <= 0.02 * len(days3) and len(div2) <= 0.02 * len(days2), "known divergence must stay rare"
+    s = _A_va.DEFAULT_SLIPPAGE_BPS / 1e4
+    report = {}
+    for variant, lab, sample in (("3PCT", lab3, sample3 + empty), ("2PCT", lab2, sample2)):
+        matched = total = days = sig_days = 0
+        for d in sample:
+            if d in (div3 if variant == "3PCT" else div2):
+                continue                                     # documented divergence, counted above
+            want = sorted((r["symbol"], int(r["side"]), r["entry_t"], r["exit_t"], int(r["qty"]),
+                           float(r["entry"]), float(r["exit"])) for r in lab if int(r["date"]) == d)
+            got = _va_run_day(d, store[d], opens[d], exits[d], ca, variant)
+            days += 1
+            sig_days += bool(want)
+            total += len(want)
+            assert [g[:5] for g in got] == [w[:5] for w in want], (variant, d, got, want)
+            for g, w in zip(got, want):
+                side = g[1]
+                assert abs(round(g[5] * (1 + side * s), 4) - w[5]) <= 1e-3, ("entry", d, g, w)
+                assert abs(round(g[6] * (1 - side * s), 4) - w[6]) <= 1e-3, ("exit", d, g, w)
+                matched += 1
+        report[variant] = (days, sig_days, matched, total)
+        print(f"     AUC-FADE-{variant}: {days} days compared ({sig_days} with signals), "
+              f"trades matched {matched}/{total}")
+    assert report["3PCT"][1] >= 40, report
+    for d in empty:
+        assert not [r for r in lab3 if int(r["date"]) == d]
+    return report
+
+
+def t_va_lab_parity_or_skip():
+    r = t_va_lab_parity()
+    if r == "skip":
+        raise _VaSkip()
+
+
+class _VaSkip(Exception):
+    pass
+
+
+try:
+    t_va_lab_parity_or_skip()
+    ok("AUC-FADE: lab parity on real 3-year bars (live enter/exit vs FINAL trade CSVs)")
+except _VaSkip:
+    print("  ⏭️   AUC-FADE: lab parity — SKIPPED (no lab data; set VALIDATED_PARITY_BARS / VALIDATED_PARITY_LAB)")
+except Exception as exc:
+    fail("AUC-FADE: lab parity on real 3-year bars (live enter/exit vs FINAL trade CSVs)", str(exc)[:600])
 
 
 # ══════════════════════════════════════════════════════════════════════════
