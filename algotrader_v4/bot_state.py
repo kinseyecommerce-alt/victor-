@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 
-_DEFAULTS = {"intraday": True, "fno": True, "swing": True, "scalping": True}
+_DEFAULTS = {"intraday": True, "fno": True, "swing": True, "scalping": True, "auc_fade": True}
+LEGACY_AGENTS = ("intraday", "scalping", "swing", "fno")
+VALIDATED_AGENTS = ("auc_fade",)                  # agents/validated_*.py (lab-protocol strategies)
 _FILE = Path(os.getenv("AGENT_ENABLES_FILE")
              or Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" / "performance.json")
              .with_name("agent_enables.json"))

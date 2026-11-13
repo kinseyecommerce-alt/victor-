@@ -495,7 +495,8 @@ class MasterAgent:
         if mode == "plan":
             return list(plan.paused), list(plan.active)
         paused = list(plan.paused) if (mode == "extreme_only" and regime == Regime.HIGH_VOLATILE) else []
-        return paused, [s for s in ALL_AGENTS if s not in paused]
+        return paused, [s for s in ALL_AGENTS if s not in paused
+                        and not getattr(ALL_AGENTS[s], "scheduled", False)]   # validated agents: scheduler-driven
 
     def _apply_regime_plan(self, regime: Regime, plan) -> None:
         paused, active = self._regime_pauses(regime, plan)

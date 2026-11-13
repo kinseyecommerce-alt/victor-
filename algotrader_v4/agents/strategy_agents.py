@@ -1465,3 +1465,8 @@ ALL_AGENTS: dict[str, BaseAgent] = {
     "swing":    SwingAgent(),
     "scalping": ScalpV2Agent(),
 }
+
+# Validated (lab-protocol) agents: scheduled by platform_scheduler, never started on the tick engine
+# (getattr(agent, "scheduled", False)); PAPER only. See agents/validated_base.py.
+from agents.validated_auction import AuctionFadeAgent   # noqa: E402
+ALL_AGENTS["auc_fade"] = AuctionFadeAgent()
