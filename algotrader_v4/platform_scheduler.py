@@ -96,6 +96,14 @@ class PlatformScheduler:
                                      (self._validated_store, "validated_store", (15, 40, 0), 600)):
             self._sched.add_job(_fn, "cron", hour=_t[0], minute=_t[1], second=_t[2], day_of_week="mon-fri",
                                 id=_id, misfire_grace_time=_grace)
+        # VRP-STRANGLE-016-WINGED: 10:20 entry; settlement from 15:31 on (retried every 10 min to 16:51);
+        # read-only leg marks every 5 min for the status
+        self._sched.add_job(self._validated_vrp_entry, "cron", hour=10, minute=20, second=0, day_of_week="mon-fri",
+                            id="validated_vrp_entry", misfire_grace_time=50)
+        self._sched.add_job(self._validated_vrp_settle, "cron", hour="15-16", minute="1,11,21,31,41,51",
+                            day_of_week="mon-fri", id="validated_vrp_settle", misfire_grace_time=300)
+        self._sched.add_job(self._validated_vrp_mark, "cron", hour="9-15", minute="*/5", day_of_week="mon-fri",
+                            id="validated_vrp_mark", misfire_grace_time=120)
         self._sched.add_job(self._validated_catch_up, "date", id="validated_catch_up",
                             run_date=_now_ist() + __import__("datetime").timedelta(seconds=60))
         self._sched.add_job(
@@ -199,6 +207,20 @@ class PlatformScheduler:
         for name, a in self._validated_agents().items():
             if hasattr(a, "parity_audit"):
                 await self._validated_call(name, "parity_audit")
+
+    async def _validated_vrp_entry(self) -> None:
+        from ist_clock import is_trading_day
+        if is_trading_day():
+            await self._validated_call("vrp_winged", "decide_and_enter")
+
+    async def _validated_vrp_settle(self) -> None:
+        # not gated on is_trading_day: an expiry's settlement is booked whenever its closes are available
+        await self._validated_call("vrp_winged", "settle_due")
+
+    async def _validated_vrp_mark(self) -> None:
+        from ist_clock import is_trading_day
+        if is_trading_day():
+            await self._validated_call("vrp_winged", "mark")
 
     async def _validated_catch_up(self) -> None:
         for name in self._validated_agents():

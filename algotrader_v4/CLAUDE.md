@@ -112,6 +112,24 @@ into a loser. Rules that keep them in step:
 - Overnight positions are listed in `base_agent.overnight_hold_qty()` and persisted in the paper book's
   `validated` block.
 
+#### Validated agents (lab protocol): VRP-STRANGLE-016-WINGED (`agents/validated_strangle.py`, key `vrp_winged`)
+
+- Only the WINGED (defined-risk) variant trades; NAKED was also confirmed but is not traded, VRP-WINGED-HIGHVIX failed
+  the screen. The decision is the lab engine itself: `stratlab.options_vrp.BY_ID[...].strategy()` (an
+  `options_replay.ShortStrangle`), `next_expiry`, `MarketView`, `bs`, `_max_risk`, `lot_size_on`; `LAB_FINGERPRINT`
+  is pinned in the tests.
+- Quote ↔ bar mapping: spot = NIFTY 50 LTP at 10:20 (lab: open of the 10:20 bar), vol = INDIA VIX quote
+  `prev_close` (lab: previous VIX day close; fallback: Kite day candle), decision instant = 10:20:00 (lab: the bar
+  time), settlement S = mean of the expiry day's 15:00-15:29 Kite minute closes (lab: same bars).
+- Contracts must match exactly (`options_resolver.resolve_exact`; Kite's nearest listed expiry must equal the lab's,
+  else `expiry_mismatch`). Wings are bought first, then shorts sold; a missing leg quote means no order at all and a
+  failed short unwinds the wings (`partial_structure`). NRML legs are listed in `overnight_hold_qty()`.
+- Settlement: `kite_client.paper_fill_at(..., fill_kind="SETTLEMENT")` at intrinsic per leg and one ledger row per leg
+  at intrinsic (an option settled at ₹0 books exit 0, not the entry). Never from a guessed price; pending
+  settlements retry every 10 min to 16:51 and at restart (`catch_up`).
+- `test_pipeline.py`'s lab-parity test runs all 726 sessions: 152/152 lab trades matched (legs, fills, credit,
+  max risk, margin, VIX, settlement), no extra live plans.
+
 ### Agent Enable/Disable
 
 Agent enabled state lives in `bot_state.py` (not `main.py`) to avoid circular imports. The `/settings/agent-enables` endpoint reads/writes this. `master_agent_v5._apply_directives()` checks enabled state before resuming any strategy.

@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     validated_attention_max_gross: float = 1_000_000.0
     validated_attention_daily_loss_stop: float = 10_000.0   # lab worst exit day −₹6,286
     validated_attention_dd_kill: float = 20_000.0           # 1.5 × lab max drawdown ₹12,951
+    # VRP-STRANGLE-016-WINGED (agents/validated_strangle.py); limits scale with lots / 2 in the agent
+    validated_strangle_enabled: bool = True
+    validated_vrp_lots: int = 2                             # as tested
+    validated_vrp_max_margin: float = 250_000.0             # lab margin ≈ ₹1.08–1.32 L for 2 lots
+    validated_vrp_max_loss: float = 75_000.0                # max risk per structure; lab worst −₹51,922 (2 lots)
+    validated_vrp_dd_kill: float = 195_000.0                # 1.5 × lab max drawdown ₹129,760
     squareoff_time: str = "15:15"     # MIS flatten time; the agents were validated with 15:15 (broker auto square-off ~15:20-15:25)
 
     # Backtest gate thresholds

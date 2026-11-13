@@ -102,17 +102,19 @@ class Performance:
         extra: fields merged into the stored row."""
         if exit_price is None and quantity and entry_price:
             exit_price = entry_price + (pnl / quantity) * (1 if side == "BUY" else -1)
-        if cost_kind:
-            from costs import round_trip_cost
-            ev, xv = entry_price * quantity, (exit_price or entry_price) * quantity
+        # an option settled worthless exits at exactly ₹0 (not "unknown"): keep it, never fall back to the entry
+        settled_zero = exit_price is not None and exit_price == 0 and exchange in ("NFO", "BFO")
+        if cost_kind or settled_zero:
+            from costs import round_trip_cost, instrument_class
+            ev, xv = entry_price * quantity, (0.0 if settled_zero else (exit_price or entry_price)) * quantity
             buy_v, sell_v = (ev, xv) if side == "BUY" else (xv, ev)
-            cost = round_trip_cost(buy_v, sell_v, cost_kind)
+            cost = round_trip_cost(buy_v, sell_v, cost_kind or instrument_class(exchange, product, symbol))
         else:
             cost = trade_cost(entry_price, exit_price or entry_price, quantity, side, exchange, product, symbol)
         row = {"t": now_ist().isoformat(timespec="seconds"), "strategy": strategy, "version": _version(strategy),
                "symbol": symbol,
                "side": side, "qty": quantity, "entry": round(entry_price, 2),
-               "exit": round(exit_price or entry_price, 2), "gross": round(pnl, 2), "cost": cost,
+               "exit": round(0.0 if settled_zero else (exit_price or entry_price), 2), "gross": round(pnl, 2), "cost": cost,
                "net": round(pnl - cost, 2), "product": product, "exchange": exchange, "note": note[:80]}
         if order_id:
             row["oid"] = str(order_id)

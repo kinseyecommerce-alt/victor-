@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-_DEFAULTS = {"intraday": True, "fno": True, "swing": True, "scalping": True, "attn_on": True}
+_DEFAULTS = {"intraday": True, "fno": True, "swing": True, "scalping": True, "attn_on": True, "vrp_winged": True}
 LEGACY_AGENTS = ("intraday", "scalping", "swing", "fno")
 # lab-protocol agents (pre-registered DISCOVERY H1/H2 screen + one FINAL look), driven by platform_scheduler jobs
 VALIDATED_AGENTS = ("auc_fade", "attn_on", "vrp_winged")

@@ -39,9 +39,22 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "manual":   "ALGO-MANUAL-005",
     "ai":       "ALGO-AI-006",
     "attn_on":  "ALGO-ATTN-008",
+    "vrp_winged": "ALGO-VRP-009",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
+    "vrp_winged": {
+        "name": "NIFTY weekly winged short strangle (VRP-STRANGLE-016-WINGED, lab-validated)",
+        "description": ("10:20 on the first trading day after each weekly NIFTY expiry (skip the week if fewer than "
+                        "3 trading days remain): sell the CE and PE closest to 0.16 Black-Scholes delta (India VIX "
+                        "previous close as a flat vol) and buy the CE +400 / PE -400 wings; hold to expiry and settle "
+                        "at intrinsic (stratlab/options_vrp.py)"),
+        "instruments": "NFO NIFTY weekly options (NRML; PAPER only)",
+        "order_types": ["LIMIT"],
+        "holding_period": "Entry day to the weekly expiry (settled at intrinsic)",
+        "risk_controls": "Defined risk (wings); no stop / target (none tested); per-agent drawdown kill and risk cap",
+        "parameters": {"short_delta": 0.16, "wing_pts": 400, "lots": 2, "min_days_left": 3, "entry": "10:20"},
+    },
     "attn_on": {
         "name": "Attention overnight long (SWING-ATTN-ON-3X, lab-validated)",
         "description": ("Volume 09:15-15:20 > 3x the 20-session mean daily volume and 15:20 close > previous close: "

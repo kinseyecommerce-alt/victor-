@@ -11953,6 +11953,565 @@ run("attention: exempt from pruning; scheduler jobs never send Telegram", t_va_p
 run("attention LAB PARITY: 3 years of lab days through the live decision code", t_va_lab_parity)
 
 
+section("VALIDATED AGENTS — VRP-STRANGLE-016-WINGED NIFTY weekly winged strangle (agents/validated_strangle.py)")
+import agents.validated_strangle as _VS
+import options_replay as _OR_vs
+import options_resolver as _ORS_vs
+from stratlab import options_vrp as _V_vs
+
+_VS_ENTRY = date(2026, 11, 11)      # Wed: previous session Mon 11-09 was the (holiday-moved) expiry → cycle day
+_VS_EXP = date(2026, 11, 17)        # Tue weekly expiry
+_VS_SPOT, _VS_VIX = 25_000.0, 14.0
+
+
+def _vs_at(d, hh, mm, ss=0):
+    return datetime.combine(d, time(hh, mm, ss)).replace(tzinfo=_IST_pb)
+
+
+def _vs_wk(d):                       # a calendar with weekends only
+    return d.weekday() < 5
+
+
+def _vs_plan(lots=2, lot=None):
+    p, why = _VS.plan_strangle(datetime.combine(_VS_ENTRY, time(10, 20)), _VS_SPOT, _VS_VIX, _is_td_vs, lots, lot)
+    assert p is not None, why
+    return p
+
+
+from ist_clock import is_trading_day as _is_td_vs
+
+
+def _vs_tsym(opt, k, exp=_VS_EXP):
+    return f"NIFTY{exp.strftime('%y%m%d')}{int(k)}{opt}"
+
+
+def _vs_instruments(exp=_VS_EXP, lot=65, extra_exp=()):
+    """A fake NFO instrument master around the plan's strikes (every 50 points)."""
+    rows = []
+    for e in (exp,) + tuple(extra_exp):
+        for k in range(22_500, 27_550, 50):
+            for opt in ("CE", "PE"):
+                rows.append({"name": "NIFTY", "instrument_type": opt, "segment": "NFO-OPT", "expiry": e,
+                             "strike": float(k), "tradingsymbol": _vs_tsym(opt, k, e), "lot_size": lot})
+    return rows
+
+
+def _vs_quotes_fn(spot=_VS_SPOT, vix=_VS_VIX, legs=None, missing=()):
+    """Fake Kite quotes: index spot / VIX previous close, and every option leg two-sided around its model price."""
+    plan = _vs_plan()
+    model = {_vs_tsym(o, k): m for o, k, _, m in plan.legs}
+
+    def fn(instruments):
+        out = {}
+        for ins in instruments:
+            s = ins.split(":", 1)[1]
+            if s == "NIFTY 50" and spot:
+                out[s] = {"ltp": spot, "open": spot, "prev_close": spot, "bid": 0, "ask": 0, "volume": 0}
+            elif s == "INDIA VIX" and vix:
+                out[s] = {"ltp": vix + 0.5, "open": vix, "prev_close": vix, "bid": 0, "ask": 0, "volume": 0}
+            elif s in model and s not in missing:
+                m = (legs or {}).get(s, model[s])
+                out[s] = {"ltp": round(m, 2), "open": 0, "prev_close": 0, "bid": round(max(0.05, m - 0.5), 2),
+                          "ask": round(m + 0.5, 2), "volume": 1000}
+        return out
+    return fn
+
+
+@_ctx_va.contextmanager
+def _vs_env(now, quotes=None, instruments=None, closes=None):
+    """A fresh strangle agent at IST `now`; PAPER+KITE; fake quotes, NFO instrument master and expiry candles;
+    private ledger, paper book and snapshot file."""
+    from agents.strategy_agents import ALL_AGENTS as _ALL
+    clk = [now]
+    qfn = quotes or _vs_quotes_fn()
+    inst = instruments if instruments is not None else _vs_instruments()
+    cl = closes if closes is not None else {}
+    p, _ = _fresh_perf()
+    a = _VS.WingedStrangleAgent()
+    a.state.running = True
+    prev = {k: getattr(settings, k) for k in ("trading_mode", "paper_data_source", "validated_only",
+                                             "validated_strangle_enabled", "validated_vrp_lots")}
+    prev_en = _bs_va.is_agent_enabled("vrp_winged")
+
+    async def _sleep(s):
+        clk[0] = clk[0] + timedelta(seconds=s)
+    with _pb_isolated():
+        prev_agent = _ALL.get("vrp_winged")
+        _ALL["vrp_winged"] = a
+        settings.trading_mode, settings.paper_data_source = "PAPER", "KITE"
+        settings.validated_only, settings.validated_strangle_enabled, settings.validated_vrp_lots = True, True, 2
+        _bs_va._agent_enabled["vrp_winged"] = True
+        try:
+            with _patch.object(_VS, "now_ist", side_effect=lambda: clk[0]), \
+                 _patch.object(_perf_mod, "now_ist", side_effect=lambda: clk[0]), \
+                 _patch.object(_pb, "now_ist", side_effect=lambda: clk[0]), \
+                 _patch.object(_perf_mod, "performance", p), \
+                 _patch.object(_VS.VD, "quotes", side_effect=lambda ins: qfn(ins)), \
+                 _patch.object(_ORS_vs, "_instruments", side_effect=lambda: inst), \
+                 _patch.object(_VS, "expiry_closes", side_effect=lambda d: list(cl.get(d, []))), \
+                 _patch.object(_VS, "vix_prev_close_hist", return_value=None), \
+                 _patch.object(_VS.asyncio, "sleep", _sleep), \
+                 _patch.object(_sebi_x, "pre_order_check", return_value=(True, "ALGO-VRP-009", "ok")):
+                yield a, clk, p
+        finally:
+            _ALL["vrp_winged"] = prev_agent
+            for k, v in prev.items():
+                setattr(settings, k, v)
+            _bs_va._agent_enabled["vrp_winged"] = prev_en
+
+
+def _vs_rows(sym):
+    return [r for r in _te_kite_client._paper_positions if r["tradingsymbol"] == sym and r.get("product") == "NRML"]
+
+
+def _vs_orders(*tags):
+    return [o for o in _te_kite_client._paper_orders if o.get("tag") in tags]
+
+
+# ── pure rule ──
+def t_vs_lab_spec_and_fingerprint():
+    sp = _VS.SPEC
+    assert sp.id == "VRP-STRANGLE-016-WINGED" and sp.lots == 2 and sp.underlying == "NIFTY"
+    assert sp.params == {"short_delta": 0.16, "min_days_left": 3, "wing_pts": 400.0}
+    st = sp.strategy()
+    assert (st.decision_times, st.hold, st.target_frac, st.stop_mult, st.weekly_cycle, st.exits_early) == \
+        ([time(10, 20)], "expiry", None, None, True, False), "hold to expiry: no stop, no target, no adjustment"
+    # pinned: a change to the lab engine / spec must come with a VERSION bump
+    assert _VS.LAB_FINGERPRINT == "80768f8470a56ca9", _VS.LAB_FINGERPRINT
+    a = _VS.WingedStrangleAgent()
+    assert a.VERSION == "VRP-STRANGLE-016-WINGED/o1/v1" and a.LAB_ID == "VRP-STRANGLE-016-WINGED"
+    assert a.product == "NRML" and a.COST_KIND is None and a.scheduled and not a.strategy_rule_exits
+    assert _VS.OR.ShortStrangle is _OR_vs.ShortStrangle and _VS.V is _V_vs, "the lab engine is imported, not copied"
+    from agents.strategy_agents import ALL_AGENTS as _ALL
+    from sebi_compliance import APPROVED_ALGO_IDS as _ids
+    assert isinstance(_ALL["vrp_winged"], _VS.WingedStrangleAgent) and _ids["vrp_winged"] == "ALGO-VRP-009"
+    assert "vrp_winged" in _bs_va.VALIDATED_AGENTS and _bs_va._DEFAULTS["vrp_winged"] is True
+
+
+def t_vs_cycle_days():
+    sched = lambda d: datetime.combine(d, time(10, 20))
+    p, why = _VS.plan_strangle(sched(date(2026, 11, 12)), _VS_SPOT, _VS_VIX, _is_td_vs, 2)
+    assert p is None and why == "not_cycle_day"
+    assert _VS.cycle_status(sched(date(2026, 11, 12)), _is_td_vs) == (None, "not_cycle_day")
+    p, why = _VS.plan_strangle(sched(date(2026, 11, 14)), _VS_SPOT, _VS_VIX, _is_td_vs, 2)
+    assert p is None and why == "weekend"
+    # short week: entry Wed 11-18 after the Tue 11-17 expiry; with 11-20 and 11-23 holidays only 11-19 and 11-24
+    # remain (< 3): the week is skipped, and not entered later
+    hol = {date(2026, 11, 20), date(2026, 11, 23)}
+    is_td = lambda d: d.weekday() < 5 and d not in hol
+    p, why = _VS.plan_strangle(sched(date(2026, 11, 18)), _VS_SPOT, _VS_VIX, is_td, 2)
+    assert p is None and why == "short_week"
+    assert _VS.cycle_status(sched(date(2026, 11, 18)), is_td) == (None, "short_week")
+    assert _VS.cycle_status(sched(_VS_ENTRY), _is_td_vs) == (_VS_EXP, "")
+    p, why = _VS.plan_strangle(sched(_VS_ENTRY), 0.0, _VS_VIX, _is_td_vs, 2)
+    assert p is None and why == "no_data:spot"
+    p, why = _VS.plan_strangle(sched(_VS_ENTRY), _VS_SPOT, None, _is_td_vs, 2)
+    assert p is None and why == "no_data:vix"
+
+
+def t_vs_legs_delta_and_wings():
+    p = _vs_plan()
+    assert p.expiry == _VS_EXP and p.qty == 130 and p.lot == 65 and abs(p.sigma - 0.14) < 1e-12
+    (o1, kc, s1, _), (o2, kp, s2, _), (o3, kcw, s3, _), (o4, kpw, s4, _) = p.legs
+    assert (o1, s1, o2, s2, o3, s3, o4, s4) == ("CE", -1, "PE", -1, "CE", 1, "PE", 1)
+    assert kcw == kc + 400 and kpw == kp - 400 and all(k % 50 == 0 for k in (kc, kp)) and kp < _VS_SPOT < kc
+    T = _OR_vs.years_between(p.entry, p.expiry)
+    for opt, k in (("CE", kc), ("PE", kp)):
+        dd = lambda x: abs(abs(_OR_vs.bs_delta(_VS_SPOT, x, T, 0.14, opt)) - 0.16)
+        assert dd(k) <= dd(k - 50) and dd(k) <= dd(k + 50), (opt, k)
+    assert abs(p.model_credit - sum(-s * m for _, _, s, m in p.legs)) < 1e-3 and p.model_credit > p.lab_credit > 0
+    assert p.max_risk == round((400 - p.lab_credit) * 130, 2)
+    assert abs(p.margin_est - (p.max_risk + 0.02 * _VS_SPOT * 130)) < 0.01
+
+
+def t_vs_lot_schedule_and_expiry_calendar():
+    sched = lambda d: datetime.combine(d, time(10, 20))
+    p, _ = _VS.plan_strangle(sched(date(2025, 12, 24)), 26_000.0, 10.0, _vs_wk, 2)
+    assert p.lot == 75 and p.qty == 150, "lot 75 before 2025-12-31"
+    p, _ = _VS.plan_strangle(sched(date(2025, 12, 31)), 26_000.0, 10.0, _vs_wk, 2)
+    assert p.lot == 65 and p.qty == 130 and p.expiry == date(2026, 1, 6), "lot 65 from 2025-12-31, Tuesday expiry"
+    p, why = _VS.plan_strangle(sched(date(2025, 8, 29)), 24_500.0, 12.0, _vs_wk, 2)
+    assert p is None and why == "short_week", "Fri 08-29 → first Tuesday expiry 09-02: 2 days left"
+    p, _ = _VS.plan_strangle(sched(date(2025, 9, 3)), 24_500.0, 12.0, _vs_wk, 2)
+    assert p.expiry == date(2025, 9, 9) and p.expiry.weekday() == 1
+    p, _ = _VS.plan_strangle(sched(date(2025, 8, 22)), 24_500.0, 12.0, _vs_wk, 2)
+    assert p.expiry == date(2025, 8, 28) and p.expiry.weekday() == 3, "Thursday before 2025-09-01"
+    p, _ = _VS.plan_strangle(sched(date(2026, 11, 4)), 25_000.0, 14.0, _is_td_vs, 2)
+    assert p.expiry == date(2026, 11, 9), "Tue 2026-11-10 is a holiday: the expiry moves to Mon 11-09"
+
+
+def t_vs_settle_intrinsic():
+    legs = [("CE", 25_300.0), ("PE", 24_600.0), ("CE", 25_700.0), ("PE", 24_200.0)]
+    S, iv = _VS.settle_strangle(legs, [25_390.0, 25_410.0])
+    assert S == 25_400.0 and iv == [100.0, 0.0, 0.0, 0.0]
+    S, iv = _VS.settle_strangle(legs, [24_000.0])
+    assert iv == [0.0, 600.0, 0.0, 200.0]
+
+
+# ── live path ──
+def t_vs_live_path_end_to_end():
+    """Acceptance: a 10:20 cycle-day signal reaches the paper broker as 4 NRML legs at the tested size (2 lots),
+    wings first; survives the 15:15 square-off, a same-day restart and overnight restarts; a restart that missed the
+    expiry settles it at intrinsic from the expiry day's 15:00-15:29 closes; each leg is booked once in the ledger at
+    intrinsic with the lab's option round-trip cost."""
+    import master_agent_v5 as _mav_vs
+    plan = _vs_plan()
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20, 0)) as (a, clk, p):
+        out = asyncio.run(a.decide_and_enter())
+        assert out["gid"] == "VRP-20261111" and len(out["opened"]) == 4, out
+        orders = _vs_orders("VAL-VRP-W", "VAL-VRP-S")
+        assert [o["tag"] for o in orders] == ["VAL-VRP-W", "VAL-VRP-W", "VAL-VRP-S", "VAL-VRP-S"], "wings first"
+        assert all(o["product"] == "NRML" and o["exchange"] == "NFO" and o["quantity"] == 130
+                   and o["status"] == "COMPLETE" for o in orders)
+        q = _vs_quotes_fn()([f"NFO:{_vs_tsym(o, k)}" for o, k, _, _ in plan.legs])
+        for (opt, k, side, m) in plan.legs:
+            sym = _vs_tsym(opt, k)
+            pos = next(x for x in a.positions() if x.symbol == sym)
+            assert pos.side == ("BUY" if side > 0 else "SELL") and pos.qty == 130 and pos.overnight
+            assert pos.entry_px == (q[sym]["ask"] if side > 0 else q[sym]["bid"]) and pos.group == out["gid"]
+            assert _vs_rows(sym)[0]["quantity"] == 130 * side
+        st = a.structures[out["gid"]]
+        assert st["status"] == "open" and abs(st["model_credit"] - plan.model_credit) < 1e-9
+        assert abs(st["real_credit"] - (plan.model_credit - 4 * 0.5)) < 0.05, "real credit vs model: recorded"
+        asyncio.run(a.decide_and_enter())
+        assert len(_vs_orders("VAL-VRP-W", "VAL-VRP-S")) == 4 and a.state.skip_counts.get("already_entered") == 1
+        # the 15:15 square-off leaves the NRML legs alone
+        held = _ba.overnight_hold_qty()
+        assert all(held.get((x.symbol, "NRML")) == _vs_rows(x.symbol)[0]["quantity"] for x in a.positions())
+        clk[0] = _vs_at(_VS_ENTRY, 15, 15)
+        with _patch.object(_mav_vs, "send_telegram", _noop_async):
+            _mav_vs.MasterAgent.squareoff_book("test square-off")
+        assert _pb.squareoff_restored_if_due(clk[0]) == []
+        assert len(a.positions()) == 4 and all(_vs_rows(x.symbol)[0]["quantity"] != 0 for x in a.positions())
+        # same-day restart
+        clk[0] = _vs_at(_VS_ENTRY, 15, 30)
+        assert _pb.save(force=True)
+        snap_day = _json_pb.loads(_pb.path().read_text())
+        assert len(snap_day["validated"]["vrp_winged"]["positions"]) == 4
+        _pb_wipe(); a._positions.clear(); a.days_done.clear(); a.structures.clear()
+        out2 = _pb.restore()
+        assert out2["restored"] and not out2["stale"] and len(a.positions()) == 4, out2
+        assert a.done_today("entry") and a.structures["VRP-20261111"]["status"] == "open"
+        # overnight: next morning from yesterday's snapshot; nothing settles before the expiry
+        _pb.save(force=True)
+        clk[0] = _vs_at(date(2026, 11, 12), 9, 0)
+        _pb_wipe(); a._positions.clear()
+        out2 = _pb.restore()
+        assert out2["restored"] and out2["stale"] and len(a.positions()) == 4, out2
+        assert all(_vs_rows(x.symbol)[0]["quantity"] == x.qty * (1 if x.side == "BUY" else -1) for x in a.positions())
+        res = asyncio.run(a.catch_up(_vs_at(date(2026, 11, 12), 10, 20, 30)))
+        assert res["settled"] == [] and "entry" not in res and len(a.positions()) == 4
+        clk[0] = _vs_at(date(2026, 11, 16), 15, 40)
+        assert _pb.save(force=True)
+        pre_settle = _json_pb.loads(_pb.path().read_text())
+        # the process was down through the expiry: restarts Wednesday morning
+        clk[0] = _vs_at(date(2026, 11, 18), 9, 5)
+        _pb_wipe(); a._positions.clear()
+        out2 = _pb.restore()
+        assert out2["stale"] and len(a.positions()) == 4
+        kc = plan.legs[0][1]
+        closes = [kc + 90.0] * 15 + [kc + 110.0] * 15          # S = short CE + 100
+        with _patch.object(_VS, "expiry_closes", side_effect=lambda d: closes if d == _VS_EXP else []):
+            res = asyncio.run(a.catch_up(clk[0]))
+        assert res["settled"] == ["VRP-20261111"] and not a.positions(), res
+        sett = _vs_orders("VAL-VRP-SETTLE")
+        assert len(sett) == 4 and all(o["fill_kind"] == "SETTLEMENT" and o["product"] == "NRML" for o in sett)
+        S, iv = _VS.settle_strangle(plan.legs, closes)
+        assert S == kc + 100.0 and iv[0] == 100.0 and iv[1:] == [0.0, 0.0, 0.0]
+        assert all(_vs_rows(_vs_tsym(o, k))[0]["quantity"] == 0 for o, k, _, _ in plan.legs), "paper rows flat"
+        rows = [t for t in p.trades if t["strategy"] == "vrp_winged"]
+        assert len(rows) == 4 and len({t["oid"] for t in rows}) == 4
+        by_sym = {t["symbol"]: t for t in rows}
+        for (opt, k, side, m), x in zip(plan.legs, iv):
+            t = by_sym[_vs_tsym(opt, k)]
+            e, n = t["entry"], t["qty"]
+            assert t["exit"] == round(x, 2) and t["gross"] == round((x - e) * n * side, 2)
+            assert t["cost"] == _OR_vs.leg_cost(e, x, side, n, settled=True), "the lab's option round-trip leg cost"
+            assert t["version"] == a.VERSION and t["group"] == "VRP-20261111" and t["product"] == "NRML"
+        assert a.structures["VRP-20261111"]["status"] == "settled"
+        # nothing books twice: another settle run, and an import of the pre-settlement snapshot
+        assert asyncio.run(a.settle_due(clk[0])) == []
+        a.import_book(pre_settle["validated"]["vrp_winged"], closed={t["oid"] for t in rows}, stale=True)
+        assert not a.positions(), "legs the ledger already closed are not restored"
+        assert len([t for t in p.trades if t["strategy"] == "vrp_winged"]) == 4
+        st = a.get_status()
+        assert st["live"]["n"] == 1 and st["live"]["net"] == round(sum(t["net"] for t in rows), 2)
+        assert st["live_readiness"]["ready"] is False and st["live_readiness"]["checks"]["cycles>=26"] is False
+
+
+def t_vs_settle_on_expiry_day_and_pending():
+    plan = _vs_plan()
+    kp = plan.legs[1][1]
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        clk[0] = _vs_at(_VS_EXP, 15, 21)
+        assert asyncio.run(a.settle_due()) == [], "not before 15:31 on the expiry day"
+        clk[0] = _vs_at(_VS_EXP, 15, 31)
+        assert asyncio.run(a.settle_due()) == [] and len(a.positions()) == 4, "no candles: never a guessed price"
+        assert a.state.skip_counts.get("settlement_pending") == 1 and "settlement_pending" not in a.flags
+        clk[0] = _vs_at(date(2026, 11, 19), 16, 0)                 # 2 trading days later: status alert
+        asyncio.run(a.settle_due())
+        assert a.flags.get("settlement_pending", "").startswith("VRP-20261111")
+        with _patch.object(_VS, "expiry_closes", return_value=[kp - 300.0] * 30):
+            assert asyncio.run(a.settle_due()) == ["VRP-20261111"] and not a.positions()
+        rows = {t["symbol"]: t for t in p.trades if t["strategy"] == "vrp_winged"}
+        assert rows[_vs_tsym("PE", kp)]["exit"] == 300.0 and rows[_vs_tsym("PE", kp - 400)]["exit"] == 0.0
+        assert "settlement_pending" not in a.flags
+
+
+def t_vs_no_partial_structure():
+    plan = _vs_plan()
+    wing = _vs_tsym(plan.legs[2][0], plan.legs[2][1])
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20), quotes=_vs_quotes_fn(missing={wing})) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert not _vs_orders("VAL-VRP-W", "VAL-VRP-S") and a.state.skip_counts.get("no_data:leg_quote") == 1
+        assert a.done_today("entry") and not a.positions()
+    # a short leg fails after the wings filled: the wings are closed at once, CRITICAL partial_structure
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20)) as (a, clk, p):
+        real = _VS.paper_marketable
+        def flaky(sym, exch, side, qty, product, quote, tag):
+            if tag == "VAL-VRP-S":
+                raise RuntimeError("order rejected")
+            return real(sym, exch, side, qty, product, quote, tag)
+        with _patch.object(_VS, "paper_marketable", side_effect=flaky):
+            out = asyncio.run(a.decide_and_enter())
+        assert out["reason"] == "partial_structure" and not a.positions()
+        assert [o["tag"] for o in _te_kite_client._paper_orders] == ["VAL-VRP-W", "VAL-VRP-W", "VAL-VRP-UNWIND",
+                                                                     "VAL-VRP-UNWIND"]
+        assert all(r["quantity"] == 0 for r in _te_kite_client._paper_positions)
+        rows = [t for t in p.trades if t["strategy"] == "vrp_winged"]
+        assert len(rows) == 2 and all(t.get("deviation") == "partial_structure" for t in rows)
+        assert a.deviations.get("partial_structure") == 2
+
+
+def t_vs_contract_checks():
+    plan = _vs_plan()
+    # Kite lists an earlier weekly expiry than the lab's calendar: skip the week
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20), instruments=_vs_instruments(extra_exp=(date(2026, 11, 16),))) \
+            as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("expiry_mismatch") == 1 and not _te_kite_client._paper_orders
+    # a strike not listed: no_contract
+    inst = [r for r in _vs_instruments() if not (r["strike"] == plan.legs[3][1] and r["instrument_type"] == "PE")]
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20), instruments=inst) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("no_contract") == 1 and not _te_kite_client._paper_orders
+    # Kite's lot differs from the lab schedule: exchange truth, flagged
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20), instruments=_vs_instruments(lot=75)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert a.flags.get("lot_mismatch") and all(x.qty == 150 for x in a.positions()) and len(a.positions()) == 4
+    # risk cap
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20)) as (a, clk, p):
+        old = settings.validated_vrp_max_loss
+        settings.validated_vrp_max_loss = 10_000.0
+        try:
+            asyncio.run(a.decide_and_enter())
+        finally:
+            settings.validated_vrp_max_loss = old
+        assert a.state.skip_counts.get("risk_cap") == 1 and not _te_kite_client._paper_orders
+    # VIX previous close missing from the quote: Kite day-candle fallback; both missing: the week is skipped
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20), quotes=_vs_quotes_fn(vix=0)) as (a, clk, p):
+        with _patch.object(_VS, "vix_prev_close_hist", return_value=_VS_VIX):
+            asyncio.run(a.decide_and_enter())
+        assert len(a.positions()) == 4
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20), quotes=_vs_quotes_fn(vix=0)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("no_data:vix") == 1 and not a.positions()
+
+
+def t_vs_entry_window_and_blocks():
+    with _vs_env(_vs_at(date(2026, 11, 12), 10, 20)) as (a, clk, p):
+        out = asyncio.run(a.decide_and_enter())
+        assert out["reason"] == "not_cycle_day" and not a.state.skip_counts, "info only, not a skip"
+        assert any(r["reason"] == "not_cycle_day" for r in a.day_log)
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 21, 0)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("entry_window_missed") == 1 and not _te_kite_client._paper_orders
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20, 40)) as (a, clk, p):
+        out = asyncio.run(a.catch_up())
+        assert len(out["entry"]["opened"]) == 4 and a.deviations.get("late_entry") == 1
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20)) as (a, clk, p):
+        for attr, val, why in (("validated_strangle_enabled", False, "kill_switch"),
+                               ("validated_only", False, "validated_only_off"),
+                               ("paper_data_source", "SIM", "no_kite_data")):
+            old = getattr(settings, attr)
+            setattr(settings, attr, val)
+            asyncio.run(a.decide_and_enter())
+            setattr(settings, attr, old)
+            assert a.state.skip_counts.get(why) == 1, (why, a.state.skip_counts)
+        _bs_va._agent_enabled["vrp_winged"] = False
+        asyncio.run(a.decide_and_enter())
+        _bs_va._agent_enabled["vrp_winged"] = True
+        assert a.state.skip_counts.get("disabled") == 1 and not _te_kite_client._paper_orders
+        asyncio.run(a.decide_and_enter())
+        assert len(a.positions()) == 4, "a blocked batch can still run inside the window"
+        # one structure at a time: next cycle day with the previous structure still open (not yet expired)
+        a.days_done.clear()
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("position_open") == 1 and len(a.positions()) == 4
+
+
+def t_vs_live_mode_refused_and_kill_switch_still_settles():
+    plan = _vs_plan()
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20)) as (a, clk, p):
+        settings.trading_mode = "LIVE"
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("live_mode_refused") == 1 and not _te_kite_client._paper_orders
+        settings.trading_mode = "PAPER"
+        asyncio.run(a.decide_and_enter())
+        assert len(a.positions()) == 4
+        settings.trading_mode = "LIVE"
+        clk[0] = _vs_at(_VS_EXP, 15, 31)
+        with _patch.object(_VS, "expiry_closes", return_value=[_VS_SPOT] * 30):
+            assert asyncio.run(a.settle_due()) == [] and len(a.positions()) == 4, "LIVE: nothing is sent"
+        settings.trading_mode = "PAPER"
+        settings.validated_strangle_enabled = False             # the kill switch blocks entries only
+        _bs_va._agent_enabled["vrp_winged"] = False
+        with _patch.object(_VS, "expiry_closes", return_value=[_VS_SPOT] * 30):
+            assert asyncio.run(a.settle_due()) == ["VRP-20261111"] and not a.positions()
+        assert len([t for t in p.trades if t["strategy"] == "vrp_winged"]) == 4
+
+
+def t_vs_drawdown_kill_and_no_telegram():
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20)) as (a, clk, p):
+        assert a.dd_limit() == 195_000.0 and a.daily_loss_limit() == 0.0
+        settings.validated_vrp_lots = 4
+        assert a.dd_limit() == 390_000.0, "limits scale with lots / 2"
+        settings.validated_vrp_lots = 2
+        p.record_trade("vrp_winged", "X", "SELL", 130, 100.0, -200_000.0, "NFO", "NRML", charge_risk=False)
+        asyncio.run(a.decide_and_enter())
+        assert a.state.skip_counts.get("drawdown_kill") == 1 and not _bs_va.is_agent_enabled("vrp_winged")
+        assert not _te_kite_client._paper_orders
+    async def _boom(*a_, **k):
+        raise AssertionError("validated jobs must not send Telegram")
+    import platform_scheduler as _ps_vs
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20)) as (a, clk, p), _patch.object(_ba, "send_telegram", _boom):
+        ps = _ps_vs.PlatformScheduler()
+        with _patch.object(_ps_vs, "_now_ist", side_effect=lambda: clk[0]), \
+             _patch("ist_clock.now_ist", side_effect=lambda: clk[0]):
+            asyncio.run(ps._validated_vrp_entry())
+            asyncio.run(ps._validated_vrp_mark())
+            clk[0] = _vs_at(_VS_EXP, 15, 31)
+            with _patch.object(_VS, "expiry_closes", return_value=[_VS_SPOT] * 30):
+                asyncio.run(ps._validated_vrp_settle())
+        assert not a.positions() and len([t for t in p.trades if t["strategy"] == "vrp_winged"]) == 4
+        assert not a.state.errors, a.state.errors
+        assert "VRP-20261111" in a.marks or a.structures["VRP-20261111"]["status"] == "settled"
+
+
+def t_vs_lab_parity():
+    """Acceptance gate: every session of the lab's 3-year NIFTY data through the live decision code
+    (plan_strangle at the 10:20 bar's open with the previous VIX close; contract-free), and every lab trade's legs,
+    fills, max risk, margin and settlement compared with dd/vrp/final_run/trades/VRP-STRANGLE-016-WINGED.csv.
+    The settlement closes go through the live candle filter (expiry_closes) from Kite-shaped candles; the VIX
+    previous close through the live day-candle fallback (vix_prev_close_hist)."""
+    import csv as _csv
+    import validated_parity as _VP
+    rel = "vrp/final_run/trades/VRP-STRANGLE-016-WINGED.csv"
+    if not (_os.path.exists(_os.path.join(_VP.PARITY_BARS, "_NIFTY50_min.json"))
+            and _os.path.exists(_os.path.join(_VP.PARITY_LAB, rel))):
+        print("      SKIP (no lab data)")
+        return
+    bars, vix = _V_vs.load(_VP.PARITY_BARS)
+    lab = {int(r["date"]): r for r in _csv.DictReader(open(_os.path.join(_VP.PARITY_LAB, rel)))}
+    by_day = {}
+    for b in bars:
+        by_day.setdefault(b[0].date(), []).append(b)
+    sessions = sorted(by_day)
+    is_td = _OR_vs.make_trading_day_fn(sessions)
+    tz = _IST_pb
+    kite_min = lambda d: [{"date": b[0].replace(tzinfo=tz), "open": b[1], "high": b[2], "low": b[3], "close": b[4],
+                           "volume": 0} for b in by_day.get(d, [])]
+    kite_vix = [{"date": datetime.combine(d, time(0, 0)).replace(tzinfo=tz), "open": c, "high": c, "low": c,
+                 "close": c, "volume": 0} for d, c in sorted(vix.items())]
+
+    def hist(token, frm, to, interval="day", **k):
+        if interval == "minute":
+            return kite_min(frm.date())
+        return [r for r in kite_vix if frm.date() <= r["date"].date() <= to.date()]
+    plans, reasons, off_1020 = {}, {}, []
+    with _patch.object(_te_kite_client, "historical_data", side_effect=hist), \
+         _patch.object(_VS, "_token", side_effect=lambda s, f: f):
+        for d in sessions:
+            bar = next((b for b in by_day[d] if b[0].time() >= time(10, 20)), None)
+            if bar is None:
+                reasons[d] = "no_bar"
+                continue
+            vx = _VS.vix_prev_close_hist(d)                        # live fallback path: last day candle < d
+            assert vx == (vix[max(k for k in vix if k < d)] if any(k < d for k in vix) else None)
+            p, why = _VS.plan_strangle(bar[0], bar[1], vx, is_td, 2)
+            live_p, _ = _VS.plan_strangle(datetime.combine(d, time(10, 20)), bar[1], vx, is_td, 2)
+            k = int(d.strftime("%Y%m%d"))
+            if p is not None:
+                plans[k] = p
+                if bar[0].time() != time(10, 20):
+                    off_1020.append(k)
+                elif [x[:3] for x in live_p.legs] != [x[:3] for x in p.legs]:
+                    raise AssertionError(f"{k}: the scheduled-instant plan differs from the bar-time plan")
+            else:
+                reasons[k] = why
+            if not why.startswith("no_data"):
+                cs = _VS.cycle_status(bar[0], is_td)
+                assert (cs[0] is not None) == (p is not None) and (p is not None or cs[1] == why), (k, why, cs)
+        matched, mism = 0, []
+        for k, r in sorted(lab.items()):
+            p = plans.get(k)
+            if p is None:
+                mism.append((k, "no live plan", reasons.get(k)))
+                continue
+            legs = [x.split() for x in r["legs"].split(" | ")]
+            want = [(l[1][-2:], float(l[1][:-2]), 1 if l[0] == "B" else -1) for l in legs]
+            errs = []
+            if [(o, kk, s) for o, kk, s, _ in p.legs] != want:
+                errs.append("legs")
+            if p.expiry.isoformat() != r["expiry"] or p.qty != int(r["qty"]) or p.lot != int(r["lot"]):
+                errs.append("expiry/qty")
+            for (o, kk, s, m), l in zip(p.legs, legs):
+                e = float(l[2].split("->")[0])
+                if abs(_OR_vs.fill_price(m, s, "NIFTY") - e) > 0.006:        # model price before the haircut
+                    errs.append(f"fill {o}{kk}")
+            if abs(p.lab_credit - float(r["credit_pts"])) > 0.006 or abs(p.max_risk - float(r["max_risk"])) > 0.02 \
+                    or abs(p.margin_est - float(r["margin"])) > 0.02 or abs(p.sigma * 100 - float(r["vix"])) > 0.006:
+                errs.append("credit/risk/margin/vix")
+            exp = date.fromisoformat(r["expiry"])
+            S, iv = _VS.settle_strangle(p.legs, _VS.expiry_closes(exp))
+            if abs(S - float(r["spot_out"])) > 0.006 or any(abs(v - float(l[2].split("->")[1])) > 0.006
+                                                            for v, l in zip(iv, legs)):
+                errs.append("settlement")
+            if errs:
+                mism.append((k, errs, None))
+            else:
+                matched += 1
+    extra = sorted(set(plans) - set(lab))
+    from collections import Counter as _Cn
+    rc = _Cn(reasons.values())
+    first_short = min((k for k, v in reasons.items() if v == "short_week"), default=None)
+    print(f"      parity: {len(sessions)} sessions, {len(plans)} live plans, lab trades matched {matched}/{len(lab)}; "
+          f"live-only plans {extra}; no-plan reasons {dict(rc)}; first short week {first_short}; "
+          f"cycle days whose 10:20 bar is missing (lab decides on the next bar) {off_1020}")
+    assert not mism, mism[:5]
+    assert matched == len(lab) == 152 and not extra
+    assert first_short is not None and rc["short_week"] == 5
+    for k in (20231110, 20240927, 20250317, 20250903, 20251231, 20260923, 20261028, 20261104):
+        assert k in plans and k in lab, k
+    assert plans[20261104].expiry == date(2026, 11, 9) and plans[20251231].lot == 65
+
+
+run("strangle: lab spec imported (WINGED, 2 lots, hold to expiry), LAB_FINGERPRINT pinned, registered", t_vs_lab_spec_and_fingerprint)
+run("strangle: cycle days only (not_cycle_day / weekend / short_week / missing spot or VIX)", t_vs_cycle_days)
+run("strangle: 0.16-delta shorts on the 50 grid, ±400 wings, lab credit / max risk / margin", t_vs_legs_delta_and_wings)
+run("strangle: lot 75 → 65 on 2025-12-31; Thursday → Tuesday expiry; holiday-moved expiry", t_vs_lot_schedule_and_expiry_calendar)
+run("strangle: settlement at intrinsic against the mean 15:00-15:29 close", t_vs_settle_intrinsic)
+run("strangle LIVE PATH: 4 NRML legs at size, wings first → 15:15 → restarts → missed expiry settled once", t_vs_live_path_end_to_end)
+run("strangle: settles from 15:31 on the expiry day; no candles → pending (alert after 2 trading days)", t_vs_settle_on_expiry_day_and_pending)
+run("strangle: never a partial structure (missing leg quote; short rejected after wings → unwound)", t_vs_no_partial_structure)
+run("strangle: expiry_mismatch, no_contract, lot_mismatch (Kite lot), risk_cap, VIX fallback", t_vs_contract_checks)
+run("strangle: entry window / late catch-up entry / blocks / one structure at a time", t_vs_entry_window_and_blocks)
+run("strangle: LIVE refused (no orders, no settlement fills); kill switch still settles", t_vs_live_mode_refused_and_kill_switch_still_settles)
+run("strangle: drawdown kill (scales with lots); scheduler jobs never send Telegram", t_vs_drawdown_kill_and_no_telegram)
+run("strangle LAB PARITY: 3 years of sessions through the live decision + settlement code", t_vs_lab_parity)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
