@@ -38,7 +38,8 @@ from loguru import logger
 
 import options_replay as OR
 import validated_data as VD
-from agents.validated_base import ValidatedAgent, PlannedTrade, ValidatedPosition, fingerprint, paper_marketable
+from agents.validated_base import (ValidatedAgent, PlannedTrade, ValidatedPosition, fingerprint, paper_marketable,
+                                   serialized)
 from config import settings
 from ist_clock import now_ist, is_trading_day
 from stratlab import options_vrp as V
@@ -53,6 +54,7 @@ ENTRY_DEADLINE = dtime(10, 21)                  # a catch-up entry is allowed un
 SETTLE_T = dtime(15, 31)
 SETTLE_FROM, SETTLE_TO = OR.SETTLE_FROM, dtime(15, 29)
 QUOTE_RETRY_GAPS_S = (10,)                      # one whole-batch retry, still inside the minute
+SETTLE_N_CLOSES = 30                            # 15:00..15:29: the full window the lab averaged
 SETTLE_ALERT_TD = 2                             # settlement pending this many trading days → status alert
 NIFTY_50_TOKEN = 256265                         # fallbacks when the NSE instrument master has no row
 INDIA_VIX_TOKEN = 264969
@@ -234,6 +236,7 @@ class WingedStrangleAgent(ValidatedAgent):
                 "max_risk_real": st.get("max_risk_real")}
 
     # ── 10:20 entry ──
+    @serialized
     async def decide_and_enter(self, late: bool = False) -> dict:
         now = self._now()
         today, t = now.date(), now.time().replace(tzinfo=None)
@@ -250,6 +253,7 @@ class WingedStrangleAgent(ValidatedAgent):
             return skip("not_trading_day", mark=False)
         # a structure whose expiry has passed is settled first (the lab settled it before this entry)
         await self.settle_due(now)
+        await self.unwind_orphans()
         # the cycle needs no market data: on the 4 non-cycle days a week nothing else is looked at
         sched = datetime.combine(today, ENTRY_T)             # the scheduled instant, naive IST (lab: the bar time)
         exp, why = cycle_status(sched, is_trading_day)
@@ -362,11 +366,10 @@ class WingedStrangleAgent(ValidatedAgent):
             sebi_compliance.record_order_id(self.name, c.tradingsymbol, oid)
             pt = PlannedTrade(symbol=c.tradingsymbol, side=side, qty=plan.qty, entry_ref=round(m, 4),
                               entry_t="10:20", exit_t="expiry", key=k)
-            pos = self._open(pt, "NRML", "NFO", fill, oid, overnight=True,
+            pos = self._open(pt, "NRML", "NFO", fill, oid, overnight=True, group=gid,
                              meta={"opt": opt, "strike": k, "model_px": round(m, 4),
                                    "lab_fill": round(plan.lab_fills[i], 4), "expiry": plan.expiry.isoformat(),
                                    "spot": plan.spot, "sigma": plan.sigma, "leg": i})
-            pos.group = gid
             filled.append(pos)
         legs_real = sorted(((p.meta["opt"], p.meta["strike"], 1 if p.side == "BUY" else -1, p.entry_px, p.meta["leg"])
                             for p in filled), key=lambda x: x[4])
@@ -386,6 +389,8 @@ class WingedStrangleAgent(ValidatedAgent):
         if filled:
             logger.critical("[vrp_winged] {}: {} — closing {} filled leg(s)", gid, kind, len(filled))
         for pos in filled:
+            if not self._still_open(pos):
+                continue
             back = "SELL" if pos.side == "BUY" else "BUY"
             try:
                 _oid, fill = paper_marketable(pos.symbol, "NFO", back, pos.qty, "NRML", lq.get(pos.symbol) or {},
@@ -395,8 +400,31 @@ class WingedStrangleAgent(ValidatedAgent):
                 continue
             self._deviation(kind, pos.symbol, "unwound")
             self._close(pos, fill, f"{kind}: unwound", kind=kind)
-        self.structures.get(gid, {})["status"] = kind
+        if not self._legs_of(gid):
+            self.structures.get(gid, {})["status"] = kind
 
+    async def unwind_orphans(self) -> list[str]:
+        """A structure left in status "opening" by a process that died between legs (each leg is saved as it fills):
+        never held as a partial structure — its filled legs are closed at the touch (deviation partial_structure)."""
+        done = []
+        for gid, st in list(self.structures.items()):
+            if st.get("status") != "opening":
+                continue
+            legs = self._legs_of(gid)
+            if not legs:
+                st["status"] = "partial_structure"
+                continue
+            lq = await asyncio.to_thread(VD.quotes, [f"NFO:{p.symbol}" for p in legs])
+            if not all(float((lq or {}).get(p.symbol, {}).get("bid" if p.side == "BUY" else "ask") or 0) > 0
+                       or float((lq or {}).get(p.symbol, {}).get("ltp") or 0) > 0 for p in legs):
+                self._skip(gid, "no_data:unwind_quote", stage="unwind")
+                continue
+            logger.critical("[vrp_winged] {} restored mid-entry with {} of 4 legs — unwinding", gid, len(legs))
+            self._unwind(gid, legs, lq or {}, "partial_structure")
+            done.append(gid)
+            if str(st.get("entry", ""))[:10] == self._today().isoformat():
+                self.mark_done("entry")          # as an in-flight unwind: no second structure the same day
+        return done
     # ── expiry settlement ──
     def _due(self, now: datetime) -> list[str]:
         today, t = now.date(), now.time().replace(tzinfo=None)
@@ -407,6 +435,7 @@ class WingedStrangleAgent(ValidatedAgent):
                 out.append(g)
         return out
 
+    @serialized
     async def settle_due(self, now: Optional[datetime] = None) -> list[str]:
         """Settle every structure whose expiry close is known (15:31 on the expiry day or later): each leg is closed
         in the paper broker at its intrinsic value (fill_kind SETTLEMENT) and booked to the ledger at intrinsic.
@@ -435,9 +464,18 @@ class WingedStrangleAgent(ValidatedAgent):
                     self.flags["settlement_pending"] = f"{gid} expiry {exp} ({n_td} trading days)"
                     logger.error("[vrp_winged] {} expiry {} still unsettled after {} trading days", gid, exp, n_td)
                 continue
+            if len(closes) < SETTLE_N_CLOSES:
+                if exp >= now.date():
+                    # Kite's historical feed can lag right after the close: settle only on the full window
+                    self._skip(gid, f"settlement_pending: {len(closes)}/{SETTLE_N_CLOSES} closes", stage="settle")
+                    continue
+                # a later day: the window is final as Kite has it (the lab averaged the bars its data had)
+                self._deviation("partial_settle_window", gid, f"{len(closes)}/{SETTLE_N_CLOSES} closes")
             S, intrinsic = settle_strangle([(p.meta["opt"], p.meta["strike"]) for p in legs], closes)
             from kite_client import kite_client
             for pos, px in zip(legs, intrinsic):
+                if not self._still_open(pos):
+                    continue
                 back = "SELL" if pos.side == "BUY" else "BUY"
                 kite_client.paper_fill_at(pos.symbol, "NFO", back, pos.qty, "NRML", round(px, 2), "VAL-VRP-SETTLE",
                                           "SETTLEMENT")
@@ -474,9 +512,12 @@ class WingedStrangleAgent(ValidatedAgent):
         return out
 
     # ── restart catch-up ──
+    @serialized
     async def catch_up(self, now: Optional[datetime] = None) -> dict:
         now = now or self._now()
+        self.auto_start(now.date())            # the 08:55 preflight for a process started later (not after a Stop)
         out = {"settled": await self.settle_due(now)}
+        out["unwound"] = await self.unwind_orphans()
         t = now.time().replace(tzinfo=None)
         if is_trading_day(now.date()) and t >= ENTRY_T and not self.done_today("entry"):
             exp, _why = cycle_status(datetime.combine(now.date(), ENTRY_T), is_trading_day)

@@ -31,7 +31,7 @@ from loguru import logger
 
 import validated_data as VD
 from agents.validated_base import (ValidatedAgent, PlannedTrade, ValidatedPosition, fingerprint, paper_marketable,
-                                   paper_fill_at)
+                                   paper_fill_at, serialized)
 from config import settings
 from costs import round_trip_cost
 from ist_clock import now_ist, next_trading_day, is_trading_day
@@ -135,6 +135,13 @@ class AttentionOvernightAgent(ValidatedAgent):
         "DISC_cnc_costs": {"net_bps": 13.88, "pf": 1.46, "screen": "FAIL"},
         "FINAL_cnc_costs": {"net_bps": -7.54, "pf": 0.80},
         "FINAL_stress_5bps": {"net_bps": -0.19, "pf": 0.99},
+        "live_only_guards": {
+            "corporate_action": "exclude a symbol with an NSE price-adjusting corporate action (split / bonus / "
+                                "demerger / consolidation / capital reduction) on t or t+1; the lab excluded only "
+                                "stratlab.ltr.CA_GAPS (its minute data is otherwise Kite-adjusted). Kept because a "
+                                "CNC hold across an ex-date is booked at the adjusted open with an unadjusted qty; "
+                                "counted under skip key 'corporate_action'",
+        },
     }
 
     def __init__(self) -> None:
@@ -147,6 +154,7 @@ class AttentionOvernightAgent(ValidatedAgent):
                 "carrier": CARRIER, "ratio": round(float(pos.meta.get("ratio", 0.0)), 3)}
 
     # ── 15:21 entry ──
+    @serialized
     async def decide_and_enter(self) -> dict:
         now = self._now()
         today = now.date()
@@ -200,6 +208,8 @@ class AttentionOvernightAgent(ValidatedAgent):
                                          float(qs.get("ask") or 0) or float(qs["ltp"])))
         nxt = next_trading_day(today)
         if not VD.ca_calendar_loaded():
+            await VD.ensure_ca_calendar(timeout=20.0)   # a restart after 09:10 has none in memory
+        if not VD.ca_calendar_loaded():
             self.flags["ca_calendar_unavailable"] = today.isoformat()
             logger.warning("[attn_on] corporate-action calendar not loaded — proceeding without CA exclusions")
             self._log("entry", "*", "flag", "ca_calendar_unavailable")
@@ -243,6 +253,7 @@ class AttentionOvernightAgent(ValidatedAgent):
     def due_positions(self, today: date) -> list[ValidatedPosition]:
         return [p for p in self.positions() if p.opened[:10] < today.isoformat()]
 
+    @serialized
     async def exit_at_open(self, q: Optional[dict] = None) -> list[str]:
         """Sell every overnight long at the session's official open (the call-auction print a pre-open SELL order
         fills at). Missing opens are retried every 10 s until 09:29:50; after that the LTP (late_exit)."""
@@ -258,6 +269,8 @@ class AttentionOvernightAgent(ValidatedAgent):
         closed = []
 
         def _exit(pos, px, kind, fill_kind, note):
+            if not self._still_open(pos):
+                return
             oid, fill = paper_fill_at(pos.symbol, pos.exchange, "SELL", pos.qty, pos.product, px,
                                       "VAL-ATTN-OUT", fill_kind)
             if kind != "normal":
@@ -292,10 +305,12 @@ class AttentionOvernightAgent(ValidatedAgent):
         return closed
 
     # ── restart catch-up ──
+    @serialized
     async def catch_up(self, now: Optional[datetime] = None) -> dict:
         now = now or self._now()
         today, t = now.date(), now.time().replace(tzinfo=None)
         out = {}
+        self.auto_start(today)                 # the 08:55 preflight for a process started later (not after a Stop)
         if is_trading_day(today) and t >= EXIT_T and self.due_positions(today):
             out["exited"] = await self.exit_at_open()
         if is_trading_day(today) and ENTRY_T <= t < ENTRY_DEADLINE and not self.done_today("entry"):

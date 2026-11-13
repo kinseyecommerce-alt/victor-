@@ -31,6 +31,9 @@ MASTER_HOUSEKEEPING: dict[str, dict] = {
 }
 
 
+VALIDATED_DOW = "mon-sun"    # validated jobs gate on is_trading_day (weekend Budget sessions included)
+
+
 class PlatformScheduler:
     def __init__(self) -> None:
         self._sched = AsyncIOScheduler(timezone="Asia/Kolkata")
@@ -89,21 +92,23 @@ class PlatformScheduler:
                 hour=_h, minute=_m, second=_s, day_of_week="mon-fri", id=f"forward_{_stage}",
                 misfire_grace_time=20,
             )
-        # lab-validated PAPER agents (agents/validated_*.py): fixed IST times of the tested rules
+        # lab-validated PAPER agents (agents/validated_*.py): fixed IST times of the tested rules. Every day of the
+        # week: each job gates on ist_clock.is_trading_day, which knows the full weekend sessions (Budget days) the
+        # lab's calendar traded
         for _fn, _id, _t, _grace in ((self._validated_preflight, "validated_preflight", (8, 55, 0), 300),
                                      (self._validated_open, "validated_open", (9, 15, 5), 50),
                                      (self._validated_auc_exit, "validated_auc_exit", (9, 20, 0), 60),
                                      (self._validated_attn_entry, "validated_attn_entry", (15, 21, 0), 150),
                                      (self._validated_store, "validated_store", (15, 40, 0), 600)):
-            self._sched.add_job(_fn, "cron", hour=_t[0], minute=_t[1], second=_t[2], day_of_week="mon-fri",
+            self._sched.add_job(_fn, "cron", hour=_t[0], minute=_t[1], second=_t[2], day_of_week=VALIDATED_DOW,
                                 id=_id, misfire_grace_time=_grace)
         # VRP-STRANGLE-016-WINGED: 10:20 entry; settlement from 15:31 on (retried every 10 min to 16:51);
         # read-only leg marks every 5 min for the status
-        self._sched.add_job(self._validated_vrp_entry, "cron", hour=10, minute=20, second=0, day_of_week="mon-fri",
+        self._sched.add_job(self._validated_vrp_entry, "cron", hour=10, minute=20, second=0, day_of_week=VALIDATED_DOW,
                             id="validated_vrp_entry", misfire_grace_time=50)
         self._sched.add_job(self._validated_vrp_settle, "cron", hour="15-16", minute="1,11,21,31,41,51",
-                            day_of_week="mon-fri", id="validated_vrp_settle", misfire_grace_time=300)
-        self._sched.add_job(self._validated_vrp_mark, "cron", hour="9-15", minute="*/5", day_of_week="mon-fri",
+                            day_of_week=VALIDATED_DOW, id="validated_vrp_settle", misfire_grace_time=300)
+        self._sched.add_job(self._validated_vrp_mark, "cron", hour="9-15", minute="*/5", day_of_week=VALIDATED_DOW,
                             id="validated_vrp_mark", misfire_grace_time=120)
         self._sched.add_job(self._validated_catch_up, "date", id="validated_catch_up",
                             run_date=_now_ist() + __import__("datetime").timedelta(seconds=60))
@@ -177,7 +182,7 @@ class PlatformScheduler:
         except Exception as exc:
             logger.error("[validated] corporate-action calendar refresh failed: {}", exc)
         for name, a in self._validated_agents().items():
-            a.start()
+            a.auto_start()                       # not after an operator Stop (persisted until the next Start)
             logger.info("[validated] {} preflight: entries {}", name,
                         a.entry_block_reason_readonly() or "allowed")
 
@@ -231,6 +236,20 @@ class PlatformScheduler:
             await self._validated_call("vrp_winged", "mark")
 
     async def _validated_catch_up(self) -> None:
+        """A process started after 08:55 lacks what the preflight prepared: the session store (refreshed when it
+        misses the previous trading day) and the in-memory corporate-action calendar; then each agent's catch_up
+        (serialised with the scheduled jobs by the agent's stage lock)."""
+        from ist_clock import is_trading_day
+        import validated_data as VD
+        today = _now_ist().date()
+        if is_trading_day(today):
+            try:
+                if not VD.store_fresh(today):
+                    await asyncio.to_thread(VD.refresh_store)
+            except Exception as exc:
+                logger.error("[validated] catch-up store refresh failed: {}", exc)
+            if not await VD.ensure_ca_calendar():
+                logger.warning("[validated] catch-up: corporate-action calendar unavailable")
         for name in self._validated_agents():
             await self._validated_call(name, "catch_up", _now_ist())
 

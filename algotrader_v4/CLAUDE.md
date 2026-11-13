@@ -125,6 +125,25 @@ Strategies that passed stratlab's pre-registered protocol run as PAPER-only, sch
   P&L does not feed risk_manager (`charge_risk=False`), so neither book can halt or resize the other.
 - Every early return logs through `_note()` / `_skip()` + the per-day `day_log`; `GET /validated` shows all three
   (status, live stats vs the lab expectation, live-readiness criteria — read-only, nothing switches to LIVE).
+- One stage at a time: every job coroutine (entry, exit, settlement, `catch_up`) is `@serialized` on a per-agent
+  asyncio lock (`validated_base.serialized`, re-entrant within a task). The scheduled job and the restart catch-up
+  call the same coroutines; without the lock both pass the done-check before the first Kite await and double every
+  order. Exit / settlement loops also re-check `_still_open(pos)` right before each paper fill.
+- Running state: the 08:55 preflight and each agent's `catch_up` call `auto_start()` on a trading day, unless the
+  operator stopped the bot: `/bot/stop` persists `bot_state.operator_stopped()` (`bot_stopped.json` next to the
+  ledger) until the next `/bot/start`, so a Stop never silently expires. `/agents/{name}/pause` lasts the day; the
+  enable toggle is the persistent per-agent switch.
+- Restart catch-up (`platform_scheduler._validated_catch_up`, start-up + 60 s): refreshes the session store when it
+  misses the previous trading day and loads the corporate-action calendar (in memory only) before the agents'
+  `catch_up`. `auc_fade` and `attn_on` refuse entries on a stale store (`no_data:store_stale`).
+- Calendars: `ist_clock.EXTRA_TRADING_DAYS` (+ `MARKET_EXTRA_SESSIONS`) lists full weekend sessions (Budget days) the
+  lab's calendar traded; validated jobs run every day and gate on `is_trading_day`. `ist_clock.SPECIAL_SESSIONS`
+  (+ `VALIDATED_SPECIAL_SESSIONS`) lists Muhurat / DR-drill sessions (the lab's special days and announced ones):
+  add each year's Muhurat date. The parity tests also run on the live calendar (2026): decisions identical; the lab's
+  bars lack sessions on 2026-03-12, 05-12 and 09-11, which ist_clock trades (one strangle expiry and three attention
+  exits differ by a day there).
+- Live-only guards (not in the tested rule, listed in each `LAB_EXPECTATION["live_only_guards"]`): the
+  corporate-action exclusion beyond the lab's `CA_GAPS` and the stale-store refusal.
 
 #### Validated agents (lab protocol): SWING-ATTN-ON-3X (`agents/validated_attention.py`)
 
@@ -157,7 +176,10 @@ Strategies that passed stratlab's pre-registered protocol run as PAPER-only, sch
   failed short unwinds the wings (`partial_structure`). NRML legs are listed in `overnight_hold_qty()`.
 - Settlement: `kite_client.paper_fill_at(..., fill_kind="SETTLEMENT")` at intrinsic per leg and one ledger row per leg
   at intrinsic (an option settled at ₹0 books exit 0, not the entry). Never from a guessed price; pending
-  settlements retry every 10 min to 16:51 and at restart (`catch_up`).
+  settlements retry every 10 min to 16:51 and at restart (`catch_up`). On the expiry day only the full 30-close window
+  15:00-15:29 settles (Kite's feed can lag); a later day settles on what Kite has, flagged `partial_settle_window`.
+  A structure restored in status `opening` (the process died between legs) is unwound at restart
+  (`unwind_orphans`, deviation `partial_structure`); the day's entry is then done.
 - `test_pipeline.py`'s lab-parity test runs all 726 sessions: 152/152 lab trades matched (legs, fills, credit,
   max risk, margin, VIX, settlement), no extra live plans.
 

@@ -155,6 +155,8 @@ class MasterAgent:
 
     def start(self, strategies: list[str], watchlist: list[dict]) -> dict:
         self.running = True
+        import bot_state as _bs
+        _bs.set_operator_stopped(False)
         try:
             import paper_book
             paper_book.roll_day_if_due()     # PAPER: never start a session on an earlier session's counters
@@ -239,6 +241,8 @@ class MasterAgent:
 
     async def stop(self) -> None:
         self.running = False
+        import bot_state as _bs
+        _bs.set_operator_stopped(True)       # the validated agents' preflight / catch-up stay off until a Start
         # the tick engine keeps running: agents are stopped below, so nothing trades, but the
         # dashboard keeps showing live prices and the WebSocket stays warm for the next start
         for a in ALL_AGENTS.values():

@@ -50,3 +50,34 @@ def set_agent_enabled(name: str, val: bool) -> None:
     if name in _agent_enabled:
         _agent_enabled[name] = bool(val)
         _save()
+
+
+# An operator Stop (/bot/stop) of the whole bot, persisted until the next /bot/start. The validated agents are set
+# running by platform_scheduler (08:55 preflight, restart catch-up), which honours it.
+_STOP_FILE = Path(os.getenv("BOT_STOP_FILE") or _FILE.with_name("bot_stopped.json"))
+
+
+def _load_stopped() -> bool:
+    try:
+        return bool(json.loads(_STOP_FILE.read_text()).get("stopped"))
+    except Exception:
+        return False
+
+
+_operator_stopped: bool = _load_stopped()
+
+
+def operator_stopped() -> bool:
+    return _operator_stopped
+
+
+def set_operator_stopped(val: bool) -> None:
+    global _operator_stopped
+    _operator_stopped = bool(val)
+    try:
+        _STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STOP_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"stopped": _operator_stopped}))
+        os.replace(tmp, _STOP_FILE)
+    except Exception:
+        pass

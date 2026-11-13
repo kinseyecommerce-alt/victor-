@@ -143,6 +143,7 @@ class Settings(BaseSettings):
     # Auto-start (set to enable fully-lights-out operation)
     # Comma-separated strategy names e.g. "intraday,scalping"
     auto_start_strategies: str = ""
+    market_extra_sessions: str = ""  # full weekend sessions "YYYY-MM-DD:Name,..." (adds to ist_clock.EXTRA_TRADING_DAYS)
     market_holidays: str = ""        # extra exchange holidays "YYYY-MM-DD:Name,..." (adds to ist_clock.NSE_HOLIDAYS)
     # Comma-separated symbols e.g. "RELIANCE,TCS" — empty = use symbol scanner
     auto_start_watchlist: str = ""

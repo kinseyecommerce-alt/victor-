@@ -288,9 +288,26 @@ def ca_calendar_loaded() -> bool:
         return False
 
 
+async def ensure_ca_calendar(timeout: float = 30.0) -> bool:
+    """Load the NSE corporate-action calendar when this process has none (a restart after the 08:55 / 09:10
+    refreshes). Never raises; True when loaded."""
+    if ca_calendar_loaded():
+        return True
+    import asyncio
+    try:
+        import event_calendar
+        await asyncio.wait_for(event_calendar.refresh_calendar(), timeout)
+    except Exception as exc:
+        logger.warning("[validated_data] corporate-action calendar refresh failed: {}", exc)
+    return ca_calendar_loaded()
+
+
 def special_sessions() -> set[date]:
+    """Special / short sessions (Muhurat, DR drills): ist_clock.SPECIAL_SESSIONS (the lab's own special days and
+    the announced ones) plus settings.validated_special_sessions ("YYYY-MM-DD,...")."""
     from config import settings
-    out = set()
+    from ist_clock import SPECIAL_SESSIONS
+    out = set(SPECIAL_SESSIONS)
     for part in (getattr(settings, "validated_special_sessions", "") or "").split(","):
         part = part.strip()
         if part:

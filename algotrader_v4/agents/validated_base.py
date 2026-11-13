@@ -13,6 +13,8 @@ refused and kite_client.paper_fill_at raises.
 """
 from __future__ import annotations
 
+import asyncio
+import functools
 import hashlib
 import inspect
 import sys
@@ -69,6 +71,26 @@ def fingerprint(*objs, consts: Optional[dict] = None) -> str:
     for k in sorted(consts or {}):
         h.update(f"{k}={consts[k]!r}".encode())
     return h.hexdigest()[:16]
+
+
+def serialized(fn):
+    """One stage of an agent at a time. The scheduled job and the restart catch_up (or two overlapping jobs) call
+    the same coroutines; each reads its done-marker / open positions before its first await and books after it, so
+    two concurrent runs would both pass the check and double every order. Re-entrant within one task (catch_up →
+    enter, decide_and_enter → settle_due)."""
+    @functools.wraps(fn)
+    async def wrapper(self, *args, **kwargs):
+        task = asyncio.current_task()
+        if task is not None and self._stage_owner is task:
+            return await fn(self, *args, **kwargs)
+        async with self._stage_lock():
+            self._stage_owner = task
+            try:
+                return await fn(self, *args, **kwargs)
+            finally:
+                self._stage_owner = None
+    wrapper.serialized = True
+    return wrapper
 
 
 # ── order helpers (PAPER) ─────────────────────────────────────────────────────
@@ -128,6 +150,23 @@ class ValidatedAgent(BaseAgent):
         self._dd_killed: Optional[dict] = None    # {"at": iso, "dd": x} while the drawdown kill holds
         self._dd_since: str = ""                  # ledger rows before this (a manual re-enable) are not counted
         self._day: dict = {}                      # today's working state ({"date": iso, ...}), persisted same-day
+        self._lock: Optional[asyncio.Lock] = None
+        self._lock_loop = None
+        self._stage_owner = None
+
+    def _stage_lock(self) -> asyncio.Lock:
+        """The agent's stage lock, bound to the running event loop (tests run several loops)."""
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock, self._lock_loop = asyncio.Lock(), loop
+        return self._lock
+
+    def _still_open(self, pos: "ValidatedPosition") -> bool:
+        """Right before an exit / settlement order: the position is still ours to close (never a second fill)."""
+        if pos.oid in self._positions:
+            return True
+        logger.warning("[{}] {} already closed — no second exit order", self.name, pos.symbol)
+        return False
 
     # ── compat aliases (one base for all three agents) ──
     @property
@@ -186,6 +225,23 @@ class ValidatedAgent(BaseAgent):
     def stop(self) -> None:
         self.state.running = False               # no new entries; open positions still exit by their rule
         logger.info("[{}] stopped — no new entries (open positions still exit by rule)", self.name)
+
+    def auto_start(self, today: Optional[date] = None) -> bool:
+        """The 08:55 preflight and a restart's catch_up set the agent running on a trading day, unless the operator
+        stopped the bot (/bot/stop, persisted until the next /bot/start): a Stop never silently expires."""
+        import bot_state
+        from ist_clock import is_trading_day
+        today = today or self._today()
+        if not is_trading_day(today):
+            return False
+        if bot_state.operator_stopped():
+            if self.state.running:
+                self.stop()
+            logger.info("[{}] not started: the bot was stopped by the operator (start it to resume)", self.name)
+            return False
+        if not self.state.running:
+            self.start()
+        return True
 
     # ── limits ──
     def _setting(self, suffix: str, default=None):

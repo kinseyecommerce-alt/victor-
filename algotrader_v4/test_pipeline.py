@@ -11766,6 +11766,54 @@ run("AUC-FADE: paper_book restart same-day / crash / stale: booked once",       
 run("AUC-FADE: status, 15:40 parity audit, scheduler jobs, no Telegram",              t_va_status_parity_audit_scheduler)
 
 
+# ── review fixes (AUC-FADE): stale store, overlapping job + catch_up ──
+import time as _time_rf
+
+
+def t_va_refuses_stale_store():
+    """Store's newest session 11-11, today Fri 11-13 (Thu 11-12 missing): the gap would be measured against a
+    2-session-old close — no entry, counted as no_data:store_stale, entry marked done."""
+    q = {"ABB": _va_q(104.0)}
+    with _va_env(_va_at(_D_va, 9, 15, 5), {"ABB": 100.0}, q, prev_day=20261111) as (a, clock):
+        assert not _vd.store_current(_D_va) and _vd.prev_close("ABB", _D_va) == 100.0
+        out = asyncio.run(a.enter(q))
+        assert out == {"entered": 0, "skipped": "no_data:store_stale"}, out
+        assert not a.positions() and not _va_orders("VAL-AUC-IN")
+        assert a.state.skip_counts.get("no_data:store_stale") == 1 and a.day_state().get("entry_done")
+
+
+def t_va_job_and_catch_up_serialised():
+    """The 09:15:05 job (in its missing-open retry loop, slow Kite quotes) and a restart's catch_up overlap:
+    one basket, one order per name; the 09:20 exit and a catch_up exit overlap: one SELL/BUY per position."""
+    pcs = {"ABB": 100.0, "ADANIENT": 200.0, "ADANIPORTS": 400.0}
+
+    def slow(ins):
+        _time_rf.sleep(0.1)
+        return {s: v for s, v in {"ABB": _va_q(104.0), "ADANIENT": _va_q(190.0),
+                                  "ADANIPORTS": _va_q(401.0, open_=0.0)}.items() if s in ins}
+    with _va_env(_va_at(_D_va, 9, 15, 20), pcs, slow) as (a, clock):
+        async def both():
+            return await asyncio.gather(a.enter(), a.catch_up(clock.t))
+        asyncio.run(both())
+        orders = _va_orders("VAL-AUC-IN")
+        assert len(orders) == 2 and len(a.positions()) == 2, [(o["tradingsymbol"], o["quantity"]) for o in orders]
+        assert abs(_va_row("ABB")["quantity"]) == int(100_000 // 104.0)
+        clock.t = _va_at(_D_va, 9, 20, 0)
+        _vd.quotes = lambda ins: (_time_rf.sleep(0.1), {s: _va_q(100.0, 99.9, 100.1) for s in ins})[1]
+
+        async def both_exit():
+            return await asyncio.gather(a.exit(), a.catch_up(clock.t))
+        asyncio.run(both_exit())
+        assert len(_va_orders("VAL-AUC-OUT")) == 2 and not a.positions()
+        assert _va_row("ABB")["quantity"] == 0 and _va_row("ADANIENT")["quantity"] == 0
+        assert len(_perf_va.trades) == 2
+
+
+run("AUC-FADE: no entry on a stale session store (no_data:store_stale)", t_va_refuses_stale_store)
+run("AUC-FADE: scheduled job and restart catch_up serialised: one entry and one exit per name",
+    t_va_job_and_catch_up_serialised)
+
+
 
 # ── Lab-parity acceptance test (real 3-year bars + the lab's FINAL trade lists) ─────────────────────────────
 _PARITY_BARS_va = _os.getenv("VALIDATED_PARITY_BARS",
@@ -11876,6 +11924,10 @@ def _va_divergent_days(cands, extra, spec_id):
     return {d for d in set(lab) | set(live) if sorted(lab.get(d, [])) != sorted(live.get(d, []))}, lab
 
 
+import bisect as _bisect_auc
+_VA_LAB_CAL_auc: list = [[]]
+
+
 def _va_run_day(d, store, opens, exits, ca, variant):
     """The live agent's own enter() / exit() on day d from Kite-shaped data. Returns [(sym, side, '09:15', exit_t,
     qty, entry_fill, exit_fill)]."""
@@ -11885,7 +11937,14 @@ def _va_run_day(d, store, opens, exits, ca, variant):
         return {s: _va_q(exits[s][1], exits[s][1], exits[s][1]) for s in ins if s in exits}
     clock_ref = []
     day = date(d // 10000, d // 100 % 100, d % 100)
-    with _va_env(_va_at(day, 9, 15, 5), {}, quotes) as (a, clock):
+    # the store-current guard reads the previous trading day; the lab's calendar is its data's session list
+    # (ist_clock's holiday table starts in 2026)
+    cal = _VA_LAB_CAL_auc[0]
+    i = _bisect_auc.bisect_left(cal, d)
+    lab_prev = cal[i - 1] if i > 0 else d
+    with _va_env(_va_at(day, 9, 15, 5), {}, quotes) as (a, clock), \
+            _patch.object(_vd, "previous_trading_day",
+                          lambda _d: date(lab_prev // 10000, lab_prev // 100 % 100, lab_prev % 100)):
         clock_ref.append(clock)
         settings.validated_auction_variant = variant
         _vd._cache["symbols"] = dict(store)
@@ -11923,6 +11982,7 @@ def t_va_lab_parity():
     needed = sorted(set(sample3) | set(sample2) | {20240101, 20240102, 20240103, 20240104, 20240105})
     syms, store, opens, exits, noexit, short, cal, cands = _va_parity_load(needed)
     assert set(syms) == set(_vd.UNIVERSE), "the live universe is the lab's"
+    _VA_LAB_CAL_auc[0] = sorted(cal)
     empty = [d for d in cal if d >= 20240101 and d not in set(days3)][:2]
     assert set(empty) <= set(needed), empty
     ca = {}
@@ -12560,6 +12620,33 @@ def t_va_lab_parity():
         "VEDL is excluded on the eve of its CA gap (2026-04-30)"
     assert set(excls[20240517].values()) == {"special_session"}, \
         "the night into the 2024-05-18 special session is excluded (the lab's only excluded signal: NAUKRI)"
+    # the same decisions from the LIVE sources: validated_data.special_sessions() and ist_clock.next_trading_day
+    # (2026 onward: ist_clock's holiday table starts in 2026; full weekend sessions via EXTRA_TRADING_DAYS)
+    from ist_clock import next_trading_day as _ntd_live
+    live_sp = _VD.special_sessions()
+    assert special_d <= live_sp, "every special day of the lab is in the live list"
+    cal_diff = {}
+    for i, d in enumerate(cal):
+        nd = cal[i + 1] if i + 1 < len(cal) else None
+        if d < 20260101 or nd is None or d in special:
+            continue
+        day = _VP.to_date(d)
+        nl = _ntd_live(day)
+        inp = [x for x in (_VA.AttentionInput(s, feat[s][d]["volume"], feat[s][d]["ltp"],
+                                              _VD.prev_close_from(store.before(s, d), d),
+                                              _VD.prev20_from(store.before(s, d), d), feat[s][d]["entry"])
+                           for s in syms if "volume" in feat[s].get(d, {}))
+               if x.prev_close is not None and x.prev20_full_vols is not None]
+        ex = _VA.attention_exclusions(day, nl, live_sp, _VA.lab_ca, [x.symbol for x in inp])
+        pl, _ = _VA.plan_attention(inp, ex)
+        if {p_.symbol for p_ in pl} != set(plans[d]) or nl != _VP.to_date(nd):
+            cal_diff[d] = (str(_VP.to_date(nd)), str(nl), sorted(set(plans[d]) ^ {p_.symbol for p_ in pl}))
+    print(f"      live sources (special_sessions + next_trading_day) vs the lab's calendar, 2026: {cal_diff}")
+    # the decisions are identical on every 2026 day; the next session differs only where the lab's bars have no
+    # session on a date ist_clock trades (2026-03-12, 2026-05-12, 2026-09-11: data gaps, exit one day earlier live)
+    # and around the 2026-11-08 Muhurat (excluded by both)
+    assert all(not v[2] for v in cal_diff.values()), cal_diff
+    assert set(cal_diff) <= {20260311, 20260511, 20260910, 20261106}, cal_diff
     n_div = sum(len(v) for v in explained.values())
     print(f"      parity: {len(cal)} days, {sig_days} with a signal (live or lab); trades matched {matched}/{total}; "
           f"days the lab's selection used later information: {n_div} {dict(explained)}")
@@ -13131,6 +13218,27 @@ def t_vs_lab_parity():
     for k in (20231110, 20240927, 20250317, 20250903, 20251231, 20260923, 20261028, 20261104):
         assert k in plans and k in lab, k
     assert plans[20261104].expiry == date(2026, 11, 9) and plans[20251231].lot == 65
+    # the live calendar (ist_clock.is_trading_day: weekdays minus NSE_HOLIDAYS, plus EXTRA_TRADING_DAYS) against the
+    # lab's (its data's session list), on 2026 — the year ist_clock's holiday table covers
+    from ist_clock import is_trading_day as _itd_live
+    cal_diff = {}
+    for k, p in sorted(plans.items()):
+        if k < 20260101:
+            continue
+        d = date(k // 10000, k // 100 % 100, k % 100)
+        lp, lwhy = _VS.plan_strangle(p.entry, p.spot, p.sigma * 100, _itd_live, 2)
+        if lp is None or lp.expiry != p.expiry or [x[:3] for x in lp.legs] != [x[:3] for x in p.legs]:
+            cal_diff[k] = (str(p.expiry), str(lp.expiry) if lp else lwhy)
+    for k, why in sorted(reasons.items()):
+        if isinstance(k, int) and k >= 20260101 and why == "short_week":
+            bar = next(b for b in by_day[date(k // 10000, k // 100 % 100, k % 100)] if b[0].time() >= time(10, 20))
+            lp, _ = _VS.plan_strangle(bar[0], bar[1], 15.0, _itd_live, 2)     # the cycle does not depend on vol
+            if lp is not None:
+                cal_diff[k] = (why, str(lp.expiry))
+    print(f"      live-calendar (ist_clock) vs lab-calendar plans on 2026 cycle days: {cal_diff}")
+    # 2026-05-12 and 2026-09-11 have no session in the lab's bars (0 of 97 symbols) but are trading days for
+    # ist_clock: the only 2026 weeks the live calendar plans differently (documented, not hidden)
+    assert set(cal_diff) <= {20260506, 20260909}, cal_diff
 
 
 run("strangle: lab spec imported (WINGED, 2 lots, hold to expiry), LAB_FINGERPRINT pinned, registered", t_vs_lab_spec_and_fingerprint)
@@ -13203,6 +13311,7 @@ def _vo_env(validated_only: bool):
         for k, v in saved.items():
             setattr(settings, k, v)
         m.running, m._scheduler = saved_m[0], saved_m[2]
+        _bs.set_operator_stopped(False)
         m._agent_watchlists.clear(); m._agent_watchlists.update(saved_m[1])
         _bs._agent_enabled.clear(); _bs._agent_enabled.update(saved_en)
         for n, a in _AA.items():
@@ -13274,7 +13383,7 @@ def t_vo_validated_only_true_blocks_legacy_and_schedules_validated():
                 "validated_store": (15, 40, 0)}
         for jid, (h, mi, se) in want.items():
             k = added[jid]
-            assert (k["hour"], k["minute"], k["second"], k["day_of_week"]) == (h, mi, se, "mon-fri"), (jid, k)
+            assert (k["hour"], k["minute"], k["second"], k["day_of_week"]) == (h, mi, se, "mon-sun"), (jid, k)
         assert {"validated_vrp_settle", "validated_vrp_mark", "validated_catch_up"} <= set(added)
         # status: /validated has all three; the AI trader is labelled the benchmark
         v = _main.validated_status()
@@ -13342,6 +13451,238 @@ run("VALIDATED_ONLY=false: legacy agents, toggle and momentum return; validated 
     t_vo_validated_only_false_restores_legacy)
 run("validated book stays out of risk_manager / VaR / order_guard / allocator (neither book blocks the other)",
     t_vo_validated_book_never_feeds_legacy_guards)
+
+# ══════════════════════════════════════════════════════════════════════════
+# Validated agents: review fixes (concurrency, restart, calendars, settlement)
+# ══════════════════════════════════════════════════════════════════════════
+import time as _time_rv
+import bot_state as _bs_rv
+
+
+def t_rv_attention_job_and_catch_up_serialised():
+    """15:21 job + restart catch_up: one basket (10 names, 1x qty); 09:15:05 job + catch_up: one SELL per long,
+    no naked CNC short."""
+    qd = _va_signal_quotes(12)
+
+    def slow(ins):
+        _time_rv.sleep(0.2)
+        return dict(qd)
+    with _va_env(_va_at(_DA, 15, 21, 0), slow) as (a, clk, p):
+        async def both():
+            return await asyncio.gather(a.decide_and_enter(), a.catch_up(_va_at(_DA, 15, 21, 10)))
+        asyncio.run(both())
+        assert len(a.positions()) == 10 and len(_va_orders("VAL-ATTN-IN")) == 10
+        syms = [x.symbol for x in a.positions()]
+        assert all(_va_rows(s)[0]["quantity"] == x.qty for s, x in zip(syms, a.positions()))
+        clk[0] = _va_at(_DA_NEXT, 9, 15, 6)
+        q2 = {s: {**_va_quote(110.0, 1), "open": 105.0} for s in syms}
+
+        def slow2(ins):
+            _time_rv.sleep(0.2)
+            return dict(q2)
+        _VA.VD.quotes.side_effect = slow2
+
+        async def job():                       # platform_scheduler._validated_open
+            qq = await asyncio.to_thread(_VA.VD.quotes, ["x"])
+            return await a.exit_at_open(qq)
+
+        async def both_exit():
+            return await asyncio.gather(job(), a.catch_up(clk[0]))
+        asyncio.run(both_exit())
+        assert len(_va_orders("VAL-ATTN-OUT")) == 10 and not a.positions()
+        assert all(_va_rows(s)[0]["quantity"] == 0 for s in syms), "never a second SELL (naked CNC short)"
+        assert len([t for t in p.trades if t["strategy"] == "attn_on"]) == 10
+
+
+def t_rv_strangle_job_and_catch_up_serialised():
+    """10:20 job + catch_up: one structure of 4 legs at the tested 2 lots; 15:31 settle + catch_up: 4 settlement
+    fills, every NRML row flat, 4 ledger rows."""
+    plan = _vs_plan()
+    kc = plan.legs[0][1]
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20, 0)) as (a, clk, p):
+        async def both():
+            return await asyncio.gather(a.decide_and_enter(), a.catch_up(_vs_at(_VS_ENTRY, 10, 20, 0)),
+                                        a.decide_and_enter(late=True))
+        asyncio.run(both())
+        assert len(a.positions()) == 4 and len(_vs_orders("VAL-VRP-W", "VAL-VRP-S")) == 4
+        assert all(abs(r_["quantity"]) == plan.qty for r_ in _te_kite_client._paper_positions)
+        clk[0] = _vs_at(_VS_EXP, 15, 31, 0)
+
+        def ec(d):
+            _time_rv.sleep(0.2)
+            return [kc + 100.0] * 30
+        with _patch.object(_VS, "expiry_closes", side_effect=ec):
+            async def both_settle():
+                return await asyncio.gather(a.settle_due(), a.catch_up(clk[0]))
+            asyncio.run(both_settle())
+        assert len(_vs_orders("VAL-VRP-SETTLE")) == 4 and not a.positions()
+        assert all(r_["quantity"] == 0 for r_ in _te_kite_client._paper_positions)
+        assert len([t for t in p.trades if t["strategy"] == "vrp_winged"]) == 4
+
+
+def t_rv_strangle_settles_on_full_window_only():
+    """Expiry day 15:31 with 5 of the 30 closes 15:00..15:29: pending (no fill, no ledger row). The next day the
+    window is final as Kite has it: settled, flagged partial_settle_window."""
+    plan = _vs_plan()
+    kc = plan.legs[0][1]
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20, 0)) as (a, clk, p):
+        asyncio.run(a.decide_and_enter())
+        clk[0] = _vs_at(_VS_EXP, 15, 31, 0)
+        with _patch.object(_VS, "expiry_closes", side_effect=lambda d: [kc - 50.0] * 5):
+            assert asyncio.run(a.settle_due()) == []
+            assert len(a.positions()) == 4 and not _vs_orders("VAL-VRP-SETTLE")
+            assert a.state.skip_counts.get("settlement_pending") == 1
+            clk[0] = _vs_at(_VS_EXP + timedelta(days=1), 15, 31, 0)
+            assert asyncio.run(a.settle_due()) == ["VRP-20261111"]
+        assert a.deviations.get("partial_settle_window") == 1 and not a.positions()
+        assert a.structures["VRP-20261111"]["n_settle_closes"] == 5
+
+
+def t_rv_strangle_crash_mid_structure_unwound():
+    """The process dies after the wings filled (each leg saved as it fills): after the restart the structure in
+    status 'opening' is unwound (deviation partial_structure), never held as wings only."""
+    class _Die(BaseException):
+        pass
+    with _vs_env(_vs_at(_VS_ENTRY, 10, 20, 0)) as (a, clk, p):
+        real = _VS.paper_marketable
+
+        def dying(sym, exch, side, qty, product, quote, tag):
+            if tag == "VAL-VRP-S":
+                raise _Die()
+            return real(sym, exch, side, qty, product, quote, tag)
+        with _patch.object(_VS, "paper_marketable", side_effect=dying):
+            try:
+                asyncio.run(a.decide_and_enter())
+            except _Die:
+                pass
+        snap = _json_pb.loads(_pb.path().read_text())
+        legs = snap["validated"]["vrp_winged"]["positions"]
+        assert len(legs) == 2 and all(x["group"] == "VRP-20261111" for x in legs), legs
+        _pb_wipe(); a._positions.clear(); a.days_done.clear(); a.structures.clear()
+        _pb.restore()
+        assert a.structures["VRP-20261111"]["status"] == "opening" and len(a.positions()) == 2
+        clk[0] = _vs_at(_VS_ENTRY, 10, 20, 40)
+        r = asyncio.run(a.catch_up(clk[0]))
+        assert r["unwound"] == ["VRP-20261111"] and not a.positions() and "entry" not in r, r
+        assert a.done_today("entry"), "no second structure the same day (as an in-flight unwind)"
+        assert a.deviations.get("partial_structure") == 2
+        assert a.structures["VRP-20261111"]["status"] == "partial_structure"
+        assert all(r_["quantity"] == 0 for r_ in _te_kite_client._paper_positions)
+
+
+def t_rv_operator_stop_persists_and_restart_starts_agents():
+    """/bot/stop is persisted: the next 08:55 preflight and a restart's catch_up keep every validated agent stopped.
+    Without an operator Stop a restart's catch_up sets attention / the strangle running (they used to stay 'stopped'
+    and lose the 15:21 entry / the weekly cycle)."""
+    import platform_scheduler as _ps
+    import master_agent_v5 as _mav_rv
+    import n8n_bridge as _n8n_rv
+    import event_calendar as _ec_rv
+    from agents.strategy_agents import ALL_AGENTS as _ALL_rv
+    names = ("auc_fade", "attn_on", "vrp_winged")
+    saved_run = {n: _ALL_rv[n].state.running for n in names}
+    saved_m = (_mav_rv.master_agent.running, _mav_rv.master_agent._scheduler)
+    try:
+        _mav_rv.master_agent._scheduler = _MagicMock_vo()
+        with _patch.object(_mav_rv, "send_telegram", _AsyncMock_vo()), _patch.object(_n8n_rv, "notify", _AsyncMock_vo()):
+            async def stop():
+                await _mav_rv.master_agent.stop()
+                await asyncio.sleep(0)
+            asyncio.run(stop())
+        assert _bs_rv.operator_stopped() and _json_pb.loads(_bs_rv._STOP_FILE.read_text())["stopped"] is True
+        assert not any(_ALL_rv[n].state.running for n in names)
+
+        async def _noop():
+            return None
+        with _patch.object(_ps, "_now_ist", return_value=_va_at(_DA, 8, 55)), \
+             _patch("ist_clock.is_trading_day", return_value=True), \
+             _patch("validated_data.store_fresh", return_value=True), _patch.object(_ec_rv, "refresh_calendar", _noop):
+            asyncio.run(_ps.PlatformScheduler()._validated_preflight())
+        assert not any(_ALL_rv[n].state.running for n in names), "an operator Stop never silently expires"
+        with _va_env(_va_at(_DA, 15, 21, 30), _va_signal_quotes(3)) as (a, clk, p):
+            a.state.running = False
+            asyncio.run(a.catch_up(clk[0]))
+            assert not a.positions() and a.state.skip_counts.get("stopped") == 1
+            _bs_rv.set_operator_stopped(False)              # what /bot/start does (master.start)
+            a.day_state(); a.days_done.clear()
+            asyncio.run(a.catch_up(clk[0]))
+            assert a.state.running and len(a.positions()) == 3
+        with _vs_env(_vs_at(_VS_ENTRY, 10, 20, 30)) as (a, clk, p):
+            a.state.running = False
+            r = asyncio.run(a.catch_up(clk[0]))
+            assert a.state.running and len(a.positions()) == 4, r
+        assert "set_operator_stopped(False)" in _inspect_rv.getsource(_mav_rv.MasterAgent.start)
+    finally:
+        _bs_rv.set_operator_stopped(False)
+        _mav_rv.master_agent.running, _mav_rv.master_agent._scheduler = saved_m
+        for n in names:
+            _ALL_rv[n].state.running = saved_run[n]
+
+
+def t_rv_catch_up_loads_store_and_ca_calendar():
+    """A restart after 09:10 has no corporate-action calendar in memory and may have a stale store: the platform
+    catch-up refreshes both before the agents' catch_up; the 15:21 decision also retries the calendar itself."""
+    import platform_scheduler as _ps
+    import validated_data as _vd_rv
+    import event_calendar as _ec_rv
+    calls = []
+
+    async def _refresh_cal():
+        calls.append("cal")
+        _ec_rv._loaded_at = _va_at(_DA, 9, 30)
+    with _patch.object(_ps, "_now_ist", return_value=_va_at(_DA, 9, 30)), \
+         _patch("ist_clock.is_trading_day", return_value=True), \
+         _patch.object(_vd_rv, "store_fresh", return_value=False), \
+         _patch.object(_vd_rv, "refresh_store", side_effect=lambda: calls.append("store") or {"ok": True}), \
+         _patch.object(_ec_rv, "_loaded_at", None), _patch.object(_ec_rv, "refresh_calendar", _refresh_cal), \
+         _patch.object(_ps.PlatformScheduler, "_validated_agents", staticmethod(lambda: {})):
+        asyncio.run(_ps.PlatformScheduler()._validated_catch_up())
+        assert calls == ["store", "cal"], calls
+    with _va_env(_va_at(_DA, 15, 21, 5), _va_signal_quotes(3)) as (a, clk, p):
+        loaded = [False]
+
+        async def _ens(timeout=30.0):
+            loaded[0] = True
+            return True
+        with _patch.object(_VA.VD, "ca_calendar_loaded", side_effect=lambda: loaded[0]), \
+             _patch.object(_VA.VD, "ensure_ca_calendar", side_effect=_ens):
+            asyncio.run(a.decide_and_enter())
+        assert loaded[0] and "ca_calendar_unavailable" not in a.flags and len(a.positions()) == 3
+
+
+def t_rv_live_calendars_match_lab():
+    """Special sessions come from a maintained list (the lab's special days + announced ones), not only an empty
+    setting; full weekend sessions (Budget days) are trading days; the live sources exclude the night into the
+    2024-05-18 DR drill and the 2026-11-08 Muhurat as the lab did."""
+    import validated_data as _vd_rv
+    from ist_clock import is_trading_day as _itd, next_trading_day as _ntd
+    sp = _vd_rv.special_sessions()
+    assert {date(2024, 3, 2), date(2024, 5, 18), date(2025, 10, 21), date(2026, 11, 8)} <= sp
+    assert all(_itd(d) for d in (date(2024, 1, 20), date(2025, 2, 1), date(2026, 2, 1)))
+    assert not _itd(date(2026, 1, 31)) and _ntd(date(2026, 1, 30)) == date(2026, 2, 1)
+    no_ca = (lambda s, d: [])
+    for day in (date(2024, 5, 17), date(2026, 11, 6)):
+        ex = _VA.attention_exclusions(day, _ntd(day), sp, no_ca, ["NAUKRI"])
+        assert ex == {"NAUKRI": "special_session"}, (day, ex)
+    assert _VA.attention_exclusions(date(2026, 11, 12), _ntd(date(2026, 11, 12)), sp, no_ca, ["X"]) == {}
+
+
+import inspect as _inspect_rv
+run("attention: 15:21 job + catch_up → one basket; 09:15 exit + catch_up → one SELL each (stage lock)",
+    t_rv_attention_job_and_catch_up_serialised)
+run("strangle: 10:20 job + catch_up → one structure; settlement + catch_up → 4 fills, rows flat (stage lock)",
+    t_rv_strangle_job_and_catch_up_serialised)
+run("strangle: settles on the full 15:00-15:29 window on expiry day; a later day settles flagged",
+    t_rv_strangle_settles_on_full_window_only)
+run("strangle: a crash mid-entry leaves no partial structure (unwound at restart)",
+    t_rv_strangle_crash_mid_structure_unwound)
+run("validated: an operator Stop persists through preflight / catch-up; a restart otherwise starts the agents",
+    t_rv_operator_stop_persists_and_restart_starts_agents)
+run("validated: restart catch-up refreshes the session store and the corporate-action calendar",
+    t_rv_catch_up_loads_store_and_ca_calendar)
+run("validated: live special sessions / weekend sessions match the lab's calendar",
+    t_rv_live_calendars_match_lab)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

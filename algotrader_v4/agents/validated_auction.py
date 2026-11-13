@@ -22,7 +22,9 @@ order entry closes (~09:08). The paper record measures whether the effect persis
 Documented divergences from the lab (measured by the parity test, not hidden):
   * the lab drops a candidate whose 09:20..09:29 exit bar is missing (and a day whose session ends up < 200 bars)
     BEFORE ranking — look-ahead the live agent cannot have
-  * corporate-action ex-dates (split / bonus / demerger ...) are skipped: the lab's adjusted data has no such gap
+  * corporate-action ex-dates (split / bonus / demerger ...) are skipped: the lab's adjusted data has no such gap.
+    A live-only data-integrity guard (stratlab.auction has no CA rule), counted under its own skip key
+    "corporate_action" and listed in LAB_EXPECTATION["live_only_guards"]
 """
 from __future__ import annotations
 
@@ -37,7 +39,7 @@ from loguru import logger
 
 import stratlab.auction as A
 import validated_data
-from agents.validated_base import PlannedTrade, ValidatedAgent, paper_marketable, paper_row
+from agents.validated_base import PlannedTrade, ValidatedAgent, paper_marketable, paper_row, serialized
 from config import settings
 from ist_clock import is_trading_day, now_ist  # noqa: F401  (now_ist: module-level clock the tests patch)
 
@@ -60,6 +62,14 @@ LAB_EXPECTATIONS = {
              "FINAL": {"trades": 525, "net_bps": 4.27, "pf": 1.08, "win_pct": 53.7},
              "FINAL_stress_5bps": {"net_bps": -1.52, "pf": 0.97}},
 }
+LIVE_ONLY_GUARDS = {
+    "corporate_action": "skip a symbol with a split / bonus / demerger / consolidation / capital reduction ex-date "
+                        "today (Kite quote vs an unadjusted stored close); not in stratlab.auction — counted under "
+                        "skip key 'corporate_action'",
+    "store_stale": "no entries when the session store misses the previous trading day (skip 'no_data:store_stale')",
+}
+for _v in LAB_EXPECTATIONS.values():
+    _v["live_only_guards"] = LIVE_ONLY_GUARDS
 READINESS_MIN_TRADES = 150
 READINESS_MIN_PF = 1.15
 
@@ -153,6 +163,7 @@ class AuctionFadeAgent(ValidatedAgent):
         return float(settings.validated_auction_dd_kill) * float(settings.validated_notional_scale)
 
     # ── entry (09:15:05) ─────────────────────────────────────────────────────
+    @serialized
     async def enter(self, q: Optional[dict] = None) -> dict:
         ds = self.day_state()
         today = self._today()
@@ -167,6 +178,13 @@ class AuctionFadeAgent(ValidatedAgent):
             self._note("entry", "*", "skip", "entry_window_missed")
             ds["entry_done"] = True
             return {"entered": 0, "skipped": "entry_window_missed"}
+        if not validated_data.store_current(today):
+            # the gap must be measured against the previous valid session's close; a store that missed its refresh
+            # would hand back an older close (a rule the lab never tested)
+            self._note("entry", "*", "skip", "no_data:store_stale")
+            ds["entry_done"] = True
+            self._save_book()
+            return {"entered": 0, "skipped": "no_data:store_stale"}
 
         pcs = {s: validated_data.prev_close(s, today) for s in validated_data.UNIVERSE}
         attempt = 0
@@ -266,6 +284,7 @@ class AuctionFadeAgent(ValidatedAgent):
             out.append(p.symbol)
         return out
 
+    @serialized
     async def exit(self, late: bool = False) -> dict:
         """Close every open position at the quote touch; symbols without a usable quote are retried every 10 s
         until 09:29:50, then exited at their last price (late_exit)."""
@@ -278,6 +297,8 @@ class AuctionFadeAgent(ValidatedAgent):
                 break
             q = await asyncio.to_thread(validated_data.quotes, sorted({p.symbol for p in open_}))
             for p in open_:
+                if not self._still_open(p):
+                    continue
                 qs = q.get(p.symbol) or {}
                 if not (float(qs.get("ltp") or 0) > 0 or float(qs.get("bid") or 0) > 0 or float(qs.get("ask") or 0) > 0):
                     continue
@@ -296,6 +317,8 @@ class AuctionFadeAgent(ValidatedAgent):
                 break
             if self._now().time() >= EXIT_LAST_RETRY:
                 for p in self.positions():            # no usable quote until 09:29:50: exit at the last price
+                    if not self._still_open(p):
+                        continue
                     row = paper_row(p.symbol, p.product) or {}
                     px = float((q.get(p.symbol) or {}).get("ltp") or 0) or float(row.get("last_price") or 0) \
                         or p.entry_px
@@ -311,12 +334,12 @@ class AuctionFadeAgent(ValidatedAgent):
         return {"closed": closed, "open": len(self.positions())}
 
     # ── restart catch-up ─────────────────────────────────────────────────────
+    @serialized
     async def catch_up(self, now: Optional[datetime] = None) -> dict:
         now = now or self._now()
         today, t = now.date(), now.time().replace(tzinfo=None)
         out: dict = {}
-        if is_trading_day(today):
-            self.state.running = True          # equivalent of the 08:55 preflight for a process started later
+        self.auto_start(today)                 # the 08:55 preflight for a process started later (not after a Stop)
         self.reconcile()
         if is_trading_day(today) and ENTRY_T <= t < ENTRY_DEADLINE and not self.day_state().get("entry_done"):
             out["enter"] = await self.enter()
