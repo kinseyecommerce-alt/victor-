@@ -255,6 +255,7 @@ def status(include_quotes: bool = False) -> dict:
     t = days.get(today, {})
     return {
         "strategy": "opening-auction fade (stratlab/auction.py), paper forward test; separate ledger, no broker orders",
+        "superseded_by": "auc_fade agent (official paper record)",
         "rules": {"final": "signal from the final auction price (as tested)",
                   "live": "signal from the 09:06:45 indicative price (what a real pre-open order can use)"},
         "summary": summarize(trades),

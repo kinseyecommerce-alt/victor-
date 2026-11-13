@@ -308,3 +308,21 @@ A pre-registered parameter variant of the opening-auction fade, using `auction.p
 share, net without the best 5 dates and a date-clustered t on DISCOVERY and (for a screen passer) FINAL.
 
     python -m stratlab.auction_r2 --data <bars3y> --out <scratch dir> [--screen-only]
+
+## NSE end-of-day archive data (`nsedata.py`)
+
+Delivery %, F&O bhavcopy (futures OI / basis, per-strike NIFTY / BANKNIFTY option prices and OI, stock option OI
+and per-strike prices of the two nearest expiries), participant-wise OI and the F&O ban list, normalised in
+`<scratchpad>/nse` (env `STRATLAB_NSE_DIR`) and cached as `.npz` in `<nse>/_cache` (rebuilt when the source files
+change). **Availability rule:** NSE publishes these files in the evening of trade date D; a value dated D is usable
+from the open of the next session. Every accessor takes `before` and returns only rows dated strictly before it;
+use `asof_session(s)` in an intraday `@strategy`, `asof_swing(d)` in a next-open Swing (sees the decision day's
+EOD) and `asof_swing_intraday(d)` with `decision_time` (sees only the previous session). The ban file dated D lists
+the securities banned FOR trade date D and is published the evening before. Option strategies that hold across
+days use `OptionSpec` + `run_option_specs` (EOD-close fills, haircut max(₹0.05, 1 %) per leg per fill,
+`options_replay.leg_cost` fees, expiry settlement at the expiring future's final settlement price, the same
+`protocol.evaluate` split and FINAL ledger as `options_vrp.py`; callbacks run under `cutoff(today)`, so reading
+today's EOD raises `LookAheadError`). Tests: `<scratchpad>/nse/tests_nsedata.py`. Full API: the module docstring.
+
+    python -m stratlab.nsedata --check
+    python -m stratlab.nsedata --data <bars3y> --out <scratch> --specs stratlab.my_module:SPECS [--screen-only]

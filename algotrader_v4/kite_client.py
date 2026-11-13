@@ -664,6 +664,33 @@ class KiteClient:
                     quantity, fill or trigger_price, order_id)
         return order_id
 
+    def paper_fill_at(self, tradingsymbol: str, exchange: str, transaction_type: str, quantity: int,
+                      product: str, price: float, tag: str, fill_kind: str) -> str:
+        """PAPER only (raises RuntimeError in LIVE): a COMPLETE order at exactly `price` — a pre-open order
+        filled at the call-auction price (fill_kind="AUCTION"), an expiry settlement at intrinsic value
+        (fill_kind="SETTLEMENT") or a book reconciliation (fill_kind="RECONCILE"). order_type "MARKET",
+        average_price = ref_ltp = price (paper_fill_vs_ltp → 0), extra field fill_kind; updates the
+        (symbol, product) row. A price of 0 is valid (an option expiring worthless)."""
+        if settings.trading_mode != "PAPER":
+            raise RuntimeError("paper_fill_at is a PAPER-mode primitive; refused in LIVE")
+        if price is None or price < 0:
+            raise InputException(f"Invalid fill price {price} for {tradingsymbol}")
+        quantity = self._validated_quantity(tradingsymbol, exchange, product, quantity)
+        order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
+        px = float(price)
+        record = {
+            "order_id": order_id, "tradingsymbol": tradingsymbol, "exchange": exchange,
+            "transaction_type": transaction_type, "quantity": quantity, "order_type": "MARKET",
+            "product": product, "price": px, "average_price": px, "ref_ltp": px, "trigger_price": 0.0,
+            "status": "COMPLETE", "tag": (tag or "")[:_KITE_ORDER_TAG_MAX], "fill_kind": fill_kind,
+            "placed_at": now_ist().isoformat(),
+        }
+        self._paper_orders.append(record)
+        self._update_paper_position(record)
+        logger.info("[PAPER] {} {} {} qty={} @ ₹{} ({}) | id={}", transaction_type, tradingsymbol, product,
+                    quantity, px, fill_kind, order_id)
+        return order_id
+
     def paper_fill_vs_ltp(self, order_id: str) -> float:
         """PAPER: fill price minus the LTP at the moment of the fill (the half-spread a marketable order paid,
         signed), 0.0 when unknown or not a paper order. Lets the ledger book what the paper broker booked."""

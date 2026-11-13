@@ -282,6 +282,9 @@ class AgentEnablesRequest(BaseModel):
     fno:      bool | None = None
     swing:    bool | None = None
     scalping: bool | None = None
+    auc_fade: bool | None = None      # validated (lab-protocol) agents: the dashboard toggle (entries only)
+    attn_on: bool | None = None
+    vrp_winged: bool | None = None
 
 class CapitalAllocationRequest(BaseModel):
     total_capital:           float | None = Field(None, ge=10000, le=100_000_000)
@@ -648,6 +651,11 @@ def resume_agent(name: str):
     if not a: raise HTTPException(404, "Not found")
     if not bot_state.is_agent_enabled(name):
         raise HTTPException(400, f"Agent '{name}' is disabled")
+    if getattr(a, "scheduled", False):
+        a.start()                        # validated agents: scheduler-driven, no tick queue
+        return {"status": "resumed", "scheduled": True}
+    if settings.validated_only and name in bot_state.LEGACY_AGENTS:
+        raise HTTPException(400, f"VALIDATED_ONLY is on: '{name}' is not started (set VALIDATED_ONLY=false)")
     wl = master_agent._agent_watchlists.get(name, [])
     if wl:
         q = tick_engine.add_subscriber(f"agent_{name}")
@@ -846,6 +854,11 @@ def get_agent_enables():
 @app.post("/settings/agent-enables", tags=["Settings"])
 def set_agent_enables(req: AgentEnablesRequest):
     updates = req.model_dump(exclude_none=True)
+    if settings.validated_only:
+        bad = [n for n, v in updates.items() if v and n in bot_state.LEGACY_AGENTS]
+        if bad:
+            raise HTTPException(400, f"VALIDATED_ONLY is on: {', '.join(bad)} has no lab-validated edge and cannot be "
+                                     f"enabled (set VALIDATED_ONLY=false to revert to the legacy agents)")
     for name, val in updates.items():
         bot_state.set_agent_enabled(name, val)
         if not val:
@@ -1371,6 +1384,46 @@ async def _pnl_sampler() -> None:
         await asyncio.sleep(5)
 
 
+def _validated_compact() -> dict:
+    """Per validated agent: enabled, open positions, today's P&L, live n / net / PF next to the lab's bps."""
+    out = {"validated_only": settings.validated_only, "agents": {}}
+    for n, a in ALL_AGENTS.items():
+        if not getattr(a, "scheduled", False):
+            continue
+        try:
+            live = a.live_stats()
+            lab = getattr(a, "LAB_EXPECTATION", {}) or {}
+            out["agents"][n] = {
+                "lab_id": a.LAB_ID, "enabled": bot_state.is_agent_enabled(n),
+                "entry_block": a.entry_block_reason_readonly(), "open_positions": len(a.positions()),
+                "pnl_today": a.realised_today(), "n": live.get("n", 0), "net": live.get("net"),
+                "pf": live.get("pf"), "net_bps": live.get("net_bps"),
+                "lab_final": (lab.get("FINAL") or {}),
+            }
+        except Exception as exc:
+            out["agents"][n] = {"error": str(exc)[:200]}
+    return out
+
+
+@app.get("/validated", tags=["Agents"])
+def validated_status():
+    """The three lab-validated PAPER agents: full status, plus forward_test's auction comparison."""
+    agents_ = {}
+    for n, a in ALL_AGENTS.items():
+        if getattr(a, "scheduled", False):
+            try:
+                agents_[n] = a.get_status()
+            except Exception as exc:
+                agents_[n] = {"error": str(exc)[:200]}
+    try:
+        import forward_test
+        fwd = forward_test.status().get("summary")
+    except Exception as exc:
+        fwd = {"error": str(exc)[:200]}
+    return {"validated_only": settings.validated_only, "scale": settings.validated_notional_scale,
+            "agents": agents_, "forward_test": fwd}
+
+
 @app.get("/dashboard/summary", tags=["Dashboard"])
 def dashboard_summary():
     from trailing_sl_engine import SLStatus
@@ -1432,7 +1485,7 @@ def dashboard_summary():
     agents = [{"name": n, "running": a.state.running, "enabled": bot_state.is_agent_enabled(n),
                "trades_today": a.state.trades_today} for n, a in ALL_AGENTS.items()]
     agents.append({"name": "ai", "running": ai["enabled"], "enabled": True,
-                   "trades_today": ai["trades_today"]})
+                   "trades_today": ai["trades_today"], "role": ai.get("role")})
 
     watch = [{"symbol": sym, "ltp": d.get("ltp"), "change_pct": d.get("change_pct"),
               "trend": d.get("trend"), "rsi": d.get("rsi_14")} for sym, d in list(live.items())[:40]]
@@ -1463,8 +1516,9 @@ def dashboard_summary():
         },
         "positions": positions,
         "agents": agents,
-        "ai": {k: ai[k] for k in ("enabled", "alerts_today", "decisions_today", "avg_decision_ms",
-                                  "last_alert", "api_key_set", "trades_today")},
+        "ai": {**{k: ai[k] for k in ("enabled", "alerts_today", "decisions_today", "avg_decision_ms",
+                                     "last_alert", "api_key_set", "trades_today")}, "role": ai.get("role")},
+        "validated": _validated_compact(),
         "watch": watch,
         "activity": activity[:50],
         "pnl_history": [{"t": t, "pnl": v} for t, v in _pnl_history],

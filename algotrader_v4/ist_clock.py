@@ -37,6 +37,43 @@ NSE_HOLIDAYS: dict[date, str] = {
 }
 _HOLIDAY_YEARS = {2026}
 
+# Full-length weekend sessions (Budget days, the 2024-01-20 DR switchover session): trading days although they fall
+# on a Saturday / Sunday. The lab's calendar is its data's session list, which has them; validated agents' jobs run
+# on them (platform_scheduler gates on is_trading_day, not on mon-fri). Extend without a deploy through
+# MARKET_EXTRA_SESSIONS="YYYY-MM-DD:Name,...".
+EXTRA_TRADING_DAYS: dict[date, str] = {
+    date(2024, 1, 20): "Special live session (DR switchover)",
+    date(2025, 2, 1):  "Union Budget",
+    date(2026, 2, 1):  "Union Budget",
+}
+
+# Special / short sessions (Muhurat, DR drills): the lab's special days (median minute bars across symbols < 300,
+# stratlab.attention.special_days: 20240302, 20240518, 20251021, 20261108). SWING-ATTN excludes a night touching one
+# (t, t+1 or in between). Not trading days for the agents; add new ones here or via VALIDATED_SPECIAL_SESSIONS.
+SPECIAL_SESSIONS: dict[date, str] = {
+    date(2024, 3, 2):   "DR drill (Saturday)",
+    date(2024, 5, 18):  "DR drill (Saturday)",
+    date(2025, 10, 21): "Muhurat trading",
+    date(2026, 11, 8):  "Muhurat trading (Sunday)",
+}
+
+
+def _extra_sessions() -> dict[date, str]:
+    out = dict(EXTRA_TRADING_DAYS)
+    try:
+        from config import settings
+        raw = getattr(settings, "market_extra_sessions", "") or ""
+    except Exception:
+        return out
+    for part in raw.split(","):
+        d, _, name = part.strip().partition(":")
+        if d:
+            try:
+                out[date.fromisoformat(d.strip())] = name.strip() or "Special session"
+            except ValueError:
+                continue
+    return out
+
 
 def _extra_holidays() -> dict[date, str]:
     """Operator-supplied holidays from settings.market_holidays ("YYYY-MM-DD[:Name],...")."""
@@ -65,9 +102,11 @@ def holiday_name(d: date | None = None) -> str | None:
 
 
 def is_trading_day(d: date | None = None) -> bool:
-    """Weekday that is not an NSE holiday."""
+    """Weekday that is not an NSE holiday, or a listed full-length weekend session (EXTRA_TRADING_DAYS)."""
     d = d or now_ist().date()
-    return d.weekday() < 5 and holiday_name(d) is None
+    if d.weekday() >= 5:
+        return d in _extra_sessions()
+    return holiday_name(d) is None
 
 
 def holiday_calendar_known(d: date | None = None) -> bool:

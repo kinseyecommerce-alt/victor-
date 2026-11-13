@@ -489,6 +489,7 @@ class AITrader:
         self._roll_day()
         return {
             "enabled":           self.enabled,
+            "role":              "benchmark — no validated edge",
             "mode":              self._mode_label(),
             "can_trade":         self._trading_allowed()[0],
             "blocked_reason":    self._trading_allowed()[1],
