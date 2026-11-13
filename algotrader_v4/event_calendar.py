@@ -47,6 +47,22 @@ _SAFE_RESULT: dict = {
 _event_cache: dict[str, list] = {}
 # "MARKET" key holds broad macro events (RBI, budget, etc.) not tied to a single symbol.
 _MARKET_KEY = "__MARKET__"
+# Price-adjusting corporate actions (split / bonus / demerger / consolidation / capital reduction) by symbol:
+# [(ex_date, purpose)], rebuilt on every successful NSE corporate-actions fetch. Kept apart from _event_cache
+# (whose CORPORATE_ACTION filter drops consolidations and capital reductions) so that the validated agents can
+# exclude a symbol on its ex-date as the lab's adjusted data did (validated_data.price_adjusting_actions).
+_price_actions: dict[str, list] = {}
+_loaded_at: Optional[datetime] = None          # IST time of the last successful corporate-actions fetch
+_PRICE_ADJUSTING = ("split", "bonus", "demerger", "consolidat", "reduction of capital")
+
+
+def price_adjusting_actions(symbol: str, d) -> list[str]:
+    """Purposes of the price-adjusting corporate actions of `symbol` with ex-date `d` (a date)."""
+    return [p for ex, p in _price_actions.get((symbol or "").upper(), []) if ex == d]
+
+
+def ca_calendar_loaded() -> bool:
+    return _loaded_at is not None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -100,6 +116,7 @@ def get_event_risk(symbol: str, current_time: Optional[datetime] = None) -> dict
     except Exception as exc:
         logger.debug("[events] get_event_risk error {}: {}", symbol, exc)
         return dict(_SAFE_RESULT)
+
 
 
 def has_results_today(symbol: str) -> bool:
@@ -160,6 +177,20 @@ async def _fetch_corporate_actions() -> None:
 
 def _parse_corporate_actions(data: list) -> None:
     """Parse the NSE corporate-actions response and insert events into the cache."""
+    global _price_actions, _loaded_at
+    pa: dict[str, list] = {}
+    for item in data:
+        sym = (item.get("symbol") or "").strip().upper()
+        purpose = (item.get("purpose") or "").strip()
+        dt = _parse_dmy((item.get("exDate") or "").strip())
+        if sym and dt is not None and any(k in purpose.lower() for k in _PRICE_ADJUSTING):
+            pa.setdefault(sym, []).append((dt.date(), purpose))
+    _price_actions = pa
+    try:
+        from ist_clock import now_ist
+        _loaded_at = now_ist()
+    except Exception:
+        _loaded_at = datetime.now()
     today_date = date.today()
     for item in data:
         symbol  = (item.get("symbol") or "").strip().upper()
@@ -180,6 +211,7 @@ def _parse_corporate_actions(data: list) -> None:
         ))
         is_corporate = any(kw in purpose_lower for kw in (
             "dividend", "bonus", "split", "rights", "buyback", "demerger",
+            "consolidat", "reduction of capital",
         ))
         if not (is_results or is_corporate):
             continue
