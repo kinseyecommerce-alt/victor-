@@ -466,3 +466,514 @@ Results (run once, 2026-11-14; all net of costs; % per year; excess = CAGR − N
 2013-2023. Do not re-run with other lookbacks / holdings / filters on these data: that would be tuning on the result.
 The live `momentum_rotation.py` (top 5, raw 12-1/6-1, 200-DMA) was never pre-registered or tested out of sample, and
 its built-in `backtest()` charges no costs (it sets `held = pick` before computing the cost of the change).
+
+## Round 5 — Zerodha / Kite ecosystem strategies, tested as published (`catalog/r5_kite.py`, `kite_*.py`)
+
+69 published strategies (Zerodha Varsity, Streak examples, AlgoTest Pine templates, Tradetron blog builds,
+AlgoBulls pyalgostrategypool, Sensibull templates; source list `<scratchpad>/kite/strategies_69.json`) were classified,
+pre-registered and run once, with no tuning. Pre-registration `prereg/kite_ecosystem_v1.json` (sha256
+`6f2c38290cc43860bfb5d65008b754ae20b0e4d733dbb2d767e461002b88d4d6`, byte-identical to `<scratchpad>/PREREGISTERED_KITE.json`,
+written before any result) lists every id, its published rule, the ONE plain default for each unspecified field, the eras
+and the code fingerprint. `prereg/kite_ecosystem_v1_amendment1.json` (sha256 `d4ae96fd…dcb842`) adds
+`r5_kite_vars_calendar_v2`: v1 crashed (missing contract row) on its first 2012-23 run and is recorded INVALID with no
+P&L; the fix runs under a new id, so the one-look ledger keeps v1's INVALID entry.
+
+Code: `kite_ind.py` (platform formulas: Pine RMA RSI/ATR/DMI/SAR/stoch, TA-Lib AROON/STOCH, AlgoTest's Ichimoku and
+non-ratcheting Supertrend as coded, Tradetron double Supertrend), `kite_tf.py` (continuous Kite-aligned candles with
+the short last candle kept, and the entry/exit "machine"), `kite_stats.py` (ADF = statsmodels adfuller defaults,
+checked against statsmodels), `kite_spreads.py` (Varsity PTM2 / PTM1 / calendar spread), `kite_options.py`
+(Tradetron iron condor and double-Supertrend debit spreads on real EOD option prices), `kite_momentum.py` (Varsity
+momentum on factor_momentum's data, costs and gates). `sim.py` gained OPTIONAL fields that change nothing for
+existing strategies: `Entry.exit_sig` (exit by rule at the next bar's open; an opposite entry on the same bar fills at
+that open = stop-and-reverse; audited for look-ahead like the entry), `Entry.bracket` (stop / target measured from
+the fill, points or %), `Swing.exit_fn` (positional exit by rule at the next open, same-open reversal) and
+`Swing.lots`. Tests: `tests_kite.py` (hand-computed Aroon, Williams %R, stochastic, Ichimoku, Supertrend / double
+Supertrend; ADF vs statsmodels; the simulator extensions; dense look-ahead audit of all 29 intraday specs).
+
+Classification (a = as published 23, b = one plain default needed 26, c = not testable 20):
+(c) the 14 Sensibull templates (legs only: no entry time, no exit), AlgoTest 9:20 straddle, Tradetron Rs150 strangle
+and 09:30 straddle, AlgoBulls strangle (all need INTRADAY option prices; the lab has EOD bhavcopy only and a flat-vol
+Black-Scholes model would test the model), AlgoTest VWAP (as coded `ta.vwap(volume, 14)` makes the line the bar's
+volume) and VWAP+EMA+volume (both need NIFTY futures volume; the lab's NIFTY bars are the spot index, volume 0).
+Dedup: no strategy in `trials_v2.csv` has identical rules; same-family neighbours with other parameters were tested
+anew. Eras: intraday on 2023-26 only; daily rules on 2023-26 (protocol.py) and once on 2012-23 (protocol_oos);
+Varsity candlesticks enter at the 15:20 bar on 2023-26 and, as `*_nxo` twins (next-open fill), on 2012-23.
+
+Results (2023-26: DISCOVERY trades / PF / net Rs, verdict; 2012-23: era trades / PF / net Rs, verdict;
+"gross" = before costs, after the modelled slippage):
+
+| source | id (r5_kite_…) | cls | 2023-26 disc tr / PF / net | verdict | 2012-23 tr / PF / net | verdict | main reason |
+|---|---|---|---|---|---|---|---|
+| Streak | streak_rsi30m_short | b | 8,958 / 0.71 / -9.7 L | FAIL | – | – | gross < 0 (-26/trade) and costs 82/trade |
+| Streak | streak_orb5_long | b | 31,224 / 0.78 / -32.4 L | FAIL | – | – | gross < 0 |
+| Streak | streak_4th30m_long | b | 26,326 / 0.74 / -23.0 L | FAIL | – | – | gross ~0 (-5/trade), killed by costs |
+| Streak | streak_st7_long | b | 344,457 / 0.40 / -449 L | FAIL | – | – | gross < 0, ~680 trades/day over 97 stocks |
+| Varsity | vars_momentum12 | b | era2 CAGR 7.9 % vs NIFTY 7.7 % | PASS (gates) | 2013-23 CAGR 13.7 % vs 11.5 %, Sharpe 0.64 | PASS (gates) | margins: H2 excess +0.09 %/yr, era2 +0.22 %/yr (biased), maxDD -57 % |
+| Varsity | vars_ptm2 | b | 635 / 0.66 / -5.7 L | FAIL | 3,450 / 0.86 / -14.8 L | FAIL | gross < 0 both eras |
+| Varsity | vars_ptm1 | b | 2,576 / 0.85 / -6.8 L | FAIL | 14,946 / 0.89 / -39.5 L | FAIL | gross ~0 (PF 0.97-0.98), killed by costs |
+| Varsity | vars_calendar_v2 | b | 1,827 / 0.05 / -5.1 L | FAIL | 11,583 / 0.24 / -31.6 L | FAIL | gross < 0 and costs 3x gross |
+| Varsity | vars_px_ema50 | a | 1,776 / 1.02 / +0.8 L | FAIL | 11,376 / 1.26 / +59.6 L | CONFIRMED | 2023-26: H2 < 0, PAYTM 175 % of net; 2012-23: = NIFTY drift (excess vs NIFTY < 0 both halves) |
+| Varsity | vars_ema9_21 | b | 1,003 / 1.07 / +1.9 L | FAIL | 6,014 / 1.53 / +99.6 L | CONFIRMED | 2023-26: H2 < 0, PAYTM 52 %; 2012-23 excess vs NIFTY +17 L H1, -0.4 L H2 |
+| Varsity | vars_ema25_50 | b | 344 / 1.33 / +4.0 L | FAIL | 2,225 / 1.70 / +78.6 L | CONFIRMED | 2023-26: PAYTM 38 % of net; 2012-23 excess vs NIFTY +13 L H1, -10 L H2 |
+| Varsity | vars_ema50_100 | b | 155 / 1.19 / +1.3 L | FAIL | 1,024 / 1.97 / +70.3 L | CONFIRMED | 2023-26: H1 < 0, PAYTM 62 %; 2012-23 excess vs NIFTY +5 L H1, -3 L H2 |
+| Varsity | vars_ema100_200 | b | 57 / 1.56 / +1.5 L | FAIL | 454 / 2.86 / +66.1 L | CONFIRMED | 2023-26: 57 trades, PAYTM 58 %; 2012-23 excess vs NIFTY -6.7 L H1, +11.8 L H2 |
+| Varsity | vars_ema15x30_1m | b | 267,610 / 0.41 / -339 L | FAIL | – | – | gross < 0, ~530 trades/day over 97 stocks |
+| Varsity | vars_ema5x10_1m | b | 836,887 / 0.24 / -1,090 L | FAIL | – | – | gross < 0 |
+| Varsity | vars_macd_d | b | 3,798 / 0.64 / -37.2 L | FAIL | 22,171 / 1.07 / +45.2 L | FAIL | 2023-26 gross < 0; 2012-23 H1 < 0, PF 1.07 |
+| Varsity | vars_bb20_d | b | 2,687 / 1.20 / +10.5 L | FAIL | 15,706 / 0.84 / -74.7 L | FAIL | failed H1 (2023-26); gross < 0 over 2012-23 |
+| Varsity | vars_cs_bull_marubozu (/_nxo) | b | 765 / 1.11 / +1.2 L | FAIL | 2,819 / 1.05 / +2.7 L | FAIL | PF < 1.15; small gross edge mostly eaten by costs |
+| Varsity | vars_cs_bear_marubozu | b | 1,160 / 0.73 / -5.0 L | FAIL | 3,465 / 0.93 / -4.0 L | FAIL | gross < 0 |
+| Varsity | vars_cs_hammer | b | 643 / 1.04 / +0.3 L | FAIL | 2,299 / 1.07 / +2.1 L | FAIL | H2 < 0, GAIL 78 % (2023-26); PF 1.07 (2012-23) |
+| Varsity | vars_cs_hanging_man | b | 855 / 0.38 / -2.0 L | FAIL | 1,881 / 0.47 / -5.8 L | FAIL | gross < 0 |
+| Varsity | vars_cs_shooting_star | b | 710 / 0.75 / -2.0 L | FAIL | 3,070 / 0.92 / -2.7 L | FAIL | gross < 0 (2023-26) / ~0 (2012-23) |
+| Varsity | vars_cs_bull_engulfing | b | 703 / 1.24 / +2.6 L; FINAL 264 / 1.02 / +0.1 L | REJECTED ON FINAL | 4,244 / 1.05 / +5.9 L | FAIL | the only screen pass of the round; FINAL PF 1.02 < 1.05; 2012-23 PF 1.05 |
+| Varsity | vars_cs_bear_engulfing | b | 1,330 / 0.72 / -7.3 L | FAIL | 7,765 / 0.95 / -7.8 L | FAIL | gross < 0 / ~0 |
+| Varsity | vars_cs_piercing | b | 518 / 1.04 / +0.2 L | FAIL | 2,753 / 0.98 / -1.1 L | FAIL | VEDL > 100 % of net; killed by costs (2012-23) |
+| Varsity | vars_cs_dark_cloud | b | 889 / 0.78 / -2.6 L | FAIL | 5,189 / 0.92 / -6.4 L | FAIL | gross < 0 |
+| Varsity | vars_cs_morning_star | b | 30 / 0.92 / -0.1 L | FAIL | 136 / 1.08 / +0.4 L | FAIL | too few trades; AUROPHARMA 59 % |
+| Varsity | vars_cs_evening_star | b | 20 / 1.63 / +0.2 L | FAIL | 140 / 0.71 / -1.6 L | FAIL | too few trades (2023-26); gross < 0 (2012-23) |
+| AlgoTest | at_rsi / at_supertrend / at_sma9_21 / at_macd / at_bollinger / at_adx / at_psar / at_stoch / at_ema_macd_rsi / at_williams / at_ichimoku | a | 90-3,350 trades each, PF 0.35-0.57, -0.9 L to -43 L each (11 total -255 L) | FAIL (all 11) | – | – | gross < 0 for all 11 (gross PF 0.72-0.95) before ~Rs 920 cost per NIFTY lot round trip |
+| Tradetron | tt_ic_wed | b | 105 / 0.83 / -0.5 L | FAIL | not run (no weeklies before 2019) | – | gross < 0 (EOD-only stop, EOD fills) |
+| Tradetron | tt_dst_nifty | a | 28 / 0.47 / -5.2 L | FAIL | 132 / 1.76 / +11.2 L | CONFIRMED | 2023-26 gross < 0, 28 trades; 2012-23 = NIFTY exposure (holding 2 lots of NIFTY made Rs 19 L) |
+| Tradetron | tt_dst_spreads | b | 41 / 0.62 / -1.3 L | FAIL | 199 / 1.08 / +0.6 L | FAIL | gross < 0 (2023-26); H1 < 0, PF 1.08 (2012-23) |
+| Tradetron | tt_orb15_stock (stock proxy) | b | 58,903 / 0.78 / -53.4 L | FAIL | – | – | gross ~0 (-8.5/trade), killed by costs |
+| Tradetron | tt_orb30_list (US template mapped) | b | 45,098 / 0.81 / -38.2 L | FAIL | – | – | gross ~0 (-2.5/trade; +H1, -H2), killed by costs |
+| AlgoBulls | ab_ema12_20 / ab_macd_5m / ab_aroon_15m / ab_bollinger_60m / ab_reverse_rsi_60m / ab_stoch_60m / ab_vwap_60m / ab_atr_trend_60m / ab_inverse_ema_60m / ab_rsi_macd_60m | a | 10,517-268,536 trades each, PF 0.53-0.76 (10 total -830 L) | FAIL (all 10) | – | – | gross < 0 for all 10 (-6 to -74 Rs/trade) before 82 Rs/trade costs |
+
+(L = lakh = Rs 1,00,000; every stock trade is Rs 1 lakh notional, so -Rs 9.7 L over 8,958 trades is -0.11 % per trade.)
+
+Verdict: **nothing tested here is a deployable edge.** On 2023-26, 53 strategies: 1 screen pass (Varsity bullish
+engulfing at 15:20), rejected on FINAL; 0 confirmed. The 25 intraday platform templates (AlgoTest, AlgoBulls,
+Streak) lose money BEFORE costs. The opening-range and pair / calendar trades are about flat before costs and lose
+to them. On 2012-23, 24 judgements: 6 OOS-CONFIRMED, all long-only daily trend rules (Varsity price > EMA50 and the
+four EMA crossovers) or the long-biased double Supertrend. Each one earned about what holding NIFTY earned over the same
+holding periods (net minus the same-period NIFTY move is negative in at least one half for every one), and all six
+failed the 2023-26 screen. These confirmations are exposure to a decade in which NIFTY rose 4x. They are not an
+edge: the protocol_oos gates test net > 0, not net > the index. Varsity momentum
+passes its factor_momentum gates, but it is the 5th correlated momentum variant on these data (4 failed), and its
+2018-23 and 2023-26 margins over NIFTY are +0.09 % and +0.22 % a year (the latter on today's NIFTY-100 names, biased in
+its favour), with a 57 % drawdown. At most it is a paper-trading candidate, not evidence of an edge. New trials:
+54 variants on 2023-26 (N 1,115 -> 1,169) and 25 on 2012-23 (N 178 -> 203), 66 new ids in all (including the INVALID
+calendar v1). Outputs: `<scratchpad>/kite/` (run3y, spreads3y, opts3y, momentum) and `<scratchpad>/oldera_oos/run1/bkite_*`.
+
+## Round 6 — GitHub-sourced strategies, re-implemented from source with known bugs fixed (`catalog/r6_github.py`, `r6_portfolio.py`, `r6_ind.py`)
+
+A 20-entry shortlist taken from public GitHub code (QuantConnect Tutorials strategy library, letianzj QuantResearch,
+freqtrade-strategies, pysystemtrade, Screeni-py, openalgo, marketcalls, quantrocket qmom, rkohli3 TSMOM,
+NiftyOnTheMove, the 101 Formulaic Alphas paper) was classified, pre-registered and run once, with no tuning. The
+downloaded repositories (`<scratchpad>/dl/github`) were only read, never executed. Pre-registration
+`prereg/github_v1.json` (sha256 `b283cda39dd84f6afd65175bc34f7901d9de542bc4bda079848297ec2ecfaf09`, byte-identical
+to `<scratchpad>/PREREGISTERED_GITHUB.json`, committed before any result) lists for every entry the source files with
+their sha256, the rule as coded, the bug fixes, the ONE plain default for each unspecified field, the eras and the
+code fingerprint of every id.
+
+Code: `r6_ind.py` (TD Sequential counts / perfection, Williams VIX Fix, Dynamic Breakout II adaptive lookback,
+pysystemtrade EWMAC / robust vol / mr_wings, Meeus ch. 49 moon phases, ghost-trader replay, R-Breaker pivots, Clenow
+regression momentum, residual-momentum score, Alpha101 #9 #12 #33 #54 #101), `catalog/r6_github.py` (14 per-symbol
+specs through the unchanged `sim.py` / `protocol.py` / `protocol_oos.py`), `r6_portfolio.py` (15 portfolio specs:
+`factor_momentum.backtest` generalised to negative weights = stock futures, and to weekly / quarterly / Q-NOV / daily
+schedules; same data, 10 bps slippage, costs and `factor_momentum.judge` gates; one-look ledger
+`<scratchpad>/github/portfolio_ledger.json`; `--january` writes the January-barometer report). `sim.py` was not changed.
+Tests: `tests_r6.py` (hand-computed values for every formula, Meeus' worked examples 49.a / 49.b and the USNO January
+2024 phases, the portfolio engine's next-open / long-short / cost / stale-name arithmetic, a noise-after-t causality
+check of every weights function, the dense look-ahead audit of the intraday specs), run by `test_pipeline.py`.
+
+Bugs fixed (all listed in the pre-registration): marketcalls' two-quarter lag (`winner.shift(1)`); QC 66's inverted
+turnover, its `int(len x 0.01)` empty tail and 2-month / overwriting tranches; QC 125's absolute-price ranking (269 is
+ranked by % return); freqtrade TD perfection "below either" bar-6/7 low (DeMark: below both); ghost_trader's
+Donchian window that includes the current bar; letianzj Dynamic Breakout II's `(v_t/v_y)/v_t`, its short branch that
+buys and its commented-out breakout test (QC's vol window indexing too); NiftyOnTheMove's up-only gap filter, EMAs
+named SMA and buys outside the top 20 %; rkohli3's sum of a long mean and a short mean; yli188's Alpha101 code is not
+used (its `rank()` ranks along time over the whole sample and it back-fills prices).
+
+Classification (a = as coded after the fixes 5, b = one plain default 13, c = not testable 2): (c) QC 24 liquidity
+premium (needs shares outstanding and market cap; the lab's top-100-by-turnover universe is the opposite end of the
+population the effect lives in, so a proxy would be a different strategy) and the NIFTY-BANKNIFTY IV-spread z-score
+(the source never trades options: its P&L is position x the IV-spread LEVEL x tte^0.7 at 1-minute frequency with a
+full-sample grid search; a faithful EOD test needs a new two-underlying straddle simulator with vega matching and
+expiry rolls). Defaults that matter: residual momentum on a NIFTY-only regression (no Fama-French data for India);
+momentum x turnover uses a LABELLED proxy (decision-day traded value / 60-day mean) because shares outstanding are
+missing; mr_wings is the binary +-1 lot version; WVF exits after a fixed 5-session hold; the 5-EMA trigger is valid
+only in the candle after the alert candle. Dedup: no identical rule in `trials_v2.csv` or round 5; residual / QMOM /
+Clenow / turnover momentum and per-stock TSMOM are CORRELATED variants of momentum families tested before, counted as
+new trials anyway. Eras: intraday on 2023-26 only; daily per-symbol rules on 2023-26 (protocol.py) and once on 2012-23
+(protocol_oos); portfolios on era 1 = 2013-23 (point-in-time top-100, delisted kept) and era 2 = 2023-26
+(survivorship-biased), judged by the factor_momentum gates.
+
+Results (per-symbol: trades / PF / net Rs, "gross" = before costs after modelled slippage; portfolios: CAGR / excess
+over NIFTY per year; "excess vs NIFTY" for trade-level rules = net minus the same notional's NIFTY move over each
+trade, per half; L = Rs 1 lakh):
+
+| source | id (r6_gh_…) | cls | 2023-26 | verdict | 2012-23 | verdict | main reason |
+|---|---|---|---|---|---|---|---|
+| letianzj r_breaker.py | rbreaker_nifty | b | 146 / 0.88 / -0.5 L (gross +0.9 L) | FAIL | – | – | killed by costs (gross PF 1.28, cost 1.3 L); H2 < 0 |
+| letianzj r_breaker.py | rbreaker_banknifty | b | 87 / 1.08 / +0.2 L (gross +1.0 L) | FAIL | – | – | one half (H2 < 0), PF < 1.15, costs take 80 % of gross |
+| Screeni-py + original | ema5_nifty | b | 1,921 / 0.38 / -25.4 L | FAIL | – | – | no edge before costs (gross -7.7 L, gross PF 0.72) |
+| Screeni-py + original | ema5_banknifty | b | 1,750 / 0.46 / -22.7 L | FAIL | – | – | no edge before costs (gross -6.5 L, gross PF 0.78) |
+| freqtrade TDSequential | td9_stock | a | 429 / 0.95 / -0.7 L | FAIL | 4,179 / 1.17 / +27.3 L (H1 +15.2, H2 +12.1) | OOS-CONFIRMED | 2023-26 gross ~0 killed by costs; 2012-23 pass trails NIFTY (excess -3.4 L H1, -4.4 L H2) |
+| freqtrade TDSequential | td9_nifty | a | 1 / 0.00 / -0.8 L | FAIL | 22 / 1.97 / +2.3 L | OOS-FAILED | too few trades (13 / 9 per half) |
+| freqtrade TDSequential | td9_banknifty | a | 1 / 0.00 / -0.1 L | FAIL | 27 / 0.93 / -0.4 L | OOS-FAILED | too few trades; gross < 0 |
+| pysystemtrade mr_wings | mrwings_nifty | b | 3 / 1.69 / +0.1 L | FAIL | 4 / 0.14 / -0.3 L | OOS-FAILED | too few trades (3-sd wings fire ~once a year) |
+| pysystemtrade mr_wings | mrwings_banknifty | b | 1 / inf / +0.03 L | FAIL | 4 / 0.21 / -0.7 L | OOS-FAILED | too few trades |
+| openalgo WVF | wvf_stock | b | 2,255 / 1.30 / +9.0 L; FINAL 1,293 / 0.88 / -2.3 L | REJECTED ON FINAL | 15,379 / 0.91 / -29.6 L (H1 +2.2, H2 -31.8) | OOS-FAILED | the round's only screen pass: its DISCOVERY profit was index drift (excess vs NIFTY +0.6 L H1, -2.2 L H2), FINAL < 0; 2012-23 gross PF 1.02 killed by costs, trails NIFTY |
+| QC 61 lunar | lunar_nifty | a | 53 / 0.45 / -6.3 L | FAIL | 294 / 0.98 / -0.4 L | OOS-FAILED | no edge before costs (2023-26 gross < 0; 2012-23 gross PF 1.04, H2 < 0) |
+| letianzj ghost_trader | ghost_nifty | a | 8 / 0.16 / -1.9 L | FAIL | 31 / 0.81 / -0.8 L | OOS-FAILED | too few trades; gross < 0 |
+| letianzj ghost_trader | ghost_banknifty | a | 6 / 2.40 / +1.8 L | FAIL | 31 / 0.71 / -2.0 L | OOS-FAILED | too few trades; gross < 0 over 2012-23 |
+| QC 04 / letianzj DBO II | dbo2_stock | a | 1,202 / 0.92 / -3.3 L | FAIL | 7,567 / 1.08 / +24.4 L (H1 +0.7, H2 +23.7) | OOS-FAILED | no edge before costs on 2023-26 (H2 < 0); PF 1.08 over 2012-23 and trails NIFTY (excess -38.9 L / -17.7 L) |
+| QC 136 | resid_mom_long | b | CAGR 4.2 % / excess -3.5 | FAIL | H1 (2015-17) 15.3 % / +9.0, H2 21.8 % / +10.8, Sharpe 0.86 | (era1 gates met) | fails only era 2: trails NIFTY 2023-26 on the (favourably biased) current names |
+| QC 136 | resid_mom_ls | b | -6.6 % / -14.3 | FAIL | 3.1 % / -3.2, 11.9 % / +1.0, Sharpe 0.94 | FAIL | one half (H1 excess < 0), era 2 < 0; market-neutral book cannot beat NIFTY's CAGR |
+| QC 269 | season_1y | b | -3.3 % / -11.0 | FAIL | -5.3 % / -17.3, 0.2 % / -10.8 | FAIL | no edge before costs (gross -2.0 % / +3.8 % per half) |
+| Heston-Sadka (QC 269 ext.) | season_5y | b | 6.7 % / -1.0 | FAIL | -4.8 % / -16.8, -6.7 % / -17.7 | FAIL | no edge before costs over 2013-23 |
+| QC 66 | mom_turnover | b | -13.2 % / -20.9 | FAIL | 0.8 % / -11.2, 7.9 % / -3.1 | FAIL | gross 3.1 % / 10.4 %, era 2 gross -11 %: no stable edge, trails NIFTY |
+| marketcalls / QC 33 | etf_switch | a | 8.7 % / +3.3 | FAIL | 4.5 % / -9.4, 8.9 % / -2.1, Sharpe 0.67 | FAIL | trails NIFTY in both 2013-23 halves (75 % invested as coded) |
+| 101 Formulaic Alphas | alpha101_a101 | b | -51.9 % / -59.6 | FAIL | -55.5 % / -67.5, -48.5 % / -59.5 | FAIL | no edge before costs (gross -15 % / -1 % per half) and ~64 %/yr cost drag |
+| 101 Formulaic Alphas | alpha101_a33 | b | -40.6 % / -48.3 | FAIL | -36.7 % / -48.7, -46.3 % / -57.3 | FAIL | killed by costs (gross +20 % / +1 % per half, +12 % era 2; cost drag 64 %/yr) |
+| 101 Formulaic Alphas | alpha101_a12 | b | -40.1 % / -47.8 | FAIL | -39.0 % / -51.0, -39.2 % / -50.1 | FAIL | killed by costs (gross +5.8 % / +4.8 %; drag 55 %/yr) |
+| 101 Formulaic Alphas | alpha101_a54 | b | -47.8 % / -55.5 | FAIL | -46.7 % / -58.7, -46.4 % / -57.4 | FAIL | no edge before costs (gross ~0) |
+| 101 Formulaic Alphas | alpha101_a9 | b | -41.3 % / -49.0 | FAIL | -41.0 % / -53.1, -42.8 % / -53.7 | FAIL | killed by costs (gross +4.5 % / +1.1 %; drag 57 %/yr) |
+| shortlist (no source file) | ibs_xs | b | -47.1 % / -54.8 | FAIL | -43.4 % / -55.4, -46.7 % / -57.6 | FAIL | killed by costs (gross +6.9 % / +1.6 %; drag 64 %/yr) |
+| NiftyOnTheMove (Clenow) | clenow | b | 6.3 % / -1.2 | FAIL | 2.5 % / -9.7, 3.3 % / -7.6, Sharpe 0.48 | FAIL | trails NIFTY (only ~25 % invested: top 20 % of a 100-name ranking leaves few buys) |
+| quantrocket qmom | qmom | b | 11.5 % / +3.8 | FAIL | 12.6 % / -0.9, 6.5 % / -4.5, Sharpe 0.46 | FAIL | trails NIFTY in both 2013-23 halves (gross excess +0.5 / -3.3) |
+| rkohli3 TSMOM | tsmom_stock | b | 0.7 % / -7.0 | FAIL | 8.2 % / -3.8, 0.8 % / -10.2, Sharpe 0.36 | FAIL | trails NIFTY; gross 9.2 % / 1.9 % per half |
+| QC 24 | (liquidity premium) | c | – | not run | – | – | needs shares outstanding / market cap; wrong population |
+| beastytitan18 | (IV-spread z-score) | c | – | not run | – | – | source P&L is not a traded instrument; needs a new 2-underlying option simulator |
+| paperswithbacktest | january_barometer | b | report only | – | NIFTY 2013-2026: 1.12x vs 4.24x buy-and-hold, out of the market 10 of 14 years | no verdict | ~14 observations: no power; January was negative in 10 of 14 years and Feb-Dec rose in 9 of those 10 |
+
+Gross figures for the portfolios come from a zero-cost re-run made AFTER the one-look verdicts were written
+(`<scratchpad>/github/portfolio_gross_diag.json`, diagnostic only: not a trial, ledger untouched).
+
+Verdict: **nothing here is a deployable edge.** 2023-26: 14 per-symbol strategies, 1 screen pass (WVF on stocks),
+REJECTED ON FINAL; 0 confirmed; 15 portfolios, 0 pass the factor_momentum gates. 2012-23: 10 daily per-symbol
+judgements, 1 OOS-CONFIRMED (TD Sequential 9 on stocks, PF 1.17) - and it earned less than holding NIFTY over the same
+trades in both halves, after failing the 2023-26 screen (gross ~0 there): exposure, not an edge. The closest portfolio
+is residual momentum, long-only: +9 / +11 %/yr over NIFTY in 2015-17 / 2018-23 with Sharpe 0.86, but -3.5 %/yr on
+2023-26 (even with today's names); it is one of four momentum variants in this round on top of five tested before, and its long-short version (the
+actual factor) fails, so the long-only result is mostly a momentum-tilted long book. Every daily cross-sectional
+book (5 alphas, IBS) turns over ~190x a year: a few % of gross edge against ~55-65 %/yr of costs. The intraday
+templates (5-EMA, R-Breaker) have no edge before costs or lose it to costs. New trials: 29 variants on 2023-26
+(N 1,169 -> 1,198; 1 new FINAL look) and 26 on 2012-23 (N 203 -> 229, incl. the January-barometer report row); 30 new
+ids in the pre-registration. Outputs: `<scratchpad>/github/` (run3y_swing, run3y_futures, portfolio, january,
+aggregate.json, scripts/) and `<scratchpad>/oldera_oos/run1/github_daily`.
+
+## Round 7 — second GitHub shortlist, OHLCV-only items (`catalog/r7_github2.py`, `r7_portfolio.py`, `r7_tps.py`, `r7_ind.py`)
+
+The second GitHub shortlist (`<scratchpad>/github_round2_shortlist.md`; sources in `<scratchpad>/dl/github2`, only read,
+never executed). Each strategy was rebuilt from the source code or the book rules with the known bugs fixed,
+pre-registered, and run once with no tuning. The pre-registration is `prereg/github_v2.json` (sha256
+`1745b3e24092cae2d9ea7009ee6380c322a5fcc67a3f35617a8e6e840e2b7b92`). It is byte-identical to
+`<scratchpad>/PREREGISTERED_GITHUB2.json` and was committed before any result existed. For every entry it lists the
+source files with their sha256, the rule as coded, the bug fixes, the one plain default for each unspecified field, the
+eras, the fingerprint of every id and the sha256 of the round's code files. 30 ids in all.
+
+Not in this round (each needs a data build or an ML pipeline):
+1. Promoter stake increase ≥ 0.5 pp: needs point-in-time NSE shareholding-pattern filings with their filing dates.
+2. Promoter open-market buys (PIT / SAST): needs an archive of the disclosures with acquirer category, mode and
+   dissemination time.
+3. Earnings-day gap momentum: needs real results-announcement dates and times; the lab only has the gap + volume proxy
+   it already tested.
+6. Qlib Alpha158 + LightGBM: needs NIFTY-500 point-in-time membership and a walk-forward retraining pipeline with its
+   own trial accounting.
+
+Code:
+* `r7_ind.py` holds the formulas: Clenow counter-trend, Turtle Soup / +1, Smash Day with MT5's SMA ATR, Holy Grail
+  gate, Double 7s, Bensdorp ATR% / MRL / MRS, the TPS state machine, the 80-20 setup and the intraday stop re-entry.
+* `catalog/r7_github2.py` has 25 per-symbol specs, run through `sim.py` / `protocol.py` / `protocol_oos.py`.
+* `r7_tps.py` is Connors TPS. Its scale-in (10/20/30/40 %) gets its own trade simulator. One trade = one scale-in
+  sequence, judged by the unchanged protocols.
+* `r7_portfolio.py` holds:
+  * volatility-managed NIFTY;
+  * weekly stock-futures carry, with P&L on the futures contracts and rolls;
+  * sector rotation, on `r6_portfolio.backtest`, unchanged.
+  It uses its own one-look ledger, `<scratchpad>/github2_r7/portfolio_ledger.json`.
+
+`sim.py` gained OPTIONAL `Swing` fields `entry` / `valid` / `entry_stop_ticks`, used by `sim._order_trade`. This is a
+resting stop or limit entry for the next session(s), on daily bars:
+* An armed stop (Turtle Soup) that reaches both its arm and its level in one session counts as filled. Daily bars
+  cannot tell whether the high or the low came first, and assuming a fill is the pessimistic choice.
+* A limit order needs a trade one tick through its level.
+* On the fill session only the stop is checked, assuming the low came after the fill. Targets start the next session.
+
+No existing strategy sets these fields, so `FILL_MODEL_VERSION` is unchanged. The controls were re-run after the change
+and are unchanged: RANDOM_0 PF 0.77, PLANTED_20pct 1.15, CHEAT 19.57. Era-2 sector-index data was built for this round
+from 994 NSE `ind_close_all` files in `<scratchpad>/github2_r7/ind_close_all`; their sha256 is in the
+pre-registration. Tests are in `tests_r7.py`, run by `test_pipeline.py`. They cover:
+* hand-computed values for every formula;
+* the resting-order fills;
+* the TPS sequence arithmetic, and the carry and vol-managed engines by hand;
+* look-ahead: noise after t leaves the vol-managed and sector-rotation decisions at t unchanged, and the intraday specs
+  pass a dense audit.
+
+Bugs fixed (all in the pre-registration):
+* Volatility-managed portfolio (coolgan): `c` came from full-sample standard deviations, and the monthly weight used the
+  22-day variance ending on the month's first day, which includes that day's own return. Replaced by an expanding `c`
+  and the previous month's realised variance.
+* Turtle Soup: the centred `argrelextrema` port (which reads future bars) and the 3-bar close-back-inside port are
+  replaced by the book rules.
+* Smash Day: the README paragraph contradicts its rule list; the rule list is used, with a 48-hour (2-session) order
+  life.
+* Holy Grail: the ports fill one bar after the breakout; replaced by a resting stop one tick above the touch bar.
+* Double 7s: pinkfish fills at the signal close; replaced by the next open. The `main()` overrides (SMA70, 15 % stop,
+  2x margin) are dropped.
+* Bensdorp (MRL / MRS) and Connors (TPS): the TuringTrader ports use EMA-smoothed RSI / ADX; replaced by Wilder.
+* 80-20 and Oops: the 1-hour crypto adaptations are replaced by the book rules on 1-minute sessions.
+* Clenow: the notebook already uses the std of price differences, not % changes, and that is kept.
+
+Carry vs the tested `r4_oi_basis_*` rules: those are per-stock time-series z-scores of the near future's premium over
+cash, held 5 days. Carry here is a cross-sectional weekly rank of the front-vs-second calendar slope, with P&L on the
+contracts. The two are related through the basis but are different rules. Sector rotation: the porter warns that his
+top-2 code does not reproduce Alvarez's published results and that picking the 2 worst sectors would. Only the
+described momentum version was tested.
+
+Results, under the same conventions as Round 6 ("excess" = net minus the same notional's index move over each trade,
+sign-adjusted for shorts, per half; stocks are measured vs NIFTY, index futures vs their own index; L = Rs 1 lakh):
+
+| # | id (r7_gh2_…) | 2023-26 (DISC trades / PF / net) | verdict | 2012-23 (trades / PF / net) | verdict | main reason |
+|---|---|---|---|---|---|---|
+| 4 | clenow_ct_nifty | 10 / 1.81 / +1.2 L | FAIL | 70 / 1.36 / +2.3 L | OOS-FAILED | too few trades (33 / 37 per half); trails holding NIFTY (excess -0.3 / -0.7 L) |
+| 4 | clenow_ct_banknifty | 11 / 4.25 / +3.5 L | FAIL | 60 / 0.85 / -1.7 L | OOS-FAILED | too few trades; 2012-23 H2 < 0, gross PF 0.88 |
+| 4 | clenow_ct_stock | 866 / 1.55 / +9.8 L; FINAL 347 / 0.74 / -2.8 L | REJECTED ON FINAL | 5,896 / 1.19 / +37.0 L | OOS-CONFIRMED | the round's only screen pass, lost on FINAL; the 2012-23 pass trails NIFTY in both halves (excess -4.4 / -4.3 L): long-only dip buying = index exposure |
+| 5 | volmanaged_nifty | Sharpe 0.52 vs buy-and-hold 0.62; maxDD -21 % vs -16 %; CAGR 6.9 vs 7.6 % | FAIL | Sharpe H1 0.84 vs 0.86, H2 0.68 vs 0.67; maxDD -20 % vs -38 %; CAGR 9.4 vs 11.4 % | FAIL | no Sharpe gain (H1 and era 2 lower); shallower drawdown in 2012-23 only, paid for with 2 %/yr of CAGR |
+| 7 | ts_stock / ts_nifty / ts_banknifty | 2,990 / 0.76 / -8.1 L; 38 / 0.47; 28 / 0.70 | FAIL (3) | 17,515 / 0.67 / -92 L; 170 / 0.58; 174 / 0.66 | OOS-FAILED (3) | no edge before costs (gross PF 0.72-0.84) |
+| 7 | tsp1_stock | 1,089 / 1.10 / +1.3 L | FAIL | 6,749 / 0.89 / -13.1 L | OOS-FAILED | PF < 1.15 (costs take half the gross); 2012-23 gross PF 0.95 |
+| 7 | tsp1_nifty / tsp1_banknifty | 11 / 0.98; 11 / 0.09 | FAIL (2) | 58 / 0.77; 73 / 0.55 | OOS-FAILED (2) | too few trades; gross < 0 |
+| 8 | smash_stock | 3,003 / 1.10 / +7.0 L | FAIL | 17,457 / 0.90 / -60.5 L | OOS-FAILED | PF < 1.15 and trails NIFTY (excess -7.7 / -2.4 L); 2012-23 gross PF 0.93 |
+| 8 | smash_nifty / smash_banknifty | 38 / 0.86; 34 / 1.30 | FAIL (2) | 254 / 0.77; 230 / 0.76 | OOS-FAILED (2) | gross < 0 over 2012-23; too few trades on 2023-26 |
+| 9 | hg_stock | 75 / 1.39 / +0.4 L | FAIL | 397 / 0.89 / -1.1 L | OOS-FAILED | HAL is 51 % of net; 2012-23 gross < 0 |
+| 9 | hg_nifty / hg_banknifty | 0 / – ; 0 / – | FAIL (2) | 2 / 1.56; 2 / 1.88 | OOS-FAILED (2) | almost never fires: ADX > 30 and rising on the bar before the touch rarely meets a pullback to EMA20 on an index |
+| 10 | carry_xs | CAGR -12.1 % / excess -19.6 | FAIL | H1 -10.0 % / -22.1, H2 -15.8 % / -26.8, Sharpe -2.09 | FAIL | no stable edge before costs (gross +3.0 % / -4.4 % / -0.5 %/yr) and a 13 %/yr cost drag (weekly quintile churn + monthly rolls) |
+| 11 | sector_rot | CAGR 12.7 % / excess +5.2 | (era-2 gates met) | H1 17.8 % / +5.3, H2 1.7 % / -9.2, Sharpe 0.52 | FAIL | trails NIFTY by 9 %/yr in 2018-23 (maxDD -53 %). Era 2 uses the real sector indices, so it is not survivorship-biased |
+| 12 | d7_nifty / d7_banknifty | 13 / 2.13; 13 / 1.84 | FAIL (2) | 114 / 0.97; 105 / 0.85 | OOS-FAILED (2) | too few trades; 2012-23 H2 < 0, PF < 1 |
+| 13 | mrl_stock | 3 / 3.02 / +0.03 L | FAIL | 217 / 1.06 / +0.4 L | OOS-FAILED | filter rarely met on NIFTY-100 names (ATR% > 4 and ADX7 > 45); ADANIENT is 78 % of the 2012-23 net |
+| 13 | mrs_stock | 17 / 0.81 / -0.07 L | FAIL | 485 / 1.25 / +2.5 L (H1 +2.45, H2 +0.10) | OOS-CONFIRMED | 2012-23 pass carried by H1 (excess +2.9 / +0.3 L); H2 net ≈ 0 and 2023-26 negative |
+| 14 | 8020_stock / 8020_nifty / 8020_banknifty | 5,942 / 0.87 / -2.8 L; 71 / 0.78; 74 / 0.70 | FAIL (3) | – | – | gross ≈ 0 (gross PF 1.04-1.21) killed by costs; index versions too few trades |
+| 14 | oops_stock / oops_nifty / oops_banknifty | 7,424 / 0.90 / -3.2 L; 133 / 0.82; 134 / 0.77 | FAIL (3) | – | – | gross ≈ 0 (gross PF 1.08-1.20) killed by costs (stocks: gross +2.9 L, costs 6.1 L) |
+| 15 | tps_nifty | 19 sequences / 6.20 / +1.0 L | FAIL | 143 / 1.31 / +1.0 L (H1 +0.59, H2 +0.44) | OOS-CONFIRMED | too few sequences on 2023-26. The 2012-23 pass is small: about 23 % of sessions in the market, gross excess per tranche vs NIFTY -0.1 / +1.0 L, and 1 lot held throughout earned +3.8 / +5.8 L |
+| 15 | tps_banknifty | 15 / 2.65 / +0.4 L | FAIL | 143 / 1.10 / +0.5 L | OOS-FAILED | too few sequences (2023-26); 2012-23 H2 < 0, PF 1.10 |
+
+The carry gross figures and the TPS per-tranche excess come from diagnostics run after the one-look verdicts. They are
+in `<scratchpad>/github2_r7/diag_after_verdicts.json`, are not trials, and do not touch any ledger.
+
+Verdict: **nothing here is a deployable edge.**
+* 2023-26: 27 per-symbol / TPS strategies gave 1 screen pass (Clenow counter-trend on stock futures), REJECTED ON FINAL.
+  The 3 portfolios fail their gates.
+* 2012-23: 21 trade-level judgements gave 3 OOS-CONFIRMED. With 21 judged, about one per gate is expected by luck.
+  * Clenow on stocks earned less than NIFTY over the same trades in both halves.
+  * MRS short is carried by 2012-17, with ≈ 0 in 2018-23 and a loss on 2023-26.
+  * TPS on NIFTY is a small, rarely-in-the-market pass with mixed excess. It is the fourth short-term RSI(2)
+    index-reversion variant, after r3_futures_nifty_rsi2_ls, r3_swing_nifty_rsi2 and r3_swing_rsi2_sma200.
+* The book reversal patterns (Turtle Soup, Smash Day, Holy Grail, 80-20, Oops) lose before costs on daily data, or have
+  only a gross edge that costs remove intraday.
+* Volatility management halves NIFTY's 2013-23 drawdown but does not raise its Sharpe, and costs 2 %/yr of CAGR.
+* Sector rotation beat NIFTY in 2013-17 and 2023-26 and lost 9 %/yr in 2018-23.
+
+New trials: 30 variants on 2023-26 (N 1,198 -> 1,228; 1 new FINAL look) and 24 on 2012-23 (N 229 -> 253). Outputs are
+in `<scratchpad>/github2_r7/`: run3y_{swing,futures,intraday}, tps3y, oos_daily, tps_oos, portfolio, aggregate.json,
+scripts/.
+
+## Old-era minute OOS (2016-2023) (`protocol_min_oos.py`, `prereg/oldera_min_v1.json`)
+
+**Plain language.** The three strategies trading in PAPER (AUC-FADE-3PCT, SWING-ATTN-ON-3X, VRP-STRANGLE-016-WINGED)
+were run once, with no tuning, on 2016-01-01..2023-11-09 one-minute bars that none of them was developed on. All three
+pass the same gates the 2012-23 daily round used. That is real evidence, and for the auction fade and the attention
+trade it is strong: of 373 non-option minute strategies that failed the 2023-26 screen, only 2 (0.5 %) pass here. But
+each pass has a weak spot: the 3 % auction fade made 84 % of its 8-year profit in 2020 and barely broke even in
+2016-2019 (loses there at 5 bps); the attention trade's 2016-2019 profit is less than holding NIFTY over the same
+nights would have made; the strangle is a Black-Scholes MODEL on VIX, not option prices, and that model passes a third
+of the option structures that failed on 2023-26, so its pass says more about the model than about the trade. Keep all
+three in paper trading; none of this is a reason to switch to LIVE.
+
+Pre-registered before any 2016-2023 strategy result was computed: `prereg/oldera_min_v1.json` (sha256
+`8e18deeccf2506fecfc75a5e444adbd7a80fe09cd73e9f99553b1dbebecf6203`, byte-identical to
+`<scratchpad>/oldera_min/PREREGISTERED_MIN_OOS.json`, committed before the run). Every judgement is in the one-look
+ledger `<scratchpad>/oldera_min/ledger.json` (a second run returns the first result, never recomputes); 420 rows
+(era `2016-23`, stage `oos`) were appended to `trials_v2.csv`.
+
+```
+python -m stratlab.protocol_min_oos --build-cache && python -m stratlab.protocol_min_oos --data-check
+python -m stratlab.protocol_min_oos --run a|b|c --prereg <scratch>/oldera_min/PREREGISTERED_MIN_OOS.json --trials <ledger>
+```
+
+* **Gates** = protocol_oos's (constants imported): net > 0 in H1 (2016-2019) and H2 (2020-01-01..2023-11-09), PF >= 1.15
+  over the era, >= 150 (intraday) / 60 (positional) trades in EACH half, top symbol <= 35 % of net (not for one
+  instrument). Report-only: 5 bps (index 2.5, auction family 5 vs its 2.1, options haircut x2.5), would an intraday id pass
+  with 60 trades per half, net minus the same notional's NIFTY move over each trade ("excess"), NIFTY weeklies restricted
+  to listed contracts (from 2019-02-11). "Proven in both eras" = FINAL-CONFIRMED on 2023-26 AND OOS-CONFIRMED here.
+* **Costs** costs.py 2026 rates on every year; each runner's own fills (sim.py, auction.py 2.1 bps, attention.py,
+  options_vrp / options_r3 Black-Scholes on the index minute bars with the previous official India VIX close as a flat vol,
+  r3_crosssec, ltr); 2026 lot sizes on every date.
+* **Data** (`--data-check`, `<scratchpad>/oldera_min/data_check.json`): 97 of today's NIFTY-100 stocks plus NIFTY 50, NIFTY
+  BANK and INDIA VIX minute files, all present (nothing blocked: strangle, NIFTY-relative and needs_index rules all ran).
+  31 symbol-year files are empty (listed later: ADANIGREEN, DMART, ETERNAL, HAL, HDFCLIFE, ICICIGI, IRCTC, JIOFIN, LODHA,
+  PAYTM, SBILIFE). Split / bonus adjusted on all 51 checkable NSE split / bonus events (2 more fell on missing sessions; RELIANCE 1:1
+  bonus 2017-09-07: NSE gap 0.500, Kite 1.001); demergers are not (ADANIENT 2018-09-06, GRASIM 2017-07-19) or wrongly (NMDC 2022-10-27, ABB 2019-12-20)
+  adjusted; volume is adjusted on most events but not on 9 (BRITANNIA 2018, CHOLAFIN, HCLTECH, HDFCBANK, NTPC, WIPRO, GAIL,
+  VBL 2019, EICHERMOT 2020), which inflates 20-session volume ratios for a few weeks after them. **28 regular sessions are
+  missing from every file** (download chunk boundaries, e.g. 2016-03-01, 2019-05-02, 2023-11-01) plus RELIANCE
+  2018-03-05..04-30 and NAUKRI 2018-09-03..10-31. IRCTC before its 2019-10-14 listing and PIIND before 2020-02 hold another
+  instrument's prints and were dropped. Pre-registered **dirty rule**: a trade is excluded if its entry..exit (or the
+  session after its exit) touches a session after a hole, or an overnight link where Kite's open/previous close differs from
+  NSE's adjusted ratio by > 5 % (2,837 symbol-dates, ~1.5 % of symbol-sessions; 12 % of auction gap candidates, because
+  two-day gaps after a hole are large). Kite's last-minute NIFTY close vs the official close: median 0.05 %. No dates
+  overlap bars3y; the 2023-11-09 close -> 2023-11-10 open seam has a median |gap| of 0.2 % (largest ONGC +3.6 %), so the two
+  sets are on the same adjustment basis. No daily history is spliced before 2016: lookbacks warm up in 2016.
+* **Survivorship**: today's NIFTY-100 names only. This favours every long strategy; read every long result with it.
+
+**(a) The live PAPER strategies** (L = Rs 1 lakh; "xs" = excess vs NIFTY):
+
+| | AUC-FADE-3PCT | SWING-ATTN-ON-3X | VRP-STRANGLE-016-WINGED (modelled) |
+|---|---|---|---|
+| 2023-26 | FINAL 252 tr, PF 1.32, +0.49 L | FINAL 194 tr, PF 1.18, +0.11 L | FINAL 45 tr, PF 1.27, +0.61 L |
+| H1 2016-19 trades / PF / net | 702 / 1.05 / +0.23 L | 1,164 / 1.22 / +0.81 L | 187 / 1.60 / +2.31 L |
+| H2 2020-23 trades / PF / net | 1,269 / 1.53 / +3.93 L | 1,324 / 1.97 / +3.69 L | 178 / 1.36 / +2.77 L |
+| era PF / net | 1.35 / +4.16 L | 1.60 / +4.50 L | 1.44 / +5.08 L |
+| top symbol | PIIND 6.6 % | ADANIGREEN 10.6 % | one instrument |
+| sensitivity | 5 bps: +3.02 L but H1 -0.18 L -> would FAIL | 5 bps: +3.02 L, H1 +0.11 L -> passes; 09:16 exit +2.88 L; CNC costs +1.19 L but H1 -0.74 L | haircut x2.5: +1.79 L, PF 1.147 -> would FAIL by 0.003 |
+| excess vs NIFTY H1 / H2 | -0.25 L / +3.51 L (both sides; not long-biased) | **-0.90 L** / +1.86 L (long-only) | n/a |
+| other (after the verdict, `diag_after_verdicts.json`) | 2020 alone +3.48 L (84 %); without 2020: 1,375 tr, PF 1.08, +0.68 L; best 5 days +2.01 L | without 2020: PF 1.50, +3.04 L | listed weeklies only (2019-02-11..): 218 tr, PF 1.39, +3.47 L; 2016 -0.35 L; worst week -0.56 L (2019-09-20); max DD 1.33 L |
+| verdict | OOS-CONFIRMED | OOS-CONFIRMED | OOS-CONFIRMED (model) |
+| proven in both eras | yes, fragile | yes, but H1 is index exposure | yes, on modelled premiums |
+
+What it means for paper trading: keep AUC-FADE-3PCT, but expect lumpy results: it was positive in only 4 of the 8 calendar
+years, a 2020-like crash year dominates it, and at 5 bps 2016-2019 is a loss, so live fill quality decides it. Keep SWING-ATTN-ON-3X but judge it
+against NIFTY's overnight move, not against zero: in 2016-2019 holding NIFTY on the same nights would have earned more,
+and on CNC (delivery) costs 2016-2019 loses. Keep VRP-STRANGLE-016-WINGED as a paper test of the model: the paper fills are
+the only real option prices it will see; before 2019-02 the weekly contracts did not even exist.
+
+**(b) Other 2023-26 FINAL-confirmed minute-bar strategies** (r4_realopt_nf_wk_strangle_3pct is a daily real-price spec
+with no weeklies before 2019 and was not run):
+
+| id | H1 tr / net | H2 tr / net | PF | net@5 (pass?) | verdict |
+|---|---|---|---|---|---|
+| AUC-FADE-2PCT | 1,751 / +1.50 L | 2,580 / +4.94 L | 1.29 | +3.94 L (Y) | OOS-CONFIRMED (without 2020 PF 1.15) |
+| VRP-STRANGLE-016-NAKED (model) | 187 / +1.31 L | 178 / +1.52 L | 1.43 | +2.01 L (Y) | OOS-CONFIRMED |
+| r3_options_ic_25_10 (model) | 187 / +0.57 L | 178 / +1.75 L | 1.36 | +0.62 L (N) | OOS-CONFIRMED |
+| r3_options_wc_fri (model) | 181 / +1.41 L | 167 / +1.66 L | 1.63 | +1.50 L (Y) | OOS-CONFIRMED |
+| r3_tfweekly_wk_loser_rev | 159 / +1.34 L | 344 / +0.99 L | 1.11 | +2.03 L (N) | OOS-FAILED (PF 1.11) |
+
+**(c) The luck rate.** 412 other minute-bar ids (8 calendar-bound r4_mechanics ids ineligible): 394 judged, 18 INVALID
+(every r3_ai_crosssec id: its feature audit finds a decision-time feature that reads a later bar when a session lacks its
+09:15 bar, which happens in the old data; the module then invalidates all its ids). 12 OOS-CONFIRMED:
+
+| 2023-26 status | judged | OOS-CONFIRMED |
+|---|---|---|
+| FAILED SCREEN (all) | 385 | **6 (1.6 %)**: r3_tfweekly_volshock_flat, r3_tfweekly_wk_excess_loser_rev, and 4 option models (ibf_400, ibf_400_tp25, cs_trend20, ls_highvix) |
+| FAILED SCREEN, not options | 373 | **2 (0.5 %)** |
+| FAILED SCREEN, option models | 12 | 4 (33 %) |
+| REJECTED ON FINAL | 8 | 5: r3_futures_stk_tom_long (+42.8 L, long-only, positive excess both halves, passes at 5 bps), SCALP-AUC-FADE-1TO3-0925 (+13.2 L, fails at 5 bps), 3 r3_options_ss16_stop2x* models |
+| INVALID on 2023-26 | 1 | 1 (r3_options_cs_trend50, model) |
+| **FINAL-CONFIRMED (a + b)** | 8 | **7 (87.5 %)** |
+
+Read: for stock rules the 2023-26 screen is informative (0.5 % of its failures pass here against 87.5 % of its
+confirmations), so the auction and attention confirmations are unlikely to be luck. For options it is not: the flat-VIX
+Black-Scholes model makes short premium look profitable in most years (VIX above realised volatility, no skew), so a third
+of the screen-failed option structures pass too; an option "pass" here is a property of the model. Several 2023-26 FINAL
+rejections pass 2016-23 (the turn-of-month stock-futures long, the 1-3 % auction fade to 09:25): their edge, if any, did
+not survive into 2023-26, which is exactly what a one-era test cannot see.
+
+**Proven in both eras: 7** (AUC-FADE-3PCT, AUC-FADE-2PCT, SWING-ATTN-ON-3X, VRP-STRANGLE-016-WINGED,
+VRP-STRANGLE-016-NAKED, r3_options_ic_25_10, r3_options_wc_fri); 3 on stock data (one effect counted twice: 3 % is a
+subset of 2 %), 4 on modelled option premiums. Caveats: survivorship (today's names); modelled premiums, not prices, and
+NIFTY weeklies only from 2019-02; 2026 costs and lot sizes on 2016 trades (2016 STT / charges differed); 28 missing
+sessions handled by exclusion; unadjusted volume on 9 events; DSR still unaddressed (N grows by 420 trials on this era).
+Outputs: `<scratchpad>/oldera_min/` (run_a, run_b, run_c: summary.txt, results.csv / .json, trades/*.csv.gz for a, b and
+the module runners; aggregate.json, diag_after_verdicts.json, scripts/). Tests: `tests_min_oos.py` (synthetic), run by
+`test_pipeline.py`.
+
+## Timeframe grid: every strategy on every timeframe, Rs 10 lakh per agent, 1:3 risk-reward (`tfgrid.py`, `capital.py`)
+
+**Plain language.** Every timeframe-portable rule (38 textbook indicator, price-pattern and candlestick rules: EMA / SMA
+crosses, MACD, Supertrend, PSAR, ADX, Ichimoku, Aroon, Heikin-Ashi, Donchian / Turtle, Keltner, Bollinger, ROC, RSI,
+Connors RSI(2), stochastic, Williams %R, CCI, MFI, volume breakout, inside bar, NR7, TD9, 10 candlestick pairs) was run
+on 1, 3, 5, 15, 30, 60 minute, daily and weekly candles, and every catalogue strategy (608) on its own timeframe, each
+as a separate Rs 10 lakh account traded the way a person would: 1 % risk (Rs 10,000) per trade from the stop, MIS 5x /
+CNC 1x / futures margin, config.py's position slots, trades per day and daily loss stop, signals taken in time order.
+Every combination used the user's 1:3 risk-reward bracket. **1,276 combinations, 8 passed the 2023-25 screen, 2 held
+on the one-look 2025-26 hold-out, 0 passed 2016-2023, 0 proven.** Nothing beats costs below the daily timeframe: every
+1-60 minute rule on stocks and on index futures lost money, most of them the whole account. Random-entry accounts
+passed the same screen 1.2 % of the time, so 8 passes out of 1,276 is fewer than luck alone would give.
+
+Pre-registered before any result: `prereg/tfgrid_v1.json` (sha256 `a75a31f998066b02c09a9cca61b5805963d4433ffde080aa91ee9af65ce1652a`,
+byte-identical to `<scratchpad>/tfgrid/PREREGISTERED_TFGRID.json`, committed in 9b104d2 with the code). Every stage refuses
+to run if that sha256 or any rule fingerprint changed. The user's "Risk 1:3" instruction arrived before the file was
+written, so the bracket is part of the plan, not an amendment.
+
+```
+python -m stratlab.tfgrid --list | --preregister
+python -m stratlab.tfgrid --stage1 --jobs 4        # DISCOVERY, every combo (~16 min)
+python -m stratlab.tfgrid --final                  # one FINAL look per stage-1 passer (tfgrid/final_ledger.json)
+python -m stratlab.tfgrid --stage2                 # 2016-23, once (tfgrid/stage2_ledger.json)
+python -m stratlab.tfgrid --controls --live --report
+```
+
+* **Engine** (`tfgrid.gen`): the lab's fill model at minute resolution for every timeframe: a decision at a candle's close
+  fills at the next 1-minute open, 2 bps worse (index 1 bps); stop / target on every later minute (fill minute included),
+  stop first, gaps fill at the open, a target needs a tick through; rule exits at the next open; intraday timeframes no
+  fill at/after 15:15 and square-off at the 15:15 open; daily / weekly overnight, closed at the period's last close.
+  Candles are continuous and Kite-aligned (09:15, short last candle kept; weekly = ISO week); data are cut at the period
+  end before any indicator is computed. A test checks the engine against `sim.fill_intraday` fill for fill.
+* **1:3 bracket**: stop = the rule's own initial stop (Supertrend line, SAR, Turtle 2N, the pattern / mother-bar / NR7 /
+  TD-setup extreme; otherwise 1.5 x ATR(14) of the same timeframe); target = fill +- 3 x |fill - stop|; the rule's own
+  exit signal, max hold and the 15:15 square-off still apply, whichever comes first. Natives: `wrap_rr` sets the same
+  bracket on the catalogue entries and runs the unchanged `sim.py` (no stop: 1.5 x the lab's 5-minute ATR intraday,
+  daily ATR(14) positional).
+* **Account** (`capital.simulate`): Rs 10 lakh fixed base (compounded variant report-only); config.py: intraday 2 /
+  scalping 2 / swing 3 positions, 8 / 20 / 3 trades a day, daily loss stop Rs 10,000 (max_daily_loss / total_capital),
+  min position Rs 25,000, futures margin 15 % (ai_agent_future_margin_pct), index orders <= Rs 25 lakh; futures agent 3
+  positions (task fallback). Agents: 1-5 min scalping, 15-60 min intraday, daily / weekly swing (CNC longs, stock-future
+  shorts), futures (stock futures daily / weekly both ways, NIFTY / BANKNIFTY futures every timeframe). 2026 lot sizes
+  on every date.
+* **Protocol**: stage 1 = `protocol.screen` on the account's DISCOVERY trades (unchanged gates; index combos exempt from
+  the symbol gate); one FINAL look per passer; stage 2 = `protocol_min_oos.judge` on 2016-01-01..2023-11-09 (dirty-link
+  rule applied to candidates before the account); DSR on the stage-2 daily account P&L with N = all trials and N = this
+  grid. Proven = stage 1 + FINAL + stage 2 + DSR >= 0.95.
+
+Results (DISCOVERY 2023-11-10..2025-12-16 unless stated; L = Rs 1 lakh; median = median account net over the combos):
+
+| universe / timeframe | combos | median net | combos with net > 0 | stage-1 passes |
+|---|---|---|---|---|
+| stocks 1 / 3 / 5 min (scalping) | 38 each | -64.6 / -60.5 / -47.6 L | 0 / 0 / 0 | 0 |
+| stocks 15 / 30 / 60 min (intraday) | 38 each | -19.0 / -8.4 / -5.2 L | 0 / 0 / 2 | 0 |
+| stocks daily / weekly (swing) | 38 each | -0.8 / +0.1 L | 8 / 21 | 0 / 0 |
+| stock futures daily / weekly | 38 each | +0.3 / 0.0 L | 24 / 10 | 2 / 0 |
+| NIFTY + BANKNIFTY futures 1 / 3 / 5 / 15 / 30 / 60 min | 36 each | -56.6 / -35.7 / -23.8 / -7.6 / -3.7 / -1.1 L | 0 / 0 / 0 / 1 / 0 / 0 | 0 |
+| NIFTY + BANKNIFTY futures daily / weekly | 36 each | 0.0 / 0.0 L (one lot risks > Rs 10,000) | 8 / 1 | 0 |
+| catalogue strategies, native timeframe | 608 | stocks -4.8 L | 88 | 6 |
+
+| stage-1 passer | agent | DISC net / PF | FINAL (one look) | 2016-23 net / PF | verdict |
+|---|---|---|---|---|---|
+| tfg_williams_r_14@1d:stockfut | futures | +3.23 L / 1.89 | -0.86 L, PF 0.67 | -2.09 L / 0.95 | rejected |
+| tfg_heikin_ashi@1d:stockfut | futures | +2.05 L / 1.45 | -0.49 L, PF 0.85 | -5.75 L / 0.87 | rejected |
+| nat:cs_tweezer_top_d:rr3 | futures | +3.77 L / 1.23 | +1.94 L, PF 1.41 CONFIRMED | -6.00 L / 0.91 | OOS-FAILED |
+| nat:r3_tfweekly_wk_excess_loser_rev:rr3 | swing | +0.55 L / 1.38 | +0.32 L, PF 1.46 CONFIRMED | +0.05 L / 1.01 | OOS-FAILED |
+| nat:cs_bear_engulfing_d:rr3 | futures | +3.72 L / 1.29 | -0.91 L, PF 0.77 | -10.29 L / 0.82 | rejected |
+| nat:cs_tweezer_top_d_conf:rr3 | futures | +2.10 L / 1.53 | -0.13 L, PF 0.85 | -6.47 L / 0.76 | rejected |
+| nat:r3_tfdaily_aroon_cross:rr3 | swing | +2.23 L / 1.64 | -0.64 L, PF 0.76 | +1.94 L / 1.14 | rejected |
+| nat:r5_kite_vars_cs_bull_marubozu_nxo:rr3 | futures | +1.90 L / 1.25 | -0.56 L, PF 0.85 | +2.14 L / 1.06 | rejected |
+
+Every survivor's DSR is 0.000 (with N 3,185 or 1,276). By agent: scalping 152 combos, 0 profitable, 140 lose the whole
+Rs 10 lakh; intraday 375, 13 profitable, 173 ruined, best catalogue `r7_gh2_oops_stock` +3.6 L (PF 1.06, fails); swing
+183, 73 profitable, 2 passes; futures 566, 77 profitable, 6 passes; options: no portable rule (the live strangle only).
+Daily / weekly index futures and weekly stock futures are mostly untradeable here: one lot at the rule's stop risks more
+than 1 % of Rs 10 lakh, so the account skips the signal (pre-registered).
+
+The live PAPER strategies + AUC-FADE-2PCT as Rs 10 lakh accounts with their config.py limits and their own exits
+(report only; 2023-26 includes the already-seen FINAL): AUC-FADE-3PCT +2.84 L 2023-26 (PF 1.68, max DD Rs 24,605) and
++4.16 L 2016-23 (PF 1.35, max DD Rs 83,794); AUC-FADE-2PCT +2.77 L / +6.45 L; SWING-ATTN-ON-3X +1.70 L / +4.51 L;
+VRP-STRANGLE-016-WINGED (modelled premiums) +1.97 L / +5.12 L (max DD Rs 1.30 L / 1.19 L). NIFTY buy-and-hold made +3.36 L
+over DISCOVERY and +14.44 L over 2016-23 on the same Rs 10 lakh. Their 1:3 versions (report only, not trials): AUC-FADE
+loses half its 2023-26 profit (+1.08 L / +1.32 L) but gains in 2016-23 (+4.21 L / +7.30 L, max DD halved); ATTN is
+unchanged (the bracket rarely triggers in 8 minutes before an overnight exit); for the winged strangle 3 x the wing
+risk exceeds the maximum profit, so the bracket cannot trigger. The lab's own numbers are reproduced (max DD 24,605 /
+12,952 / 129,760 = config.py's "lab max DD").
+
+Controls (25 stocks, DISCOVERY, through the same engine and account): 10 random-entry seeds per timeframe have PF
+0.46 (1 min) to 0.89 (daily) and 1 of 80 passes the screen; planted 5 / 10 / 20 % edges raise the PF in order at every
+intraday timeframe and daily, the 100 % cheat is always found (PF 2.3-4.3). Weekly controls have too few trades.
+
+Trials: 1,292 rows appended to `trials_v2.csv` (protocol `tfgrid capital 1:3 v1`; stages `tfgrid-screen`,
+`tfgrid-final`, `tfgrid-oos`; backup `trials_v2.before_tfgrid.csv`): variants 2023-26 1,228 -> 2,504, 2016-23 420 -> 428.
+Caveats: survivorship (today's NIFTY-100 names), spot index for index futures and cash prices for stock futures, 2026
+costs and lot sizes on old years, modelled option premiums, an approximate margin model, realised (not marked-to-market)
+drawdowns, and only the 1:3 exit was tested (the rules' textbook exits were not). Outputs: `<scratchpad>/tfgrid/`
+(REPORT.md, summary.json, stage1/, final/, stage2/, controls/, live/, progress.txt). Tests: `tests_tfgrid.py`
+(synthetic), run by `test_pipeline.py`.
