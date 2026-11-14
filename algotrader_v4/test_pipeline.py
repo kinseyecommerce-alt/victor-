@@ -9616,6 +9616,11 @@ from stratlab import tests_min_oos as _tmo  # noqa: E402
 for _n, _f in _tmo.TESTS:
     run(_n, _f)
 
+section("STRATLAB: timeframe grid + Rs 10 lakh account (stratlab/tfgrid.py, capital.py, prereg/tfgrid_v1.json)")
+from stratlab import tests_tfgrid as _ttg  # noqa: E402
+for _n, _f in _ttg.TESTS:
+    run(_n, _f)
+
 
 # ── stratlab/options_vrp_vix: pre-registered VIX-regime filter on the winged weekly strangle ──
 from stratlab import options_vrp_vix as _vx
