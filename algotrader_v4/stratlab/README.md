@@ -555,3 +555,102 @@ passes its factor_momentum gates, but it is the 5th correlated momentum variant 
 its favour), with a 57 % drawdown. At most it is a paper-trading candidate, not evidence of an edge. New trials:
 54 variants on 2023-26 (N 1,115 -> 1,169) and 25 on 2012-23 (N 178 -> 203), 66 new ids in all (including the INVALID
 calendar v1). Outputs: `<scratchpad>/kite/` (run3y, spreads3y, opts3y, momentum) and `<scratchpad>/oldera_oos/run1/bkite_*`.
+
+## Round 6 — GitHub-sourced strategies, re-implemented from source with known bugs fixed (`catalog/r6_github.py`, `r6_portfolio.py`, `r6_ind.py`)
+
+A 20-entry shortlist taken from public GitHub code (QuantConnect Tutorials strategy library, letianzj QuantResearch,
+freqtrade-strategies, pysystemtrade, Screeni-py, openalgo, marketcalls, quantrocket qmom, rkohli3 TSMOM,
+NiftyOnTheMove, the 101 Formulaic Alphas paper) was classified, pre-registered and run once, with no tuning. The
+downloaded repositories (`<scratchpad>/dl/github`) were only read, never executed. Pre-registration
+`prereg/github_v1.json` (sha256 `b283cda39dd84f6afd65175bc34f7901d9de542bc4bda079848297ec2ecfaf09`, byte-identical
+to `<scratchpad>/PREREGISTERED_GITHUB.json`, committed before any result) lists for every entry the source files with
+their sha256, the rule as coded, the bug fixes, the ONE plain default for each unspecified field, the eras and the
+code fingerprint of every id.
+
+Code: `r6_ind.py` (TD Sequential counts / perfection, Williams VIX Fix, Dynamic Breakout II adaptive lookback,
+pysystemtrade EWMAC / robust vol / mr_wings, Meeus ch. 49 moon phases, ghost-trader replay, R-Breaker pivots, Clenow
+regression momentum, residual-momentum score, Alpha101 #9 #12 #33 #54 #101), `catalog/r6_github.py` (14 per-symbol
+specs through the unchanged `sim.py` / `protocol.py` / `protocol_oos.py`), `r6_portfolio.py` (15 portfolio specs:
+`factor_momentum.backtest` generalised to negative weights = stock futures, and to weekly / quarterly / Q-NOV / daily
+schedules; same data, 10 bps slippage, costs and `factor_momentum.judge` gates; one-look ledger
+`<scratchpad>/github/portfolio_ledger.json`; `--january` writes the January-barometer report). `sim.py` was not changed.
+Tests: `tests_r6.py` (hand-computed values for every formula, Meeus' worked examples 49.a / 49.b and the USNO January
+2024 phases, the portfolio engine's next-open / long-short / cost / stale-name arithmetic, a noise-after-t causality
+check of every weights function, the dense look-ahead audit of the intraday specs), run by `test_pipeline.py`.
+
+Bugs fixed (all listed in the pre-registration): marketcalls' two-quarter lag (`winner.shift(1)`); QC 66's inverted
+turnover, its `int(len x 0.01)` empty tail and 2-month / overwriting tranches; QC 125's absolute-price ranking (269 is
+ranked by % return); freqtrade TD perfection "below either" bar-6/7 low (DeMark: below both); ghost_trader's
+Donchian window that includes the current bar; letianzj Dynamic Breakout II's `(v_t/v_y)/v_t`, its short branch that
+buys and its commented-out breakout test (QC's vol window indexing too); NiftyOnTheMove's up-only gap filter, EMAs
+named SMA and buys outside the top 20 %; rkohli3's sum of a long mean and a short mean; yli188's Alpha101 code is not
+used (its `rank()` ranks along time over the whole sample and it back-fills prices).
+
+Classification (a = as coded after the fixes 5, b = one plain default 13, c = not testable 2): (c) QC 24 liquidity
+premium (needs shares outstanding and market cap; the lab's top-100-by-turnover universe is the opposite end of the
+population the effect lives in, so a proxy would be a different strategy) and the NIFTY-BANKNIFTY IV-spread z-score
+(the source never trades options: its P&L is position x the IV-spread LEVEL x tte^0.7 at 1-minute frequency with a
+full-sample grid search; a faithful EOD test needs a new two-underlying straddle simulator with vega matching and
+expiry rolls). Defaults that matter: residual momentum on a NIFTY-only regression (no Fama-French data for India);
+momentum x turnover uses a LABELLED proxy (decision-day traded value / 60-day mean) because shares outstanding are
+missing; mr_wings is the binary +-1 lot version; WVF exits after a fixed 5-session hold; the 5-EMA trigger is valid
+only in the candle after the alert candle. Dedup: no identical rule in `trials_v2.csv` or round 5; residual / QMOM /
+Clenow / turnover momentum and per-stock TSMOM are CORRELATED variants of momentum families tested before, counted as
+new trials anyway. Eras: intraday on 2023-26 only; daily per-symbol rules on 2023-26 (protocol.py) and once on 2012-23
+(protocol_oos); portfolios on era 1 = 2013-23 (point-in-time top-100, delisted kept) and era 2 = 2023-26
+(survivorship-biased), judged by the factor_momentum gates.
+
+Results (per-symbol: trades / PF / net Rs, "gross" = before costs after modelled slippage; portfolios: CAGR / excess
+over NIFTY per year; "excess vs NIFTY" for trade-level rules = net minus the same notional's NIFTY move over each
+trade, per half; L = Rs 1 lakh):
+
+| source | id (r6_gh_…) | cls | 2023-26 | verdict | 2012-23 | verdict | main reason |
+|---|---|---|---|---|---|---|---|
+| letianzj r_breaker.py | rbreaker_nifty | b | 146 / 0.88 / -0.5 L (gross +0.9 L) | FAIL | – | – | killed by costs (gross PF 1.28, cost 1.3 L); H2 < 0 |
+| letianzj r_breaker.py | rbreaker_banknifty | b | 87 / 1.08 / +0.2 L (gross +1.0 L) | FAIL | – | – | one half (H2 < 0), PF < 1.15, costs take 80 % of gross |
+| Screeni-py + original | ema5_nifty | b | 1,921 / 0.38 / -25.4 L | FAIL | – | – | no edge before costs (gross -7.7 L, gross PF 0.72) |
+| Screeni-py + original | ema5_banknifty | b | 1,750 / 0.46 / -22.7 L | FAIL | – | – | no edge before costs (gross -6.5 L, gross PF 0.78) |
+| freqtrade TDSequential | td9_stock | a | 429 / 0.95 / -0.7 L | FAIL | 4,179 / 1.17 / +27.3 L (H1 +15.2, H2 +12.1) | OOS-CONFIRMED | 2023-26 gross ~0 killed by costs; 2012-23 pass trails NIFTY (excess -3.4 L H1, -4.4 L H2) |
+| freqtrade TDSequential | td9_nifty | a | 1 / 0.00 / -0.8 L | FAIL | 22 / 1.97 / +2.3 L | OOS-FAILED | too few trades (13 / 9 per half) |
+| freqtrade TDSequential | td9_banknifty | a | 1 / 0.00 / -0.1 L | FAIL | 27 / 0.93 / -0.4 L | OOS-FAILED | too few trades; gross < 0 |
+| pysystemtrade mr_wings | mrwings_nifty | b | 3 / 1.69 / +0.1 L | FAIL | 4 / 0.14 / -0.3 L | OOS-FAILED | too few trades (3-sd wings fire ~once a year) |
+| pysystemtrade mr_wings | mrwings_banknifty | b | 1 / inf / +0.03 L | FAIL | 4 / 0.21 / -0.7 L | OOS-FAILED | too few trades |
+| openalgo WVF | wvf_stock | b | 2,255 / 1.30 / +9.0 L; FINAL 1,293 / 0.88 / -2.3 L | REJECTED ON FINAL | 15,379 / 0.91 / -29.6 L (H1 +2.2, H2 -31.8) | OOS-FAILED | the round's only screen pass: its DISCOVERY profit was index drift (excess vs NIFTY +0.6 L H1, -2.2 L H2), FINAL < 0; 2012-23 gross PF 1.02 killed by costs, trails NIFTY |
+| QC 61 lunar | lunar_nifty | a | 53 / 0.45 / -6.3 L | FAIL | 294 / 0.98 / -0.4 L | OOS-FAILED | no edge before costs (2023-26 gross < 0; 2012-23 gross PF 1.04, H2 < 0) |
+| letianzj ghost_trader | ghost_nifty | a | 8 / 0.16 / -1.9 L | FAIL | 31 / 0.81 / -0.8 L | OOS-FAILED | too few trades; gross < 0 |
+| letianzj ghost_trader | ghost_banknifty | a | 6 / 2.40 / +1.8 L | FAIL | 31 / 0.71 / -2.0 L | OOS-FAILED | too few trades; gross < 0 over 2012-23 |
+| QC 04 / letianzj DBO II | dbo2_stock | a | 1,202 / 0.92 / -3.3 L | FAIL | 7,567 / 1.08 / +24.4 L (H1 +0.7, H2 +23.7) | OOS-FAILED | no edge before costs on 2023-26 (H2 < 0); PF 1.08 over 2012-23 and trails NIFTY (excess -38.9 L / -17.7 L) |
+| QC 136 | resid_mom_long | b | CAGR 4.2 % / excess -3.5 | FAIL | H1 (2015-17) 15.3 % / +9.0, H2 21.8 % / +10.8, Sharpe 0.86 | (era1 gates met) | fails only era 2: trails NIFTY 2023-26 on the (favourably biased) current names |
+| QC 136 | resid_mom_ls | b | -6.6 % / -14.3 | FAIL | 3.1 % / -3.2, 11.9 % / +1.0, Sharpe 0.94 | FAIL | one half (H1 excess < 0), era 2 < 0; market-neutral book cannot beat NIFTY's CAGR |
+| QC 269 | season_1y | b | -3.3 % / -11.0 | FAIL | -5.3 % / -17.3, 0.2 % / -10.8 | FAIL | no edge before costs (gross -2.0 % / +3.8 % per half) |
+| Heston-Sadka (QC 269 ext.) | season_5y | b | 6.7 % / -1.0 | FAIL | -4.8 % / -16.8, -6.7 % / -17.7 | FAIL | no edge before costs over 2013-23 |
+| QC 66 | mom_turnover | b | -13.2 % / -20.9 | FAIL | 0.8 % / -11.2, 7.9 % / -3.1 | FAIL | gross 3.1 % / 10.4 %, era 2 gross -11 %: no stable edge, trails NIFTY |
+| marketcalls / QC 33 | etf_switch | a | 8.7 % / +3.3 | FAIL | 4.5 % / -9.4, 8.9 % / -2.1, Sharpe 0.67 | FAIL | trails NIFTY in both 2013-23 halves (75 % invested as coded) |
+| 101 Formulaic Alphas | alpha101_a101 | b | -51.9 % / -59.6 | FAIL | -55.5 % / -67.5, -48.5 % / -59.5 | FAIL | no edge before costs (gross -15 % / -1 % per half) and ~64 %/yr cost drag |
+| 101 Formulaic Alphas | alpha101_a33 | b | -40.6 % / -48.3 | FAIL | -36.7 % / -48.7, -46.3 % / -57.3 | FAIL | killed by costs (gross +20 % / +1 % per half, +12 % era 2; cost drag 64 %/yr) |
+| 101 Formulaic Alphas | alpha101_a12 | b | -40.1 % / -47.8 | FAIL | -39.0 % / -51.0, -39.2 % / -50.1 | FAIL | killed by costs (gross +5.8 % / +4.8 %; drag 55 %/yr) |
+| 101 Formulaic Alphas | alpha101_a54 | b | -47.8 % / -55.5 | FAIL | -46.7 % / -58.7, -46.4 % / -57.4 | FAIL | no edge before costs (gross ~0) |
+| 101 Formulaic Alphas | alpha101_a9 | b | -41.3 % / -49.0 | FAIL | -41.0 % / -53.1, -42.8 % / -53.7 | FAIL | killed by costs (gross +4.5 % / +1.1 %; drag 57 %/yr) |
+| shortlist (no source file) | ibs_xs | b | -47.1 % / -54.8 | FAIL | -43.4 % / -55.4, -46.7 % / -57.6 | FAIL | killed by costs (gross +6.9 % / +1.6 %; drag 64 %/yr) |
+| NiftyOnTheMove (Clenow) | clenow | b | 6.3 % / -1.2 | FAIL | 2.5 % / -9.7, 3.3 % / -7.6, Sharpe 0.48 | FAIL | trails NIFTY (only ~25 % invested: top 20 % of a 100-name ranking leaves few buys) |
+| quantrocket qmom | qmom | b | 11.5 % / +3.8 | FAIL | 12.6 % / -0.9, 6.5 % / -4.5, Sharpe 0.46 | FAIL | trails NIFTY in both 2013-23 halves (gross excess +0.5 / -3.3) |
+| rkohli3 TSMOM | tsmom_stock | b | 0.7 % / -7.0 | FAIL | 8.2 % / -3.8, 0.8 % / -10.2, Sharpe 0.36 | FAIL | trails NIFTY; gross 9.2 % / 1.9 % per half |
+| QC 24 | (liquidity premium) | c | – | not run | – | – | needs shares outstanding / market cap; wrong population |
+| beastytitan18 | (IV-spread z-score) | c | – | not run | – | – | source P&L is not a traded instrument; needs a new 2-underlying option simulator |
+| paperswithbacktest | january_barometer | b | report only | – | NIFTY 2013-2026: 1.12x vs 4.24x buy-and-hold, out of the market 10 of 14 years | no verdict | ~14 observations: no power; January was negative in 10 of 14 years and Feb-Dec rose in 9 of those 10 |
+
+Gross figures for the portfolios come from a zero-cost re-run made AFTER the one-look verdicts were written
+(`<scratchpad>/github/portfolio_gross_diag.json`, diagnostic only: not a trial, ledger untouched).
+
+Verdict: **nothing here is a deployable edge.** 2023-26: 14 per-symbol strategies, 1 screen pass (WVF on stocks),
+REJECTED ON FINAL; 0 confirmed; 15 portfolios, 0 pass the factor_momentum gates. 2012-23: 10 daily per-symbol
+judgements, 1 OOS-CONFIRMED (TD Sequential 9 on stocks, PF 1.17) - and it earned less than holding NIFTY over the same
+trades in both halves, after failing the 2023-26 screen (gross ~0 there): exposure, not an edge. The closest portfolio
+is residual momentum, long-only: +9 / +11 %/yr over NIFTY in 2015-17 / 2018-23 with Sharpe 0.86, but -3.5 %/yr on
+2023-26 (even with today's names); it is one of four momentum variants in this round on top of five tested before, and its long-short version (the
+actual factor) fails, so the long-only result is mostly a momentum-tilted long book. Every daily cross-sectional
+book (5 alphas, IBS) turns over ~190x a year: a few % of gross edge against ~55-65 %/yr of costs. The intraday
+templates (5-EMA, R-Breaker) have no edge before costs or lose it to costs. New trials: 29 variants on 2023-26
+(N 1,169 -> 1,198; 1 new FINAL look) and 26 on 2012-23 (N 203 -> 229, incl. the January-barometer report row); 30 new
+ids in the pre-registration. Outputs: `<scratchpad>/github/` (run3y_swing, run3y_futures, portfolio, january,
+aggregate.json, scripts/) and `<scratchpad>/oldera_oos/run1/github_daily`.

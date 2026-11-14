@@ -8547,9 +8547,9 @@ def t_sl_catalogue_first_batch():
     kinds = {}
     for sp in _SL_REG.values():
         kinds.setdefault(sp.kind, []).append(sp.id)
-        # <= 5 parameters is the first batch's convention; round-3/4 research strategies list theirs in their
+        # <= 5 parameters is the first batch's convention; round-3..6 research strategies list theirs in their
         # pre-registration files (scratchpad r3/r4 PREREGISTERED.txt) and were judged as written
-        assert sp.desc and "\n" not in sp.desc and sp.family and (len(sp.params) <= 5 or sp.id.startswith(("r3_", "r4_", "r5_"))), sp.id
+        assert sp.desc and "\n" not in sp.desc and sp.family and (len(sp.params) <= 5 or sp.id.startswith(("r3_", "r4_", "r5_", "r6_"))), sp.id
     assert len(kinds["intraday"]) >= 12 and len(kinds["scalping"]) >= 8, {k: len(v) for k, v in kinds.items()}
     assert len(set(_SL_REG)) == len(_SL_REG)
     sd = _sl_walk(n_days=30, seed=11)
@@ -8559,8 +8559,8 @@ def t_sl_catalogue_first_batch():
     specs = [sp for sp in _SL_REG.values() if sp.horizon == "intraday"]
     sessions = _sli.build_sessions(sd, idx)
     rare = {sp.id for sp in specs if sp.family == "candlestick"}   # textbook patterns may not occur in 30 days
-    # round-3/4 research rules need real NSE data, the index or rare conditions: audited below, not expected to trade here
-    rare |= {sp.id for sp in specs if sp.id.startswith(("r3_", "r4_", "r5_"))}
+    # round-3..6 research rules need real NSE data, the index or rare conditions: audited below, not expected to trade here
+    rare |= {sp.id for sp in specs if sp.id.startswith(("r3_", "r4_", "r5_", "r6_"))}
     traded = 0
     for sp in specs:
         n = 0
@@ -9599,6 +9599,11 @@ for _n, _f in _tfm.TESTS:
 section("STRATLAB: round-5 Kite ecosystem (stratlab/catalog/r5_kite.py, kite_*.py, prereg/kite_ecosystem_v1.json)")
 from stratlab import tests_kite as _tki  # noqa: E402
 for _n, _f in _tki.TESTS:
+    run(_n, _f)
+
+section("STRATLAB: round-6 GitHub strategies (stratlab/catalog/r6_github.py, r6_portfolio.py, r6_ind.py, prereg/github_v1.json)")
+from stratlab import tests_r6 as _tr6  # noqa: E402
+for _n, _f in _tr6.TESTS:
     run(_n, _f)
 
 
