@@ -878,3 +878,102 @@ sessions handled by exclusion; unadjusted volume on 9 events; DSR still unaddres
 Outputs: `<scratchpad>/oldera_min/` (run_a, run_b, run_c: summary.txt, results.csv / .json, trades/*.csv.gz for a, b and
 the module runners; aggregate.json, diag_after_verdicts.json, scripts/). Tests: `tests_min_oos.py` (synthetic), run by
 `test_pipeline.py`.
+
+## Timeframe grid: every strategy on every timeframe, Rs 10 lakh per agent, 1:3 risk-reward (`tfgrid.py`, `capital.py`)
+
+**Plain language.** Every timeframe-portable rule (38 textbook indicator, price-pattern and candlestick rules: EMA / SMA
+crosses, MACD, Supertrend, PSAR, ADX, Ichimoku, Aroon, Heikin-Ashi, Donchian / Turtle, Keltner, Bollinger, ROC, RSI,
+Connors RSI(2), stochastic, Williams %R, CCI, MFI, volume breakout, inside bar, NR7, TD9, 10 candlestick pairs) was run
+on 1, 3, 5, 15, 30, 60 minute, daily and weekly candles, and every catalogue strategy (608) on its own timeframe, each
+as a separate Rs 10 lakh account traded the way a person would: 1 % risk (Rs 10,000) per trade from the stop, MIS 5x /
+CNC 1x / futures margin, config.py's position slots, trades per day and daily loss stop, signals taken in time order.
+Every combination used the user's 1:3 risk-reward bracket. **1,276 combinations, 8 passed the 2023-25 screen, 2 held
+on the one-look 2025-26 hold-out, 0 passed 2016-2023, 0 proven.** Nothing beats costs below the daily timeframe: every
+1-60 minute rule on stocks and on index futures lost money, most of them the whole account. Random-entry accounts
+passed the same screen 1.2 % of the time, so 8 passes out of 1,276 is fewer than luck alone would give.
+
+Pre-registered before any result: `prereg/tfgrid_v1.json` (sha256 `a75a31f998066b02c09a9cca61b5805963d4433ffde080aa91ee9af65ce1652a`,
+byte-identical to `<scratchpad>/tfgrid/PREREGISTERED_TFGRID.json`, committed in 9b104d2 with the code). Every stage refuses
+to run if that sha256 or any rule fingerprint changed. The user's "Risk 1:3" instruction arrived before the file was
+written, so the bracket is part of the plan, not an amendment.
+
+```
+python -m stratlab.tfgrid --list | --preregister
+python -m stratlab.tfgrid --stage1 --jobs 4        # DISCOVERY, every combo (~16 min)
+python -m stratlab.tfgrid --final                  # one FINAL look per stage-1 passer (tfgrid/final_ledger.json)
+python -m stratlab.tfgrid --stage2                 # 2016-23, once (tfgrid/stage2_ledger.json)
+python -m stratlab.tfgrid --controls --live --report
+```
+
+* **Engine** (`tfgrid.gen`): the lab's fill model at minute resolution for every timeframe: a decision at a candle's close
+  fills at the next 1-minute open, 2 bps worse (index 1 bps); stop / target on every later minute (fill minute included),
+  stop first, gaps fill at the open, a target needs a tick through; rule exits at the next open; intraday timeframes no
+  fill at/after 15:15 and square-off at the 15:15 open; daily / weekly overnight, closed at the period's last close.
+  Candles are continuous and Kite-aligned (09:15, short last candle kept; weekly = ISO week); data are cut at the period
+  end before any indicator is computed. A test checks the engine against `sim.fill_intraday` fill for fill.
+* **1:3 bracket**: stop = the rule's own initial stop (Supertrend line, SAR, Turtle 2N, the pattern / mother-bar / NR7 /
+  TD-setup extreme; otherwise 1.5 x ATR(14) of the same timeframe); target = fill +- 3 x |fill - stop|; the rule's own
+  exit signal, max hold and the 15:15 square-off still apply, whichever comes first. Natives: `wrap_rr` sets the same
+  bracket on the catalogue entries and runs the unchanged `sim.py` (no stop: 1.5 x the lab's 5-minute ATR intraday,
+  daily ATR(14) positional).
+* **Account** (`capital.simulate`): Rs 10 lakh fixed base (compounded variant report-only); config.py: intraday 2 /
+  scalping 2 / swing 3 positions, 8 / 20 / 3 trades a day, daily loss stop Rs 10,000 (max_daily_loss / total_capital),
+  min position Rs 25,000, futures margin 15 % (ai_agent_future_margin_pct), index orders <= Rs 25 lakh; futures agent 3
+  positions (task fallback). Agents: 1-5 min scalping, 15-60 min intraday, daily / weekly swing (CNC longs, stock-future
+  shorts), futures (stock futures daily / weekly both ways, NIFTY / BANKNIFTY futures every timeframe). 2026 lot sizes
+  on every date.
+* **Protocol**: stage 1 = `protocol.screen` on the account's DISCOVERY trades (unchanged gates; index combos exempt from
+  the symbol gate); one FINAL look per passer; stage 2 = `protocol_min_oos.judge` on 2016-01-01..2023-11-09 (dirty-link
+  rule applied to candidates before the account); DSR on the stage-2 daily account P&L with N = all trials and N = this
+  grid. Proven = stage 1 + FINAL + stage 2 + DSR >= 0.95.
+
+Results (DISCOVERY 2023-11-10..2025-12-16 unless stated; L = Rs 1 lakh; median = median account net over the combos):
+
+| universe / timeframe | combos | median net | combos with net > 0 | stage-1 passes |
+|---|---|---|---|---|
+| stocks 1 / 3 / 5 min (scalping) | 38 each | -64.6 / -60.5 / -47.6 L | 0 / 0 / 0 | 0 |
+| stocks 15 / 30 / 60 min (intraday) | 38 each | -19.0 / -8.4 / -5.2 L | 0 / 0 / 2 | 0 |
+| stocks daily / weekly (swing) | 38 each | -0.8 / +0.1 L | 8 / 21 | 0 / 0 |
+| stock futures daily / weekly | 38 each | +0.3 / 0.0 L | 24 / 10 | 2 / 0 |
+| NIFTY + BANKNIFTY futures 1 / 3 / 5 / 15 / 30 / 60 min | 36 each | -56.6 / -35.7 / -23.8 / -7.6 / -3.7 / -1.1 L | 0 / 0 / 0 / 1 / 0 / 0 | 0 |
+| NIFTY + BANKNIFTY futures daily / weekly | 36 each | 0.0 / 0.0 L (one lot risks > Rs 10,000) | 8 / 1 | 0 |
+| catalogue strategies, native timeframe | 608 | stocks -4.8 L | 88 | 6 |
+
+| stage-1 passer | agent | DISC net / PF | FINAL (one look) | 2016-23 net / PF | verdict |
+|---|---|---|---|---|---|
+| tfg_williams_r_14@1d:stockfut | futures | +3.23 L / 1.89 | -0.86 L, PF 0.67 | -2.09 L / 0.95 | rejected |
+| tfg_heikin_ashi@1d:stockfut | futures | +2.05 L / 1.45 | -0.49 L, PF 0.85 | -5.75 L / 0.87 | rejected |
+| nat:cs_tweezer_top_d:rr3 | futures | +3.77 L / 1.23 | +1.94 L, PF 1.41 CONFIRMED | -6.00 L / 0.91 | OOS-FAILED |
+| nat:r3_tfweekly_wk_excess_loser_rev:rr3 | swing | +0.55 L / 1.38 | +0.32 L, PF 1.46 CONFIRMED | +0.05 L / 1.01 | OOS-FAILED |
+| nat:cs_bear_engulfing_d:rr3 | futures | +3.72 L / 1.29 | -0.91 L, PF 0.77 | -10.29 L / 0.82 | rejected |
+| nat:cs_tweezer_top_d_conf:rr3 | futures | +2.10 L / 1.53 | -0.13 L, PF 0.85 | -6.47 L / 0.76 | rejected |
+| nat:r3_tfdaily_aroon_cross:rr3 | swing | +2.23 L / 1.64 | -0.64 L, PF 0.76 | +1.94 L / 1.14 | rejected |
+| nat:r5_kite_vars_cs_bull_marubozu_nxo:rr3 | futures | +1.90 L / 1.25 | -0.56 L, PF 0.85 | +2.14 L / 1.06 | rejected |
+
+Every survivor's DSR is 0.000 (with N 3,185 or 1,276). By agent: scalping 152 combos, 0 profitable, 140 lose the whole
+Rs 10 lakh; intraday 375, 13 profitable, 173 ruined, best catalogue `r7_gh2_oops_stock` +3.6 L (PF 1.06, fails); swing
+183, 73 profitable, 2 passes; futures 566, 77 profitable, 6 passes; options: no portable rule (the live strangle only).
+Daily / weekly index futures and weekly stock futures are mostly untradeable here: one lot at the rule's stop risks more
+than 1 % of Rs 10 lakh, so the account skips the signal (pre-registered).
+
+The live PAPER strategies + AUC-FADE-2PCT as Rs 10 lakh accounts with their config.py limits and their own exits
+(report only; 2023-26 includes the already-seen FINAL): AUC-FADE-3PCT +2.84 L 2023-26 (PF 1.68, max DD Rs 24,605) and
++4.16 L 2016-23 (PF 1.35, max DD Rs 83,794); AUC-FADE-2PCT +2.77 L / +6.45 L; SWING-ATTN-ON-3X +1.70 L / +4.51 L;
+VRP-STRANGLE-016-WINGED (modelled premiums) +1.97 L / +5.12 L (max DD Rs 1.30 L / 1.19 L). NIFTY buy-and-hold made +3.36 L
+over DISCOVERY and +14.44 L over 2016-23 on the same Rs 10 lakh. Their 1:3 versions (report only, not trials): AUC-FADE
+loses half its 2023-26 profit (+1.08 L / +1.32 L) but gains in 2016-23 (+4.21 L / +7.30 L, max DD halved); ATTN is
+unchanged (the bracket rarely triggers in 8 minutes before an overnight exit); for the winged strangle 3 x the wing
+risk exceeds the maximum profit, so the bracket cannot trigger. The lab's own numbers are reproduced (max DD 24,605 /
+12,952 / 129,760 = config.py's "lab max DD").
+
+Controls (25 stocks, DISCOVERY, through the same engine and account): 10 random-entry seeds per timeframe have PF
+0.46 (1 min) to 0.89 (daily) and 1 of 80 passes the screen; planted 5 / 10 / 20 % edges raise the PF in order at every
+intraday timeframe and daily, the 100 % cheat is always found (PF 2.3-4.3). Weekly controls have too few trades.
+
+Trials: 1,292 rows appended to `trials_v2.csv` (protocol `tfgrid capital 1:3 v1`; stages `tfgrid-screen`,
+`tfgrid-final`, `tfgrid-oos`; backup `trials_v2.before_tfgrid.csv`): variants 2023-26 1,228 -> 2,504, 2016-23 420 -> 428.
+Caveats: survivorship (today's NIFTY-100 names), spot index for index futures and cash prices for stock futures, 2026
+costs and lot sizes on old years, modelled option premiums, an approximate margin model, realised (not marked-to-market)
+drawdowns, and only the 1:3 exit was tested (the rules' textbook exits were not). Outputs: `<scratchpad>/tfgrid/`
+(REPORT.md, summary.json, stage1/, final/, stage2/, controls/, live/, progress.txt). Tests: `tests_tfgrid.py`
+(synthetic), run by `test_pipeline.py`.
