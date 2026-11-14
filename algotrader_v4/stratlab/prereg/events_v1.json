@@ -1,0 +1,561 @@
+{
+ "adaptations_before_results": [
+  "Universe of the daily variants: point-in-time top 500 by turnover in BOTH eras (events_daily.py), not the lab's 97 current NIFTY-100 names / old-era top 100. Decided from counts of disclosure ROWS (promoter market purchases >= Rs 1 cr in the top 100: a few dozen a year) and because the published tests use NIFTY 500; no return was looked at.",
+  "Results timestamp: first version (announcement within 48 h / 24 h before the structured filing) put the reaction on the wrong day in 2013-2018 (UNSIGNED check: median |abnormal return| and volume on the assigned day were at the level of ordinary days; 4-20 % agreement with the board-meeting feed). Replaced by the rule in availability_rule.results; after it every era peaks on the assigned day (|AR| 2.7-2.9 % vs 1.4-1.5 %, volume 1.7-2.4 x) and 76-99 % of dates agree with the board-meeting feed. Only unsigned magnitudes and counts were used.",
+  "Results from 2025-04 come from NSE's 'Integrated Filing - Financials' feed (the older results feed stops there).",
+  "Earnings-gap variant: Chan's published rule (gap >= 0.5 x 90-day std of overnight returns, both directions, exit at the close) on minute bars, instead of the sketched 3 % gap + opening-range rule (too few events in 97 names for the 150-trade gate).",
+  "Insider disclosures exist on NSE from 2015-11-27 (SEBI PIT 2015): no insider test before that.",
+  "Stock futures do not fit a Rs 10 lakh account at 1 % risk (one lot risks far more): the account rows of the short variants will show skipped signals; stated here before the run."
+ ],
+ "availability_rule": {
+  "board_meetings": "a notice is usable if broadcast before 09:00 IST of the entry session; the session calendar (exchange holidays) is treated as public",
+  "close": 1530,
+  "insider": "a disclosure is usable for an order only if its NSE broadcast time is before 09:00 IST of the entry session (transaction / intimation dates are never used for timing)",
+  "intraday": "results first public at / after the previous session's 15:30 and before 09:00 today",
+  "order_cutoff": 900,
+  "results": "first_ts = min(earliest structured results filing broadcast, earliest 'Financial Result Updates' announcement within 48 h before it, earliest 'Outcome of Board Meeting' announcement within 24 h before it); reaction session = the first session whose 15:30 close is after first_ts; entry at the following session's open"
+ },
+ "code_sha256": {
+  "capital.py": "382986bba85b4229c3adabcd94b81e1f54825e05a2f7501d4257135f5d99903d",
+  "data_daily.py": "0d07ace83d42d712960a434423c1e6cddf3a5aedc59c94b4d3228804c54999c6",
+  "events_daily.py": "7986b283b2f23a3edf58ed1784ecee325fc09b3ab2971ccce88675e9abe23b1d",
+  "events_data.py": "6c6d2ba958b6944ca53329c7974a28b44c4c37baeea8591f077afc67a9b363db",
+  "events_fetch.py": "5258987062333ee8626ea089542b5c3e706d4f5bd811eb88e36351c1871857eb",
+  "events_parse.py": "bbc9bb6b49a06880df445436c056e06b0426cd6319d03ea9fa7d0381220886fc",
+  "events_run.py": "a9937144da233f5cafe2f5926bf37ad97afe65bcfc5eef1186f6f698d0729c31",
+  "events_strategies.py": "6f3d56168d73d444db8ef2d93c9720c186d5b89e5d36f2cf3b4efda418340358",
+  "protocol.py": "6929839143dbca9dc0bb6d8d0a5fb7b2941d20ea8c1b6a0ced969bd8ad16af9a",
+  "protocol_min_oos.py": "5473ce1f23157132fe494e84039ad58d26ebb848fc7706d7ca8cfaf2dc4c80af",
+  "protocol_oos.py": "86cd23799bcf492a734ccb257cfe3cac1c3f2e2614932356649d0a7a2c8e817a",
+  "sim.py": "315a8448f69fa220aa88bd8a9363fef1cac9ec89c177b323359fb90daaf8ee72"
+ },
+ "corporate_action_rule": "a trade whose (decision day, exit day] contains an unexplained overnight gap (open / previous close < 0.6 or > 1.67) or a demerger / scheme / large-rights ex-day of its symbol is dropped and counted; reported both ways",
+ "data": {
+  "coverage": {
+   "boardmeet": {
+    "by_year": {
+     "2011": 1777,
+     "2012": 7286,
+     "2013": 7321,
+     "2014": 7382,
+     "2015": 7283,
+     "2016": 7924,
+     "2017": 8247,
+     "2018": 8606,
+     "2019": 8457,
+     "2020": 8644,
+     "2021": 8576,
+     "2022": 9048,
+     "2023": 15708,
+     "2024": 19645,
+     "2025": 20777,
+     "2026": 23161
+    },
+    "rows": 169842,
+    "symbols": 3050
+   },
+   "insider": {
+    "by_year": {
+     "2015": 3424,
+     "2016": 42559,
+     "2017": 55747,
+     "2018": 57740,
+     "2019": 37518,
+     "2020": 29904,
+     "2021": 33707,
+     "2022": 18774,
+     "2023": 18271,
+     "2024": 16707,
+     "2025": 13313,
+     "2026": 7725
+    },
+    "rows": 335389,
+    "symbols": 2435
+   },
+   "results": {
+    "by_year": {
+     "2011": 1534,
+     "2012": 6143,
+     "2013": 6187,
+     "2014": 6141,
+     "2015": 5917,
+     "2016": 6156,
+     "2017": 6385,
+     "2018": 6420,
+     "2019": 6387,
+     "2020": 6420,
+     "2021": 6722,
+     "2022": 6908,
+     "2023": 7497,
+     "2024": 8069,
+     "2025": 8707,
+     "2026": 9330
+    },
+    "rows": 104923,
+    "symbols": 3018
+   }
+  },
+  "daily_cache": {
+   "first": 20120102,
+   "last": 20261109,
+   "scheme_ex_days": 152,
+   "sessions": 3659,
+   "symbols_ever_members": 1670,
+   "top_n": 500,
+   "unexplained_gaps": 83,
+   "version": "ed1"
+  },
+  "event_tables_sha256": {
+   "boardmeet.csv.gz": "7831b82bf7ce27d4b24a54316428b775a760486e1dcb454cc17e22a3a95153af",
+   "insider.csv.gz": "6bc982650259f1879d0f5ce2dd691df6837f9b69403f4dba839798f4e3d59ee6",
+   "results.csv.gz": "db63f17ea1c2f05cf284d4dbf8522f58674b2d0e738e4e1866b16747d1f9bf6f"
+  },
+  "sources": [
+   "NSE corporates-pit (insider trading, Reg 7(2))",
+   "NSE corporates-financial-results",
+   "NSE corporate-announcements (Financial Result Updates, Outcome of Board Meeting)",
+   "NSE corporate-board-meetings",
+   "NSE corporates-corporateActions",
+   "NSE symbolchange.csv"
+  ]
+ },
+ "data_check_sha256": "bb427cb2420e726e253480ba302eefc5a8123670005ca770700b031fea86e8cf",
+ "eras": {
+  "2012-23": {
+   "era": [
+    20120101,
+    20231109
+   ],
+   "h1": [
+    20120101,
+    20171231
+   ],
+   "h2": [
+    20180101,
+    20231109
+   ],
+   "note": "insider disclosures start 2015-11-27: insider variants' H1 = 2015-12..2017-12",
+   "protocol": "protocol_oos.evaluate (one look, ledger oos_ledger.json)"
+  },
+  "2016-23": {
+   "era": [
+    20160101,
+    20231109
+   ],
+   "h1": [
+    20160101,
+    20191231
+   ],
+   "h2": [
+    20200101,
+    20231109
+   ],
+   "protocol": "protocol_min_oos.judge on the intraday variant, dirty-link rule applied"
+  },
+  "2023-26": {
+   "calendar": "the lab's 3-year session calendar (trials.calendar_3y)",
+   "ledgers": [
+    "<events_daily cache>/final_ledger.json",
+    "<bars3y cache>/final_ledger.json"
+   ],
+   "protocol": "protocol.evaluate, DISCOVERY 70 % (H1 / H2) + FINAL 30 %, FINAL once and only for screen passers"
+  },
+  "old_era_look": "EVERY variant gets its old-era judgement, whatever its 2023-26 result"
+ },
+ "fills_costs": {
+  "cost_model": "2026-11/f2/ev1",
+  "dividends": "prices are NOT dividend-adjusted (understates longs, overstates shorts by the dividends paid during the hold)",
+  "longs": "delivery (CNC) costs",
+  "notional": 100000.0,
+  "sensitivity_bps": 5.0,
+  "shorts": "stock future on the cash price, futures costs, no basis / lot / roll",
+  "slippage_bps": 2.0
+ },
+ "gates": {
+  "dsr_min": 0.95,
+  "final": {
+   "min_pf": 1.05,
+   "net_gt_0": true
+  },
+  "min_oos": {
+   "costs": "costs.py 2026 rates for every year",
+   "era": [
+    20160101,
+    20231109
+   ],
+   "h1": [
+    20160101,
+    20191231
+   ],
+   "h2": [
+    20200101,
+    20231109
+   ],
+   "max_symbol_share": 0.35,
+   "min_pf": 1.15,
+   "min_trades_per_half": {
+    "intraday": 150,
+    "positional": 60
+   },
+   "net_gt_0": [
+    "h1",
+    "h2"
+   ],
+   "sens_bps": 5.0,
+   "universe": "today's NIFTY-100 names with Kite minute bars 2016-01-01..2023-11-09 (survivorship-biased); no point-in-time gate"
+  },
+  "oos": {
+   "era": [
+    20120101,
+    20231109
+   ],
+   "h1": [
+    20120101,
+    20171231
+   ],
+   "h2": [
+    20180101,
+    20231109
+   ],
+   "max_symbol_share": 0.35,
+   "min_pf": 1.15,
+   "min_trades_per_half": {
+    "intraday": 150,
+    "positional": 60
+   },
+   "net_gt_0": [
+    "h1",
+    "h2"
+   ],
+   "sens_bps": 5.0,
+   "universe": "universe_monthly.csv: top 100 by 60-session turnover before each month, gate on decision day"
+  },
+  "proven": "CONFIRMED on 2023-26 FINAL and OOS-CONFIRMED on the old era and DSR >= 0.95 with N = all 2023-26 trials in the ledger (the fair N = this study's variants is also reported)",
+  "screen": {
+   "max_symbol_share": 0.35,
+   "min_pf": 1.15,
+   "min_trades": {
+    "intraday": 150,
+    "positional": 60
+   },
+   "net_gt_0": [
+    "H1",
+    "H2"
+   ]
+  }
+ },
+ "gates_fingerprint": "1cbbb3ea72c1",
+ "n_variants": 9,
+ "name": "events_v1",
+ "question": "Do promoter / insider open-market purchases and earnings-announcement moves give a tradable edge on NSE stocks after costs, in two eras?",
+ "report_only": {
+  "account": "capital.py: Rs 10 lakh, 1 % risk per trade from the stop distance, config.py position limits, signals in time order; stock-future lot ~ Rs 7.5 lakh contract (approximate)",
+  "event_study": "mean / median abnormal return vs NIFTY over each holding window, 2000 month-block bootstrap resamples, seed 20261114",
+  "placebo": "every event moved to a random session of the same symbol and era (same count, time of day kept, seed 20261114), same pipeline",
+  "planted_edge": "synthetic promoter purchases broadcast the evening before each symbol's best 2 % of 20-session forward returns must show a large profit; the same events delayed 25 sessions must not",
+  "rr3": {
+   "daily": {
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   },
+   "intraday": [
+    "pct",
+    1.0,
+    3.0
+   ]
+  }
+ },
+ "report_only_twins": [
+  {
+   "fingerprint": "d62d5ff06325",
+   "id": "ev_promoter_buy_h20_rr3",
+   "params": {
+    "hold": 20,
+    "min_value": 10000000.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "window_days": 30
+   }
+  },
+  {
+   "fingerprint": "2a39739483fa",
+   "id": "ev_promoter_buy_h60_rr3",
+   "params": {
+    "hold": 60,
+    "min_value": 10000000.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "window_days": 30
+   }
+  },
+  {
+   "fingerprint": "2b9be23afce4",
+   "id": "ev_promoter_buy_dip_h60_rr3",
+   "params": {
+    "dip_pct": 20.0,
+    "high_n": 252,
+    "hold": 60,
+    "min_value": 10000000.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "window_days": 30
+   }
+  },
+  {
+   "fingerprint": "ce04517ff53f",
+   "id": "ev_promoter_sell_short_h20_rr3",
+   "params": {
+    "hold": 20,
+    "min_value": 10000000.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "window_days": 30
+   }
+  },
+  {
+   "fingerprint": "4554407c12c5",
+   "id": "ev_pead_long_h20_rr3",
+   "params": {
+    "hold": 20,
+    "min_ar_pct": 4.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "vol_n": 20
+   }
+  },
+  {
+   "fingerprint": "222e87270d24",
+   "id": "ev_pead_long_h60_rr3",
+   "params": {
+    "hold": 60,
+    "min_ar_pct": 4.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "vol_n": 20
+   }
+  },
+  {
+   "fingerprint": "c679995571ac",
+   "id": "ev_pead_short_h20_rr3",
+   "params": {
+    "hold": 20,
+    "min_ar_pct": 4.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "vol_n": 20
+   }
+  },
+  {
+   "fingerprint": "c30a316f91b1",
+   "id": "ev_pre_earnings_h5_rr3",
+   "params": {
+    "hold": 5,
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  },
+  {
+   "fingerprint": "306b4ad907ec",
+   "id": "ev_egap_intraday_rr3",
+   "params": {
+    "bracket": [
+     "pct",
+     1.0,
+     3.0
+    ],
+    "k": 0.5,
+    "lookback": 90,
+    "stop_pct": 5.0
+   }
+  }
+ ],
+ "strategies": {
+  "ev_egap_intraday": {
+   "fingerprint": "b73503fad024"
+  },
+  "ev_egap_intraday_rr3": {
+   "fingerprint": "306b4ad907ec"
+  },
+  "ev_pead_long_h20": {
+   "fingerprint": "eeaec74d8733"
+  },
+  "ev_pead_long_h20_rr3": {
+   "fingerprint": "4554407c12c5"
+  },
+  "ev_pead_long_h60": {
+   "fingerprint": "c22ae7d19e4c"
+  },
+  "ev_pead_long_h60_rr3": {
+   "fingerprint": "222e87270d24"
+  },
+  "ev_pead_short_h20": {
+   "fingerprint": "0d6db29a0478"
+  },
+  "ev_pead_short_h20_rr3": {
+   "fingerprint": "c679995571ac"
+  },
+  "ev_pre_earnings_h5": {
+   "fingerprint": "48c282783e85"
+  },
+  "ev_pre_earnings_h5_rr3": {
+   "fingerprint": "c30a316f91b1"
+  },
+  "ev_promoter_buy_dip_h60": {
+   "fingerprint": "6b41eb8c6120"
+  },
+  "ev_promoter_buy_dip_h60_rr3": {
+   "fingerprint": "2b9be23afce4"
+  },
+  "ev_promoter_buy_h20": {
+   "fingerprint": "7294b339c66c"
+  },
+  "ev_promoter_buy_h20_rr3": {
+   "fingerprint": "d62d5ff06325"
+  },
+  "ev_promoter_buy_h60": {
+   "fingerprint": "453120d147f8"
+  },
+  "ev_promoter_buy_h60_rr3": {
+   "fingerprint": "2a39739483fa"
+  },
+  "ev_promoter_sell_short_h20": {
+   "fingerprint": "806713eee6a1"
+  },
+  "ev_promoter_sell_short_h20_rr3": {
+   "fingerprint": "ce04517ff53f"
+  }
+ },
+ "trials": "each of the 9 variants is one trial on 2023-26 and one on its old era; the 9 report-only twins are recorded as stage 'explore' (they count in N, they cannot be proven)",
+ "universe": {
+  "daily_variants": "point-in-time: each month's top 500 NSE equity shares by 60-session average turnover (computed from data before the month); a position may be opened only on a member day; short variants additionally need a stock future traded on the decision day",
+  "intraday_variant": "lab minute bars: 2023-26 = 97 of today's NIFTY-100 names, 2016-23 = today's NIFTY-100 names (both SURVIVORSHIP-BIASED)"
+ },
+ "variants": [
+  {
+   "family": "insider",
+   "fingerprint": "7294b339c66c",
+   "horizon": "positional",
+   "id": "ev_promoter_buy_h20",
+   "kind": "swing",
+   "params": {
+    "hold": 20,
+    "min_value": 10000000.0,
+    "stop_pct": 20.0,
+    "window_days": 30
+   },
+   "rule": "Promoter market purchases >= Rs 1 cr disclosed within 30 days: buy next open, hold 20 sessions, 20 % stop"
+  },
+  {
+   "family": "insider",
+   "fingerprint": "453120d147f8",
+   "horizon": "positional",
+   "id": "ev_promoter_buy_h60",
+   "kind": "swing",
+   "params": {
+    "hold": 60,
+    "min_value": 10000000.0,
+    "stop_pct": 20.0,
+    "window_days": 30
+   },
+   "rule": "Promoter market purchases >= Rs 1 cr disclosed within 30 days: buy next open, hold 60 sessions, 20 % stop"
+  },
+  {
+   "family": "insider",
+   "fingerprint": "6b41eb8c6120",
+   "horizon": "positional",
+   "id": "ev_promoter_buy_dip_h60",
+   "kind": "swing",
+   "params": {
+    "dip_pct": 20.0,
+    "high_n": 252,
+    "hold": 60,
+    "min_value": 10000000.0,
+    "stop_pct": 20.0,
+    "window_days": 30
+   },
+   "rule": "Promoter market purchases >= Rs 1 cr within 30 days while >= 20 % below the 252-session high: hold 60"
+  },
+  {
+   "family": "insider",
+   "fingerprint": "806713eee6a1",
+   "horizon": "positional",
+   "id": "ev_promoter_sell_short_h20",
+   "kind": "futures",
+   "params": {
+    "hold": 20,
+    "min_value": 10000000.0,
+    "stop_pct": 20.0,
+    "window_days": 30
+   },
+   "rule": "Promoter market sales >= Rs 1 cr disclosed within 30 days: short the stock future next open, 20 sessions"
+  },
+  {
+   "family": "earnings",
+   "fingerprint": "eeaec74d8733",
+   "horizon": "positional",
+   "id": "ev_pead_long_h20",
+   "kind": "swing",
+   "params": {
+    "hold": 20,
+    "min_ar_pct": 4.0,
+    "stop_pct": 20.0,
+    "vol_n": 20
+   },
+   "rule": "Results reaction day abnormal return >= +4 % vs NIFTY on above-average volume: buy next open, 20 sessions"
+  },
+  {
+   "family": "earnings",
+   "fingerprint": "c22ae7d19e4c",
+   "horizon": "positional",
+   "id": "ev_pead_long_h60",
+   "kind": "swing",
+   "params": {
+    "hold": 60,
+    "min_ar_pct": 4.0,
+    "stop_pct": 20.0,
+    "vol_n": 20
+   },
+   "rule": "Results reaction day abnormal return >= +4 % vs NIFTY on above-average volume: buy next open, 60 sessions"
+  },
+  {
+   "family": "earnings",
+   "fingerprint": "0d6db29a0478",
+   "horizon": "positional",
+   "id": "ev_pead_short_h20",
+   "kind": "futures",
+   "params": {
+    "hold": 20,
+    "min_ar_pct": 4.0,
+    "stop_pct": 20.0,
+    "vol_n": 20
+   },
+   "rule": "Results reaction day abnormal return <= -4 % vs NIFTY on above-average volume: short the future, 20 sessions"
+  },
+  {
+   "family": "earnings",
+   "fingerprint": "48c282783e85",
+   "horizon": "positional",
+   "id": "ev_pre_earnings_h5",
+   "kind": "swing",
+   "params": {
+    "hold": 5,
+    "stop_pct": 20.0
+   },
+   "rule": "Buy 5 sessions before the notified results board meeting, sell at the close of the last session before it"
+  },
+  {
+   "family": "earnings",
+   "fingerprint": "b73503fad024",
+   "horizon": "intraday",
+   "id": "ev_egap_intraday",
+   "kind": "intraday",
+   "params": {
+    "k": 0.5,
+    "lookback": 90,
+    "stop_pct": 5.0
+   },
+   "rule": "Results out overnight and the opening gap >= 0.5 x 90-session overnight std: trade with the gap to 15:15"
+  }
+ ],
+ "written": "2026-11-14 18:53"
+}
