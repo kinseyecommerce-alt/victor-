@@ -6189,6 +6189,37 @@ run("auto-login: vault stores user id/password/seed encrypted", t_kal_vault_stor
 run("auto-login: endpoint rejects a 6-digit code as the seed", t_kal_endpoint_rejects_six_digit_code_as_seed)
 run("auto-login: not needed without credentials",             t_kal_needed_now_false_without_credentials)
 
+def t_kal_needed_now_weekend_and_weekday_window():
+    from datetime import datetime as _dt
+    import pytz as _pz
+    ist = _pz.timezone("Asia/Kolkata")
+    saved = (_kal.now_ist, _kal.credentials_ready, _kal.token_valid_today)
+    try:
+        _kal.credentials_ready = lambda: True
+        _kal.token_valid_today = lambda: False
+        for when, want in [(_dt(2026, 11, 14, 8, 45), True),    # Saturday morning
+                           (_dt(2026, 11, 15, 20, 0), True),    # Sunday evening
+                           (_dt(2026, 11, 16, 8, 45), True),    # Monday before the close
+                           (_dt(2026, 11, 16, 16, 0), False)]:  # Monday after the close
+            _kal.now_ist = (lambda w=when: ist.localize(w))
+            assert _kal.needed_now() is want, (when, want)
+        _kal.token_valid_today = lambda: True
+        _kal.now_ist = lambda: ist.localize(_dt(2026, 11, 14, 8, 45))
+        assert _kal.needed_now() is False                        # a working token: nothing to do
+    finally:
+        _kal.now_ist, _kal.credentials_ready, _kal.token_valid_today = saved
+
+def t_kal_refresh_jobs_run_every_day():
+    import platform_scheduler as _ps
+    src = _inspect_kal.getsource(_ps.PlatformScheduler.start) if hasattr(_ps, "PlatformScheduler") else open(_ps.__file__).read()
+    for job in ('id="kite_refresh"', 'id="kite_refresh_last"'):
+        line = next(l for l in src.splitlines() if job in l)
+        assert 'day_of_week="*"' in line, line
+
+import inspect as _inspect_kal
+run("auto-login: weekend login any time, weekday only before 15:30", t_kal_needed_now_weekend_and_weekday_window)
+run("auto-login: 08:45/08:55/09:05 refresh jobs run every day",      t_kal_refresh_jobs_run_every_day)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 section("21. DASHBOARD AUTH: ADMIN LOGIN (JWT) IS ENOUGH, API KEY OPTIONAL")
@@ -9523,9 +9554,46 @@ def t_sl_cli_sensitivity_and_screen_only():
 run("stratlab: CLI reports 2 bps by default, a 5 bps sensitivity column, the cost model, and --screen-only",
     t_sl_cli_sensitivity_and_screen_only)
 
+def t_sl_cli_trials_ledger():
+    """--trials appends one row per evaluated strategy (failures too); without it nothing is recorded."""
+    from stratlab import run as _slr
+    import contextlib, io, csv as _csv
+
+    def bars(sd):
+        return [[f"{str(d)[:4]}-{str(d)[4:6]}-{str(d)[6:]}T{m // 60:02d}:{m % 60:02d}:00", float(o), float(h), float(l), float(c), float(v)]
+                for d, m, o, h, l, c, v in zip(sd.date, sd.t, sd.o, sd.h, sd.l, sd.c, sd.v)]
+    with _sl_tmp.TemporaryDirectory() as td:
+        src = os.path.join(td, "bars"); os.makedirs(src)
+        for k, sym in enumerate(("AAA", "BBB")):
+            with open(os.path.join(src, sym + ".json"), "w") as fh:
+                _sl_json.dump({"symbol": sym, "interval": "minute", "bars": bars(_sl_walk(n_days=12, seed=30 + k, symbol=sym))}, fh)
+        led = os.path.join(td, "trials.csv")
+        args = ["--data", src, "--kind", "scalping", "--ids", "scalp_orb5,scalp_vwap_bounce", "--screen-only",
+                "--cache", os.path.join(td, "cache"), "--jobs", "1"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert _slr.main(args + ["--out", os.path.join(td, "o1"), "--trials", ""]) == 0
+            assert not os.path.exists(led)
+            assert _slr.main(args + ["--out", os.path.join(td, "o2"), "--trials", led]) == 0
+        rows = list(_csv.DictReader(open(led)))
+        assert sorted(r["strategy_id"] for r in rows) == ["scalp_orb5", "scalp_vwap_bounce"], rows
+        assert all(r["stage"] == "screen" and r["dataset"] == "bars" and r["params_fp"] for r in rows)
+
+
+run("stratlab: --trials records every evaluated strategy in the trials ledger; off by default", t_sl_cli_trials_ledger)
+
+section("STRATLAB: trials ledger and Deflated Sharpe Ratio (stratlab/trials.py)")
+from stratlab import tests_trials as _ttr  # noqa: E402
+for _n, _f in _ttr.TESTS:
+    run(_n, _f)
+
 section("STRATLAB: long-term reversal basket (stratlab/ltr.py)")
 from stratlab import tests_ltr as _tltr  # noqa: E402
 for _n, _f in _tltr.TESTS:
+    run(_n, _f)
+
+section("STRATLAB: factor momentum (stratlab/factor_momentum.py, pre-registered prereg/momentum_v1.json)")
+from stratlab import tests_factor_momentum as _tfm  # noqa: E402
+for _n, _f in _tfm.TESTS:
     run(_n, _f)
 
 

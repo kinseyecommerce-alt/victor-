@@ -1,0 +1,74 @@
+{
+  "title": "Slow factor momentum (vol-adjusted 12-1 / 6-1), NSE top-100 by turnover - pre-registration v1",
+  "written": "2026-11-14 02:50 UTC",
+  "status": "Written BEFORE any return, P&L or metric of this strategy was computed. Nothing below will be changed after results are seen. One look only: each variant is run once and its result written to the ledger; the runner refuses to re-run a variant already in it.",
+  "code": "algotrader_v4/stratlab/factor_momentum.py (CLI: python -m stratlab.factor_momentum)",
+  "variants": {
+    "fm_monthly_nofilter":   {"rebalance": "monthly",     "trend_filter": false},
+    "fm_monthly_filter":     {"rebalance": "monthly",     "trend_filter": true},
+    "fm_semiannual_nofilter": {"rebalance": "semiannual", "trend_filter": false},
+    "fm_semiannual_filter":  {"rebalance": "semiannual",  "trend_filter": true}
+  },
+  "n_variants": 4,
+  "signal": {
+    "decision": "at the close of the LAST session of a calendar month (decision session t); uses closes up to and including t only",
+    "lookbacks_sessions": {"skip": 21, "m6": 126, "m12": 252},
+    "returns": "R12 = C[t-21]/C[t-252] - 1 ; R6 = C[t-21]/C[t-126] - 1 (C = the stock's close, forward-filled over market sessions it did not trade; offsets count market sessions)",
+    "volatility": "sigma = population std of the 252 daily log returns of the forward-filled close over sessions t-251..t, times sqrt(252)",
+    "vol_adjusted": "VAM6 = R6 / sigma ; VAM12 = R12 / sigma",
+    "zscore": "cross-sectional over the eligible stocks of that decision: z = (VAM - mean) / population std, then clipped to [-3, +3]",
+    "score": "(z6 + z12) / 2 ; rank descending, ties broken by symbol name",
+    "eligibility": "member of the universe for the month of the execution session; has a real (not forward-filled) close on t; has real closes on >= 90 % of the 253 sessions t-252..t; sigma > 0; (era 2) no known corporate-action gap in (t-252, t]"
+  },
+  "portfolio": {
+    "holdings": 20,
+    "weighting": "equal weight 1/20 of equity measured at the execution open; cap 10 % per stock (binds only if fewer than 10 names are eligible; the rest stays in cash)",
+    "rebalance_monthly": "every month-end decision",
+    "rebalance_semiannual": "the first decision of the era, then every 6th month-end after it (old era: end-Jan / end-Jul; era 2: end-Nov / end-May)",
+    "execution": "at the OPEN of the first session after the decision session (i.e. the first session of the next month). Trades move each name to its target weight; a trade on a name that stays held is skipped if |target - current| < 0.5 % of equity (no-trade band). Names leaving the top 20 are sold completely.",
+    "trend_filter": "when on: if NIFTY close at t < SMA200 of NIFTY closes (sessions t-199..t), the target is 100 % cash (everything sold at the next open). Checked at EVERY month-end in both monthly and semi-annual variants. Leaving cash at a month-end that is not a scheduled semi-annual rebalance buys a fresh top-20 selection; the semi-annual clock is not reset.",
+    "cash": "earns 0 %; statutory costs and slippage are paid from cash, which may go marginally negative by at most one rebalance's costs (0 % financing)",
+    "capital": "Rs 10,00,000 initial; fractional shares allowed",
+    "valuation": "marked at every session close; a held stock that does not trade on a day is valued at its last close",
+    "untradeable_exit": "a held stock with no trade on an execution day (suspended / delisted / merged away) is sold at its last available close (stale price) with normal costs; the count of such exits is reported (optimistic for failures, approximately right for mergers such as HDFC -> HDFCBANK)"
+  },
+  "costs": {
+    "statutory": "costs.round_trip_cost(buy_value, 0, 'equity_cnc') for every buy and costs.round_trip_cost(0, sell_value, 'equity_cnc') for every sell, per symbol per execution day: STT 0.1 % both sides, stamp 0.015 % on buys, exchange 0.00307 %, SEBI Rs 10/crore, GST 18 % on exchange+SEBI, Zerodha brokerage 0 on delivery, DP Rs 15.34 per scrip per sell day. Cost model COST_MODEL_VERSION 2026-11 (applied to all years: 2012-2023 rates were different; 2026 rates are higher on STT so this is conservative).",
+    "slippage_bps_per_side": 10
+  },
+  "era1_oldera": {
+    "data": "scratchpad/nse_old/eq_daily_adj.csv.gz (split/bonus adjusted, NOT dividend adjusted, delisted names kept; series EQ preferred over BE when both exist on a day); calendar = sessions of NIFTY in nse_old/index_daily.csv.gz",
+    "universe": "nse_old/universe_monthly.csv: point-in-time top 100 by 60-session average turnover, list effective from the month's first session (computed only from data strictly before it). Delisted names are kept, which avoids survivorship bias.",
+    "window": "first decision 2013-01-31 (last session of Jan 2013), first trade at the open of the first Feb-2013 session; last valuation 2023-11-09",
+    "warmup_deviation_stated_in_advance": "The data starts 2012-01-02 and the 12-1 signal needs 253 sessions, so no portfolio can be formed before end-Jan 2013. H1 therefore runs 2013-01-31 close -> last session of 2017 instead of 2012-02 -> 2017-12. This is a property of the data, fixed here before any result.",
+    "halves": {"H1": "decision close 2013-01-31 -> close of the last session <= 2017-12-31", "H2": "that close -> close 2023-11-09"},
+    "benchmark": "NIFTY 50 price index (index_daily.csv.gz, no dividends). The strategy is also price-only (dividends not adjusted), so the comparison is like-for-like ('total-ish').",
+    "gates": {
+      "H1": ["net CAGR > 0", "net CAGR - NIFTY CAGR > 0"],
+      "H2": ["net CAGR > 0", "net CAGR - NIFTY CAGR > 0"],
+      "whole_era": ["Sharpe >= 0.5 (daily net returns, rf = 0, annualised by sqrt(252), 2013-01-31 -> 2023-11-09)"],
+      "reported_not_gated": ["max drawdown", "turnover", "cost drag"]
+    }
+  },
+  "era2_recent": {
+    "label": "SURVIVORSHIP-BIASED: universe = the ~97 CURRENT NIFTY-100 names that have 1-minute bars in scratchpad/bars3y (today's index members, chosen with hindsight). A pass here is weak evidence; a failure is informative.",
+    "data": "daily bars aggregated from bars3y 1-minute bars (open = 09:15 bar open, close = last bar close; Kite data, split/bonus adjusted, not dividend adjusted), via stratlab.data and the existing cache. Lookback history before 2023-11-10 is spliced from nse_old/eq_daily_adj.csv.gz by chaining returns: old-era closes up to 2023-11-09, the 2023-11-09 -> 2023-11-10 return from the official NSE bhavcopy (scratchpad/nse/delivery.csv.gz close/prev_close), then bars3y returns. Symbol map for the splice: ETERNAL <- ZOMATO, UNITDSPR <- MCDOWELL-N; other names by identical symbol. Names with no old-era history become eligible once they have the required history.",
+    "corporate_actions": "known unadjusted demerger gaps (stratlab.ltr.CA_GAPS: SIEMENS 2025-04-07, VEDL 2026-04-30): prices before the gap day are scaled by open(gap day)/close(previous day) so the overnight return that day is 0, and the name is ineligible for selection while the gap lies in its lookback window",
+    "universe": "all bars3y stock names (eligibility rules as above)",
+    "calendar": "sessions of the bars3y daily bars (union over stocks); NIFTY = bars3y _NIFTY50_day closes (from 2022-11-10, enough for SMA200)",
+    "window": "first decision 2023-11-30 (last session of Nov 2023), first trade at the open of 2023-12-01; last valuation = last bars3y session (2026-11-09)",
+    "benchmark": "NIFTY 50 price index (bars3y _NIFTY50_day)",
+    "gates": ["net CAGR > 0", "net CAGR - NIFTY CAGR > 0"]
+  },
+  "verdict": "A variant PASSES only if every era-1 gate AND every era-2 gate is met. Anything else is FAIL. No parameter (lookbacks, holdings, band, costs, filter, schedule, gates) will be changed after seeing results; a new idea needs a new pre-registration with a new id.",
+  "multiple_testing_note": "4 variants are tested; the 4 are highly correlated, so this is closer to 1-2 independent tries, but a single pass among 4 is still weaker evidence than a pass with one pre-specified variant. Cross-sectional momentum is a published factor (Jegadeesh-Titman 1993; NSE's own NIFTY200 Momentum 30 index, launched 2020, uses a very similar vol-adjusted 6/12-month score), so 2012-2023 is out-of-sample for THIS code, not for the idea.",
+  "metrics_definitions": {
+    "CAGR": "(E_end / E_start) ^ (365.25 / calendar days) - 1 on session closes",
+    "excess": "strategy net CAGR minus NIFTY CAGR over the same two closes",
+    "sharpe": "mean / std of daily net equity returns * sqrt(252), rf = 0",
+    "max_dd": "largest peak-to-trough fall of daily closing equity within the segment",
+    "turnover": "sum of |traded value| / 2 / mean daily equity / years (one-way, per year)",
+    "cost_drag": "(statutory costs + slippage) / mean daily equity / years, in % per year"
+  },
+  "ledger": "scratchpad/momentum_oos/ledger.json; key = variant id; stores the prereg sha256, the time and the result; a variant already present is never recomputed"
+}

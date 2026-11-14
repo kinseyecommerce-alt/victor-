@@ -8,7 +8,7 @@ exchanges the resulting request_token for an access token with the API secret.
 
 Credentials come from the encrypted vault (Settings → API Keys): KITE_USER_ID, KITE_PASSWORD and
 KITE_TOTP_SECRET (the base32 seed shown when enabling TOTP on Zerodha, not a 6-digit code).
-Nothing is typed in here — the scheduler calls it at 08:45 IST on weekdays, again at 08:55 and
+Nothing is typed in here — the scheduler calls it at 08:45 IST every day (weekends too, for research data), again at 08:55 and
 09:05 if it failed, and once at startup when there is no valid token for the day.
 
 Note: your Zerodha password and TOTP seed stored on the server let anyone with the server AND the
@@ -166,7 +166,8 @@ def token_valid_today() -> bool:
 
 
 def needed_now() -> bool:
-    """Startup / catch-up rule: weekday, before 15:30 IST, credentials present, no working token."""
+    """Startup / catch-up rule: credentials present, no working token, and either a weekend (any time,
+    for research data) or a weekday before 15:30 IST."""
     now = now_ist()
-    return (credentials_ready() and now.weekday() < 5 and (now.hour, now.minute) < (15, 30)
-            and not token_valid_today())
+    in_window = now.weekday() >= 5 or (now.hour, now.minute) < (15, 30)
+    return credentials_ready() and in_window and not token_valid_today()

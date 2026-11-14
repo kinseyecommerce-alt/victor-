@@ -326,3 +326,143 @@ today's EOD raises `LookAheadError`). Tests: `<scratchpad>/nse/tests_nsedata.py`
 
     python -m stratlab.nsedata --check
     python -m stratlab.nsedata --data <bars3y> --out <scratch> --specs stratlab.my_module:SPECS [--screen-only]
+
+## Old era 2012-01-01 .. 2023-11-09: daily-only out-of-sample round (`data_daily.py`, `oldera_fo.py`, `protocol_oos.py`)
+
+The decade before the 3-year data was never used by any strategy. It is judged as ONE out-of-sample block, once per
+strategy, with gates frozen in `protocol_oos.GATES` (fingerprint recorded with every judgement and in the
+pre-registration file): net > 0 in H1 (2012-01-01..2017-12-31) AND H2 (2018-01-01..2023-11-09), PF >= 1.15 over the
+era, >= 60 trades (positional) in EACH half, top symbol <= 35 % of net (skipped for one-instrument strategies); the
+5 bps run (index 2.5 bps, options haircut x2.5) is reported, not a gate. protocol.py is not used for the verdict and
+not changed; its constants are imported.
+
+* Data: NSE bhavcopy (`<scratch>/nse_old`, read-only): official open / high / low / volume, close = NSE LAST traded
+  price (the minute lab's daily close is the 15:29 minute close; `STRATLAB_DAILY_CLOSE=close` for the official close),
+  back-adjusted for splits / bonuses / large demergers, renames merged (MUNDRAPORT -> ADANIPORTS ...), delisted names
+  kept, special sessions (Muhurat, DR-test Saturdays, 2017-07-10) dropped with a causal turnover rule. Index futures run
+  on NIFTY / BANKNIFTY official daily bars; `d.nifty` / `d.vix` are official closes.
+* Universe: point-in-time monthly top 100 by 60-session turnover (`universe_monthly.csv`); a stock strategy may open a
+  position only on a member decision day (`data_daily.gate`, the strategy function is wrapped, not edited).
+* nsedata: `oldera_fo.use()` points it at `<scratch>/nse_old_view` (delivery, F&O bhavcopy with filled lots,
+  participant OI, ban list, index spot); the availability rule (EOD of D usable from D+1's open) is unchanged.
+* Eligible: positional @strategy specs without `decision_time` (minus three hard-coded-calendar specs) and the monthly /
+  expiry-week real-price option specs of options_r4. `python -m stratlab.protocol_oos --list` prints both lists with
+  reasons. Tests: `python -m stratlab.tests_oldera` (no catalogue strategy is run on the old era by the tests).
+
+```
+python -m stratlab.data_daily --build && python -m stratlab.oldera_fo --build-view
+python -m stratlab.protocol_oos --preregister <scratch>/oldera_oos/PREREGISTERED_OOS.json
+python -m stratlab.protocol_oos --out <scratch>/oldera_oos/run1 --prereg <scratch>/oldera_oos/PREREGISTERED_OOS.json --jobs 4
+```
+
+## Trials ledger and Deflated Sharpe Ratio (`trials.py`)
+
+Every evaluation is a trial, and the best of N trials looks good by luck. `trials.py` keeps an **append-only** CSV of
+every evaluation (default `<scratchpad>/stratlab_cache/trials_v2.csv`; `--ledger PATH` or `$STRATLAB_TRIALS` to move it;
+refused inside the repository) and deflates Sharpe ratios by the number of trials.
+
+    python -m stratlab.trials backfill [--scratch DIR] [--ledger PATH]   # rebuild from everything on disk (idempotent)
+    python -m stratlab.trials summary                                    # rows / variants per era and stage
+    python -m stratlab.trials report --out <scratch dir>                 # DSR of deployed + FINAL-confirmed strategies
+    python -m stratlab.run ... --trials <ledger>                         # record a new run (or export STRATLAB_TRIALS)
+
+Recording from `stratlab.run` is off unless `--trials` or `$STRATLAB_TRIALS` is set (so tests never write to the
+real ledger): **export STRATLAB_TRIALS before research runs**, and run `backfill` after module runs (auction,
+attention, options, ltr) so they are counted too.
+
+* **Row** = one evaluation: strategy id, family (catalogue/module prefix), parameter fingerprint (`p:` + hash of the
+  results.csv `params`, else the code fingerprint), era (`2023-26` / `2012-23`), protocol, stage (`screen`,
+  `screen-smoke`, `final`, `oos`, `explore`), dataset, period, cost model, trades, net, PF, per-trade mean / std /
+  Sharpe of the net, mean gross and mean cost per trade, and, when the trade list exists, the daily-P&L Sharpe,
+  skewness and kurtosis over the period (DISCOVERY for screens, FINAL for FINAL looks, the era for the OOS), verdict,
+  source file and trade file. Rows are never rewritten; re-appending the same evaluation is a no-op.
+* **Backfill sources**: every `results.csv` of a protocol run under the scratchpad (stratlab.run, r3/r4 drivers,
+  options modules, candlestick runs, reviewer neighbour runs; smoke runs marked `screen-smoke`), the module
+  `report.json` files (auction, auction_r2, attention), the LTR basket, the one-look FINAL ledgers
+  (`stratlab_cache/final_ledger.json`, `stratlab_cache/*/final_ledger.json`: authoritative FINAL verdicts), the
+  2012-23 OOS ledger with its trade files, `pm_robust_edges`, `dd/screen_old.json`, and the exploratory effect
+  measurements (round-1 facts, r2 intraday / swing / F&O effects, cross-sectional series, lead-lag, volatility
+  measurements, event studies). Live-agent replays under `edge/` are not strategy trials and are not counted.
+* **Counting N honestly**: every screened variant counts, passers or not. A variant is a strategy id plus each
+  distinct parameter set run under it; a re-run of the same variant (smoke, another cost model or slippage, another
+  dataset of the same era, a reviewer rebuild) is not a new trial. Exploratory effect tests count (they shaped what
+  was pre-registered). As backfilled on 2026-11-14: **N = 1,115 variants on 2023-26 data** (640 protocol screens /
+  FINALs + 475 exploratory effects), 38 FINAL looks, 178 variants judged on 2012-23.
+* **PSR / DSR** (Bailey & Lopez de Prado 2012, 2014), non-annualised daily Sharpe, skewness, NON-excess kurtosis:
+  `PSR(SR*) = Phi((SR - SR*) sqrt(T-1) / sqrt(1 - skew SR + (kurt-1)/4 SR^2))`;
+  `SR0 = sqrt(V[SR]) ((1-g) Z^-1(1-1/N) + g Z^-1(1-1/(N e)))`, g = Euler-Mascheroni; `DSR = PSR(SR0)`.
+  The unit tests reproduce the paper's worked example (SR 2.5 annual, T 1250, N 100, V 0.5, skew -3, kurt 10:
+  SR0 = 0.1132 daily, DSR = 0.9004).
+* **V[SR]** is the cross-trial variance of the DISCOVERY daily Sharpe over the 631 trials with a 3-year trade list.
+  The naive sample variance (sd 0.59 per day) is dominated by high-turnover strategies whose cost drag gives SR of -1
+  to -5 per day (not luck), so the headline uses the robust (1.4826 x MAD)^2 (sd 0.174 per day); the report also
+  shows the naive value and the most lenient floor 1/(T-1) (noise only). FINAL rows use N = FINAL looks and the
+  variance of the FINAL Sharpes.
+* **Gate** (`deflation_gate`), replacing any "PF haircut": **0.5 x mean gross per trade - mean cost per trade > 0**
+  (half the edge must still pay the full costs; gross already includes the modelled slippage) and/or **DSR > 0.95**.
+  It is an additional report: protocol verdicts and ledgers are never changed by it.
+
+Result of the 2026-11-14 report (`report --out`; DISCOVERY + FINAL trade lists on the 726-session calendar):
+
+| strategy | SR ann. disc / final | DSR disc (robust V, N 1,115) | DSR disc (floor V) | DSR final (N 38) | haircut/trade disc / final (Rs) |
+|---|---|---|---|---|---|
+| AUC-FADE-3PCT (deployed) | 2.39 / 1.13 | 0.00 | 0.56 | 0.10 | +189 / +57 |
+| SWING-ATTN-ON-3X (deployed) | 2.49 / 0.71 | 0.00 | 0.64 | 0.06 | +85 / **-24** |
+| VRP-STRANGLE-016-WINGED (deployed) | 0.59 / 0.63 | 0.00 | 0.01 | 0.07 | +571 / +615 |
+| AUC-FADE-2PCT | 2.00 / 0.44 | 0.00 | 0.30 | 0.03 | +76 / **-20** |
+| best other FINAL-confirmed (r3_options_wc_fri) | 1.40 / 3.16 | 0.00 | 0.15 | 0.71 | +626 / +915 |
+
+No deployed or confirmed strategy reaches DSR 0.95 under any variance estimate, even the noise-only floor: with
+about 1,100 variants tried, a 2-2.5 annual Sharpe on two years of DISCOVERY is about what the luckiest zero-edge
+variant would show. SWING-ATTN-ON-3X, AUC-FADE-2PCT and r4_delivery_brk_fake_short fail the haircut on their FINAL
+trades. `cs_shooting_star_d` was confirmed only on the 12-month dataset; the 3-year run never opened its FINAL, so it
+has no 3-year DSR. Full table: `<scratchpad>/stratlab_cache/dsr_v2/dsr_report.txt`.
+
+**Corrected re-backfill (`trials_v2.csv`, `dsr_v2/`, 2026-11-14).** The first ledger (`trials.csv`, report in `dsr/`)
+matched a FINAL ledger entry to a trade file by strategy id alone. Its bars3y FINAL row for `cs_gravestone_doji_d`
+(ledger: 32 trades, net 1,146.67) took Sharpe and moments from the 12-month run's file
+(`candles/out_12m`, 22 trades, net -1,585.39 in the window): daily SR -0.0078 instead of 0.0052, and that wrong value
+entered V[SR] of the FINAL looks. A FINAL row now borrows statistics only from a same-dataset, same-cost-model file
+that reproduces the ledger's FINAL trades and net (else the Sharpe columns stay blank), and `report` applies the same
+check to every file it uses. No backtest was re-run and no verdict changed; `trials.csv` is kept unchanged as the
+superseded first version. Effect: V[SR] FINAL 0.004631 -> 0.004629 (34 looks); N, the DISCOVERY V[SR] and every
+DSR / PSR in the table above are unchanged at the precision shown. Tests: `tests_trials.py`, run by
+`test_pipeline.py` (section "STRATLAB: trials ledger and Deflated Sharpe Ratio").
+
+## Slow factor momentum — pre-registered portfolio test (`factor_momentum.py`, `prereg/momentum_v1.json`)
+
+A portfolio backtest (not the per-trade protocol): cross-sectional momentum is a slow rebalance strategy, so the
+trade-level PF / trade-count gates do not fit it. Its own low-frequency gates were fixed in `prereg/momentum_v1.json`
+(sha256 `2a7cf8bf595cd9f7289aa55d92be0d904b03e1897bf4063f3c62bf2fc372a202`, checked by the CLI) BEFORE any result was
+computed. One look only: the ledger (`momentum_oos/ledger.json` in the scratchpad) refuses to re-run a variant.
+
+    python -m stratlab.factor_momentum --prereg <PREREGISTERED_MOMENTUM.json> --old <nse_old> --bars <bars3y> \
+        --nse <nse> --ledger <ledger.json> --out <scratch dir>
+
+* Signal at the close of each month's last session: mean of cross-sectional z-scores (clipped ±3) of
+  vol-adjusted 12-1 and 6-1 momentum (`C[t-21]/C[t-252]-1`, `C[t-21]/C[t-126]-1`, ÷ annualised std of 252 daily
+  log returns). Execution at the **next session's OPEN**; the signal never sees that session.
+* Top 20 equal weight (cap 10 %), 0.5 %-of-equity no-trade band, CNC costs from `costs.py` + 10 bps per side,
+  ₹10 L, cash at 0 %. Trend filter = NIFTY < SMA200 → cash, checked monthly. A buy or re-weight of a stock with no
+  trade on the execution day is skipped; a full exit of one is done at its last close (counted as a stale exit).
+* Era 1: nse_old 2013-01-31 → 2023-11-09, point-in-time top-100 by turnover, delisted names kept (H1 starts 2013,
+  not 2012-02: the 12-1 signal needs 253 sessions of data that begins 2012-01-02; stated in the prereg).
+  Era 2: bars3y 2023-11-30 → 2026-11-09 on the 97 current NIFTY-100 names — **survivorship-biased**; lookback history
+  spliced from nse_old through the 2023-11-10 bhavcopy return.
+* Gates: each half CAGR > 0 and CAGR > NIFTY (price index; the strategy is price-only too), era-1 Sharpe ≥ 0.5;
+  era 2 CAGR > 0 and > NIFTY. PASS needs all.
+
+Results (run once, 2026-11-14; all net of costs; % per year; excess = CAGR − NIFTY CAGR):
+
+| variant | era1 H1 CAGR / NIFTY / excess | H2 CAGR / NIFTY / excess | era1 Sharpe | era1 maxDD | turnover / cost drag (era1) | era2 CAGR / NIFTY / excess (biased) | verdict |
+|---|---|---|---|---|---|---|---|
+| monthly, no filter | 16.7 / 12.0 / **+4.7** | 10.3 / 11.0 / **−0.7** | 0.68 | −46 % | 407 % / 1.80 % | 4.8 / 7.7 / −2.9 | FAIL (H2, era2 excess) |
+| monthly, filter | 11.1 / 12.0 / −0.9 | 5.8 / 11.0 / −5.2 | 0.54 | −34 % | 388 % / 1.73 % | 12.2 / 7.7 / +4.5 | FAIL (H1, H2 excess) |
+| semi-annual, no filter | 11.6 / 12.0 / −0.4 | 9.7 / 11.0 / −1.3 | 0.58 | −42 % | 155 % / 0.69 % | 9.3 / 7.7 / +1.6 | FAIL (H1, H2 excess) |
+| semi-annual, filter | 6.4 / 12.0 / −5.6 | 4.3 / 11.0 / −6.7 | 0.39 | −33 % | 214 % / 0.96 % | 14.3 / 7.7 / +6.6 | FAIL (H1, H2 excess, Sharpe) |
+
+**0 of 4 pass.** Monthly momentum beat NIFTY only in 2013-2017 and lost to it after costs in 2018-2023 and on the
+(favourably biased) 2023-26 names; the 200-day filter cost more in whipsaws (13 cash switches) than it saved in
+2013-2023. Do not re-run with other lookbacks / holdings / filters on these data: that would be tuning on the result.
+The live `momentum_rotation.py` (top 5, raw 12-1/6-1, 200-DMA) was never pre-registered or tested out of sample, and
+its built-in `backtest()` charges no costs (it sets `held = pick` before computing the cost of the change).
