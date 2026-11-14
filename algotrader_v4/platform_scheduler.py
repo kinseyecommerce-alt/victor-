@@ -118,6 +118,11 @@ class PlatformScheduler:
         if getattr(settings, "shadow_registry_enabled", False) and settings.trading_mode == "PAPER":
             self._sched.add_job(self._shadow_registry, "cron", hour=17, minute=5, day_of_week=VALIDATED_DOW,
                                 id="shadow_registry", misfire_grace_time=3600)
+        # option-bar archiver (option_bar_archiver.py): only with OPTION_BAR_ARCHIVER_ENABLED=true (default off);
+        # read-only Kite history after the close, saved to the volume; never an order, no Telegram
+        if self._option_archiver_on():
+            self._sched.add_job(self._option_bar_archive, "cron", hour=16, minute=10, day_of_week=VALIDATED_DOW,
+                                id="option_bar_archive", misfire_grace_time=3 * 3600)
         self._sched.add_job(
             self._refresh_universe, "cron",
             hour=16, minute=30, day_of_week="mon-fri", id="universe_refresh",
@@ -312,6 +317,22 @@ class PlatformScheduler:
             await asyncio.to_thread(shadow_registry.daily_job)
         except Exception as exc:
             logger.error("[platform] shadow registry job failed: {}", exc)
+
+    @staticmethod
+    def _option_archiver_on() -> bool:
+        try:
+            import option_bar_archiver
+            return option_bar_archiver.enabled()
+        except Exception:
+            return False
+
+    async def _option_bar_archive(self) -> None:
+        """Daily option / future minute-bar archive (option_bar_archiver.daily_job re-checks the flag)."""
+        try:
+            import option_bar_archiver
+            await asyncio.to_thread(option_bar_archiver.daily_job)
+        except Exception as exc:
+            logger.error("[platform] option bar archive job failed: {}", exc)
 
     async def _allocate(self, reason: str) -> None:
         """The AI capital manager's two daily calls (09:08 before auto-start, 12:30)."""
