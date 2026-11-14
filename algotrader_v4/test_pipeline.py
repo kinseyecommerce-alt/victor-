@@ -9626,6 +9626,16 @@ from stratlab import tests_events as _tev  # noqa: E402
 for _n, _f in _tev.TESTS:
     run(_n, _f)
 
+section("STRATLAB: flow data (stratlab/flowdata.py: deals, corporate actions, index membership, FII; stratlab/optmin.py)")
+from stratlab import tests_flowdata as _tfd  # noqa: E402
+for _n, _f in _tfd.TESTS:
+    run(_n, _f)
+
+section("OPTION BAR ARCHIVER (option_bar_archiver.py, OPTION_BAR_ARCHIVER_ENABLED default off)")
+import test_option_bar_archiver as _toba  # noqa: E402
+for _n, _f in _toba.TESTS:
+    run(_n, _f)
+
 
 # ── stratlab/options_vrp_vix: pre-registered VIX-regime filter on the winged weekly strangle ──
 from stratlab import options_vrp_vix as _vx
