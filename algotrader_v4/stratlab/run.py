@@ -232,6 +232,9 @@ def main(argv=None) -> int:
     ap.add_argument("--screen-only", action="store_true",
                     help="never simulate FINAL, not even for screen passers (their one FINAL look stays unused)")
     ap.add_argument("--list", action="store_true", help="list the strategies of the kind and exit")
+    ap.add_argument("--trials", default=os.environ.get("STRATLAB_TRIALS", ""),
+                    help="append every evaluation (passers and failures) to this trials ledger CSV "
+                         "(default $STRATLAB_TRIALS; empty = do not record). See stratlab/trials.py")
     a = ap.parse_args(argv)
 
     specs = [sp for sp in REGISTRY.values() if a.kind in ("all", sp.kind)]
@@ -310,6 +313,11 @@ def main(argv=None) -> int:
             "slippage_bps": a.slippage_bps, "index_slippage_bps": a.index_slippage_bps,
             "sens_bps": a.sens_bps, "sens_index_bps": sens_i if a.sens_bps > 0 else 0,
             "screen_only": a.screen_only, "cost_model": sim.COST_MODEL}
+    if a.trials:
+        from . import trials as TR
+        n_rec = TR.record_evaluation(results, trades_by_id, dataset=os.path.basename(os.path.realpath(a.data)),
+                                     cost_model=sim.COST_MODEL, ledger_path=a.trials, calendar=calendar, source=out)
+        print(f"trials ledger: {n_rec} evaluation row(s) appended to {a.trials}")
     text = write_outputs(out, results, trades_by_id, timing, meta, quality, problems)
     print(text)
     print(f"written to {out}")

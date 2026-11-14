@@ -354,3 +354,67 @@ python -m stratlab.data_daily --build && python -m stratlab.oldera_fo --build-vi
 python -m stratlab.protocol_oos --preregister <scratch>/oldera_oos/PREREGISTERED_OOS.json
 python -m stratlab.protocol_oos --out <scratch>/oldera_oos/run1 --prereg <scratch>/oldera_oos/PREREGISTERED_OOS.json --jobs 4
 ```
+
+## Trials ledger and Deflated Sharpe Ratio (`trials.py`)
+
+Every evaluation is a trial, and the best of N trials looks good by luck. `trials.py` keeps an **append-only** CSV of
+every evaluation (default `<scratchpad>/stratlab_cache/trials.csv`; `--ledger PATH` or `$STRATLAB_TRIALS` to move it;
+refused inside the repository) and deflates Sharpe ratios by the number of trials.
+
+    python -m stratlab.trials backfill [--scratch DIR] [--ledger PATH]   # rebuild from everything on disk (idempotent)
+    python -m stratlab.trials summary                                    # rows / variants per era and stage
+    python -m stratlab.trials report --out <scratch dir>                 # DSR of deployed + FINAL-confirmed strategies
+    python -m stratlab.run ... --trials <ledger>                         # record a new run (or export STRATLAB_TRIALS)
+
+Recording from `stratlab.run` is off unless `--trials` or `$STRATLAB_TRIALS` is set (so tests never write to the
+real ledger): **export STRATLAB_TRIALS before research runs**, and run `backfill` after module runs (auction,
+attention, options, ltr) so they are counted too.
+
+* **Row** = one evaluation: strategy id, family (catalogue/module prefix), parameter fingerprint (`p:` + hash of the
+  results.csv `params`, else the code fingerprint), era (`2023-26` / `2012-23`), protocol, stage (`screen`,
+  `screen-smoke`, `final`, `oos`, `explore`), dataset, period, cost model, trades, net, PF, per-trade mean / std /
+  Sharpe of the net, mean gross and mean cost per trade, and, when the trade list exists, the daily-P&L Sharpe,
+  skewness and kurtosis over the period (DISCOVERY for screens, FINAL for FINAL looks, the era for the OOS), verdict,
+  source file and trade file. Rows are never rewritten; re-appending the same evaluation is a no-op.
+* **Backfill sources**: every `results.csv` of a protocol run under the scratchpad (stratlab.run, r3/r4 drivers,
+  options modules, candlestick runs, reviewer neighbour runs; smoke runs marked `screen-smoke`), the module
+  `report.json` files (auction, auction_r2, attention), the LTR basket, the one-look FINAL ledgers
+  (`stratlab_cache/final_ledger.json`, `stratlab_cache/*/final_ledger.json`: authoritative FINAL verdicts), the
+  2012-23 OOS ledger with its trade files, `pm_robust_edges`, `dd/screen_old.json`, and the exploratory effect
+  measurements (round-1 facts, r2 intraday / swing / F&O effects, cross-sectional series, lead-lag, volatility
+  measurements, event studies). Live-agent replays under `edge/` are not strategy trials and are not counted.
+* **Counting N honestly**: every screened variant counts, passers or not. A variant is a strategy id plus each
+  distinct parameter set run under it; a re-run of the same variant (smoke, another cost model or slippage, another
+  dataset of the same era, a reviewer rebuild) is not a new trial. Exploratory effect tests count (they shaped what
+  was pre-registered). As backfilled on 2026-11-14: **N = 1,115 variants on 2023-26 data** (640 protocol screens /
+  FINALs + 475 exploratory effects), 38 FINAL looks, 178 variants judged on 2012-23.
+* **PSR / DSR** (Bailey & Lopez de Prado 2012, 2014), non-annualised daily Sharpe, skewness, NON-excess kurtosis:
+  `PSR(SR*) = Phi((SR - SR*) sqrt(T-1) / sqrt(1 - skew SR + (kurt-1)/4 SR^2))`;
+  `SR0 = sqrt(V[SR]) ((1-g) Z^-1(1-1/N) + g Z^-1(1-1/(N e)))`, g = Euler-Mascheroni; `DSR = PSR(SR0)`.
+  The unit tests reproduce the paper's worked example (SR 2.5 annual, T 1250, N 100, V 0.5, skew -3, kurt 10:
+  SR0 = 0.1132 daily, DSR = 0.9004).
+* **V[SR]** is the cross-trial variance of the DISCOVERY daily Sharpe over the 631 trials with a 3-year trade list.
+  The naive sample variance (sd 0.59 per day) is dominated by high-turnover strategies whose cost drag gives SR of -1
+  to -5 per day (not luck), so the headline uses the robust (1.4826 x MAD)^2 (sd 0.174 per day); the report also
+  shows the naive value and the most lenient floor 1/(T-1) (noise only). FINAL rows use N = FINAL looks and the
+  variance of the FINAL Sharpes.
+* **Gate** (`deflation_gate`), replacing any "PF haircut": **0.5 x mean gross per trade - mean cost per trade > 0**
+  (half the edge must still pay the full costs; gross already includes the modelled slippage) and/or **DSR > 0.95**.
+  It is an additional report: protocol verdicts and ledgers are never changed by it.
+
+Result of the 2026-11-14 report (`report --out`; DISCOVERY + FINAL trade lists on the 726-session calendar):
+
+| strategy | SR ann. disc / final | DSR disc (robust V, N 1,115) | DSR disc (floor V) | DSR final (N 38) | haircut/trade disc / final (Rs) |
+|---|---|---|---|---|---|
+| AUC-FADE-3PCT (deployed) | 2.39 / 1.13 | 0.00 | 0.56 | 0.10 | +189 / +57 |
+| SWING-ATTN-ON-3X (deployed) | 2.49 / 0.71 | 0.00 | 0.64 | 0.06 | +85 / **-24** |
+| VRP-STRANGLE-016-WINGED (deployed) | 0.59 / 0.63 | 0.00 | 0.01 | 0.07 | +571 / +615 |
+| AUC-FADE-2PCT | 2.00 / 0.44 | 0.00 | 0.30 | 0.03 | +76 / **-20** |
+| best other FINAL-confirmed (r3_options_wc_fri) | 1.40 / 3.16 | 0.00 | 0.15 | 0.71 | +626 / +915 |
+
+No deployed or confirmed strategy reaches DSR 0.95 under any variance estimate, even the noise-only floor: with
+about 1,100 variants tried, a 2-2.5 annual Sharpe on two years of DISCOVERY is about what the luckiest zero-edge
+variant would show. SWING-ATTN-ON-3X, AUC-FADE-2PCT and r4_delivery_brk_fake_short fail the haircut on their FINAL
+trades. `cs_shooting_star_d` was confirmed only on the 12-month dataset; the 3-year run never opened its FINAL, so it
+has no 3-year DSR. Full table: `<scratchpad>/stratlab_cache/dsr/dsr_report.txt`. Tests: `tests_trials.py`, run by
+`test_pipeline.py` (section "STRATLAB: trials ledger and Deflated Sharpe Ratio").
