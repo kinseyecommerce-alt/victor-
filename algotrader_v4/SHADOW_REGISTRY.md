@@ -5,7 +5,9 @@ on live market data, in PAPER. The registry does not trade: it copies paper trad
 opening-fade forward test and the three validated agents) into tamper-evident ledgers and applies a promotion
 rule that was written down before any forward result existed.
 
-Written 2026-11-14, rule version `shadow-promotion/v1`. At the time of writing no shadow had a forward trade.
+Written 2026-11-14, rule version `shadow-promotion/v2`. At the time of writing no shadow had a forward trade.
+(v1, same day, counted the Bonferroni family over the *active* shadows; v2 fixes the family — see below. No
+result existed under v1.)
 
 ## What a shadow is
 
@@ -24,7 +26,10 @@ tail. A ledger whose chain fails is not evaluated.
 
 Re-registering an id with a different config raises `FrozenConfigError`: a changed strategy is a new shadow (new
 id, new trials-ledger row, one more test in the Bonferroni family). A validated agent whose lab code changed
-without a `VERSION` bump is reported as `config_drift` and its trades are no longer copied.
+without a `VERSION` bump is reported as `config_drift` and its trades are no longer copied. The same holds for
+the forward-test shadows: if a `forward_test.py` constant changes (variant bands, `MAX_PER_DAY`, `NOTIONAL`,
+`SLIPPAGE_BPS`, `UNIVERSE`, `RULES`), the affected shadows report `config_drift` and `sync_forward_test` stops
+copying their trades, so a frozen record never mixes two strategies.
 
 ## Pre-registered promotion rule (`PROMOTION_RULE`, do not tune)
 
@@ -35,8 +40,12 @@ without a `VERSION` bump is reported as `config_drift` and its trades are no lon
 - Test: one-sided **bootstrap** of the mean **daily** forward net P&L (trading-day totals, so several trades on one
   day are not treated as independent). H0: mean ≤ 0. Resample the centred daily totals with replacement,
   B = 20 000, seed = first 8 bytes of sha256(`<id>|look<k>`); p = (1 + #{boot mean ≥ observed}) / (B + 1).
-- Promote when the mean is positive and **p ≤ 0.05 / (n_active × 3)** — **Bonferroni** over the shadows active
-  at the look (incubating or promotion-eligible; not demoted or retired) and over the three looks.
+- Promote when the mean is positive and **p ≤ 0.05 / (n_family × 3)** — **Bonferroni** over a fixed family and
+  the three looks. `n_family` = every shadow ever registered under this rule version, *including* demoted,
+  retired and config-drifted ones; it never decreases. (Counting only active shadows would let the demotion of
+  losers loosen the survivors' later thresholds, spending more than 0.05 in total, and would make the threshold
+  depend on evaluation order.) Registering more shadows later raises `n_family` for later looks only; register the
+  whole family up front where possible.
   There is no profit-factor threshold.
 - `promotion_eligible` is a recommendation recorded in the registry. It never switches anything on; changing what
   trades (or going LIVE) stays a human decision.
@@ -50,8 +59,8 @@ trades). References: AUC-FADE-3PCT ₹24,605, AUC-FADE-2PCT ₹29,535, SWING-ATT
 VRP-STRANGLE-016-WINGED ₹129,760 (2 lots, raw rupees). AUC-FADE-1TO3PCT was never run in the lab: no reference,
 so its demotion cannot fire (the evaluation says so).
 
-Retiring a shadow removes it from the active set; the reason is recorded in the registry chain, so retiring losers
-to shrink the Bonferroni family is visible.
+Retiring a shadow removes it from the active set (no more trades or looks); the reason is recorded in the registry
+chain. It stays in the Bonferroni family, so retiring losers cannot loosen anyone's threshold.
 
 ## Enrolled shadows
 

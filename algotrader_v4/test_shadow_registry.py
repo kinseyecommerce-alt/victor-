@@ -187,8 +187,8 @@ def test_look_sample_rules():
     assert SR.look_sample(legs, 10, 1) is not None and SR.look_sample(legs, 11, 1) is None
 
 
-def test_promotion_uses_bonferroni_over_active_shadows():
-    """The same forward record promotes when it is the only shadow and does not when 40 shadows are active."""
+def test_promotion_uses_bonferroni_over_registered_shadows():
+    """The same forward record promotes when it is the only shadow and does not when 40 shadows are registered."""
     d0 = REG_DAY + timedelta(days=1)
     # 50 trades over 50 days, an edge whose bootstrap p sits between 0.05/(40·3) and 0.05/3
     nets = [380.0 + (1000.0 if i % 2 else -1000.0) * (1 + 0.01 * i) for i in range(50)]   # z ≈ 2.6
@@ -202,7 +202,7 @@ def test_promotion_uses_bonferroni_over_active_shadows():
         r.record_trade("solo", t)
     with mock.patch.object(SR, "look_seed", return_value=SR.look_seed("solo", 1)):
         ev = r.evaluate("solo")
-    assert ev["status"] == "promotion_eligible" and ev["looks"]["1"]["n_active"] == 1, ev
+    assert ev["status"] == "promotion_eligible" and ev["looks"]["1"]["n_family"] == 1, ev
 
     r2 = _reg()
     for i in range(40):
@@ -212,7 +212,7 @@ def test_promotion_uses_bonferroni_over_active_shadows():
     with mock.patch.object(SR, "look_seed", return_value=SR.look_seed("solo", 1)):
         ev2 = r2.evaluate("s00")
     lk = ev2["looks"]["1"]
-    assert ev2["status"] == "incubating" and lk["n_active"] == 40 and not lk["promote"], ev2
+    assert ev2["status"] == "incubating" and lk["n_family"] == 40 and not lk["promote"], ev2
     assert abs(lk["p_value"] - p) < 1e-9 and abs(lk["threshold"] - 0.05 / 120) < 1e-12
     # one look, evaluated once: re-evaluating does not re-run (or re-write) look 1
     n_looks = sum(1 for x in r2.index.records() if x["kind"] == "look")
@@ -261,6 +261,29 @@ def test_rule_is_preregistered_constants():
     assert R["demotion_dd_multiple"] == 1.5 and "bootstrap" in R["test"]
     doc = (Path(__file__).resolve().parent / "SHADOW_REGISTRY.md").read_text()
     assert R["version"] in doc and "Bonferroni" in doc
+
+
+def test_demotion_and_retirement_do_not_loosen_threshold():
+    """Fixed family: demoting or retiring other shadows (or evaluation order) never changes a survivor's threshold."""
+    d0 = REG_DAY + timedelta(days=1)
+    nets = [380.0 + (1000.0 if i % 2 else -1000.0) * (1 + 0.01 * i) for i in range(50)]
+    sample = [_trade(d0 + timedelta(days=i), 0, v) for i, v in enumerate(nets)]
+    r = _reg()
+    r.register(_spec("A", backtest_max_dd=100.0), REG_DAY)
+    r.register(_spec("B", backtest_max_dd=100.0), REG_DAY)
+    r.register(_spec("C"), REG_DAY)
+    for sid in ("A", "B"):                       # losers: demoted on drawdown at their first evaluation
+        r.record_trade(sid, _trade(d0, 0, -1000.0))
+    r.retire("B", "test")                        # retiring a demoted loser too
+    for t in sample:
+        r.record_trade("C", t)
+    ev = r.evaluate_all()                        # A, B evaluated (demoted) BEFORE C in the same pass
+    assert ev["A"]["status"] == "demoted" and r.active_ids() == ["C"], ev
+    lk = ev["C"]["looks"]["1"]
+    assert lk["n_family"] == 3 and abs(lk["threshold"] - SR.bonferroni_threshold(3)) < 1e-15, lk
+    assert len(r.family_ids()) == 3 and r.status()["n_family"] == 3
+    # the rule (and its hash) changed with the fix: v2, fixed family
+    assert SR.PROMOTION_RULE["version"] == "shadow-promotion/v2" and "n_family" in SR.PROMOTION_RULE["threshold"]
 
 
 # ── trials ledger hook ────────────────────────────────────────────────────────────────────────────────────────
@@ -325,6 +348,13 @@ def test_enrol_and_sync_without_changing_trading():
     assert out2["auc_fade@AUC-FADE-3PCT/f/v1"] == "config_drift"
     rows[0] = {**rows[0], "oid": "P2", "t": "2026-11-17T09:20:05"}
     assert SR.sync_validated_agents(r, agents, rows[:1]) == 0
+    # forward_test constants changed after freezing: every forward shadow drifts, nothing is copied any more
+    import forward_test as F
+    with mock.patch.object(F, "MAX_PER_DAY", F.MAX_PER_DAY + 5):
+        out3 = SR.ensure_enrolled(r, agents)
+        assert all(v == "config_drift" for k, v in out3.items() if k.startswith("forward:")), out3
+        assert SR.sync_forward_test(r, _fwd_state("2026-11-18")) == 0
+    assert SR.sync_forward_test(r, _fwd_state("2026-11-18")) == 6          # constants restored: copied again
     assert r.verify_all()["ok"]
     r.evaluate_all()
     assert r.verify_all()["ok"]

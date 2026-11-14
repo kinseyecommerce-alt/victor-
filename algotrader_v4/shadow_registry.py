@@ -18,7 +18,9 @@ What makes it hard to mine
   * the promotion rule (PROMOTION_RULE) is written here BEFORE any forward result exists, and its hash is stored in
     every registration, so a later change of the rule is visible;
   * a fixed number of looks at pre-registered trade counts, each evaluated exactly once and written to the
-    registry; the significance level is Bonferroni-split over the active shadows AND the looks.
+    registry; the significance level is Bonferroni-split over a FIXED family — every shadow ever registered
+    under the rule version (demoted, retired and drifted ones included) — AND the looks, so demoting or retiring
+    losers can never loosen the threshold of the survivors.
 
 PAPER only. Nothing in this module places, modifies or cancels an order, or touches an agent's book: it reads the
 forward test's ledger (forward_test.py) and the performance ledger rows of the validated agents and copies them.
@@ -48,18 +50,19 @@ GENESIS_PREV = "0" * 64
 # Do not tune it on results. Any change must bump "version"; its hash is stored in every registration.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 PROMOTION_RULE: dict = {
-    "version": "shadow-promotion/v1",
+    "version": "shadow-promotion/v2",   # v2 (2026-11-14, before any forward trade): fixed Bonferroni family
     "written": "2026-11-14",
     # promotion: evaluated only at these looks (cumulative forward trade counts); each look runs exactly once
     "looks_trades": (50, 100, 200),
     "min_forward_trades": 50,            # = the first look: no promotion is possible before this many trades
     "min_forward_days": 20,              # and at least this many distinct trading days in the look sample
-    "family_alpha": 0.05,                # family-wise error rate over (active shadows × looks)
+    "family_alpha": 0.05,                # family-wise error rate over (registered shadows × looks)
     "test": "one-sided bootstrap of the mean daily forward net P&L; H0: mean <= 0; daily totals resampled "
             "with replacement after centring on the observed mean; p = (1 + #{boot mean >= observed}) / (B + 1)",
     "bootstrap_resamples": 20000,
     "bootstrap_seed": "first 8 bytes of sha256('<shadow id>|look<k>')",
-    "threshold": "p <= family_alpha / (n_active_shadows × len(looks_trades)); n_active counted at the look",
+    "threshold": "p <= family_alpha / (n_family × len(looks_trades)); n_family = number of shadows ever "
+                 "registered under this rule version (incl. demoted, retired, drifted); never decreases",
     # demotion: checked at every evaluation (no multiple-testing cost: it only removes)
     "demotion_dd_multiple": 1.5,         # forward max drawdown (daily totals) > 1.5 × backtest max drawdown
     "demotion_reference": "backtest max drawdown of daily net totals over the lab period, at lab size; forward "
@@ -223,9 +226,9 @@ def bootstrap_pvalue(daily_nets: Iterable[float], resamples: int = PROMOTION_RUL
     return (1 + hits) / (resamples + 1)
 
 
-def bonferroni_threshold(n_active: int, alpha: float = PROMOTION_RULE["family_alpha"],
+def bonferroni_threshold(n_family: int, alpha: float = PROMOTION_RULE["family_alpha"],
                          n_looks: int = len(PROMOTION_RULE["looks_trades"])) -> float:
-    return alpha / (max(1, int(n_active)) * max(1, int(n_looks)))
+    return alpha / (max(1, int(n_family)) * max(1, int(n_looks)))
 
 
 def look_seed(shadow_id: str, look: int) -> int:
@@ -264,17 +267,17 @@ def look_sample(trades: list[dict], n_trades: int, min_days: int) -> Optional[li
     return None
 
 
-def judge_look(shadow_id: str, look: int, sample: list[dict], n_active: int,
+def judge_look(shadow_id: str, look: int, sample: list[dict], n_family: int,
                rule: dict = PROMOTION_RULE) -> dict:
     """One look's verdict (pure): bootstrap p of the mean daily net vs the Bonferroni threshold."""
     days = daily_totals(sample)
     nets = [v for _, v in days]
     p = bootstrap_pvalue(nets, rule["bootstrap_resamples"], look_seed(shadow_id, look))
-    thr = bonferroni_threshold(n_active, rule["family_alpha"], len(rule["looks_trades"]))
+    thr = bonferroni_threshold(n_family, rule["family_alpha"], len(rule["looks_trades"]))
     mean = sum(nets) / len(nets) if nets else 0.0
     return {"look": look, "trades": len({t["trade_key"] for t in sample}), "days": len(nets),
             "net": round(sum(nets), 2), "mean_daily_net": round(mean, 2), "p_value": round(p, 6),
-            "n_active": int(n_active), "threshold": thr, "first_day": days[0][0] if days else None,
+            "n_family": int(n_family), "threshold": thr, "first_day": days[0][0] if days else None,
             "last_day": days[-1][0] if days else None, "promote": bool(mean > 0 and p <= thr)}
 
 
@@ -377,6 +380,12 @@ class ShadowRegistry:
     def active_ids(self) -> list[str]:
         return [i for i, e in self.entries().items() if e["status"] in self.ACTIVE]
 
+    def family_ids(self) -> list[str]:
+        """The Bonferroni family: every shadow ever registered under this rule version, whatever its status
+        (demoted, retired and config-drifted shadows stay in). Only grows, so it cannot be shrunk by results."""
+        v = self.rule["version"]
+        return [i for i, e in self.entries().items() if e.get("rule_version") == v]
+
     # ── registration ──
     def register(self, spec: ShadowSpec, registered_on: Optional[date] = None) -> dict:
         """Register (idempotent for the same config). A different config under the same id raises."""
@@ -401,8 +410,8 @@ class ShadowRegistry:
         return self.entries()[spec.id]
 
     def retire(self, shadow_id: str, reason: str) -> None:
-        """Retired shadows leave the active set. Recorded with its reason (retiring losers to shrink the
-        Bonferroni family is visible in the registry chain)."""
+        """Retired shadows leave the active set (no more trades or looks) but stay in the Bonferroni family, so
+        retiring losers cannot loosen anyone's threshold. Recorded with its reason in the registry chain."""
         if shadow_id not in self.entries():
             raise KeyError(shadow_id)
         self.index.append("status", {"id": shadow_id, "status": "retired", "reason": reason})
@@ -519,14 +528,14 @@ class ShadowRegistry:
             out["demotion_note"] = "no backtest max drawdown in the frozen config: demotion cannot fire"
         # promotion looks (each once, in order)
         if e["status"] == "incubating":
-            n_active = len(self.active_ids())
+            n_family = max(1, len(self.family_ids()))
             for k, n in enumerate(self.rule["looks_trades"], start=1):
                 if str(k) in e["looks"]:
                     continue
                 sample = look_sample(trades, n, self.rule["min_forward_days"])
                 if sample is None:
                     break
-                res = judge_look(shadow_id, k, sample, n_active, self.rule)
+                res = judge_look(shadow_id, k, sample, n_family, self.rule)
                 res["id"] = shadow_id
                 out["looks"][str(k)] = res
                 out["new_looks"].append(k)
@@ -550,7 +559,7 @@ class ShadowRegistry:
     def status(self) -> dict:
         ents = self.entries()
         return {"rule": self.rule, "rule_hash": sha256_hex(self.rule), "n_active": len(self.active_ids()),
-                "verify": self.verify_all(),
+                "n_family": len(self.family_ids()), "verify": self.verify_all(),
                 "shadows": {sid: {"family": e["family"], "strategy_ref": e["strategy_ref"], "source": e["source"],
                                   "config_hash": e["config_hash"], "registered_on": e["registered_on"],
                                   "forward_from": e["forward_from"], "status": e["status"],
@@ -624,16 +633,22 @@ def ensure_enrolled(reg: ShadowRegistry, agents: Optional[dict] = None) -> dict:
 
 
 def sync_forward_test(reg: ShadowRegistry, state: Optional[dict] = None) -> int:
-    """Copy forward_test's built trades (per variant/rule) into the forward shadows. Returns trades added."""
+    """Copy forward_test's built trades (per variant/rule) into the forward shadows. Returns trades added.
+    Skipped for a shadow whose config drifted (forward_test constants changed since it was frozen): the trades of
+    the changed strategy must not be mixed into the frozen shadow's record."""
     import forward_test as F
     state = state if state is not None else F._load()
     ents, n = reg.entries(), 0
+    current = {s.id: s.config_hash for s in forward_test_specs()}
+    drifted = {sid for sid, h in current.items() if sid in ents and ents[sid]["config_hash"] != h}
+    for sid in sorted(drifted):
+        logger.error("[shadow] {}: forward_test config drifted from the frozen config — trades not copied", sid)
     for day, rec in sorted((state.get("days") or {}).items()):
         trades = rec.get("trades") or {}
         for v in F.VARIANTS:
             for rule in F.RULES:
                 sid = f"forward:{v}/{rule}"
-                if sid not in ents:
+                if sid not in ents or sid in drifted or sid not in current:
                     continue
                 for t in (trades.get(v) or {}).get(rule, []):
                     key = f"{day}:{t['symbol']}"
