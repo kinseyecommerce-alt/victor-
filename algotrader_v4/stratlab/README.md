@@ -654,3 +654,118 @@ templates (5-EMA, R-Breaker) have no edge before costs or lose it to costs. New 
 (N 1,169 -> 1,198; 1 new FINAL look) and 26 on 2012-23 (N 203 -> 229, incl. the January-barometer report row); 30 new
 ids in the pre-registration. Outputs: `<scratchpad>/github/` (run3y_swing, run3y_futures, portfolio, january,
 aggregate.json, scripts/) and `<scratchpad>/oldera_oos/run1/github_daily`.
+
+## Round 7 — second GitHub shortlist, OHLCV-only items (`catalog/r7_github2.py`, `r7_portfolio.py`, `r7_tps.py`, `r7_ind.py`)
+
+The second GitHub shortlist (`<scratchpad>/github_round2_shortlist.md`; sources in `<scratchpad>/dl/github2`, only read,
+never executed). Each strategy was rebuilt from the source code or the book rules with the known bugs fixed,
+pre-registered, and run once with no tuning. The pre-registration is `prereg/github_v2.json` (sha256
+`1745b3e24092cae2d9ea7009ee6380c322a5fcc67a3f35617a8e6e840e2b7b92`). It is byte-identical to
+`<scratchpad>/PREREGISTERED_GITHUB2.json` and was committed before any result existed. For every entry it lists the
+source files with their sha256, the rule as coded, the bug fixes, the one plain default for each unspecified field, the
+eras, the fingerprint of every id and the sha256 of the round's code files. 30 ids in all.
+
+Not in this round (each needs a data build or an ML pipeline):
+1. Promoter stake increase ≥ 0.5 pp: needs point-in-time NSE shareholding-pattern filings with their filing dates.
+2. Promoter open-market buys (PIT / SAST): needs an archive of the disclosures with acquirer category, mode and
+   dissemination time.
+3. Earnings-day gap momentum: needs real results-announcement dates and times; the lab only has the gap + volume proxy
+   it already tested.
+6. Qlib Alpha158 + LightGBM: needs NIFTY-500 point-in-time membership and a walk-forward retraining pipeline with its
+   own trial accounting.
+
+Code:
+* `r7_ind.py` holds the formulas: Clenow counter-trend, Turtle Soup / +1, Smash Day with MT5's SMA ATR, Holy Grail
+  gate, Double 7s, Bensdorp ATR% / MRL / MRS, the TPS state machine, the 80-20 setup and the intraday stop re-entry.
+* `catalog/r7_github2.py` has 25 per-symbol specs, run through `sim.py` / `protocol.py` / `protocol_oos.py`.
+* `r7_tps.py` is Connors TPS. Its scale-in (10/20/30/40 %) gets its own trade simulator. One trade = one scale-in
+  sequence, judged by the unchanged protocols.
+* `r7_portfolio.py` holds:
+  * volatility-managed NIFTY;
+  * weekly stock-futures carry, with P&L on the futures contracts and rolls;
+  * sector rotation, on `r6_portfolio.backtest`, unchanged.
+  It uses its own one-look ledger, `<scratchpad>/github2_r7/portfolio_ledger.json`.
+
+`sim.py` gained OPTIONAL `Swing` fields `entry` / `valid` / `entry_stop_ticks`, used by `sim._order_trade`. This is a
+resting stop or limit entry for the next session(s), on daily bars:
+* An armed stop (Turtle Soup) that reaches both its arm and its level in one session counts as filled. Daily bars
+  cannot tell whether the high or the low came first, and assuming a fill is the pessimistic choice.
+* A limit order needs a trade one tick through its level.
+* On the fill session only the stop is checked, assuming the low came after the fill. Targets start the next session.
+
+No existing strategy sets these fields, so `FILL_MODEL_VERSION` is unchanged. The controls were re-run after the change
+and are unchanged: RANDOM_0 PF 0.77, PLANTED_20pct 1.15, CHEAT 19.57. Era-2 sector-index data was built for this round
+from 994 NSE `ind_close_all` files in `<scratchpad>/github2_r7/ind_close_all`; their sha256 is in the
+pre-registration. Tests are in `tests_r7.py`, run by `test_pipeline.py`. They cover:
+* hand-computed values for every formula;
+* the resting-order fills;
+* the TPS sequence arithmetic, and the carry and vol-managed engines by hand;
+* look-ahead: noise after t leaves the vol-managed and sector-rotation decisions at t unchanged, and the intraday specs
+  pass a dense audit.
+
+Bugs fixed (all in the pre-registration):
+* Volatility-managed portfolio (coolgan): `c` came from full-sample standard deviations, and the monthly weight used the
+  22-day variance ending on the month's first day, which includes that day's own return. Replaced by an expanding `c`
+  and the previous month's realised variance.
+* Turtle Soup: the centred `argrelextrema` port (which reads future bars) and the 3-bar close-back-inside port are
+  replaced by the book rules.
+* Smash Day: the README paragraph contradicts its rule list; the rule list is used, with a 48-hour (2-session) order
+  life.
+* Holy Grail: the ports fill one bar after the breakout; replaced by a resting stop one tick above the touch bar.
+* Double 7s: pinkfish fills at the signal close; replaced by the next open. The `main()` overrides (SMA70, 15 % stop,
+  2x margin) are dropped.
+* Bensdorp (MRL / MRS) and Connors (TPS): the TuringTrader ports use EMA-smoothed RSI / ADX; replaced by Wilder.
+* 80-20 and Oops: the 1-hour crypto adaptations are replaced by the book rules on 1-minute sessions.
+* Clenow: the notebook already uses the std of price differences, not % changes, and that is kept.
+
+Carry vs the tested `r4_oi_basis_*` rules: those are per-stock time-series z-scores of the near future's premium over
+cash, held 5 days. Carry here is a cross-sectional weekly rank of the front-vs-second calendar slope, with P&L on the
+contracts. The two are related through the basis but are different rules. Sector rotation: the porter warns that his
+top-2 code does not reproduce Alvarez's published results and that picking the 2 worst sectors would. Only the
+described momentum version was tested.
+
+Results, under the same conventions as Round 6 ("excess" = net minus the same notional's index move over each trade,
+sign-adjusted for shorts, per half; stocks are measured vs NIFTY, index futures vs their own index; L = Rs 1 lakh):
+
+| # | id (r7_gh2_…) | 2023-26 (DISC trades / PF / net) | verdict | 2012-23 (trades / PF / net) | verdict | main reason |
+|---|---|---|---|---|---|---|
+| 4 | clenow_ct_nifty | 10 / 1.81 / +1.2 L | FAIL | 70 / 1.36 / +2.3 L | OOS-FAILED | too few trades (33 / 37 per half); trails holding NIFTY (excess -0.3 / -0.7 L) |
+| 4 | clenow_ct_banknifty | 11 / 4.25 / +3.5 L | FAIL | 60 / 0.85 / -1.7 L | OOS-FAILED | too few trades; 2012-23 H2 < 0, gross PF 0.88 |
+| 4 | clenow_ct_stock | 866 / 1.55 / +9.8 L; FINAL 347 / 0.74 / -2.8 L | REJECTED ON FINAL | 5,896 / 1.19 / +37.0 L | OOS-CONFIRMED | the round's only screen pass, lost on FINAL; the 2012-23 pass trails NIFTY in both halves (excess -4.4 / -4.3 L): long-only dip buying = index exposure |
+| 5 | volmanaged_nifty | Sharpe 0.52 vs buy-and-hold 0.62; maxDD -21 % vs -16 %; CAGR 6.9 vs 7.6 % | FAIL | Sharpe H1 0.84 vs 0.86, H2 0.68 vs 0.67; maxDD -20 % vs -38 %; CAGR 9.4 vs 11.4 % | FAIL | no Sharpe gain (H1 and era 2 lower); shallower drawdown in 2012-23 only, paid for with 2 %/yr of CAGR |
+| 7 | ts_stock / ts_nifty / ts_banknifty | 2,990 / 0.76 / -8.1 L; 38 / 0.47; 28 / 0.70 | FAIL (3) | 17,515 / 0.67 / -92 L; 170 / 0.58; 174 / 0.66 | OOS-FAILED (3) | no edge before costs (gross PF 0.72-0.84) |
+| 7 | tsp1_stock | 1,089 / 1.10 / +1.3 L | FAIL | 6,749 / 0.89 / -13.1 L | OOS-FAILED | PF < 1.15 (costs take half the gross); 2012-23 gross PF 0.95 |
+| 7 | tsp1_nifty / tsp1_banknifty | 11 / 0.98; 11 / 0.09 | FAIL (2) | 58 / 0.77; 73 / 0.55 | OOS-FAILED (2) | too few trades; gross < 0 |
+| 8 | smash_stock | 3,003 / 1.10 / +7.0 L | FAIL | 17,457 / 0.90 / -60.5 L | OOS-FAILED | PF < 1.15 and trails NIFTY (excess -7.7 / -2.4 L); 2012-23 gross PF 0.93 |
+| 8 | smash_nifty / smash_banknifty | 38 / 0.86; 34 / 1.30 | FAIL (2) | 254 / 0.77; 230 / 0.76 | OOS-FAILED (2) | gross < 0 over 2012-23; too few trades on 2023-26 |
+| 9 | hg_stock | 75 / 1.39 / +0.4 L | FAIL | 397 / 0.89 / -1.1 L | OOS-FAILED | HAL is 51 % of net; 2012-23 gross < 0 |
+| 9 | hg_nifty / hg_banknifty | 0 / – ; 0 / – | FAIL (2) | 2 / 1.56; 2 / 1.88 | OOS-FAILED (2) | almost never fires: ADX > 30 and rising on the bar before the touch rarely meets a pullback to EMA20 on an index |
+| 10 | carry_xs | CAGR -12.1 % / excess -19.6 | FAIL | H1 -10.0 % / -22.1, H2 -15.8 % / -26.8, Sharpe -2.09 | FAIL | no stable edge before costs (gross +3.0 % / -4.4 % / -0.5 %/yr) and a 13 %/yr cost drag (weekly quintile churn + monthly rolls) |
+| 11 | sector_rot | CAGR 12.7 % / excess +5.2 | (era-2 gates met) | H1 17.8 % / +5.3, H2 1.7 % / -9.2, Sharpe 0.52 | FAIL | trails NIFTY by 9 %/yr in 2018-23 (maxDD -53 %). Era 2 uses the real sector indices, so it is not survivorship-biased |
+| 12 | d7_nifty / d7_banknifty | 13 / 2.13; 13 / 1.84 | FAIL (2) | 114 / 0.97; 105 / 0.85 | OOS-FAILED (2) | too few trades; 2012-23 H2 < 0, PF < 1 |
+| 13 | mrl_stock | 3 / 3.02 / +0.03 L | FAIL | 217 / 1.06 / +0.4 L | OOS-FAILED | filter rarely met on NIFTY-100 names (ATR% > 4 and ADX7 > 45); ADANIENT is 78 % of the 2012-23 net |
+| 13 | mrs_stock | 17 / 0.81 / -0.07 L | FAIL | 485 / 1.25 / +2.5 L (H1 +2.45, H2 +0.10) | OOS-CONFIRMED | 2012-23 pass carried by H1 (excess +2.9 / +0.3 L); H2 net ≈ 0 and 2023-26 negative |
+| 14 | 8020_stock / 8020_nifty / 8020_banknifty | 5,942 / 0.87 / -2.8 L; 71 / 0.78; 74 / 0.70 | FAIL (3) | – | – | gross ≈ 0 (gross PF 1.04-1.21) killed by costs; index versions too few trades |
+| 14 | oops_stock / oops_nifty / oops_banknifty | 7,424 / 0.90 / -3.2 L; 133 / 0.82; 134 / 0.77 | FAIL (3) | – | – | gross ≈ 0 (gross PF 1.08-1.20) killed by costs (stocks: gross +2.9 L, costs 6.1 L) |
+| 15 | tps_nifty | 19 sequences / 6.20 / +1.0 L | FAIL | 143 / 1.31 / +1.0 L (H1 +0.59, H2 +0.44) | OOS-CONFIRMED | too few sequences on 2023-26. The 2012-23 pass is small: about 23 % of sessions in the market, gross excess per tranche vs NIFTY -0.1 / +1.0 L, and 1 lot held throughout earned +3.8 / +5.8 L |
+| 15 | tps_banknifty | 15 / 2.65 / +0.4 L | FAIL | 143 / 1.10 / +0.5 L | OOS-FAILED | too few sequences (2023-26); 2012-23 H2 < 0, PF 1.10 |
+
+The carry gross figures and the TPS per-tranche excess come from diagnostics run after the one-look verdicts. They are
+in `<scratchpad>/github2_r7/diag_after_verdicts.json`, are not trials, and do not touch any ledger.
+
+Verdict: **nothing here is a deployable edge.**
+* 2023-26: 27 per-symbol / TPS strategies gave 1 screen pass (Clenow counter-trend on stock futures), REJECTED ON FINAL.
+  The 3 portfolios fail their gates.
+* 2012-23: 21 trade-level judgements gave 3 OOS-CONFIRMED. With 21 judged, about one per gate is expected by luck.
+  * Clenow on stocks earned less than NIFTY over the same trades in both halves.
+  * MRS short is carried by 2012-17, with ≈ 0 in 2018-23 and a loss on 2023-26.
+  * TPS on NIFTY is a small, rarely-in-the-market pass with mixed excess. It is the fourth short-term RSI(2)
+    index-reversion variant, after r3_futures_nifty_rsi2_ls, r3_swing_nifty_rsi2 and r3_swing_rsi2_sma200.
+* The book reversal patterns (Turtle Soup, Smash Day, Holy Grail, 80-20, Oops) lose before costs on daily data, or have
+  only a gross edge that costs remove intraday.
+* Volatility management halves NIFTY's 2013-23 drawdown but does not raise its Sharpe, and costs 2 %/yr of CAGR.
+* Sector rotation beat NIFTY in 2013-17 and 2023-26 and lost 9 %/yr in 2018-23.
+
+New trials: 30 variants on 2023-26 (N 1,198 -> 1,228; 1 new FINAL look) and 24 on 2012-23 (N 229 -> 253). Outputs are
+in `<scratchpad>/github2_r7/`: run3y_{swing,futures,intraday}, tps3y, oos_daily, tps_oos, portfolio, aggregate.json,
+scripts/.
