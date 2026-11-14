@@ -9560,6 +9560,11 @@ from stratlab import tests_ltr as _tltr  # noqa: E402
 for _n, _f in _tltr.TESTS:
     run(_n, _f)
 
+section("STRATLAB: factor momentum (stratlab/factor_momentum.py, pre-registered prereg/momentum_v1.json)")
+from stratlab import tests_factor_momentum as _tfm  # noqa: E402
+for _n, _f in _tfm.TESTS:
+    run(_n, _f)
+
 
 # ── stratlab/options_vrp_vix: pre-registered VIX-regime filter on the winged weekly strangle ──
 from stratlab import options_vrp_vix as _vx

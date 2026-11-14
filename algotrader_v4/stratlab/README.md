@@ -428,3 +428,41 @@ check to every file it uses. No backtest was re-run and no verdict changed; `tri
 superseded first version. Effect: V[SR] FINAL 0.004631 -> 0.004629 (34 looks); N, the DISCOVERY V[SR] and every
 DSR / PSR in the table above are unchanged at the precision shown. Tests: `tests_trials.py`, run by
 `test_pipeline.py` (section "STRATLAB: trials ledger and Deflated Sharpe Ratio").
+
+## Slow factor momentum — pre-registered portfolio test (`factor_momentum.py`, `prereg/momentum_v1.json`)
+
+A portfolio backtest (not the per-trade protocol): cross-sectional momentum is a slow rebalance strategy, so the
+trade-level PF / trade-count gates do not fit it. Its own low-frequency gates were fixed in `prereg/momentum_v1.json`
+(sha256 `2a7cf8bf595cd9f7289aa55d92be0d904b03e1897bf4063f3c62bf2fc372a202`, checked by the CLI) BEFORE any result was
+computed. One look only: the ledger (`momentum_oos/ledger.json` in the scratchpad) refuses to re-run a variant.
+
+    python -m stratlab.factor_momentum --prereg <PREREGISTERED_MOMENTUM.json> --old <nse_old> --bars <bars3y> \
+        --nse <nse> --ledger <ledger.json> --out <scratch dir>
+
+* Signal at the close of each month's last session: mean of cross-sectional z-scores (clipped ±3) of
+  vol-adjusted 12-1 and 6-1 momentum (`C[t-21]/C[t-252]-1`, `C[t-21]/C[t-126]-1`, ÷ annualised std of 252 daily
+  log returns). Execution at the **next session's OPEN**; the signal never sees that session.
+* Top 20 equal weight (cap 10 %), 0.5 %-of-equity no-trade band, CNC costs from `costs.py` + 10 bps per side,
+  ₹10 L, cash at 0 %. Trend filter = NIFTY < SMA200 → cash, checked monthly. A buy or re-weight of a stock with no
+  trade on the execution day is skipped; a full exit of one is done at its last close (counted as a stale exit).
+* Era 1: nse_old 2013-01-31 → 2023-11-09, point-in-time top-100 by turnover, delisted names kept (H1 starts 2013,
+  not 2012-02: the 12-1 signal needs 253 sessions of data that begins 2012-01-02; stated in the prereg).
+  Era 2: bars3y 2023-11-30 → 2026-11-09 on the 97 current NIFTY-100 names — **survivorship-biased**; lookback history
+  spliced from nse_old through the 2023-11-10 bhavcopy return.
+* Gates: each half CAGR > 0 and CAGR > NIFTY (price index; the strategy is price-only too), era-1 Sharpe ≥ 0.5;
+  era 2 CAGR > 0 and > NIFTY. PASS needs all.
+
+Results (run once, 2026-11-14; all net of costs; % per year; excess = CAGR − NIFTY CAGR):
+
+| variant | era1 H1 CAGR / NIFTY / excess | H2 CAGR / NIFTY / excess | era1 Sharpe | era1 maxDD | turnover / cost drag (era1) | era2 CAGR / NIFTY / excess (biased) | verdict |
+|---|---|---|---|---|---|---|---|
+| monthly, no filter | 16.7 / 12.0 / **+4.7** | 10.3 / 11.0 / **−0.7** | 0.68 | −46 % | 407 % / 1.80 % | 4.8 / 7.7 / −2.9 | FAIL (H2, era2 excess) |
+| monthly, filter | 11.1 / 12.0 / −0.9 | 5.8 / 11.0 / −5.2 | 0.54 | −34 % | 388 % / 1.73 % | 12.2 / 7.7 / +4.5 | FAIL (H1, H2 excess) |
+| semi-annual, no filter | 11.6 / 12.0 / −0.4 | 9.7 / 11.0 / −1.3 | 0.58 | −42 % | 155 % / 0.69 % | 9.3 / 7.7 / +1.6 | FAIL (H1, H2 excess) |
+| semi-annual, filter | 6.4 / 12.0 / −5.6 | 4.3 / 11.0 / −6.7 | 0.39 | −33 % | 214 % / 0.96 % | 14.3 / 7.7 / +6.6 | FAIL (H1, H2 excess, Sharpe) |
+
+**0 of 4 pass.** Monthly momentum beat NIFTY only in 2013-2017 and lost to it after costs in 2018-2023 and on the
+(favourably biased) 2023-26 names; the 200-day filter cost more in whipsaws (13 cash switches) than it saved in
+2013-2023. Do not re-run with other lookbacks / holdings / filters on these data: that would be tuning on the result.
+The live `momentum_rotation.py` (top 5, raw 12-1/6-1, 200-DMA) was never pre-registered or tested out of sample, and
+its built-in `backtest()` charges no costs (it sets `held = pick` before computing the cost of the change).
