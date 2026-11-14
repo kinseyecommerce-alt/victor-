@@ -772,6 +772,109 @@ scripts/.
 
 ## Old-era minute OOS (2016-2023) (`protocol_min_oos.py`, `prereg/oldera_min_v1.json`)
 
+**Plain language.** The three strategies trading in PAPER (AUC-FADE-3PCT, SWING-ATTN-ON-3X, VRP-STRANGLE-016-WINGED)
+were run once, with no tuning, on 2016-01-01..2023-11-09 one-minute bars that none of them was developed on. All three
+pass the same gates the 2012-23 daily round used. That is real evidence, and for the auction fade and the attention
+trade it is strong: of 373 non-option minute strategies that failed the 2023-26 screen, only 2 (0.5 %) pass here. But
+each pass has a weak spot: the 3 % auction fade made 84 % of its 8-year profit in 2020 and barely broke even in
+2016-2019 (loses there at 5 bps); the attention trade's 2016-2019 profit is less than holding NIFTY over the same
+nights would have made; the strangle is a Black-Scholes MODEL on VIX, not option prices, and that model passes a third
+of the option structures that failed on 2023-26, so its pass says more about the model than about the trade. Keep all
+three in paper trading; none of this is a reason to switch to LIVE.
+
 Pre-registered before any 2016-2023 strategy result was computed: `prereg/oldera_min_v1.json` (sha256
 `8e18deeccf2506fecfc75a5e444adbd7a80fe09cd73e9f99553b1dbebecf6203`, byte-identical to
-`<scratchpad>/oldera_min/PREREGISTERED_MIN_OOS.json`). Results: not run yet.
+`<scratchpad>/oldera_min/PREREGISTERED_MIN_OOS.json`, committed before the run). Every judgement is in the one-look
+ledger `<scratchpad>/oldera_min/ledger.json` (a second run returns the first result, never recomputes); 420 rows
+(era `2016-23`, stage `oos`) were appended to `trials_v2.csv`.
+
+```
+python -m stratlab.protocol_min_oos --build-cache && python -m stratlab.protocol_min_oos --data-check
+python -m stratlab.protocol_min_oos --run a|b|c --prereg <scratch>/oldera_min/PREREGISTERED_MIN_OOS.json --trials <ledger>
+```
+
+* **Gates** = protocol_oos's (constants imported): net > 0 in H1 (2016-2019) and H2 (2020-01-01..2023-11-09), PF >= 1.15
+  over the era, >= 150 (intraday) / 60 (positional) trades in EACH half, top symbol <= 35 % of net (not for one
+  instrument). Report-only: 5 bps (index 2.5, auction family 5 vs its 2.1, options haircut x2.5), would an intraday id pass
+  with 60 trades per half, net minus the same notional's NIFTY move over each trade ("excess"), NIFTY weeklies restricted
+  to listed contracts (from 2019-02-11). "Proven in both eras" = FINAL-CONFIRMED on 2023-26 AND OOS-CONFIRMED here.
+* **Costs** costs.py 2026 rates on every year; each runner's own fills (sim.py, auction.py 2.1 bps, attention.py,
+  options_vrp / options_r3 Black-Scholes on the index minute bars with the previous official India VIX close as a flat vol,
+  r3_crosssec, ltr); 2026 lot sizes on every date.
+* **Data** (`--data-check`, `<scratchpad>/oldera_min/data_check.json`): 97 of today's NIFTY-100 stocks plus NIFTY 50, NIFTY
+  BANK and INDIA VIX minute files, all present (nothing blocked: strangle, NIFTY-relative and needs_index rules all ran).
+  31 symbol-year files are empty (listed later: ADANIGREEN, DMART, ETERNAL, HAL, HDFCLIFE, ICICIGI, IRCTC, JIOFIN, LODHA,
+  PAYTM, SBILIFE). Split / bonus adjusted on all 51 checkable NSE split / bonus events (2 more fell on missing sessions; RELIANCE 1:1
+  bonus 2017-09-07: NSE gap 0.500, Kite 1.001); demergers are not (ADANIENT 2018-09-06, GRASIM 2017-07-19) or wrongly (NMDC 2022-10-27, ABB 2019-12-20)
+  adjusted; volume is adjusted on most events but not on 9 (BRITANNIA 2018, CHOLAFIN, HCLTECH, HDFCBANK, NTPC, WIPRO, GAIL,
+  VBL 2019, EICHERMOT 2020), which inflates 20-session volume ratios for a few weeks after them. **28 regular sessions are
+  missing from every file** (download chunk boundaries, e.g. 2016-03-01, 2019-05-02, 2023-11-01) plus RELIANCE
+  2018-03-05..04-30 and NAUKRI 2018-09-03..10-31. IRCTC before its 2019-10-14 listing and PIIND before 2020-02 hold another
+  instrument's prints and were dropped. Pre-registered **dirty rule**: a trade is excluded if its entry..exit (or the
+  session after its exit) touches a session after a hole, or an overnight link where Kite's open/previous close differs from
+  NSE's adjusted ratio by > 5 % (2,837 symbol-dates, ~1.5 % of symbol-sessions; 12 % of auction gap candidates, because
+  two-day gaps after a hole are large). Kite's last-minute NIFTY close vs the official close: median 0.05 %. No dates
+  overlap bars3y; the 2023-11-09 close -> 2023-11-10 open seam has a median |gap| of 0.2 % (largest ONGC +3.6 %), so the two
+  sets are on the same adjustment basis. No daily history is spliced before 2016: lookbacks warm up in 2016.
+* **Survivorship**: today's NIFTY-100 names only. This favours every long strategy; read every long result with it.
+
+**(a) The live PAPER strategies** (L = Rs 1 lakh; "xs" = excess vs NIFTY):
+
+| | AUC-FADE-3PCT | SWING-ATTN-ON-3X | VRP-STRANGLE-016-WINGED (modelled) |
+|---|---|---|---|
+| 2023-26 | FINAL 252 tr, PF 1.32, +0.49 L | FINAL 194 tr, PF 1.18, +0.11 L | FINAL 45 tr, PF 1.27, +0.61 L |
+| H1 2016-19 trades / PF / net | 702 / 1.05 / +0.23 L | 1,164 / 1.22 / +0.81 L | 187 / 1.60 / +2.31 L |
+| H2 2020-23 trades / PF / net | 1,269 / 1.53 / +3.93 L | 1,324 / 1.97 / +3.69 L | 178 / 1.36 / +2.77 L |
+| era PF / net | 1.35 / +4.16 L | 1.60 / +4.50 L | 1.44 / +5.08 L |
+| top symbol | PIIND 6.6 % | ADANIGREEN 10.6 % | one instrument |
+| sensitivity | 5 bps: +3.02 L but H1 -0.18 L -> would FAIL | 5 bps: +3.02 L, H1 +0.11 L -> passes; 09:16 exit +2.88 L; CNC costs +1.19 L but H1 -0.74 L | haircut x2.5: +1.79 L, PF 1.147 -> would FAIL by 0.003 |
+| excess vs NIFTY H1 / H2 | -0.25 L / +3.51 L (both sides; not long-biased) | **-0.90 L** / +1.86 L (long-only) | n/a |
+| other (after the verdict, `diag_after_verdicts.json`) | 2020 alone +3.48 L (84 %); without 2020: 1,375 tr, PF 1.08, +0.68 L; best 5 days +2.01 L | without 2020: PF 1.50, +3.04 L | listed weeklies only (2019-02-11..): 218 tr, PF 1.39, +3.47 L; 2016 -0.35 L; worst week -0.56 L (2019-09-20); max DD 1.33 L |
+| verdict | OOS-CONFIRMED | OOS-CONFIRMED | OOS-CONFIRMED (model) |
+| proven in both eras | yes, fragile | yes, but H1 is index exposure | yes, on modelled premiums |
+
+What it means for paper trading: keep AUC-FADE-3PCT, but expect lumpy results: it was positive in only 4 of the 8 calendar
+years, a 2020-like crash year dominates it, and at 5 bps 2016-2019 is a loss, so live fill quality decides it. Keep SWING-ATTN-ON-3X but judge it
+against NIFTY's overnight move, not against zero: in 2016-2019 holding NIFTY on the same nights would have earned more,
+and on CNC (delivery) costs 2016-2019 loses. Keep VRP-STRANGLE-016-WINGED as a paper test of the model: the paper fills are
+the only real option prices it will see; before 2019-02 the weekly contracts did not even exist.
+
+**(b) Other 2023-26 FINAL-confirmed minute-bar strategies** (r4_realopt_nf_wk_strangle_3pct is a daily real-price spec
+with no weeklies before 2019 and was not run):
+
+| id | H1 tr / net | H2 tr / net | PF | net@5 (pass?) | verdict |
+|---|---|---|---|---|---|
+| AUC-FADE-2PCT | 1,751 / +1.50 L | 2,580 / +4.94 L | 1.29 | +3.94 L (Y) | OOS-CONFIRMED (without 2020 PF 1.15) |
+| VRP-STRANGLE-016-NAKED (model) | 187 / +1.31 L | 178 / +1.52 L | 1.43 | +2.01 L (Y) | OOS-CONFIRMED |
+| r3_options_ic_25_10 (model) | 187 / +0.57 L | 178 / +1.75 L | 1.36 | +0.62 L (N) | OOS-CONFIRMED |
+| r3_options_wc_fri (model) | 181 / +1.41 L | 167 / +1.66 L | 1.63 | +1.50 L (Y) | OOS-CONFIRMED |
+| r3_tfweekly_wk_loser_rev | 159 / +1.34 L | 344 / +0.99 L | 1.11 | +2.03 L (N) | OOS-FAILED (PF 1.11) |
+
+**(c) The luck rate.** 412 other minute-bar ids (8 calendar-bound r4_mechanics ids ineligible): 394 judged, 18 INVALID
+(every r3_ai_crosssec id: its feature audit finds a decision-time feature that reads a later bar when a session lacks its
+09:15 bar, which happens in the old data; the module then invalidates all its ids). 12 OOS-CONFIRMED:
+
+| 2023-26 status | judged | OOS-CONFIRMED |
+|---|---|---|
+| FAILED SCREEN (all) | 385 | **6 (1.6 %)**: r3_tfweekly_volshock_flat, r3_tfweekly_wk_excess_loser_rev, and 4 option models (ibf_400, ibf_400_tp25, cs_trend20, ls_highvix) |
+| FAILED SCREEN, not options | 373 | **2 (0.5 %)** |
+| FAILED SCREEN, option models | 12 | 4 (33 %) |
+| REJECTED ON FINAL | 8 | 5: r3_futures_stk_tom_long (+42.8 L, long-only, positive excess both halves, passes at 5 bps), SCALP-AUC-FADE-1TO3-0925 (+13.2 L, fails at 5 bps), 3 r3_options_ss16_stop2x* models |
+| INVALID on 2023-26 | 1 | 1 (r3_options_cs_trend50, model) |
+| **FINAL-CONFIRMED (a + b)** | 8 | **7 (87.5 %)** |
+
+Read: for stock rules the 2023-26 screen is informative (0.5 % of its failures pass here against 87.5 % of its
+confirmations), so the auction and attention confirmations are unlikely to be luck. For options it is not: the flat-VIX
+Black-Scholes model makes short premium look profitable in most years (VIX above realised volatility, no skew), so a third
+of the screen-failed option structures pass too; an option "pass" here is a property of the model. Several 2023-26 FINAL
+rejections pass 2016-23 (the turn-of-month stock-futures long, the 1-3 % auction fade to 09:25): their edge, if any, did
+not survive into 2023-26, which is exactly what a one-era test cannot see.
+
+**Proven in both eras: 7** (AUC-FADE-3PCT, AUC-FADE-2PCT, SWING-ATTN-ON-3X, VRP-STRANGLE-016-WINGED,
+VRP-STRANGLE-016-NAKED, r3_options_ic_25_10, r3_options_wc_fri); 3 on stock data (one effect counted twice: 3 % is a
+subset of 2 %), 4 on modelled option premiums. Caveats: survivorship (today's names); modelled premiums, not prices, and
+NIFTY weeklies only from 2019-02; 2026 costs and lot sizes on 2016 trades (2016 STT / charges differed); 28 missing
+sessions handled by exclusion; unadjusted volume on 9 events; DSR still unaddressed (N grows by 420 trials on this era).
+Outputs: `<scratchpad>/oldera_min/` (run_a, run_b, run_c: summary.txt, results.csv / .json, trades/*.csv.gz for a, b and
+the module runners; aggregate.json, diag_after_verdicts.json, scripts/). Tests: `tests_min_oos.py` (synthetic), run by
+`test_pipeline.py`.
