@@ -1,0 +1,25 @@
+{
+ "title": "Kite ecosystem pre-registration v1 - amendment 1",
+ "written": "2026-11-14 06:54 UTC",
+ "amends": {
+  "file": "PREREGISTERED_KITE.json",
+  "sha256": "6f2c38290cc43860bfb5d65008b754ae20b0e4d733dbb2d767e461002b88d4d6"
+ },
+ "reason": "r5_kite_vars_calendar raised TypeError on its first 2012-23 run (an exit on a session where one held contract had no bhavcopy row): protocol_oos recorded it INVALID with no trades and no P&L computed. Fix: such an exit uses the contract's last close on or before the exit session (after the fill). Rules, parameters and defaults are otherwise identical. Because the OOS ledger never re-judges a changed strategy under the same id, the fixed code runs under a NEW id; the INVALID v1 entry stays in the ledger. Written before any result of v2 on any era; the 3-year run of the spreads had not been made.",
+ "strategies": {
+  "r5_kite_vars_calendar_v2": {
+   "module": "stratlab.kite_spreads",
+   "kind": "futures spread",
+   "params": {
+    "lookback": 200,
+    "k_sd": 1.0
+   },
+   "fingerprint": "53001e6dfe6d",
+   "eras": [
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)",
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ],
+   "replaces": "r5_kite_vars_calendar (INVALID: crash)"
+  }
+ }
+}

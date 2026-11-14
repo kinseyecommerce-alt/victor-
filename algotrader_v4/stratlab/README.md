@@ -466,3 +466,92 @@ Results (run once, 2026-11-14; all net of costs; % per year; excess = CAGR − N
 2013-2023. Do not re-run with other lookbacks / holdings / filters on these data: that would be tuning on the result.
 The live `momentum_rotation.py` (top 5, raw 12-1/6-1, 200-DMA) was never pre-registered or tested out of sample, and
 its built-in `backtest()` charges no costs (it sets `held = pick` before computing the cost of the change).
+
+## Round 5 — Zerodha / Kite ecosystem strategies, tested as published (`catalog/r5_kite.py`, `kite_*.py`)
+
+69 published strategies (Zerodha Varsity, Streak examples, AlgoTest Pine templates, Tradetron blog builds,
+AlgoBulls pyalgostrategypool, Sensibull templates; source list `<scratchpad>/kite/strategies_69.json`) were classified,
+pre-registered and run once, with no tuning. Pre-registration `prereg/kite_ecosystem_v1.json` (sha256
+`6f2c38290cc43860bfb5d65008b754ae20b0e4d733dbb2d767e461002b88d4d6`, byte-identical to `<scratchpad>/PREREGISTERED_KITE.json`,
+written before any result) lists every id, its published rule, the ONE plain default for each unspecified field, the eras
+and the code fingerprint. `prereg/kite_ecosystem_v1_amendment1.json` (sha256 `d4ae96fd…dcb842`) adds
+`r5_kite_vars_calendar_v2`: v1 crashed (missing contract row) on its first 2012-23 run and is recorded INVALID with no
+P&L; the fix runs under a new id, so the one-look ledger keeps v1's INVALID entry.
+
+Code: `kite_ind.py` (platform formulas: Pine RMA RSI/ATR/DMI/SAR/stoch, TA-Lib AROON/STOCH, AlgoTest's Ichimoku and
+non-ratcheting Supertrend as coded, Tradetron double Supertrend), `kite_tf.py` (continuous Kite-aligned candles with
+the short last candle kept, and the entry/exit "machine"), `kite_stats.py` (ADF = statsmodels adfuller defaults,
+checked against statsmodels), `kite_spreads.py` (Varsity PTM2 / PTM1 / calendar spread), `kite_options.py`
+(Tradetron iron condor and double-Supertrend debit spreads on real EOD option prices), `kite_momentum.py` (Varsity
+momentum on factor_momentum's data, costs and gates). `sim.py` gained OPTIONAL fields that change nothing for
+existing strategies: `Entry.exit_sig` (exit by rule at the next bar's open; an opposite entry on the same bar fills at
+that open = stop-and-reverse; audited for look-ahead like the entry), `Entry.bracket` (stop / target measured from
+the fill, points or %), `Swing.exit_fn` (positional exit by rule at the next open, same-open reversal) and
+`Swing.lots`. Tests: `tests_kite.py` (hand-computed Aroon, Williams %R, stochastic, Ichimoku, Supertrend / double
+Supertrend; ADF vs statsmodels; the simulator extensions; dense look-ahead audit of all 29 intraday specs).
+
+Classification (a = as published 23, b = one plain default needed 26, c = not testable 20):
+(c) the 14 Sensibull templates (legs only: no entry time, no exit), AlgoTest 9:20 straddle, Tradetron Rs150 strangle
+and 09:30 straddle, AlgoBulls strangle (all need INTRADAY option prices; the lab has EOD bhavcopy only and a flat-vol
+Black-Scholes model would test the model), AlgoTest VWAP (as coded `ta.vwap(volume, 14)` makes the line the bar's
+volume) and VWAP+EMA+volume (both need NIFTY futures volume; the lab's NIFTY bars are the spot index, volume 0).
+Dedup: no strategy in `trials_v2.csv` has identical rules; same-family neighbours with other parameters were tested
+anew. Eras: intraday on 2023-26 only; daily rules on 2023-26 (protocol.py) and once on 2012-23 (protocol_oos);
+Varsity candlesticks enter at the 15:20 bar on 2023-26 and, as `*_nxo` twins (next-open fill), on 2012-23.
+
+Results (2023-26: DISCOVERY trades / PF / net Rs, verdict; 2012-23: era trades / PF / net Rs, verdict;
+"gross" = before costs, after the modelled slippage):
+
+| source | id (r5_kite_…) | cls | 2023-26 disc tr / PF / net | verdict | 2012-23 tr / PF / net | verdict | main reason |
+|---|---|---|---|---|---|---|---|
+| Streak | streak_rsi30m_short | b | 8,958 / 0.71 / -9.7 L | FAIL | – | – | gross < 0 (-26/trade) and costs 82/trade |
+| Streak | streak_orb5_long | b | 31,224 / 0.78 / -32.4 L | FAIL | – | – | gross < 0 |
+| Streak | streak_4th30m_long | b | 26,326 / 0.74 / -23.0 L | FAIL | – | – | gross ~0 (-5/trade), killed by costs |
+| Streak | streak_st7_long | b | 344,457 / 0.40 / -449 L | FAIL | – | – | gross < 0, ~680 trades/day over 97 stocks |
+| Varsity | vars_momentum12 | b | era2 CAGR 7.9 % vs NIFTY 7.7 % | PASS (gates) | 2013-23 CAGR 13.7 % vs 11.5 %, Sharpe 0.64 | PASS (gates) | margins: H2 excess +0.09 %/yr, era2 +0.22 %/yr (biased), maxDD -57 % |
+| Varsity | vars_ptm2 | b | 635 / 0.66 / -5.7 L | FAIL | 3,450 / 0.86 / -14.8 L | FAIL | gross < 0 both eras |
+| Varsity | vars_ptm1 | b | 2,576 / 0.85 / -6.8 L | FAIL | 14,946 / 0.89 / -39.5 L | FAIL | gross ~0 (PF 0.97-0.98), killed by costs |
+| Varsity | vars_calendar_v2 | b | 1,827 / 0.05 / -5.1 L | FAIL | 11,583 / 0.24 / -31.6 L | FAIL | gross < 0 and costs 3x gross |
+| Varsity | vars_px_ema50 | a | 1,776 / 1.02 / +0.8 L | FAIL | 11,376 / 1.26 / +59.6 L | CONFIRMED | 2023-26: H2 < 0, PAYTM 175 % of net; 2012-23: = NIFTY drift (excess vs NIFTY < 0 both halves) |
+| Varsity | vars_ema9_21 | b | 1,003 / 1.07 / +1.9 L | FAIL | 6,014 / 1.53 / +99.6 L | CONFIRMED | 2023-26: H2 < 0, PAYTM 52 %; 2012-23 excess vs NIFTY +17 L H1, -0.4 L H2 |
+| Varsity | vars_ema25_50 | b | 344 / 1.33 / +4.0 L | FAIL | 2,225 / 1.70 / +78.6 L | CONFIRMED | 2023-26: PAYTM 38 % of net; 2012-23 excess vs NIFTY +13 L H1, -10 L H2 |
+| Varsity | vars_ema50_100 | b | 155 / 1.19 / +1.3 L | FAIL | 1,024 / 1.97 / +70.3 L | CONFIRMED | 2023-26: H1 < 0, PAYTM 62 %; 2012-23 excess vs NIFTY +5 L H1, -3 L H2 |
+| Varsity | vars_ema100_200 | b | 57 / 1.56 / +1.5 L | FAIL | 454 / 2.86 / +66.1 L | CONFIRMED | 2023-26: 57 trades, PAYTM 58 %; 2012-23 excess vs NIFTY -6.7 L H1, +11.8 L H2 |
+| Varsity | vars_ema15x30_1m | b | 267,610 / 0.41 / -339 L | FAIL | – | – | gross < 0, ~530 trades/day over 97 stocks |
+| Varsity | vars_ema5x10_1m | b | 836,887 / 0.24 / -1,090 L | FAIL | – | – | gross < 0 |
+| Varsity | vars_macd_d | b | 3,798 / 0.64 / -37.2 L | FAIL | 22,171 / 1.07 / +45.2 L | FAIL | 2023-26 gross < 0; 2012-23 H1 < 0, PF 1.07 |
+| Varsity | vars_bb20_d | b | 2,687 / 1.20 / +10.5 L | FAIL | 15,706 / 0.84 / -74.7 L | FAIL | failed H1 (2023-26); gross < 0 over 2012-23 |
+| Varsity | vars_cs_bull_marubozu (/_nxo) | b | 765 / 1.11 / +1.2 L | FAIL | 2,819 / 1.05 / +2.7 L | FAIL | PF < 1.15; small gross edge mostly eaten by costs |
+| Varsity | vars_cs_bear_marubozu | b | 1,160 / 0.73 / -5.0 L | FAIL | 3,465 / 0.93 / -4.0 L | FAIL | gross < 0 |
+| Varsity | vars_cs_hammer | b | 643 / 1.04 / +0.3 L | FAIL | 2,299 / 1.07 / +2.1 L | FAIL | H2 < 0, GAIL 78 % (2023-26); PF 1.07 (2012-23) |
+| Varsity | vars_cs_hanging_man | b | 855 / 0.38 / -2.0 L | FAIL | 1,881 / 0.47 / -5.8 L | FAIL | gross < 0 |
+| Varsity | vars_cs_shooting_star | b | 710 / 0.75 / -2.0 L | FAIL | 3,070 / 0.92 / -2.7 L | FAIL | gross < 0 (2023-26) / ~0 (2012-23) |
+| Varsity | vars_cs_bull_engulfing | b | 703 / 1.24 / +2.6 L; FINAL 264 / 1.02 / +0.1 L | REJECTED ON FINAL | 4,244 / 1.05 / +5.9 L | FAIL | the only screen pass of the round; FINAL PF 1.02 < 1.05; 2012-23 PF 1.05 |
+| Varsity | vars_cs_bear_engulfing | b | 1,330 / 0.72 / -7.3 L | FAIL | 7,765 / 0.95 / -7.8 L | FAIL | gross < 0 / ~0 |
+| Varsity | vars_cs_piercing | b | 518 / 1.04 / +0.2 L | FAIL | 2,753 / 0.98 / -1.1 L | FAIL | VEDL > 100 % of net; killed by costs (2012-23) |
+| Varsity | vars_cs_dark_cloud | b | 889 / 0.78 / -2.6 L | FAIL | 5,189 / 0.92 / -6.4 L | FAIL | gross < 0 |
+| Varsity | vars_cs_morning_star | b | 30 / 0.92 / -0.1 L | FAIL | 136 / 1.08 / +0.4 L | FAIL | too few trades; AUROPHARMA 59 % |
+| Varsity | vars_cs_evening_star | b | 20 / 1.63 / +0.2 L | FAIL | 140 / 0.71 / -1.6 L | FAIL | too few trades (2023-26); gross < 0 (2012-23) |
+| AlgoTest | at_rsi / at_supertrend / at_sma9_21 / at_macd / at_bollinger / at_adx / at_psar / at_stoch / at_ema_macd_rsi / at_williams / at_ichimoku | a | 90-3,350 trades each, PF 0.35-0.57, -0.9 L to -43 L each (11 total -255 L) | FAIL (all 11) | – | – | gross < 0 for all 11 (gross PF 0.72-0.95) before ~Rs 920 cost per NIFTY lot round trip |
+| Tradetron | tt_ic_wed | b | 105 / 0.83 / -0.5 L | FAIL | not run (no weeklies before 2019) | – | gross < 0 (EOD-only stop, EOD fills) |
+| Tradetron | tt_dst_nifty | a | 28 / 0.47 / -5.2 L | FAIL | 132 / 1.76 / +11.2 L | CONFIRMED | 2023-26 gross < 0, 28 trades; 2012-23 = NIFTY exposure (holding 2 lots of NIFTY made Rs 19 L) |
+| Tradetron | tt_dst_spreads | b | 41 / 0.62 / -1.3 L | FAIL | 199 / 1.08 / +0.6 L | FAIL | gross < 0 (2023-26); H1 < 0, PF 1.08 (2012-23) |
+| Tradetron | tt_orb15_stock (stock proxy) | b | 58,903 / 0.78 / -53.4 L | FAIL | – | – | gross ~0 (-8.5/trade), killed by costs |
+| Tradetron | tt_orb30_list (US template mapped) | b | 45,098 / 0.81 / -38.2 L | FAIL | – | – | gross ~0 (-2.5/trade; +H1, -H2), killed by costs |
+| AlgoBulls | ab_ema12_20 / ab_macd_5m / ab_aroon_15m / ab_bollinger_60m / ab_reverse_rsi_60m / ab_stoch_60m / ab_vwap_60m / ab_atr_trend_60m / ab_inverse_ema_60m / ab_rsi_macd_60m | a | 10,517-268,536 trades each, PF 0.53-0.76 (10 total -830 L) | FAIL (all 10) | – | – | gross < 0 for all 10 (-6 to -74 Rs/trade) before 82 Rs/trade costs |
+
+(L = lakh = Rs 1,00,000; every stock trade is Rs 1 lakh notional, so -Rs 9.7 L over 8,958 trades is -0.11 % per trade.)
+
+Verdict: **nothing tested here is a deployable edge.** On 2023-26, 53 strategies: 1 screen pass (Varsity bullish
+engulfing at 15:20), rejected on FINAL; 0 confirmed. The 25 intraday platform templates (AlgoTest, AlgoBulls,
+Streak) lose money BEFORE costs. The opening-range and pair / calendar trades are about flat before costs and lose
+to them. On 2012-23, 24 judgements: 6 OOS-CONFIRMED, all long-only daily trend rules (Varsity price > EMA50 and the
+four EMA crossovers) or the long-biased double Supertrend. Each one earned about what holding NIFTY earned over the same
+holding periods (net minus the same-period NIFTY move is negative in at least one half for every one), and all six
+failed the 2023-26 screen. These confirmations are exposure to a decade in which NIFTY rose 4x. They are not an
+edge: the protocol_oos gates test net > 0, not net > the index. Varsity momentum
+passes its factor_momentum gates, but it is the 5th correlated momentum variant on these data (4 failed), and its
+2018-23 and 2023-26 margins over NIFTY are +0.09 % and +0.22 % a year (the latter on today's NIFTY-100 names, biased in
+its favour), with a 57 % drawdown. At most it is a paper-trading candidate, not evidence of an edge. New trials:
+54 variants on 2023-26 (N 1,115 -> 1,169) and 25 on 2012-23 (N 178 -> 203), 66 new ids in all (including the INVALID
+calendar v1). Outputs: `<scratchpad>/kite/` (run3y, spreads3y, opts3y, momentum) and `<scratchpad>/oldera_oos/run1/bkite_*`.

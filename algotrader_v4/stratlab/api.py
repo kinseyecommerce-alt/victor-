@@ -39,6 +39,15 @@ class Entry:
     rr: float | None = None
     time_stop: int | None = None
     trail: tuple | None = None
+    # Optional (round 5, default None = unchanged behaviour):
+    # exit_sig  bool array over the session's bars: True at bar k = exit decided at the close of bar k, filled at
+    #           the open of bar k+1 (market order, pays slippage). Only bars k >= the fill bar count. Must be causal
+    #           (audited like the entry). A new entry decided at that same bar k may fill at the same open (reversal).
+    # bracket   ("pts", stop, target) or ("pct", stop, target): stop / target placed at that distance from the FILL
+    #           price (points, or % of the fill); replaces `stop` / `target`. A stop distance of None keeps the
+    #           absolute `stop` price (fill-relative target, fixed stop).
+    exit_sig: object = None
+    bracket: tuple | None = None
 
 
 @dataclass
@@ -55,6 +64,13 @@ class Swing:
     target: float | None = None
     max_hold: int = 10
     rr: float | None = None
+    # Optional (round 5, default None = unchanged behaviour):
+    # exit_fn  callable(DailyView) -> bool, called at the close of every held session (the view ends at that
+    #          session); True = exit at the next session's open (market order, pays slippage). After such an exit the
+    #          strategy is asked again on the signal session, so an opposite entry fills at the same open (reversal).
+    # lots     index futures only: lots for this trade instead of the spec's `lots`.
+    exit_fn: object = None
+    lots: int | None = None
 
 
 @dataclass

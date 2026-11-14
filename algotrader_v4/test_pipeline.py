@@ -8549,7 +8549,7 @@ def t_sl_catalogue_first_batch():
         kinds.setdefault(sp.kind, []).append(sp.id)
         # <= 5 parameters is the first batch's convention; round-3/4 research strategies list theirs in their
         # pre-registration files (scratchpad r3/r4 PREREGISTERED.txt) and were judged as written
-        assert sp.desc and "\n" not in sp.desc and sp.family and (len(sp.params) <= 5 or sp.id.startswith(("r3_", "r4_"))), sp.id
+        assert sp.desc and "\n" not in sp.desc and sp.family and (len(sp.params) <= 5 or sp.id.startswith(("r3_", "r4_", "r5_"))), sp.id
     assert len(kinds["intraday"]) >= 12 and len(kinds["scalping"]) >= 8, {k: len(v) for k, v in kinds.items()}
     assert len(set(_SL_REG)) == len(_SL_REG)
     sd = _sl_walk(n_days=30, seed=11)
@@ -8560,7 +8560,7 @@ def t_sl_catalogue_first_batch():
     sessions = _sli.build_sessions(sd, idx)
     rare = {sp.id for sp in specs if sp.family == "candlestick"}   # textbook patterns may not occur in 30 days
     # round-3/4 research rules need real NSE data, the index or rare conditions: audited below, not expected to trade here
-    rare |= {sp.id for sp in specs if sp.id.startswith(("r3_", "r4_"))}
+    rare |= {sp.id for sp in specs if sp.id.startswith(("r3_", "r4_", "r5_"))}
     traded = 0
     for sp in specs:
         n = 0
@@ -9594,6 +9594,11 @@ for _n, _f in _tltr.TESTS:
 section("STRATLAB: factor momentum (stratlab/factor_momentum.py, pre-registered prereg/momentum_v1.json)")
 from stratlab import tests_factor_momentum as _tfm  # noqa: E402
 for _n, _f in _tfm.TESTS:
+    run(_n, _f)
+
+section("STRATLAB: round-5 Kite ecosystem (stratlab/catalog/r5_kite.py, kite_*.py, prereg/kite_ecosystem_v1.json)")
+from stratlab import tests_kite as _tki  # noqa: E402
+for _n, _f in _tki.TESTS:
     run(_n, _f)
 
 

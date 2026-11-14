@@ -109,9 +109,9 @@ def target_fill(side: int, target: float, o: float, extreme: float, tick: float)
     return float(o) if side * (o - target) >= tick - eps else float(target)
 
 
-def _settle(spec: Spec, symbol, date, side, entry_t, fill, exit_date, exit_t, exit_px, reason) -> tuple:
+def _settle(spec: Spec, symbol, date, side, entry_t, fill, exit_date, exit_t, exit_px, reason, lots=None) -> tuple:
     if getattr(spec, "underlying", None):
-        qty = int(spec.lots) * LOT_SIZES[spec.underlying]
+        qty = int(spec.lots if lots is None else lots) * LOT_SIZES[spec.underlying]
     else:
         qty = max(1, int(NOTIONAL // fill))
     gross = side * (exit_px - fill) * qty
@@ -134,11 +134,19 @@ def fill_intraday(s: Session, e: Entry, slip: float | None = None, tick: float |
     side = e.side
     raw = float(s.o[j])
     fill = raw * (1.0 + side * sl)
-    stop = float(e.stop) if e.stop is not None else np.nan
+    br = getattr(e, "bracket", None)
+    if br is not None:                                  # stop / target at a distance from the FILL (round 5)
+        kind_, d_stop, d_tgt = br
+        f_ = (lambda x: fill * float(x) / 100.0) if kind_ == "pct" else (lambda x: float(x))
+        stop = fill - side * f_(d_stop) if d_stop is not None else (float(e.stop) if e.stop is not None else np.nan)
+        tgt_ = fill + side * f_(d_tgt) if d_tgt is not None else None
+    else:
+        stop = float(e.stop) if e.stop is not None else np.nan
+        tgt_ = e.target
     if not np.isfinite(stop) or side * (raw - stop) <= 0:
         return None                                     # no stop, or already through it at the open
     risk = abs(fill - stop)
-    target = e.target
+    target = tgt_
     if target is None and e.rr:
         target = fill + side * e.rr * risk
     if target is not None:
@@ -153,6 +161,11 @@ def fill_intraday(s: Session, e: Entry, slip: float | None = None, tick: float |
         ts = s.idx(int(s.t[j]) + int(e.time_stop))
         if ts < lim:
             lim, reason = ts, "time"
+    xs = getattr(e, "exit_sig", None)
+    if xs is not None:                                  # exit decided at the close of bar k >= j, filled at open k+1
+        xs = np.asarray(xs, bool)[j:max(j, min(lim - 1, len(xs)))]
+        if xs.size and xs.any():
+            lim, reason = j + int(xs.argmax()) + 1, "signal"
     h, l, o = s.h, s.l, s.o
     if e.trail is None:
         if side > 0:
@@ -206,7 +219,9 @@ def _take(spec: Spec, s: Session, e: Entry, trades: list, slip: float | None = N
         return None
     k, fill, px, reason = r
     trades.append(_settle(spec, s.symbol, s.date, e.side, _hm(s.t[e.i + 1]), fill, s.date, _hm(s.t[k]), px, reason))
-    return k
+    # after an exit at the open of bar k decided at bar k-1 (signal), an entry decided at bar k-1 fills at that
+    # same open (stop-and-reverse); every other exit frees the symbol from bar k on, as before
+    return k - 1 if reason == "signal" else k
 
 
 def sim_session(spec: Spec, s: Session, slip: float | None = None) -> tuple[list, int]:
@@ -252,7 +267,13 @@ def _canon(ents, upto: int) -> list:
     for e in sorted(ents or [], key=lambda x: x.i):
         if e.i <= upto:
             f = lambda x: None if x is None else round(float(x), 6)
-            out.append(repr((int(e.i), int(e.side), f(e.stop), f(e.target), f(e.rr), e.time_stop, e.trail)))
+            key = (int(e.i), int(e.side), f(e.stop), f(e.target), f(e.rr), e.time_stop, e.trail)
+            br, xs = getattr(e, "bracket", None), getattr(e, "exit_sig", None)
+            if br is not None:
+                key = key + (("bracket",) + tuple(br),)
+            if xs is not None:                          # the exit signal up to the cut must not change either
+                key = key + (np.packbits(np.asarray(xs, bool)[:upto + 1]).tobytes(),)
+            out.append(repr(key))
     return out
 
 
@@ -374,13 +395,26 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
                 if tp is not None:
                     out = (k, tp, "target")
                     break
+            xf = getattr(sig, "exit_fn", None)
+            if xf is not None and k < last_day:         # decided at the close of k, exit at the open of k+1
+                xv = DailyView(d["date"][:k + 1], *[d[c][:k + 1] for c in "ohlcv"])
+                xv.symbol = sd.symbol
+                xv.nifty = None if nifty is None else nifty[:k + 1]
+                xv.vix = None if vix is None else vix[:k + 1]
+                if xf(xv):
+                    out = (k + 1, float(d["o"][k + 1]) * (1.0 - side * slip), "signal")
+                    break
         if out is None:
             out = (last_day, float(d["c"][last_day]) * (1.0 - side * slip),
                    "max_hold" if last_day == natural else ("period_end" if last_day < nd - 1 else "data_end"))
         k, px, reason = out
         et = _hm(sd.t[m]) if intr else "09:15"
         trades.append(_settle(spec, sd.symbol, d["date"][e_day], side, et, fill, d["date"][k],
-                              "15:29" if reason in ("max_hold", "data_end", "period_end") else "", px, reason))
+                              "15:29" if reason in ("max_hold", "data_end", "period_end") else
+                              ("09:15" if reason == "signal" else ""), px, reason, getattr(sig, "lots", None)))
+        if reason == "signal":                          # next-open specs: ask again on the signal day, so a
+            day = max(k if intr else k - 1, day + 1)    # reversal fills at the same open; decision_time: the exit day
+            continue
         day = max(k, day + 1)                           # flat again from the exit day's close
     return trades, skipped
 
