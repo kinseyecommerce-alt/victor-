@@ -358,7 +358,7 @@ python -m stratlab.protocol_oos --out <scratch>/oldera_oos/run1 --prereg <scratc
 ## Trials ledger and Deflated Sharpe Ratio (`trials.py`)
 
 Every evaluation is a trial, and the best of N trials looks good by luck. `trials.py` keeps an **append-only** CSV of
-every evaluation (default `<scratchpad>/stratlab_cache/trials.csv`; `--ledger PATH` or `$STRATLAB_TRIALS` to move it;
+every evaluation (default `<scratchpad>/stratlab_cache/trials_v2.csv`; `--ledger PATH` or `$STRATLAB_TRIALS` to move it;
 refused inside the repository) and deflates Sharpe ratios by the number of trials.
 
     python -m stratlab.trials backfill [--scratch DIR] [--ledger PATH]   # rebuild from everything on disk (idempotent)
@@ -416,5 +416,15 @@ No deployed or confirmed strategy reaches DSR 0.95 under any variance estimate, 
 about 1,100 variants tried, a 2-2.5 annual Sharpe on two years of DISCOVERY is about what the luckiest zero-edge
 variant would show. SWING-ATTN-ON-3X, AUC-FADE-2PCT and r4_delivery_brk_fake_short fail the haircut on their FINAL
 trades. `cs_shooting_star_d` was confirmed only on the 12-month dataset; the 3-year run never opened its FINAL, so it
-has no 3-year DSR. Full table: `<scratchpad>/stratlab_cache/dsr/dsr_report.txt`. Tests: `tests_trials.py`, run by
+has no 3-year DSR. Full table: `<scratchpad>/stratlab_cache/dsr_v2/dsr_report.txt`.
+
+**Corrected re-backfill (`trials_v2.csv`, `dsr_v2/`, 2026-11-14).** The first ledger (`trials.csv`, report in `dsr/`)
+matched a FINAL ledger entry to a trade file by strategy id alone. Its bars3y FINAL row for `cs_gravestone_doji_d`
+(ledger: 32 trades, net 1,146.67) took Sharpe and moments from the 12-month run's file
+(`candles/out_12m`, 22 trades, net -1,585.39 in the window): daily SR -0.0078 instead of 0.0052, and that wrong value
+entered V[SR] of the FINAL looks. A FINAL row now borrows statistics only from a same-dataset, same-cost-model file
+that reproduces the ledger's FINAL trades and net (else the Sharpe columns stay blank), and `report` applies the same
+check to every file it uses. No backtest was re-run and no verdict changed; `trials.csv` is kept unchanged as the
+superseded first version. Effect: V[SR] FINAL 0.004631 -> 0.004629 (34 looks); N, the DISCOVERY V[SR] and every
+DSR / PSR in the table above are unchanged at the precision shown. Tests: `tests_trials.py`, run by
 `test_pipeline.py` (section "STRATLAB: trials ledger and Deflated Sharpe Ratio").

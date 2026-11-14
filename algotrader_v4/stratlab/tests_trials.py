@@ -178,6 +178,44 @@ def t_family_of():
     assert T.family_of("cs_doji_15m") == "cs"
 
 
+def t_final_rows_only_borrow_a_matching_trade_file():
+    """A FINAL ledger entry takes Sharpe / moments only from a same-dataset, same-cost-model trade file that
+    reproduces its FINAL trades and net; another dataset's file of the same id (or a non-reproducing one) is
+    ignored and the Sharpe columns stay blank."""
+    import json
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "stratlab_cache"))
+        cal = [20251217, 20251218, 20251219, 20251222]
+
+        def w(name, rows):
+            p = os.path.join(d, name)
+            with open(p, "w") as fh:
+                fh.write("date,exit_date,net,gross,cost\n")
+                for e, x, n in rows:
+                    fh.write(f"{e},{x},{n},{n + 10},10\n")
+            return p
+        other = w("other_ds.csv", [(20251217, 20251218, -50.0)])                 # 12-month run, 1 trade
+        wrong_cm = w("wrong_cm.csv", [(20251217, 20251218, 30.0), (20251219, 20251222, 70.0)])
+        good = w("good.csv", [(20251217, 20251218, 30.0), (20251219, 20251222, 70.0)])
+        stale = w("stale.csv", [(20251217, 20251218, 30.0), (20251219, 20251222, 75.0)])   # same count, net off
+        led = {"S1|20251217-20251222|x": {"dataset": "/data/bars3y", "cost_model": "cm2", "fingerprint": "f",
+                                          "final": {"trades": 2, "net": 100.0, "pf": 0, "confirmed": True}},
+               "S2|20251217-20251222|x": {"dataset": "/data/bars3y",
+                                          "final": {"trades": 2, "net": 100.0, "pf": 0, "confirmed": False}}}
+        with open(os.path.join(d, "stratlab_cache", "final_ledger.json"), "w") as fh:
+            json.dump(led, fh)
+        scr = [{"strategy_id": "S1", "stage": "screen", "dataset": "bars12m", "cost_model": "cm2", "trades_file": other},
+               {"strategy_id": "S1", "stage": "screen", "dataset": "bars3y", "cost_model": "cm1", "trades_file": wrong_cm},
+               {"strategy_id": "S1", "stage": "screen", "dataset": "bars3y", "cost_model": "cm2", "trades_file": good},
+               {"strategy_id": "S2", "stage": "screen", "dataset": "bars12m", "cost_model": "", "trades_file": other},
+               {"strategy_id": "S2", "stage": "screen", "dataset": "bars3y", "cost_model": "", "trades_file": stale}]
+        rows = {r["strategy_id"]: r for r in T._final_rows(d, cal, {}, scr)}
+        assert rows["S1"]["trades_file"] == good and rows["S1"]["sr_daily"] is not None
+        assert rows["S1"]["trades"] == 2 and rows["S1"]["net"] == 100.0
+        assert rows["S2"]["trades_file"] == "" and "sr_daily" not in rows["S2"]      # no file reproduces it
+        assert rows["S2"]["cost_model"] == "legacy"
+
+
 TESTS = [
     ("trials: DSR reproduces Bailey & Lopez de Prado's worked example (SR0 0.1132, DSR 0.9004)",
      t_dsr_paper_worked_example),
@@ -193,6 +231,8 @@ TESTS = [
     ("trials: V[SR] uses one value per strategy id on one dataset", t_var_sr_one_value_per_id),
     ("trials: record_evaluation records failures as well as passers", t_record_evaluation_counts_failures),
     ("trials: family prefix", t_family_of),
+    ("trials: FINAL rows borrow Sharpe only from a same-dataset/cost-model file reproducing trades and net",
+     t_final_rows_only_borrow_a_matching_trade_file),
 ]
 
 

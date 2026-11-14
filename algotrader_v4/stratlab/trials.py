@@ -6,7 +6,7 @@ honest question is not "is this Sharpe positive?" but "is it higher than the bes
 would produce?". This module
 
   1. keeps an APPEND-ONLY CSV of every evaluation (`TrialsLedger`, default
-     <scratchpad>/stratlab_cache/trials.csv, override with --ledger or $STRATLAB_TRIALS), and rebuilds it from the
+     <scratchpad>/stratlab_cache/trials_v2.csv, override with --ledger or $STRATLAB_TRIALS), and rebuilds it from the
      existing ledgers, results.csv files, report.json files and exploratory effect files (`backfill`);
   2. implements the Probabilistic Sharpe Ratio (Bailey & Lopez de Prado 2012) and the Deflated Sharpe Ratio
      (Bailey & Lopez de Prado 2014) with skewness and kurtosis (`psr`, `expected_max_sr`, `dsr`);
@@ -37,7 +37,9 @@ import time
 from statistics import NormalDist
 
 _SCRATCH_DEFAULT = "/tmp/claude-0/-home-user-victor-/10a63b67-92f5-5498-8eb5-0d5b292e5470/scratchpad"
-DEFAULT_LEDGER = os.environ.get("STRATLAB_TRIALS") or os.path.join(_SCRATCH_DEFAULT, "stratlab_cache", "trials.csv")
+DEFAULT_LEDGER = os.environ.get("STRATLAB_TRIALS") or os.path.join(_SCRATCH_DEFAULT, "stratlab_cache", "trials_v2.csv")
+# trials_v2.csv: corrected re-backfill (2026-11-14). The first ledger, trials.csv, is kept unchanged (append-only)
+# but superseded: its FINAL row for cs_gravestone_doji_d took Sharpe / moments from a 12-month run's trade file.
 
 EULER_GAMMA = 0.5772156649015329
 DSR_MIN = 0.95              # gate: probability that the true Sharpe beats the expected best-of-N luck
@@ -380,7 +382,7 @@ def _skip(path: str) -> bool:
 
 def _summary_meta(d: str) -> dict:
     """dataset, DISCOVERY and FINAL ranges from a run's summary.txt (stratlab.run / module layouts)."""
-    meta = {"dataset": "", "disc": None, "final": None}
+    meta = {"dataset": "", "disc": None, "final": None, "cost_model": ""}
     p = os.path.join(d, "summary.txt")
     if not os.path.exists(p):
         return meta
@@ -389,6 +391,9 @@ def _summary_meta(d: str) -> dict:
     m = re.search(r"data=(\S+)", head)
     if m:
         meta["dataset"] = m.group(1)
+    m = re.search(r"cost model[ =]+([^\s,|]+)", head)
+    if m:
+        meta["cost_model"] = m.group(1)
     m = re.search(r"DISCOVERY\s+(\d{8})\s*\.\.\s*(\d{8})", head)
     if m:
         meta["disc"] = (int(m.group(1)), int(m.group(2)))
@@ -446,7 +451,7 @@ def _results_rows(scratch: str, cal3: list, tcache: dict) -> list:
                    "params_fp": ("p:" + _fp(r["params"])) if r.get("params") else r.get("fingerprint", ""),
                    "era": "2023-26", "protocol": "2023-26 discovery/final", "stage": "screen-smoke" if smoke else "screen",
                    "dataset": tag, "period": f"{disc[0]}-{disc[1]}" if disc else "",
-                   "cost_model": r.get("cost_model", ""), "trades": _f(r.get("disc_trades")),
+                   "cost_model": r.get("cost_model") or meta["cost_model"], "trades": _f(r.get("disc_trades")),
                    "net": _f(r.get("disc_net")), "pf": _f(r.get("disc_pf")),
                    "verdict": r.get("verdict", ""), "source": os.path.join(rel, "results.csv"),
                    "trades_file": tp, "note": r.get("why", "")}
@@ -511,12 +516,30 @@ def _ltr_rows(scratch: str, cal3: list, tcache: dict) -> list:
     return rows
 
 
+def _reproduces(trades: list, cal: list, lo: int, hi: int, want_trades, want_net) -> bool:
+    """True when the trades with entry in [lo, hi] reproduce a ledger's trade count exactly and its net within
+    rounding (the ledgers store net to 2 decimals). A file that does not is another run's (another dataset, cost
+    model or code version) and must not lend its Sharpe / moments to the row."""
+    wt, wn = _f(want_trades), _f(want_net)
+    if wt is None or wn is None:
+        return False
+    st = series_stats(trades, cal, lo, hi)
+    return st["trades"] == int(round(wt)) and abs(st["net"] - wn) <= 0.05 + 1e-6 * abs(wn)
+
+
 def _final_rows(scratch: str, cal3: list, tcache: dict, screen_rows: list) -> list:
-    """The one-look FINAL ledgers (authoritative FINAL verdicts)."""
+    """The one-look FINAL ledgers (authoritative FINAL verdicts).
+
+    A FINAL entry borrows its daily Sharpe / moments from a full-run trade file of a screen row only when that row
+    is of the SAME dataset, of the same cost model (where both record one: results.csv column, else the run's
+    summary.txt; a run that records none is judged by the next test alone), and the file reproduces the entry's
+    FINAL trade count and net. Otherwise the Sharpe columns stay blank: the trade count / net of the ledger
+    must never be mixed with another run's statistics."""
     tp_by_id = {}
     for r in screen_rows:                     # a FULL-run trade file holds the FINAL trades of a screen passer
         if r.get("trades_file") and r.get("stage") == "screen":
-            tp_by_id.setdefault(r["strategy_id"], []).append(r["trades_file"])
+            tp_by_id.setdefault(r["strategy_id"], []).append((r.get("dataset", ""), r.get("cost_model", ""),
+                                                              r["trades_file"]))
     rows = []
     paths = sorted(set(glob.glob(os.path.join(scratch, "stratlab_cache", "final_ledger.json"))
                        + glob.glob(os.path.join(scratch, "stratlab_cache", "*", "final_ledger.json"))))
@@ -528,13 +551,19 @@ def _final_rows(scratch: str, cal3: list, tcache: dict, screen_rows: list) -> li
             sid, rng = parts[0], parts[1]
             lo, hi = (int(x) for x in rng.split("-"))
             ds = _ds_tag(v.get("dataset", ""))
+            cm = v.get("cost_model") or ""
             f = v.get("final", {})
             st, tp = {}, ""
-            if ds == "bars3y":
-                for cand in tp_by_id.get(sid, []):
+            if ds == "bars3y" and cal3:
+                for cds, ccm, cand in tp_by_id.get(sid, []):
+                    if cds != ds or (cm and ccm and ccm != cm) or not os.path.exists(cand):
+                        continue
                     if cand not in tcache:
-                        tcache[cand] = load_trades(cand)
-                    if any(t["entry"] >= lo for t in tcache[cand]):
+                        try:
+                            tcache[cand] = load_trades(cand)
+                        except Exception:
+                            tcache[cand] = []
+                    if _reproduces(tcache[cand], cal3, lo, hi, f.get("trades"), f.get("net")):
                         tp = cand
                         break
                 st = _stats_for(tp, cal3, (lo, hi), tcache) if tp else {}
@@ -542,7 +571,7 @@ def _final_rows(scratch: str, cal3: list, tcache: dict, screen_rows: list) -> li
                        else "CONFIRMED" if f.get("confirmed") else "REJECTED ON FINAL")
             row = {"strategy_id": sid, "family": family_of(sid), "group": "", "params_fp": v.get("fingerprint", ""),
                    "era": "2023-26", "protocol": "2023-26 discovery/final", "stage": "final", "dataset": ds,
-                   "period": rng, "cost_model": v.get("cost_model", "legacy"), "trades": f.get("trades"),
+                   "period": rng, "cost_model": cm or "legacy", "trades": f.get("trades"),
                    "net": f.get("net"), "pf": f.get("pf"), "verdict": verdict,
                    "source": os.path.relpath(p, scratch) + "#" + key, "trades_file": tp, "note": f"seen {v.get('when', '')}"}
             row.update({k: x for k, x in st.items() if k not in ("trades", "net", "pf")})
@@ -762,17 +791,48 @@ def report(ledger_path: str | None = None, out_dir: str | None = None, scratch: 
            "var_sr_disc_from": n_v, "var_sr_final": v_fin, "var_sr_final_from": n_vf,
            "calendar_sessions": len(cal), "strategies": []}
     lo, hi = SPLIT_3Y["disc"][0], SPLIT_3Y["final"][1]
+    tl_cache: dict = {}
+
+    def _tl(f):
+        if f not in tl_cache:
+            try:
+                tl_cache[f] = load_trades(f)
+            except Exception:
+                tl_cache[f] = []
+        return tl_cache[f]
+
+    def _period(r):
+        try:
+            a, b = (int(x) for x in str(r.get("period", "")).split("-"))
+            return a, b
+        except ValueError:
+            return None
+
     for sid in targets:
+        # A 3-year trade file that holds FINAL trades (full run). The bars3y FINAL row's file comes first; any other
+        # row's file is used only if it reproduces that row's own trades / net in its period, has the FINAL row's
+        # cost model (where the FINAL row records one) and reproduces the FINAL row's trades / net. A file from
+        # another dataset, cost model or code version must not stand in for the strategy.
+        frows = [r for r in rows if r["strategy_id"] == sid and r.get("stage") == "final" and r.get("dataset") == "bars3y"]
+        cands = [r for r in rows if r["strategy_id"] == sid and r.get("dataset") == "bars3y" and r.get("trades_file")
+                 and os.path.exists(r["trades_file"]) and r.get("stage") in ("final", "screen", "screen-smoke")]
+        cands.sort(key=lambda r: r.get("stage") != "final")
         tp = ""
-        for r in rows:          # a 3-year trade file that holds FINAL trades (full run); the FINAL row's first
-            f = r.get("trades_file")
-            if r["strategy_id"] != sid or r.get("dataset") != "bars3y" or not f or not os.path.exists(f):
+        for r in cands:
+            f, per = r["trades_file"], _period(r)
+            tr = _tl(f)
+            if not tr or not per or not cal or not _reproduces(tr, cal, per[0], per[1], r.get("trades"), r.get("net")):
                 continue
-            if r.get("stage") == "final":
+            ok = True
+            for fr in frows:
+                fcm, fper = fr.get("cost_model", ""), _period(fr)
+                if fcm and fcm != "legacy" and r.get("cost_model") and r.get("cost_model") != fcm:
+                    ok = False
+                elif fper and not _reproduces(tr, cal, fper[0], fper[1], fr.get("trades"), fr.get("net")):
+                    ok = False
+            if ok and (frows or any(t["entry"] >= SPLIT_3Y["final"][0] for t in tr)):
                 tp = f
                 break
-            if not tp and any(t["entry"] >= SPLIT_3Y["final"][0] for t in load_trades(f)):
-                tp = f
         ent = {"id": sid, "deployed": sid in DEPLOYED, "confirmed": sid in confirmed, "trades_file": tp,
                "confirmed_on": sorted(conf_ds.get(sid, []))}
         if not tp or not cal:
