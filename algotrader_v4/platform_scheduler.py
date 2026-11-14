@@ -44,11 +44,11 @@ class PlatformScheduler:
         # each job checks what it needs when it fires.
         self._sched.add_job(
             self._kite_token_refresh, "cron",
-            hour=8, minute="45,55", day_of_week="mon-fri", id="kite_refresh",
+            hour=8, minute="45,55", day_of_week="*", id="kite_refresh",   # every day: weekend research needs a token too
         )
         self._sched.add_job(
             self._kite_token_refresh, "cron",
-            hour=9, minute=5, day_of_week="mon-fri", id="kite_refresh_last",
+            hour=9, minute=5, day_of_week="*", id="kite_refresh_last",
         )
         self._sched.add_job(self._kite_login_at_startup, "date", id="kite_login_startup")
         # a restart after 09:16 (deploy, crash) would otherwise leave the bot stopped for the day
@@ -429,7 +429,7 @@ class PlatformScheduler:
             await send_telegram(
                 f"✅ <b>Kite token refreshed</b>\n"
                 f"Token: <code>{token[:8]}…</code>\n"
-                f"Market opens in 25 minutes."
+                + ("Market opens in 25 minutes." if _now_ist().weekday() < 5 else "Weekend login (research/data only).")
             )
         except Exception as exc:
             self._token_ok = False

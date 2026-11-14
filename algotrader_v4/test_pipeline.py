@@ -6189,6 +6189,37 @@ run("auto-login: vault stores user id/password/seed encrypted", t_kal_vault_stor
 run("auto-login: endpoint rejects a 6-digit code as the seed", t_kal_endpoint_rejects_six_digit_code_as_seed)
 run("auto-login: not needed without credentials",             t_kal_needed_now_false_without_credentials)
 
+def t_kal_needed_now_weekend_and_weekday_window():
+    from datetime import datetime as _dt
+    import pytz as _pz
+    ist = _pz.timezone("Asia/Kolkata")
+    saved = (_kal.now_ist, _kal.credentials_ready, _kal.token_valid_today)
+    try:
+        _kal.credentials_ready = lambda: True
+        _kal.token_valid_today = lambda: False
+        for when, want in [(_dt(2026, 11, 14, 8, 45), True),    # Saturday morning
+                           (_dt(2026, 11, 15, 20, 0), True),    # Sunday evening
+                           (_dt(2026, 11, 16, 8, 45), True),    # Monday before the close
+                           (_dt(2026, 11, 16, 16, 0), False)]:  # Monday after the close
+            _kal.now_ist = (lambda w=when: ist.localize(w))
+            assert _kal.needed_now() is want, (when, want)
+        _kal.token_valid_today = lambda: True
+        _kal.now_ist = lambda: ist.localize(_dt(2026, 11, 14, 8, 45))
+        assert _kal.needed_now() is False                        # a working token: nothing to do
+    finally:
+        _kal.now_ist, _kal.credentials_ready, _kal.token_valid_today = saved
+
+def t_kal_refresh_jobs_run_every_day():
+    import platform_scheduler as _ps
+    src = _inspect_kal.getsource(_ps.PlatformScheduler.start) if hasattr(_ps, "PlatformScheduler") else open(_ps.__file__).read()
+    for job in ('id="kite_refresh"', 'id="kite_refresh_last"'):
+        line = next(l for l in src.splitlines() if job in l)
+        assert 'day_of_week="*"' in line, line
+
+import inspect as _inspect_kal
+run("auto-login: weekend login any time, weekday only before 15:30", t_kal_needed_now_weekend_and_weekday_window)
+run("auto-login: 08:45/08:55/09:05 refresh jobs run every day",      t_kal_refresh_jobs_run_every_day)
+
 
 # ══════════════════════════════════════════════════════════════════════════
 section("21. DASHBOARD AUTH: ADMIN LOGIN (JWT) IS ENOUGH, API KEY OPTIONAL")
