@@ -71,6 +71,24 @@ class Swing:
     # lots     index futures only: lots for this trade instead of the spec's `lots`.
     exit_fn: object = None
     lots: int | None = None
+    # Optional (round 7, default None = unchanged behaviour: market entry at the next open):
+    # entry    a resting order for the next `valid` sessions instead of the market entry (next-open specs only):
+    #          ("stop", level) buy stop (sell stop for a short): fills when the session trades at / through `level`,
+    #             at max(open, level) for a long (min for a short), paying slippage;
+    #          ("stop", level, arm) the stop becomes active only once the session trades beyond `arm` (below it for a
+    #             long, above for a short), e.g. Turtle Soup; fills at `level` (+ slippage). Daily bars cannot tell
+    #             whether the high came before the low, so a session that reaches both `arm` and `level` counts as
+    #             filled (the pessimistic reading: the unknown cases close below the level);
+    #          ("limit", level) buy limit (sell limit for a short): fills only if the session trades one tick through
+    #             `level`, at min(open, level) for a long (max for a short), no slippage (a resting limit).
+    #          Not filled after `valid` sessions: no trade, the strategy is asked again on the next session.
+    #          On the fill session only the stop is checked (pessimistically: a low at / below the stop is taken to
+    #          come after the fill); targets and exit_fn start at that session's close / the next session.
+    # entry_stop_ticks  stop = min(stop, fill-session low) - ticks x tick for a long (max(stop, high) + ticks x tick
+    #          for a short), fixed at the fill session's close ("one tick under today's low"); stop may be None.
+    entry: tuple | None = None
+    valid: int = 1
+    entry_stop_ticks: int | None = None
 
 
 @dataclass
