@@ -769,3 +769,9 @@ Verdict: **nothing here is a deployable edge.**
 New trials: 30 variants on 2023-26 (N 1,198 -> 1,228; 1 new FINAL look) and 24 on 2012-23 (N 229 -> 253). Outputs are
 in `<scratchpad>/github2_r7/`: run3y_{swing,futures,intraday}, tps3y, oos_daily, tps_oos, portfolio, aggregate.json,
 scripts/.
+
+## Old-era minute OOS (2016-2023) (`protocol_min_oos.py`, `prereg/oldera_min_v1.json`)
+
+Pre-registered before any 2016-2023 strategy result was computed: `prereg/oldera_min_v1.json` (sha256
+`8e18deeccf2506fecfc75a5e444adbd7a80fe09cd73e9f99553b1dbebecf6203`, byte-identical to
+`<scratchpad>/oldera_min/PREREGISTERED_MIN_OOS.json`). Results: not run yet.
