@@ -1699,6 +1699,13 @@ async def backtest_bars(symbols: str, days: int = 45):
     return out
 
 
+@app.get("/shadow-registry", tags=["Research"])
+def shadow_registry_status():
+    """Frozen shadow-incubation registry (read-only): shadows, looks, promotion / demotion status, chain checks."""
+    import shadow_registry
+    return {"enabled": shadow_registry.enabled(), **shadow_registry.ShadowRegistry().status()}
+
+
 @app.get("/forward-test", tags=["Research"])
 def forward_test_status(quotes: bool = False):
     """Live paper forward test of the opening-auction fade: per-variant results under the tested ("final") and the

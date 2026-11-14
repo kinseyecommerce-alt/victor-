@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     validated_vrp_max_margin: float = 250_000.0             # lab margin ≈ ₹1.08–1.32 L for 2 lots
     validated_vrp_max_loss: float = 75_000.0                # max risk per structure; lab worst −₹51,922 (2 lots)
     validated_vrp_dd_kill: float = 195_000.0                # 1.5 × lab max drawdown ₹129,760
+    # Shadow-incubation registry (shadow_registry.py): copies the forward test's and the validated agents' PAPER
+    # trades into frozen, hash-chained ledgers and evaluates the pre-registered promotion rule. Observation only:
+    # never places an order. Off by default; its scheduler job exists only when true (PAPER only)
+    shadow_registry_enabled: bool = False
     squareoff_time: str = "15:15"     # MIS flatten time; the agents were validated with 15:15 (broker auto square-off ~15:20-15:25)
 
     # Backtest gate thresholds

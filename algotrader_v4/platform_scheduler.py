@@ -112,6 +112,12 @@ class PlatformScheduler:
                             id="validated_vrp_mark", misfire_grace_time=120)
         self._sched.add_job(self._validated_catch_up, "date", id="validated_catch_up",
                             run_date=_now_ist() + __import__("datetime").timedelta(seconds=60))
+        # shadow-incubation registry (shadow_registry.py): only with SHADOW_REGISTRY_ENABLED=true, PAPER only;
+        # reads the forward test's and the validated agents' ledgers after the strangle's last settlement retry,
+        # never places an order
+        if getattr(settings, "shadow_registry_enabled", False) and settings.trading_mode == "PAPER":
+            self._sched.add_job(self._shadow_registry, "cron", hour=17, minute=5, day_of_week=VALIDATED_DOW,
+                                id="shadow_registry", misfire_grace_time=3600)
         self._sched.add_job(
             self._refresh_universe, "cron",
             hour=16, minute=30, day_of_week="mon-fri", id="universe_refresh",
@@ -298,6 +304,14 @@ class PlatformScheduler:
                 await send_telegram(f"🧪 <b>Auction-fade forward test</b>\n{lines}")
         except Exception as exc:
             logger.error("[platform] forward test ({}) failed: {}", stage, exc)
+
+    async def _shadow_registry(self) -> None:
+        """Daily shadow-registry sync + evaluation (shadow_registry.daily_job re-checks the flag and PAPER)."""
+        try:
+            import shadow_registry
+            await asyncio.to_thread(shadow_registry.daily_job)
+        except Exception as exc:
+            logger.error("[platform] shadow registry job failed: {}", exc)
 
     async def _allocate(self, reason: str) -> None:
         """The AI capital manager's two daily calls (09:08 before auto-start, 12:30)."""
