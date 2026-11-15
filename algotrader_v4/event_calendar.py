@@ -11,7 +11,7 @@ from typing import Optional
 
 from loguru import logger
 
-from market_data import nse_client
+from nse_http import nse_client
 
 
 # ── RBI MPC announcement dates ────────────────────────────────────────────────

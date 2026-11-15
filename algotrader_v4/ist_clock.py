@@ -122,31 +122,9 @@ def next_trading_day(d: date | None = None) -> date:
     return d
 
 
-_demo_anchor: tuple[datetime, datetime] | None = None   # (real start, simulated start)
-
-
-def _demo_now() -> datetime | None:
-    """DEMO_MODE (paper simulator only): a clock that starts at 10:00 IST on a weekday when
-    the server starts and then runs at real speed, so market-hours logic works any time."""
-    global _demo_anchor
-    try:
-        from config import settings
-        if not settings.demo_active:
-            return None
-    except Exception:
-        return None
-    real = datetime.now(_IST)
-    if _demo_anchor is None:
-        day = real.date()
-        while not is_trading_day(day):                  # weekend/holiday → previous session
-            day -= timedelta(days=1)
-        _demo_anchor = (real, datetime.combine(day, dtime(10, 0), tzinfo=_IST))
-    return _demo_anchor[1] + (real - _demo_anchor[0])
-
-
 def now_ist() -> datetime:
-    """Current datetime in IST (Asia/Kolkata). In DEMO_MODE, the simulated demo clock."""
-    return _demo_now() or datetime.now(_IST)
+    """Current datetime in IST (Asia/Kolkata)."""
+    return datetime.now(_IST)
 
 
 def ist_time() -> dtime:

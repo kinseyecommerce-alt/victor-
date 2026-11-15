@@ -1,130 +1,104 @@
 """
-main.py — AlgoTrader Pro v4 (tick-driven)
-Real-time tick streaming via /ws WebSocket.
-Kite used for order placement AND live market data (WebSocket streaming + REST quote fallback).
+main.py — AlgoTrader Pro (core rebuild): FastAPI app.
+
+The kept system: four lab-validated PAPER agents (agents/strategy_agents.py) driven by platform_scheduler, the
+Kite data / login layer, the paper broker and its persisted book, the SEBI pre-order checks and kill switch, the
+performance ledger, the forward test, the shadow registry and the option-bar archiver. The legacy endpoints of the
+removed engine (AI trader, trade gates, backtests, regime, scanner, brackets, orders, n8n …) are listed in
+REBUILD.md. The dashboard's read API is the versioned /api/v2 (api_v2.py, documented in API_V2.md).
+
+Auth (unchanged): with API_KEY set, every mutating request and every sensitive GET (the /v2 API included) needs
+X-API-Key or a Bearer JWT from /auth/login. The built dashboard calls /api/<path>; the prefix is stripped before
+the gate looks at the path.
 """
 from __future__ import annotations
+
 import asyncio
-import hashlib
-import hmac
-import re
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
-from ist_clock import now_ist
-import ist_clock as _ic
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends, Body
-from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi.staticfiles import StaticFiles
+from loguru import logger
 from pydantic import BaseModel, Field, model_validator
 from pydantic.networks import IPvAnyAddress
-from loguru import logger
+from typing import Literal
 
-from config import settings
-from auth import authenticate, create_token, decode_token, hash_password
-from market_data import nse_client, yf_client, is_market_open
-from kite_client import kite_client
-from risk_manager import risk_manager
-from order_guard import order_guard
-from backtest_engine import backtest_engine
-from tick_engine import tick_engine
-from signal_engine import signal_engine
-from agents.master_agent import master_agent
-from agents.strategy_agents import ALL_AGENTS
-from trailing_sl_engine import trailing_sl_engine, TRAIL_CONFIGS
-from symbol_scanner import symbol_scanner, CRITERIA, FULL_UNIVERSE
-from market_regime import regime_detector, REGIME_PLANS
-from adaptive_engine import adaptive_engine
-from sebi_compliance import sebi_compliance, KillSwitchState, APPROVED_ALGO_IDS
-from atomic_bracket import atomic_bracket_engine
 import bot_state
+import ist_clock as _ic
+from auth import authenticate, create_token, decode_token, hash_password
+from config import settings
+from ist_clock import is_market_open, now_ist
+from kite_client import kite_client
+from sebi_compliance import sebi_compliance, APPROVED_ALGO_IDS
+from tick_engine import tick_engine
+from agents.strategy_agents import ALL_AGENTS
 
-from fastapi.security import OAuth2PasswordRequestForm
-import swagger_ui_bundle
+VERSION = "5.0.0"
 
-app = FastAPI(
-    title="AlgoTrader Pro v4", version="4.0.0",
-    description="Tick-driven · KiteConnect WebSocket + REST quote · orders + market data",
-    docs_url=None, redoc_url=None,
-)
-app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app = FastAPI(title="AlgoTrader Pro", version=VERSION,
+              description="Lab-validated PAPER strategies · Kite data · paper broker · v2 dashboard API",
+              docs_url=None, redoc_url=None)
+try:
+    import swagger_ui_bundle
+    app.mount("/swagger-static", StaticFiles(directory=swagger_ui_bundle.swagger_ui_path), name="swagger-static")
+except Exception:                                    # optional (docs page only)
+    swagger_ui_bundle = None
+_STATIC = Path(__file__).resolve().parent / "static"
+if _STATIC.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
-# The React dashboard (frontend/dist, built by `npm run build`) is served by this process, so a
-# single uvicorn behind nginx is a complete deployment. The build calls the API at /api/... and
-# the WebSocket at /ws-proxy/ws (same paths the Vite dev proxy uses); strip those prefixes here.
+# The React dashboard (frontend/dist, built by `npm run build`) is served by this process.
 _FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 if (_FRONTEND_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
 
-
-@app.websocket("/ws-proxy/ws")
-async def ws_endpoint_prefixed(ws: WebSocket):
-    await ws_endpoint(ws)
-
-# MED-1: restrict CORS to explicit methods and headers (no wildcard)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.origins_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Content-Type", "X-API-Key", "Authorization"],
 )
 
-# Swagger UI 4.x only supports OpenAPI ≤3.0.x; override to 3.0.3
-from fastapi.openapi.utils import get_openapi
-def _custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    app.openapi_schema = get_openapi(
-        title=app.title, version=app.version,
-        openapi_version="3.0.3", description=app.description,
-        routes=app.routes,
-    )
-    return app.openapi_schema
-app.openapi = _custom_openapi
 
-
-# ── CRIT-1: API key gate (all mutating routes + sensitive GETs) ───────────────────
-_EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/config/validate"})
+# ── API key / JWT gate (all mutating routes + sensitive GETs) ─────────────────
+_EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/config/validate", "/v2/health"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
-_SENSITIVE_GETS = frozenset({
-    "/portfolio/positions", "/portfolio/orders", "/sebi/audit-log", "/agent/log",
-    "/dashboard/summary", "/settings/credentials/status",
-    "/docs", "/redoc",
-})
+_SENSITIVE_GETS = frozenset({"/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
+                             "/settings/credentials/status", "/docs", "/redoc"})
+_SENSITIVE_PREFIXES = ("/v2/",)
+
+
+def _authorised(request: Request) -> bool:
+    api_key = request.headers.get("X-API-Key", "")
+    auth_hdr = request.headers.get("Authorization", "")
+    if api_key and api_key == settings.api_key:
+        return True
+    return bool(auth_hdr.startswith("Bearer ") and settings.jwt_secret_key and decode_token(auth_hdr[7:]))
+
 
 @app.middleware("http")
 async def _api_key_gate(request: Request, call_next):
+    path = request.url.path
     mutates = request.method in ("POST", "PUT", "PATCH", "DELETE")
-    is_sensitive_get = request.url.path in _SENSITIVE_GETS
-    needs_auth = mutates or is_sensitive_get
-    is_exempt = (
-        request.url.path in _EXEMPT_PATHS
-        or request.url.path in ("/auth/login", "/login")
-        or any(request.url.path.startswith(p) for p in _EXEMPT_PREFIXES)
-    )
-    if needs_auth and not is_exempt and settings.api_key:
-        # Accept X-API-Key (programmatic) OR JWT Bearer (browser/UI)
-        api_key = request.headers.get("X-API-Key", "")
-        auth_hdr = request.headers.get("Authorization", "")
-        has_key = api_key == settings.api_key
-        has_jwt = False
-        if auth_hdr.startswith("Bearer ") and settings.jwt_secret_key:
-            has_jwt = decode_token(auth_hdr[7:]) is not None
-        if not has_key and not has_jwt:
-            return JSONResponse({"detail": "Unauthorized: provide X-API-Key or Bearer token"}, status_code=401)
+    sensitive = path in _SENSITIVE_GETS or any(path.startswith(p) for p in _SENSITIVE_PREFIXES)
+    exempt = (path in _EXEMPT_PATHS or path in ("/auth/login", "/login")
+              or any(path.startswith(p) for p in _EXEMPT_PREFIXES))
+    if (mutates or sensitive) and not exempt and settings.api_key and not _authorised(request):
+        return JSONResponse({"detail": "Unauthorized: provide X-API-Key or Bearer token"}, status_code=401)
     return await call_next(request)
 
 
-# ── HIGH-5: IP whitelist enforcement for orders and SEBI admin ──────────────────
-_IP_GUARDED_PREFIXES = ("/orders/", "/sebi/kill-switch", "/sebi/resume",
-                         "/sebi/reset-kill-switch", "/sebi/pause")
+# ── IP whitelist for SEBI admin actions ───────────────────────────────────────
+_IP_GUARDED_PREFIXES = ("/orders/", "/sebi/kill-switch", "/sebi/resume", "/sebi/reset-kill-switch", "/sebi/pause")
+
 
 @app.middleware("http")
 async def _ip_whitelist_gate(request: Request, call_next):
@@ -135,68 +109,31 @@ async def _ip_whitelist_gate(request: Request, call_next):
     return await call_next(request)
 
 
-# ── MED-2: In-memory rate limiter for orders and AI signals ──────────────────
+# ── rate limiter for the write endpoints that act on trading ──────────────────
 _rate_store: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW = 60.0
-_RATE_LIMITS = {"/orders/place": 30, "/signals/generate": 10, "/agent/chat": 10, "/agent/cycle": 4}
+_RATE_LIMITS = {"/orders/squareoff": 6, "/v2/trading-state": 30, "/v2/approvals": 60}
+
 
 @app.middleware("http")
 async def _rate_limiter(request: Request, call_next):
-    for path, limit in _RATE_LIMITS.items():
-        if request.url.path == path and request.method == "POST":
-            client_ip = request.client.host if request.client else "unknown"
-            key = f"{client_ip}:{path}"
-            now = time.monotonic()
-            calls = _rate_store[key]
-            calls[:] = [t for t in calls if now - t < _RATE_WINDOW]
-            if len(calls) >= limit:
-                return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
-            calls.append(now)
+    if request.method == "POST":
+        for path, limit in _RATE_LIMITS.items():
+            if request.url.path.startswith(path):
+                key = f"{request.client.host if request.client else 'unknown'}:{path}"
+                now = time.monotonic()
+                calls = _rate_store[key]
+                calls[:] = [t for t in calls if now - t < _RATE_WINDOW]
+                if len(calls) >= limit:
+                    return JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)
+                calls.append(now)
     return await call_next(request)
 
 
-# ── HIGH-2: Input validation helpers (prompt injection / path traversal) ────────
-_SYMBOL_RE = re.compile(r"^[A-Z0-9\-&]{1,20}$")
-_VALID_STRATEGIES = frozenset({"intraday", "fno", "swing", "scalping"})
-
-def _clean_symbol(sym: str) -> str:
-    s = sym.strip().upper()
-    if not _SYMBOL_RE.match(s):
-        raise HTTPException(422, f"Invalid symbol: {sym!r}")
-    return s
-
-def _clean_strategy(strategy: str) -> str:
-    s = strategy.strip().lower()
-    if s not in _VALID_STRATEGIES:
-        raise HTTPException(422, f"Unknown strategy: {strategy!r}. Valid: {sorted(_VALID_STRATEGIES)}")
-    return s
-
-
-# ── WebSocket connection pool ────────────────────────────────────────────────
-_MAX_WS_CONNECTIONS = 50
-ws_clients: list[WebSocket] = []
-
-
-# ── LOW-4: fixed broadcast — no bare except, explicit dead-client removal ────────
-async def broadcast(data: dict) -> None:
-    dead: list[WebSocket] = []
-    for ws in ws_clients[:]:
-        try:
-            await ws.send_json(data)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        if ws in ws_clients:
-            ws_clients.remove(ws)
-
-tick_engine.ws_broadcast = broadcast
-
-
-# ── Pydantic models ────────────────────────────────────────────────────────────
-
+# ── models ────────────────────────────────────────────────────────────────────
 class TokenRequest(BaseModel):
     request_token: str | None = None
-    access_token:  str | None = None
+    access_token: str | None = None
 
     @model_validator(mode="after")
     def at_least_one_token(self) -> "TokenRequest":
@@ -204,157 +141,77 @@ class TokenRequest(BaseModel):
             raise ValueError("Provide request_token or access_token")
         return self
 
-class BacktestRequest(BaseModel):
-    symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
-    lookback_days: int | None = None; walk_forward: bool = True
 
-class ReplayRequest(BaseModel):
-    agent: Literal["intraday", "scalping", "swing"] = "intraday"
-    symbols: list[str] = Field(min_length=1, max_length=25)
-    days: int = Field(default=30, ge=2, le=60)
-    slippage_bps: float = Field(default=5.0, ge=0, le=100)
-    params: dict | None = None            # agent attribute overrides, e.g. {"MIN_SCORE": 5}
-    include_trades: bool = False
-
-class BatchBacktestRequest(BaseModel):
-    symbols: list[dict]; strategy: str = "intraday"; walk_forward: bool = True
-
-class CompareRequest(BaseModel):
-    symbol: str; exchange: str = "NSE"
-    lookback_days: int | None = None; walk_forward: bool = True
-
-# HIGH-3: Literal types on all enum-like fields to prevent injection via order type
-class OrderRequest(BaseModel):
-    symbol: str
-    exchange: Literal["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"] = "NSE"
-    transaction_type: Literal["BUY", "SELL"]
-    quantity: int = Field(gt=0)
-    order_type: Literal["MARKET", "LIMIT", "SL", "SL-M"] = "MARKET"
-    product: Literal["MIS", "CNC", "NRML"] = "MIS"
-    price: float = 0.0
-    trigger_price: float = 0.0
-
-class SignalRequest(BaseModel):
-    symbol: str; exchange: str = "NSE"; strategy: str = "intraday"
-
-# CRIT-3: Field(gt=0) bounds prevent negative/zero risk parameters
-class RiskUpdateRequest(BaseModel):
-    max_daily_loss:    float | None = Field(default=None, gt=0)
-    max_position_size: float | None = Field(default=None, gt=0)
-    stop_loss_pct:     float | None = Field(default=None, gt=0, le=20.0)
-    target_pct:        float | None = Field(default=None, gt=0, le=50.0)
-
-class BotStartRequest(BaseModel):
-    strategies: list[str]
-    watchlist:  list[dict] | None = None
-    force_scan: bool = False
-
-class ManualBracketRequest(BaseModel):
-    strategy: str; symbol: str; exchange: str = "NSE"; side: str
-    quantity: int; signal_price: float; product: str = "MIS"
-    stop_loss: float | None = None; target_1: float | None = None
-    target_2: float | None = None
-
-class TSLUpdateRequest(BaseModel):
-    strategy: str
-    initial_sl_pct:  float | None = None
-    trail_pct:       float | None = None
-    activation_pct:  float | None = None
-    target1_pct:     float | None = None
-
-# MED-3: IPvAnyAddress validates both IPv4 and IPv6
 class WhitelistIPRequest(BaseModel):
     ip: IPvAnyAddress
 
-# CRIT-2: kill-switch reset requires a separate secret
+
 class KillSwitchResetRequest(BaseModel):
     secret: str
 
-class TradingLimitsRequest(BaseModel):
-    max_trades_intraday:  int | None = Field(default=None, ge=1, le=100)
-    max_trades_fno:       int | None = Field(default=None, ge=1, le=50)
-    max_trades_swing:     int | None = Field(default=None, ge=1, le=30)
-    max_trades_scalping:  int | None = Field(default=None, ge=1, le=200)
-    cooldown_after_loss_sec: int | None = Field(default=None, ge=0, le=3600)
 
 class AgentEnablesRequest(BaseModel):
-    intraday: bool | None = None
-    fno:      bool | None = None
-    swing:    bool | None = None
-    scalping: bool | None = None
-    auc_fade: bool | None = None      # validated (lab-protocol) agents: the dashboard toggle (entries only)
+    auc_fade: bool | None = None
     attn_on: bool | None = None
     vrp_winged: bool | None = None
-    pead_h60: bool | None = None      # EV-PEAD-LONG-H60 candidate (VALIDATED_PEAD_ENABLED is the master flag)
+    pead_h60: bool | None = None      # VALIDATED_PEAD_ENABLED stays the master flag
 
-class CapitalAllocationRequest(BaseModel):
-    total_capital:           float | None = Field(None, ge=10000, le=100_000_000)
-    intraday_capital_pct:    float | None = Field(None, ge=0, le=100)
-    swing_capital_pct:       float | None = Field(None, ge=0, le=100)
-    options_capital_pct:     float | None = Field(None, ge=0, le=100)
-    futures_capital_pct:     float | None = Field(None, ge=0, le=100)
-    max_intraday_positions:  int | None   = Field(None, ge=1, le=20)
-    max_scalping_positions:  int | None   = Field(None, ge=1, le=20)
-    max_swing_positions:     int | None   = Field(None, ge=1, le=10)
 
 class CredentialsUpdateRequest(BaseModel):
-    kite_api_key:      str | None = Field(default=None, min_length=1)
-    kite_api_secret:   str | None = Field(default=None, min_length=1)
-    kite_user_id:      str | None = Field(default=None, min_length=1)   # automatic daily login
-    kite_password:     str | None = Field(default=None, min_length=1)
-    kite_totp_secret:  str | None = Field(default=None, min_length=1)   # base32 TOTP seed
-    anthropic_api_key: str | None = Field(default=None, min_length=1)
-    openai_api_key:    str | None = Field(default=None, min_length=1)
-    truedata_username: str | None = Field(default=None, min_length=1)
-    truedata_password: str | None = Field(default=None, min_length=1)
-    persist:           bool = True     # save encrypted to .secrets/ so they survive a restart
+    kite_api_key: str | None = Field(default=None, min_length=1)
+    kite_api_secret: str | None = Field(default=None, min_length=1)
+    kite_user_id: str | None = Field(default=None, min_length=1)
+    kite_password: str | None = Field(default=None, min_length=1)
+    kite_totp_secret: str | None = Field(default=None, min_length=1)
+    persist: bool = True
+
 
 class CredentialsDeleteRequest(BaseModel):
     fields: list[Literal["kite_api_key", "kite_api_secret", "kite_access_token",
-                         "kite_user_id", "kite_password", "kite_totp_secret", "anthropic_api_key",
-                         "openai_api_key", "truedata_username", "truedata_password"]] = Field(min_length=1)
+                         "kite_user_id", "kite_password", "kite_totp_secret"]] = Field(min_length=1)
+
 
 class AppPasswordRequest(BaseModel):
-    username:     str | None = Field(default=None, min_length=1, max_length=50)
-    new_password: str        = Field(min_length=8, max_length=128)
+    username: str | None = Field(default=None, min_length=1, max_length=50)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
-# ── UI pages ───────────────────────────────────────────────────────────────
+# ── UI pages ──────────────────────────────────────────────────────────────────
 @app.get("/login", include_in_schema=False)
 def login_page():
-    """Serve the browser login UI (app + Kite OAuth)."""
-    with open("static/login.html", "r") as f:
-        return HTMLResponse(f.read())
+    p = _STATIC / "login.html"
+    if not p.exists():
+        return HTMLResponse("<h2>Login page not found</h2>", status_code=404)
+    return HTMLResponse(p.read_text())
+
 
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_page():
-    """Serve the React dashboard build, or the legacy static page if it hasn't been built."""
     built = _FRONTEND_DIST / "index.html"
     if built.exists():
         return HTMLResponse(built.read_text())
-    p = Path("static/dashboard.html")
-    if not p.exists():
-        return HTMLResponse("<h2>Dashboard not found — run `npm run build` in frontend/.</h2>", status_code=404)
-    return HTMLResponse(p.read_text())
+    return HTMLResponse("<h2>Dashboard not built — run `npm run build` in frontend/. The API is at /api/v2.</h2>",
+                        status_code=404)
+
 
 @app.get("/", include_in_schema=False)
 def root_redirect():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/dashboard")
 
-# ── App auth (JWT) ──────────────────────────────────────────────────────────
+
+# ── App auth (JWT) ────────────────────────────────────────────────────────────
 @app.post("/auth/login", tags=["Auth"])
 def app_login(form: OAuth2PasswordRequestForm = Depends()):
-    """Exchange username + password for a JWT access token."""
     if not authenticate(form.username, form.password):
         raise HTTPException(status_code=401, detail="Incorrect username or password",
                             headers={"WWW-Authenticate": "Bearer"})
     token, expires_in = create_token(form.username)
     return {"access_token": token, "token_type": "bearer", "expires_in": expires_in}
 
+
 @app.get("/auth/me", tags=["Auth"])
 def me(request: Request):
-    """Return currently authenticated user (JWT or API key)."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         user = decode_token(auth[7:])
@@ -364,660 +221,8 @@ def me(request: Request):
         return {"user": "api-key-user", "auth_method": "api_key"}
     raise HTTPException(401, "Not authenticated")
 
-@app.get("/auth/kite/status", tags=["Auth"])
-def kite_status():
-    """Check whether a valid Kite access token is loaded."""
-    try:
-        profile = kite_client.profile()
-        return {"connected": True, "account_id": profile.get("user_id", ""),
-                "name": profile.get("user_name", ""), "email": profile.get("email", "")}
-    except Exception:
-        return {"connected": False, "message": "No valid Kite session. Use Connect Kite Account."}
 
-@app.get("/auth/kite/callback", tags=["Auth"], include_in_schema=False)
-def kite_callback(request_token: str = "", action: str = "", status: str = ""):
-    """Zerodha redirects here after OAuth. Auto-captures the request_token."""
-    if status != "success" or not request_token:
-        return HTMLResponse(
-            "<h2 style='font-family:sans-serif;color:#f85149'>Kite login failed or cancelled.</h2>"
-            "<p><a href='/dashboard'>← Back to the dashboard</a> (Settings → API Keys → Log in with Zerodha)</p>",
-            status_code=400,
-        )
-    try:
-        token = kite_client.set_access_token(request_token=request_token)
-        _remember_kite_token(token)
-        return HTMLResponse(f"""
-        <html><head><title>Kite Connected</title></head>
-        <body style="font-family:sans-serif;background:#0d1117;color:#e6edf3;
-                     display:flex;align-items:center;justify-content:center;height:100vh">
-          <div style="text-align:center">
-            <div style="font-size:3rem">✅</div>
-            <h2 style="color:#3fb950">Kite Connected!</h2>
-            <p style="color:#8b949e">Token: {token[:8]}…</p>
-            <p style="color:#8b949e">You can close this tab — the dashboard picks the session up by itself.</p>
-            <p style="margin-top:16px"><a href="/dashboard" style="color:#58a6ff">Back to the dashboard</a></p>
-          </div>
-          <script>setTimeout(function () {{ try {{ window.close(); }} catch (e) {{}} }}, 2500);</script>
-        </body></html>
-        """)
-    except Exception as e:
-        logger.error("Kite callback error: {}", e)
-        return HTMLResponse(
-            "<h2 style='font-family:sans-serif;color:#f85149'>Token exchange failed.</h2>"
-            "<p><a href='/dashboard'>← Back to the dashboard and try again</a></p>",
-            status_code=500,
-        )
-
-
-# ── Docs (LOW-3: protected by _api_key_gate middleware above) ─────────────────
-@app.get("/docs", include_in_schema=False)
-def swagger_ui() -> HTMLResponse:
-    return get_swagger_ui_html(
-        openapi_url="/openapi.json",
-        title="AlgoTrader Pro v4 - Swagger UI",
-        swagger_js_url="/swagger-static/swagger-ui-bundle.js",
-        swagger_css_url="/swagger-static/swagger-ui.css",
-    )
-
-@app.get("/redoc", include_in_schema=False)
-def redoc_ui() -> HTMLResponse:
-    return get_redoc_html(openapi_url="/openapi.json", title="AlgoTrader Pro v4 - ReDoc")
-
-
-# ── Auth ────────────────────────────────────────────────────────────────────
-@app.get("/auth/login-url", tags=["Auth"])
-def login_url(): return {"login_url": kite_client.login_url()}
-
-@app.get("/market/opportunities", tags=["Market"])
-async def market_opportunities(top: int = 12, focus: str = "all", refresh: bool = False):
-    """Ranked tradeable set-ups across the NIFTY 100 and index underlyings (the AI's scan)."""
-    import opportunity_scanner
-    return await asyncio.to_thread(opportunity_scanner.scan, max(1, min(top, 30)), focus, refresh)
-
-
-@app.get("/universe", tags=["AI"])
-def universe_status():
-    """The rolling NIFTY 100 universe for the opening-range agents (computed after each close)."""
-    import universe
-    return {**universe.load(), "enabled": settings.use_rolling_universe,
-            "today": universe.today_watchlist()}
-
-
-@app.post("/universe/refresh", tags=["AI"])
-async def universe_refresh(lookback: int | None = None):
-    """Recompute the universe now (replays ~100 stocks in the background worker; a few minutes)."""
-    import universe
-    return await universe.refresh(lookback)
-
-
-@app.get("/allocator", tags=["AI"])
-def allocator_today():
-    """Today's AI capital allocation (size factor per strategy, day posture) and the evidence it sees."""
-    import allocator
-    return {"today": allocator.today(), "evidence": allocator.evidence(),
-            "bucket": {a: {"total": risk_manager.bucket_total(a), "deployed": risk_manager.bucket_exposure(a)}
-                       for a in ("intraday", "swing", "fno")}}
-
-
-@app.post("/allocator/run", tags=["AI"])
-async def allocator_run(reason: str = "manual"):
-    """Ask the AI allocator for today's allocation now (one model call)."""
-    import allocator
-    return await allocator.run(reason)
-
-
-@app.post("/ai/providers/test", tags=["Status"])
-async def test_ai_providers():
-    """Send a one-word health prompt to every configured AI provider (Anthropic, OpenAI) so the
-    dashboard's AI icon reflects a real call instead of 'key saved — untested'. Costs a few tokens."""
-    from llm_provider import llm_router, ProviderError
-    out: dict = {}
-    for name in llm_router.providers:
-        prov = llm_router.providers[name]
-        if not prov.configured():
-            out[name] = {"ok": False, "state": "no_key", "detail": f"{name} API key not set"}
-            continue
-        try:
-            resp = await asyncio.wait_for(llm_router._create_with_step_down(prov, dict(
-                messages=[{"role": "user", "content": "Reply with the single word OK."}],
-                system="You are a connectivity check for a trading system.", tools=[], max_tokens=64)), timeout=45)
-            text = " ".join(b.get("text", "") for b in resp.content if b.get("type") == "text").strip()
-            llm_router._mark(name, "ok", f"{prov.model} responding")
-            if llm_router.last_used not in out or not out.get(llm_router.last_used, {}).get("ok"):
-                llm_router.last_used = name      # the status line names a provider that actually answered
-            out[name] = {"ok": True, "state": "ok", "model": resp.model or prov.model, "reply": text[:40]}
-        except ProviderError as exc:
-            llm_router._mark(name, exc.kind, exc.message, code=exc.code)
-            out[name] = {"ok": False, "state": exc.kind, "model": prov.model, "detail": exc.message[:300]}
-        except Exception as exc:
-            llm_router._mark(name, "connection", str(exc))
-            out[name] = {"ok": False, "state": "connection", "model": prov.model, "detail": str(exc)[:300]}
-    return {"providers": out, "status": llm_router.status()}
-
-
-@app.get("/status/connections", tags=["Status"])
-def connection_status():
-    """One call for the dashboard's status icons: Kite session, Claude API, market data, WebSocket."""
-    import kite_auto_login
-    from datetime import timezone as _tz
-    # Kite
-    kite: dict = {"connected": False, "keys": bool(settings.kite_api_key and settings.kite_api_secret),
-                  "auto_login": kite_auto_login.credentials_ready()}
-    if settings.uses_kite_market_data or settings.trading_mode == "LIVE":
-        try:
-            prof = kite_client.profile()
-            kite.update(connected=True, account=prof.get("user_id", ""))
-        except Exception as exc:
-            kite["detail"] = "No Kite session for today" if settings.kite_api_key else "Kite API key not set"
-            kite["error"] = str(exc)[:120]
-    else:
-        kite.update(connected=False, detail="Paper simulator — Kite not used")
-    # market data freshness
-    newest = None
-    for t in list(tick_engine._latest_tick.values()):
-        ts = getattr(t, "timestamp", None)
-        if ts is None:
-            continue
-        if ts.tzinfo is not None:
-            ts = ts.astimezone().replace(tzinfo=None)        # to the container's local clock
-        newest = ts if newest is None or ts > newest else newest
-    # Tick timestamps are stamped with datetime.now() (container clock, naive) — compare like with like
-    age = max(0.0, (datetime.now() - newest).total_seconds()) if newest else None
-    data = {"source": tick_engine.data_source(), "symbols": len(tick_engine._latest_tick),
-            "unknown_symbols": sorted(tick_engine._no_quote),
-            "last_tick_age_s": round(age, 1) if age is not None else None,
-            "streaming": age is not None and age < 15 and is_market_open(),
-            "market_open": is_market_open(), "trading_day": _ic.is_trading_day(),
-            "holiday": _ic.holiday_name(), "next_session": _ic.next_trading_day().isoformat(),
-            "holiday_calendar_known": _ic.holiday_calendar_known()}
-    _depths = [len(b.candles()) for b in list(tick_engine._bufs_1min.values())]
-    data["candle_history"] = {"symbols": len(_depths), "ready": sum(1 for x in _depths if x >= 60),
-                              "min": min(_depths) if _depths else 0}
-    return {"kite": kite, "claude": ai_trader.api_health(), "data": data,
-            "ws_clients": len(ws_clients), "bot_running": master_agent.running, "mode": settings.trading_mode,
-            "time_ist": now_ist().strftime("%H:%M:%S")}
-
-
-@app.post("/auth/kite/auto-login", tags=["Auth"])
-async def kite_auto_login_now():
-    """Run the automatic Zerodha login now (user ID + password + TOTP from the vault)."""
-    import kite_auto_login
-    if not kite_auto_login.credentials_ready():
-        raise HTTPException(422, "Automatic login needs " + ", ".join(kite_auto_login.missing_credentials())
-                                 + " — add them under Settings → API Keys")
-    try:
-        token = await kite_auto_login.refresh_kite_token_async()
-    except kite_auto_login.KiteLoginError as exc:
-        raise HTTPException(502, str(exc))
-    return {"status": "connected", "token_hint": token[:6] + "…", "auto_login": kite_auto_login.status()}
-
-@app.get("/auth/kite/auto-login/status", tags=["Auth"])
-def kite_auto_login_status():
-    import kite_auto_login
-    return kite_auto_login.status()
-
-@app.post("/auth/token", tags=["Auth"])
-def set_token(req: TokenRequest):
-    t = kite_client.set_access_token(req.request_token, req.access_token)
-    _remember_kite_token(t)
-    return {"status": "ok", "access_token": t[:6] + "…"}
-
-
-# ── Bot control ──────────────────────────────────────────────────────────────
-@app.post("/bot/start", tags=["Bot"])
-async def start_bot(req: BotStartRequest):
-    if master_agent.running:
-        raise HTTPException(400, "Already running")
-    strategies = [s for s in req.strategies if bot_state.is_agent_enabled(s)]
-    if not strategies:
-        raise HTTPException(400, "All requested strategies are disabled")
-    watchlist = req.watchlist
-    if not watchlist:
-        selected = await symbol_scanner.run(strategies=strategies, force=req.force_scan)
-        watchlist = symbol_scanner.all_selected_flat()
-        if not watchlist:
-            from symbol_scanner import NIFTY_50
-            watchlist = [{"symbol": s, "exchange": "NSE"} for s in NIFTY_50[:20]]
-            logger.warning("[bot/start] Symbol scanner returned no results — using Nifty 50 fallback ({} symbols)", len(watchlist))
-    report = master_agent.start(strategies, watchlist)
-    return {"status": "started", "architecture": "tick-driven 1s",
-            "symbol_selection": "auto-scanned" if not req.watchlist else "manual",
-            "watchlist": [w["symbol"] for w in watchlist], "report": report}
-
-@app.post("/bot/stop", tags=["Bot"])
-async def stop_bot():
-    await master_agent.stop()
-    return {"status": "stopped"}
-
-@app.get("/bot/status", tags=["Bot"])
-def bot_status(): return master_agent.get_status()
-
-@app.get("/bot/directives", tags=["Bot"])
-def directives(): return master_agent.last_directives
-
-
-# ── Market data ──────────────────────────────────────────────────────────────
-@app.get("/market/live", tags=["Market"])
-def live_market(): return tick_engine.all_latest()
-
-@app.get("/market/live/{symbol}", tags=["Market"])
-def live_symbol(symbol: str):
-    symbol = _clean_symbol(symbol)
-    tick, ind = tick_engine.latest(symbol)
-    if not tick: raise HTTPException(404, f"{symbol} not subscribed")
-    if ind is None:                                 # market closed / first quote: price only
-        return {"symbol": symbol, "ltp": tick.ltp, "bid": tick.bid, "ask": tick.ask,
-                "spread": tick.ask - tick.bid, "volume": tick.volume, "indicators": None}
-    from tick_engine import json_safe as _json_safe
-    return _json_safe({"symbol": symbol, "ltp": tick.ltp, "bid": tick.bid, "ask": tick.ask,
-            "spread": tick.ask - tick.bid, "volume": tick.volume,
-            "indicators": {"ema9": round(ind.ema9,2), "ema21": round(ind.ema21,2),
-                "ema50": round(ind.ema50,2), "vwap": round(ind.vwap,2),
-                "rsi_14": round(ind.rsi_14,1), "rsi_7": round(ind.rsi_7,1),
-                "macd": round(ind.macd,4), "macd_signal": round(ind.macd_signal,4),
-                "macd_hist": round(ind.macd_hist,4), "bb_upper": round(ind.bb_upper,2),
-                "bb_lower": round(ind.bb_lower,2), "atr_14": round(ind.atr_14,2),
-                "volume_ratio": round(ind.volume_ratio,2),
-                "trend": ind.trend, "momentum": ind.momentum, "volatility": ind.volatility},
-            "ts": tick.timestamp.isoformat()})
-
-@app.get("/market/status", tags=["Market"])
-async def market_status():
-    status = await tick_engine.get_market_status()
-    status["market_open"] = is_market_open()
-    status["data_source"] = "NSE India API (not Kite)"
-    return status
-
-@app.get("/market/option-chain/{symbol}", tags=["Market"])
-async def option_chain(symbol: str):
-    symbol = _clean_symbol(symbol)
-    data = await tick_engine.get_option_chain(symbol)
-    if not data: raise HTTPException(404, f"Option chain not available for {symbol}")
-    return data
-
-
-# ── Agents ────────────────────────────────────────────────────────────────────
-@app.get("/agents", tags=["Agents"])
-def agents(): return {n: a.get_status() for n, a in ALL_AGENTS.items()}
-
-@app.post("/agents/{name}/pause", tags=["Agents"])
-def pause_agent(name: str):
-    a = ALL_AGENTS.get(name)
-    if not a: raise HTTPException(404, "Not found")
-    a.stop(); return {"status": "paused"}
-
-@app.post("/agents/{name}/resume", tags=["Agents"])
-def resume_agent(name: str):
-    a = ALL_AGENTS.get(name)
-    if not a: raise HTTPException(404, "Not found")
-    if not bot_state.is_agent_enabled(name):
-        raise HTTPException(400, f"Agent '{name}' is disabled")
-    if getattr(a, "scheduled", False):
-        a.start()                        # validated agents: scheduler-driven, no tick queue
-        return {"status": "resumed", "scheduled": True}
-    if settings.validated_only and name in bot_state.LEGACY_AGENTS:
-        raise HTTPException(400, f"VALIDATED_ONLY is on: '{name}' is not started (set VALIDATED_ONLY=false)")
-    wl = master_agent._agent_watchlists.get(name, [])
-    if wl:
-        q = tick_engine.add_subscriber(f"agent_{name}")
-        a.start(q)
-    return {"status": "resumed", "symbols": [w["symbol"] for w in wl]}
-
-
-# ── Backtest ────────────────────────────────────────────────────────────────────
-@app.post("/backtest/run", tags=["Backtest"])
-def run_bt(req: BacktestRequest):
-    sym = _clean_symbol(req.symbol)
-    strat = _clean_strategy(req.strategy)
-    return backtest_engine.run(sym, req.exchange, strat, req.lookback_days,
-                               force=True, walk_forward=req.walk_forward).to_dict()
-
-@app.post("/backtest/batch", tags=["Backtest"])
-def batch_bt(req: BatchBacktestRequest):
-    strat = _clean_strategy(req.strategy)
-    results = backtest_engine.run_batch(req.symbols, strat, walk_forward=req.walk_forward)
-    return {"strategy": strat,
-            "passed":  [s for s, r in results.items() if r.passed],
-            "failed":  [s for s, r in results.items() if not r.passed],
-            "details": {s: r.to_dict() for s, r in results.items()}}
-
-@app.get("/backtest/approved/{strategy}", tags=["Backtest"])
-def approved(strategy: str):
-    strategy = _clean_strategy(strategy)
-    return {"strategy": strategy, "approved": backtest_engine.get_approved_symbols(strategy)}
-
-@app.post("/backtest/compare", tags=["Backtest"])
-def compare_strategies(req: CompareRequest):
-    """Run all 4 strategies on a symbol and rank by Sharpe ratio."""
-    sym = _clean_symbol(req.symbol)
-    return backtest_engine.compare_strategies(sym, req.exchange, req.lookback_days, req.walk_forward)
-
-@app.get("/backtest/trades/{symbol}/{strategy}", tags=["Backtest"])
-def download_trades(symbol: str, strategy: str):
-    """Download the full trade log for a symbol/strategy as CSV."""
-    symbol = _clean_symbol(symbol)
-    strategy = _clean_strategy(strategy)
-    key = (symbol, strategy)
-    result = backtest_engine._cache.get(key)
-    if result is None:
-        raise HTTPException(404, f"No backtest result cached for {symbol}/{strategy}. Run /backtest/run first.")
-    csv_data = result.to_csv()
-    return StreamingResponse(
-        iter([csv_data]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={symbol}_{strategy}_trades.csv"},
-    )
-
-@app.get("/backtest/equity/{symbol}/{strategy}", tags=["Backtest"])
-def equity_chart(symbol: str, strategy: str):
-    """Return equity curve chart as PNG image."""
-    symbol = _clean_symbol(symbol)
-    strategy = _clean_strategy(strategy)
-    key = (symbol, strategy)
-    result = backtest_engine._cache.get(key)
-    if result is None:
-        raise HTTPException(404, f"No backtest result cached for {symbol}/{strategy}. Run /backtest/run first.")
-    png_bytes = result.equity_chart_png()
-    return StreamingResponse(
-        iter([png_bytes]),
-        media_type="image/png",
-        headers={"Content-Disposition": f"inline; filename={symbol}_{strategy}_equity.png"},
-    )
-
-@app.post("/backtest/weekly", tags=["Backtest"])
-async def trigger_weekly_backtest():
-    """Manually trigger the weekly auto-backtest across full universe."""
-    asyncio.create_task(asyncio.to_thread(backtest_engine.weekly_auto_backtest))
-    return {"status": "weekly backtest started", "note": "runs in background, check logs"}
-
-
-# ── Orders ────────────────────────────────────────────────────────────────────
-@app.post("/orders/place", tags=["Orders"])
-async def place_order(req: OrderRequest):
-    ok, reason = order_guard.can_place(req.symbol, "manual", req.transaction_type)
-    if not ok: raise HTTPException(400, f"Guard: {reason}")
-    ok, reason = risk_manager.check_before_order(req.symbol, req.quantity, req.price or 1, req.transaction_type)
-    if not ok: raise HTTPException(400, f"Risk: {reason}")
-    sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
-        strategy="manual", symbol=req.symbol, exchange=req.exchange,
-        transaction_type=req.transaction_type, quantity=req.quantity,
-        order_type=req.order_type, price_at_signal=req.price or 0,
-        signal_source="manual_api", regime=regime_detector.current_regime.value)
-    if not sebi_ok: raise HTTPException(403, f"SEBI compliance: {sebi_reason}")
-    oid = kite_client.place_order(
-        tradingsymbol=req.symbol, exchange=req.exchange,
-        transaction_type=req.transaction_type, quantity=req.quantity,
-        order_type=req.order_type, product=req.product,
-        price=req.price, trigger_price=req.trigger_price, tag=algo_id)
-    sebi_compliance.record_order_id("manual", req.symbol, oid)
-    order_guard.register_order(req.symbol, "manual", req.transaction_type, oid)
-    await broadcast({"event": "order_placed", "order_id": oid, "symbol": req.symbol})
-    return {"status": "ok", "order_id": oid}
-
-@app.delete("/orders/{order_id}", tags=["Orders"])
-async def cancel(order_id: str):
-    kite_client.cancel_order(order_id); return {"status": "ok"}
-
-@app.post("/orders/squareoff", tags=["Orders"])
-async def squareoff():
-    ids = master_agent.squareoff_book("manual square-off")      # tracked positions through their exit path
-    return {"status": "ok", "squared_off": len(ids)}
-
-# HIGH-6: generic error messages, raw exceptions logged server-side only
-@app.get("/portfolio/positions", tags=["Portfolio"])
-def positions():
-    try: return kite_client.positions()
-    except Exception as e:
-        logger.error("Portfolio positions error: {}", e)
-        raise HTTPException(500, "Unable to fetch positions")
-
-@app.get("/portfolio/orders", tags=["Portfolio"])
-def orders():
-    try: return kite_client.orders()
-    except Exception as e:
-        logger.error("Portfolio orders error: {}", e)
-        raise HTTPException(500, "Unable to fetch orders")
-
-
-# ── Claude Gate Log (dashboard) ──────────────────────────────────────────────
-@app.get("/gate/log", tags=["AI Signal"])
-def gate_log(n: int = 50):
-    """Return last n Claude trade-gate decisions (newest first). Used by dashboard."""
-    from claude_trade_gate import get_gate_log, get_gate_stats
-    decisions = get_gate_log(n)
-    # Normalise: add `enter` bool from decision string if needed
-    for d in decisions:
-        if "enter" not in d:
-            d["enter"] = d.get("decision", "").upper() == "ENTER"
-    return {"decisions": decisions, "count": len(decisions), "stats": get_gate_stats(),
-            "enabled": settings.use_claude_trade_gate}
-
-
-# ── Signals / Risk ──────────────────────────────────────────────────────────
-@app.post("/signals/generate", tags=["AI Signal"])
-async def gen_signal(req: SignalRequest):
-    # HIGH-2: sanitise inputs before they reach Claude prompt
-    sym   = _clean_symbol(req.symbol)
-    strat = _clean_strategy(req.strategy)
-    try:
-        sig = signal_engine.generate(sym, req.exchange, strat)
-        await broadcast({"event": "signal", "symbol": sym, "signal": sig})
-        from n8n_bridge import notify as _n8n
-        asyncio.create_task(_n8n("signal", {
-            "symbol":     sym,
-            "strategy":   strat,
-            "action":     sig.get("action", ""),
-            "price":      sig.get("price", 0),
-            "confidence": sig.get("confidence", 0),
-            "pattern":    sig.get("trigger", ""),
-        }))
-        return sig
-    except Exception as e:
-        logger.error("Signal generation error for {}: {}", sym, e)
-        raise HTTPException(500, "Signal generation failed")
-
-@app.get("/risk/status", tags=["Risk"])
-def risk_st(): return risk_manager.status()
-
-@app.patch("/risk/update", tags=["Risk"])
-def risk_update(req: RiskUpdateRequest):
-    if req.max_daily_loss    is not None: settings.max_daily_loss    = req.max_daily_loss
-    if req.max_position_size is not None: settings.max_position_size = req.max_position_size
-    if req.stop_loss_pct     is not None: settings.stop_loss_pct     = req.stop_loss_pct
-    if req.target_pct        is not None: settings.target_pct        = req.target_pct
-    return risk_manager.status()
-
-@app.get("/settings/trading-limits", tags=["Settings"])
-def get_trading_limits():
-    return {
-        "max_trades_intraday":     settings.max_trades_intraday,
-        "max_trades_fno":          settings.max_trades_fno,
-        "max_trades_swing":        settings.max_trades_swing,
-        "max_trades_scalping":     settings.max_trades_scalping,
-        "cooldown_after_loss_sec": settings.cooldown_after_loss_sec,
-    }
-
-@app.patch("/settings/trading-limits", tags=["Settings"])
-def patch_trading_limits(req: TradingLimitsRequest):
-    if req.max_trades_intraday     is not None: settings.max_trades_intraday     = req.max_trades_intraday
-    if req.max_trades_fno          is not None: settings.max_trades_fno          = req.max_trades_fno
-    if req.max_trades_swing        is not None: settings.max_trades_swing        = req.max_trades_swing
-    if req.max_trades_scalping     is not None: settings.max_trades_scalping     = req.max_trades_scalping
-    if req.cooldown_after_loss_sec is not None: settings.cooldown_after_loss_sec = req.cooldown_after_loss_sec
-    return get_trading_limits()
-
-
-# ── Agent Enable/Disable ───────────────────────────────────────────────────
-@app.get("/settings/agent-enables", tags=["Settings"])
-def get_agent_enables():
-    return dict(bot_state._agent_enabled)
-
-@app.post("/settings/agent-enables", tags=["Settings"])
-def set_agent_enables(req: AgentEnablesRequest):
-    updates = req.model_dump(exclude_none=True)
-    if settings.validated_only:
-        bad = [n for n, v in updates.items() if v and n in bot_state.LEGACY_AGENTS]
-        if bad:
-            raise HTTPException(400, f"VALIDATED_ONLY is on: {', '.join(bad)} has no lab-validated edge and cannot be "
-                                     f"enabled (set VALIDATED_ONLY=false to revert to the legacy agents)")
-    for name, val in updates.items():
-        bot_state.set_agent_enabled(name, val)
-        if not val:
-            a = ALL_AGENTS.get(name)
-            if a and a.state.running:
-                a.stop()
-    return dict(bot_state._agent_enabled)
-
-
-# ── Capital Allocation ──────────────────────────────────────────────────────────
-@app.get("/settings/capital-allocation", tags=["Settings"])
-def get_capital_allocation():
-    intraday_bucket = round(risk_manager.bucket_total("intraday"))          # includes intraday_leverage
-    swing_bucket    = round(settings.total_capital * settings.swing_capital_pct    / 100)
-    options_bucket  = round(settings.total_capital * settings.options_capital_pct  / 100)
-    futures_bucket  = round(settings.total_capital * settings.futures_capital_pct  / 100)
-    return {
-        "total_capital":        settings.total_capital,
-        "intraday_capital_pct": settings.intraday_capital_pct,
-        "swing_capital_pct":    settings.swing_capital_pct,
-        "options_capital_pct":  settings.options_capital_pct,
-        "futures_capital_pct":  settings.futures_capital_pct,
-        "max_positions": {
-            "intraday": settings.max_intraday_positions,
-            "scalping":  settings.max_scalping_positions,
-            "swing":     settings.max_swing_positions,
-        },
-        "per_type_rupees": {
-            "intraday": intraday_bucket,
-            "swing":    swing_bucket,
-            "options":  options_bucket,
-            "futures":  futures_bucket,
-        },
-        "per_trade_rupees": {
-            "intraday": round(intraday_bucket / max(settings.max_intraday_positions, 1)),
-            "scalping":  round(intraday_bucket / max(settings.max_scalping_positions, 1)),
-            "swing":     round(swing_bucket    / max(settings.max_swing_positions,    1)),
-            "options":   options_bucket,
-        },
-        "agent_buckets": {
-            "intraday": "intraday", "scalping": "intraday",
-            "swing": "swing",       "fno": "options",
-        },
-        "intraday_leverage": settings.intraday_leverage,
-        "intraday_margin_rupees": round(settings.total_capital * settings.intraday_capital_pct / 100),
-    }
-
-@app.patch("/settings/capital-allocation", tags=["Settings"])
-def patch_capital_allocation(req: CapitalAllocationRequest):
-    pcts = [req.intraday_capital_pct, req.swing_capital_pct,
-            req.options_capital_pct,  req.futures_capital_pct]
-    provided = [p for p in pcts if p is not None]
-    if len(provided) == 4 and round(sum(provided), 2) > 100:
-        raise HTTPException(400, "Capital percentages exceed 100%")
-    if req.total_capital           is not None: settings.total_capital           = req.total_capital
-    if req.intraday_capital_pct    is not None: settings.intraday_capital_pct    = req.intraday_capital_pct
-    if req.swing_capital_pct       is not None: settings.swing_capital_pct       = req.swing_capital_pct
-    if req.options_capital_pct     is not None: settings.options_capital_pct     = req.options_capital_pct
-    if req.futures_capital_pct     is not None: settings.futures_capital_pct     = req.futures_capital_pct
-    if req.max_intraday_positions  is not None: settings.max_intraday_positions  = req.max_intraday_positions
-    if req.max_scalping_positions  is not None: settings.max_scalping_positions  = req.max_scalping_positions
-    if req.max_swing_positions     is not None: settings.max_swing_positions     = req.max_swing_positions
-    return get_capital_allocation()
-
-
-_CRED_FIELDS = ("kite_api_key", "kite_api_secret", "kite_user_id", "kite_password", "kite_totp_secret",
-                "anthropic_api_key", "openai_api_key", "truedata_username", "truedata_password")
-
-
-def _is_loopback(request: Request) -> bool:
-    host = request.client.host if request.client else ""
-    return host in ("127.0.0.1", "::1", "localhost")
-
-
-def _refresh_after_credential_change(changed: set[str]) -> None:
-    """Make running components pick up new keys without a restart."""
-    if changed & {"anthropic_api_key", "openai_api_key"}:
-        from llm_provider import llm_router
-        llm_router.reset()                 # new keys on the next AI call, both providers
-    if "anthropic_api_key" in changed:
-        import anthropic, trade_memory
-        from signal_engine import signal_engine
-        ai_trader._client = None
-        trade_memory._client = None
-        master_agent._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        if getattr(signal_engine, "_client", None) is not None:
-            signal_engine._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    if changed & {"kite_api_key", "kite_api_secret"}:
-        kite_client._kite = None          # reopened with the new app key on next use
-
-
-def _credential_view() -> dict:
-    import kite_auto_login
-    creds = kite_client.validate_credentials()
-    creds["truedata_username"] = bool(settings.truedata_username)
-    creds["truedata_password"] = bool(settings.truedata_password)
-    for f in ("kite_user_id", "kite_password", "kite_totp_secret", "openai_api_key"):
-        creds[f] = bool(getattr(settings, f))
-    creds["auto_login"] = kite_auto_login.status()
-    creds["ai_providers"] = ai_trader.api_health()
-    return creds
-
-
-@app.post("/settings/credentials", tags=["Settings"])
-def update_credentials(req: CredentialsUpdateRequest, request: Request):
-    """Set API credentials. With persist=true (default) they are also saved encrypted in .secrets/
-    and reloaded at startup. Values are never returned by any endpoint."""
-    from secret_store import secret_store
-    values = {f: v.strip() for f in _CRED_FIELDS if (v := getattr(req, f)) is not None and v.strip()}
-    if not values:
-        raise HTTPException(422, "No credentials given")
-    if "kite_totp_secret" in values:
-        seed = values["kite_totp_secret"].replace(" ", "").upper()
-        if seed.isdigit() or len(seed) < 16:
-            raise HTTPException(422, "KITE_TOTP_SECRET must be the base32 seed shown when enabling TOTP on Zerodha "
-                                     "(16+ letters/digits), not the 6-digit code")
-        try:
-            import pyotp; pyotp.TOTP(seed).now()
-        except Exception:
-            raise HTTPException(422, "KITE_TOTP_SECRET is not a valid base32 TOTP seed")
-        values["kite_totp_secret"] = seed
-    if req.persist and not settings.api_key and not _is_loopback(request):
-        raise HTTPException(403, "Set API_KEY in .env before saving keys from another machine")
-    if req.persist:
-        try:
-            secret_store.save(values)
-        except Exception as e:
-            logger.error("Credential vault write failed: {}", e)
-            raise HTTPException(500, "Could not save to the encrypted vault — see server log")
-    for f, v in values.items():
-        setattr(settings, f, v)
-    _refresh_after_credential_change(set(values))
-    logger.info("Credentials updated: {} (persisted={})", sorted(values), req.persist)
-    return {"status": "saved" if req.persist else "updated", "persisted": req.persist,
-            "credentials": _credential_view(), "vault": secret_store.status()}
-
-
-@app.get("/settings/credentials/status", tags=["Settings"])
-def credentials_status():
-    """Which credentials are set, and which are stored in the encrypted vault (no values)."""
-    from secret_store import secret_store
-    return {"credentials": _credential_view(), "vault": secret_store.status()}
-
-
-@app.delete("/settings/credentials", tags=["Settings"])
-def delete_credentials(req: CredentialsDeleteRequest):
-    """Remove credentials from the vault and from the running server."""
-    from secret_store import secret_store
-    secret_store.delete(req.fields)
-    for f in req.fields:
-        setattr(settings, f, "")
-    if "kite_access_token" in req.fields:
-        kite_client._kite = None
-    _refresh_after_credential_change(set(req.fields))
-    logger.info("Credentials deleted: {}", sorted(req.fields))
-    return {"status": "deleted", "credentials": _credential_view(), "vault": secret_store.status()}
-
-
+# ── Kite login ────────────────────────────────────────────────────────────────
 def _remember_kite_token(token: str) -> None:
     """Keep today's Kite access token so a restart doesn't need a fresh login (expires next morning)."""
     from secret_store import secret_store
@@ -1029,386 +234,177 @@ def _remember_kite_token(token: str) -> None:
     tick_engine.on_kite_login()
 
 
-@app.post("/settings/app-password", tags=["Settings"])
-def update_app_password(req: AppPasswordRequest):
-    """Change the dashboard login. Saved (bcrypt hash) in the encrypted vault, so it survives
-    restarts and redeploys and overrides ADMIN_PASSWORD_HASH from the environment."""
-    from secret_store import secret_store
-    if req.username is not None:
-        settings.admin_username = req.username
-    settings.admin_password_hash = hash_password(req.new_password)
+@app.get("/auth/kite/status", tags=["Auth"])
+def kite_status():
     try:
-        secret_store.save({"admin_username": settings.admin_username,
-                           "admin_password_hash": settings.admin_password_hash})
-        persisted = True
+        profile = kite_client.profile()
+        return {"connected": True, "account_id": profile.get("user_id", ""), "name": profile.get("user_name", "")}
+    except Exception:
+        return {"connected": False, "message": "No valid Kite session. Use Connect Kite Account."}
+
+
+@app.get("/auth/kite/callback", tags=["Auth"], include_in_schema=False)
+def kite_callback(request_token: str = "", action: str = "", status: str = ""):
+    if status != "success" or not request_token:
+        return HTMLResponse("<h2 style='font-family:sans-serif'>Kite login failed or cancelled.</h2>"
+                            "<p><a href='/dashboard'>Back to the dashboard</a></p>", status_code=400)
+    try:
+        token = kite_client.set_access_token(request_token=request_token)
+        _remember_kite_token(token)
+        return HTMLResponse("<html><body style='font-family:sans-serif;text-align:center;padding-top:20vh'>"
+                            "<h2>Kite connected</h2><p>You can close this tab.</p>"
+                            "<p><a href='/dashboard'>Back to the dashboard</a></p></body></html>")
     except Exception as e:
-        logger.error("Admin password not saved to vault: {}", e)
-        persisted = False
-    return {"status": "updated", "admin_username": settings.admin_username, "persisted": persisted}
+        logger.error("Kite callback error: {}", e)
+        return HTMLResponse("<h2 style='font-family:sans-serif'>Token exchange failed.</h2>"
+                            "<p><a href='/dashboard'>Back to the dashboard and try again</a></p>", status_code=500)
 
 
-# ── WebSocket ────────────────────────────────────────────────────────────────────
-# HIGH-1: token auth via ?token= query param + max connection cap
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-    token = ws.query_params.get("token", "")
-    if settings.api_key and token != settings.api_key:
-        # the browser dashboard authenticates with the admin login's JWT instead of the API key
-        if not (settings.jwt_secret_key and token and decode_token(token)):
-            await ws.close(code=4001, reason="Unauthorized")
-            return
-    if len(ws_clients) >= _MAX_WS_CONNECTIONS:
-        await ws.close(code=4002, reason="Too many connections")
-        return
-    await ws.accept()
-    ws_clients.append(ws)
+@app.get("/auth/login-url", tags=["Auth"])
+def login_url():
+    return {"login_url": kite_client.login_url()}
+
+
+@app.post("/auth/kite/auto-login", tags=["Auth"])
+async def kite_auto_login_now():
+    import kite_auto_login
+    if not kite_auto_login.credentials_ready():
+        raise HTTPException(422, "Automatic login needs " + ", ".join(kite_auto_login.missing_credentials()))
     try:
-        while True:
-            data = await ws.receive_text()
-            if data == "ping":
-                await ws.send_json({"event": "pong", "ts": datetime.now().isoformat()})
-    except WebSocketDisconnect:
-        if ws in ws_clients:
-            ws_clients.remove(ws)
+        token = await kite_auto_login.refresh_kite_token_async()
+    except kite_auto_login.KiteLoginError as exc:
+        raise HTTPException(502, str(exc))
+    return {"status": "connected", "token_hint": token[:6] + "…", "auto_login": kite_auto_login.status()}
 
 
-# ── Regime ────────────────────────────────────────────────────────────────────
-@app.get("/regime/status", tags=["Market Regime"])
-def regime_status(): return regime_detector.status()
-
-@app.post("/regime/refresh", tags=["Market Regime"])
-async def regime_refresh():
-    regime, plan = await regime_detector.update()
-    return {"regime": regime.value, "label": regime_detector._regime_label(),
-            "active": plan.active, "paused": plan.paused,
-            "allocation": plan.allocation, "size_factor": plan.size_factor,
-            "reasoning": plan.reasoning}
-
-@app.get("/regime/history", tags=["Market Regime"])
-def regime_history(): return {"history": regime_detector.history}
-
-@app.get("/regime/plans", tags=["Market Regime"])
-def regime_plans():
-    return {r.value: {"active": p.active, "paused": p.paused, "allocation": p.allocation,
-            "size_factor": p.size_factor, "reasoning": p.reasoning}
-            for r, p in REGIME_PLANS.items()}
+@app.get("/auth/kite/auto-login/status", tags=["Auth"])
+def kite_auto_login_status():
+    import kite_auto_login
+    return kite_auto_login.status()
 
 
-# ── Adaptive engine ────────────────────────────────────────────────────────────
-@app.get("/adaptive/status", tags=["Adaptive Engine"])
-def adaptive_status():
-    return adaptive_engine.summary()
-
-# MED-5: bounded vix parameter
-@app.post("/adaptive/review", tags=["Adaptive Engine"])
-async def adaptive_review(
-    vix: float = Query(default=14.0, ge=0.0, le=200.0, description="VIX value"),
-    regime_changed: bool = False,
-):
-    report = await adaptive_engine.nightly_review(vix, regime_changed)
-    return report
+@app.post("/auth/token", tags=["Auth"])
+def set_token(req: TokenRequest):
+    t = kite_client.set_access_token(req.request_token, req.access_token)
+    _remember_kite_token(t)
+    return {"status": "ok", "access_token": t[:6] + "…"}
 
 
-# ── Symbol scanner ────────────────────────────────────────────────────────────
-@app.post("/symbols/scan", tags=["Symbol Scanner"])
-async def run_scan(strategies: list[str] | None = None):
-    result = await symbol_scanner.run(strategies=strategies, force=True)
-    return {"status": "complete",
-            "selected": {s: [x["symbol"] for x in syms] for s, syms in result.items()},
-            "total_symbols": sum(len(v) for v in result.values())}
-
-@app.get("/symbols/selected", tags=["Symbol Scanner"])
-def get_selected(strategy: str | None = None): return symbol_scanner.get_selected(strategy)
-
-@app.get("/symbols/scores/{strategy}", tags=["Symbol Scanner"])
-def get_scores(strategy: str):
-    scores = symbol_scanner.get_scores(strategy)
-    if not scores: raise HTTPException(404, "No scan results yet.")
-    return {"strategy": strategy,
-            "passed":   sorted([s for s in scores if s["selected"]], key=lambda x: x["total_score"], reverse=True),
-            "rejected": sorted([s for s in scores if not s["selected"]], key=lambda x: x["total_score"], reverse=True)}
-
-@app.get("/symbols/criteria", tags=["Symbol Scanner"])
-def get_criteria():
-    return {name: {"description": c.description, "universe_size": len(c.universe),
-                   "top_n": c.top_n, "score_weights": c.score_weights,
-                   "filters": {"min_avg_volume": c.min_avg_volume,
-                               "atr_range": f"{c.min_atr_pct}–{c.max_atr_pct}%",
-                               "rsi_range": f"{c.rsi_min}–{c.rsi_max}",
-                               "min_adx": c.min_adx, "fo_only": c.fo_eligible_only,
-                               "require_trend": c.require_trend}}
-            for name, c in CRITERIA.items()}
-
-@app.get("/symbols/universe", tags=["Symbol Scanner"])
-def get_universe():
-    from symbol_scanner import NIFTY_50, NIFTY_NEXT_50, NIFTY_BANK
-    return {"nifty_50": NIFTY_50, "nifty_next_50": NIFTY_NEXT_50,
-            "nifty_bank": NIFTY_BANK, "total": len(FULL_UNIVERSE)}
+# ── Docs ──────────────────────────────────────────────────────────────────────
+@app.get("/docs", include_in_schema=False)
+def swagger_ui() -> HTMLResponse:
+    if swagger_ui_bundle is None:
+        return get_swagger_ui_html(openapi_url="/openapi.json", title="AlgoTrader Pro - Swagger UI")
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="AlgoTrader Pro - Swagger UI",
+                               swagger_js_url="/swagger-static/swagger-ui-bundle.js",
+                               swagger_css_url="/swagger-static/swagger-ui.css")
 
 
-# ── Trailing SL ────────────────────────────────────────────────────────────────
-@app.get("/trailing-sl/status", tags=["Trailing SL"])
-def tsl_status(): return trailing_sl_engine.status_summary()
-
-@app.get("/trailing-sl/configs", tags=["Trailing SL"])
-def tsl_configs():
-    return {name: {"initial_sl_pct": cfg.initial_sl_pct, "trail_pct": cfg.trail_pct,
-                   "breakeven_pct": cfg.breakeven_pct, "activation_pct": cfg.activation_pct,
-                   "target1_pct": cfg.target1_pct, "target2_pct": cfg.target2_pct,
-                   "mode": cfg.mode.value, "atr_multiplier": cfg.atr_multiplier}
-            for name, cfg in TRAIL_CONFIGS.items()}
-
-@app.patch("/trailing-sl/config", tags=["Trailing SL"])
-def update_tsl_config(req: TSLUpdateRequest):
-    cfg = TRAIL_CONFIGS.get(req.strategy)
-    if not cfg: raise HTTPException(404, f"Strategy '{req.strategy}' not found")
-    if req.initial_sl_pct  is not None: cfg.initial_sl_pct  = req.initial_sl_pct
-    if req.trail_pct       is not None: cfg.trail_pct        = req.trail_pct
-    if req.activation_pct  is not None: cfg.activation_pct  = req.activation_pct
-    if req.target1_pct     is not None: cfg.target1_pct      = req.target1_pct
-    return {"status": "updated", "strategy": req.strategy}
+@app.get("/redoc", include_in_schema=False)
+def redoc_ui() -> HTMLResponse:
+    return get_redoc_html(openapi_url="/openapi.json", title="AlgoTrader Pro - ReDoc")
 
 
-# ── Brackets ────────────────────────────────────────────────────────────────────
-@app.get("/brackets", tags=["Brackets"])
-def get_all_brackets(active_only: bool = False):
-    return {"brackets": atomic_bracket_engine.all_brackets(active_only),
-            "summary": atomic_bracket_engine.summary()}
-
-@app.get("/brackets/{bracket_id}", tags=["Brackets"])
-def get_bracket(bracket_id: str):
-    b = atomic_bracket_engine.get_bracket(bracket_id)
-    if not b: raise HTTPException(404, "Bracket not found")
-    return b
-
-@app.post("/brackets/manual", tags=["Brackets"])
-async def manual_bracket(req: ManualBracketRequest):
-    bracket = await atomic_bracket_engine.execute(
-        strategy=req.strategy, symbol=req.symbol, exchange=req.exchange,
-        side=req.side, quantity=req.quantity, signal_price=req.signal_price,
-        product=req.product, stop_loss=req.stop_loss,
-        target_1=req.target_1, target_2=req.target_2,
-        sub_strategy="manual", trigger="manual_api")
-    if not bracket: raise HTTPException(500, "Bracket execution failed")
-    return bracket.to_dict()
+# ── Status ────────────────────────────────────────────────────────────────────
+def kite_connection() -> dict:
+    import kite_auto_login
+    kite: dict = {"connected": False, "keys": bool(settings.kite_api_key and settings.kite_api_secret),
+                  "auto_login": kite_auto_login.credentials_ready()}
+    if settings.uses_kite_market_data:
+        try:
+            prof = kite_client.profile()
+            kite.update(connected=True, account=prof.get("user_id", ""))
+        except Exception as exc:
+            kite["detail"] = "No Kite session for today" if settings.kite_api_key else "Kite API key not set"
+            kite["error"] = str(exc)[:120]
+    else:
+        kite["detail"] = "PAPER_DATA_SOURCE=SIM — Kite not used (validated agents take no entries)"
+    return kite
 
 
-# ── Paper simulation helper ─────────────────────────────────────────────────────
-
-class SimTickRequest(BaseModel):
-    symbol: str
-    ltp: float = Field(gt=0)
-    atr_14: float = 0.0
-
-@app.post("/simulate/price-tick", tags=["Simulate"])
-async def simulate_price_tick(req: SimTickRequest):
-    """PAPER mode only — inject a price tick directly into the TSL engine.
-    Bypasses candle-history guard so profit booking can be tested immediately."""
-    if settings.trading_mode != "PAPER":
-        raise HTTPException(403, "Only available in PAPER mode")
-    sym = _clean_symbol(req.symbol)
-    before = {b["bracket_id"]: b["status"]
-              for b in atomic_bracket_engine.all_brackets(active_only=False)}
-    await trailing_sl_engine.on_tick(sym, req.ltp, req.atr_14)
-    after  = {b["bracket_id"]: b["status"]
-              for b in atomic_bracket_engine.all_brackets(active_only=False)}
-    changes = {bid: {"before": before.get(bid), "after": after[bid]}
-               for bid in after if after[bid] != before.get(bid)}
-    brackets_now = [b for b in atomic_bracket_engine.all_brackets()
-                    if b["symbol"] == sym]
-    return {"symbol": sym, "ltp": req.ltp, "status_changes": changes,
-            "brackets": brackets_now}
+@app.get("/status/connections", tags=["Status"])
+def connection_status():
+    data = {**tick_engine.status(), "market_open": is_market_open(), "trading_day": _ic.is_trading_day(),
+            "holiday": _ic.holiday_name(), "next_session": _ic.next_trading_day().isoformat(),
+            "holiday_calendar_known": _ic.holiday_calendar_known()}
+    from platform_scheduler import platform_scheduler
+    return {"kite": kite_connection(), "data": data, "bot_running": platform_scheduler.bot_running(),
+            "mode": settings.trading_mode, "time_ist": now_ist().strftime("%H:%M:%S")}
 
 
-@app.get("/sebi/status", tags=["SEBI Compliance"])
-def sebi_status(): return sebi_compliance.status()
-
-@app.get("/sebi/disclosures", tags=["SEBI Compliance"])
-def sebi_disclosures(): return sebi_compliance.get_disclosure_document()
-
-@app.post("/sebi/kill-switch", tags=["SEBI Compliance"])
-async def trigger_kill_switch(reason: str = "Manual kill switch"):
-    sebi_compliance.trigger_kill_switch(reason)
-    from n8n_bridge import notify as _n8n
-    asyncio.create_task(_n8n("system", {"type": "kill_switch", "reason": reason}))
-    return {"status": "KILLED", "reason": reason}
-
-@app.post("/sebi/resume", tags=["SEBI Compliance"])
-def resume_trading():
-    ok, msg = sebi_compliance.resume_trading()
-    if not ok:
-        raise HTTPException(409, f"SEBI: {msg}")
-    return {"status": "ACTIVE"}
-
-@app.post("/sebi/pause", tags=["SEBI Compliance"])
-def pause_trading(reason: str = "Manual pause"):
-    sebi_compliance.pause_trading(reason)
-    return {"status": "PAUSED", "reason": reason}
-
-@app.get("/sebi/audit-log", tags=["SEBI Compliance"])
-def query_audit_log(date: str, strategy: str = None, symbol: str = None, decision: str = None):
-    records = sebi_compliance.query_audit_log(date, strategy, symbol, decision)
-    return {"date": date, "count": len(records), "records": records}
-
-@app.get("/sebi/algo-ids", tags=["SEBI Compliance"])
-def get_algo_ids(): return {"algo_ids": APPROVED_ALGO_IDS, "total": len(APPROVED_ALGO_IDS)}
-
-@app.get("/sebi/strategy-disclosure/{strategy}", tags=["SEBI Compliance"])
-def strategy_disclosure(strategy: str): return sebi_compliance.get_strategy_logic_disclosure(strategy)
-
-# CRIT-2: reset kill switch requires a separate secret (not just API key)
-@app.post("/sebi/reset-kill-switch", tags=["SEBI Compliance"])
-def reset_kill_switch(req: KillSwitchResetRequest):
-    ok, msg = sebi_compliance.reset_kill_switch(req.secret)
-    if not ok:
-        raise HTTPException(403, f"SEBI: {msg}")
-    return {"status": "ACTIVE", "note": "Kill switch reset. Trading re-enabled."}
-
-@app.post("/sebi/whitelist-ip", tags=["SEBI Compliance"])
-def whitelist_ip(req: WhitelistIPRequest):
-    sebi_compliance.add_whitelisted_ip(str(req.ip))
-    return {"status": "added", "ip": str(req.ip)}
-
-
-# ── Health ────────────────────────────────────────────────────────────────────
 @app.get("/health", tags=["System"])
 def health():
-    return {"status": "ok", "version": "4.0.0", "mode": settings.trading_mode,
-            "architecture": "tick-driven 1s",
-            "market_data_source": tick_engine.data_source(),
-            "market_open": is_market_open(),
-            "master": "running" if master_agent.running else "stopped",
-            "tick_engine": "running" if tick_engine._running else "stopped",
+    from platform_scheduler import platform_scheduler
+    return {"status": "ok", "version": VERSION, "mode": settings.trading_mode,
+            "market_data_source": tick_engine.data_source(), "market_open": is_market_open(),
+            "bot": "running" if platform_scheduler.bot_running() else "stopped",
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
-            "subscribed_symbols": tick_engine.symbols(),
             "time": now_ist().strftime("%H:%M:%S IST")}
 
 
-# ── Config validate ────────────────────────────────────────────────────────────
 @app.get("/config/validate", tags=["System"])
 def config_validate():
-    """Validate all required credentials and show current tick data source."""
     creds = kite_client.validate_credentials()
-    use_ws = getattr(tick_engine, "_use_ws", False)
-    if settings.uses_kite_market_data:
-        ticker_source = "KITE_WS" if use_ws else "KITE_REST"
-    else:
-        ticker_source = "PAPER"
     creds["paper_data_source"] = settings.paper_data_source
-    creds["ticker_source"] = ticker_source
-    creds["truedata_username"] = bool(settings.truedata_username)
-    creds["truedata_password"] = bool(settings.truedata_password)
+    creds["ticker_source"] = ("KITE_WS" if getattr(tick_engine, "_use_ws", False) else "KITE_REST") \
+        if settings.uses_kite_market_data else "NONE"
     creds["admin_username"] = settings.admin_username
-    creds["ready_to_trade"] = bool(
-        creds.get("kite_api_key")
-        and creds.get("kite_access_token")
-        and creds.get("kite_initialised")
-    )
+    creds["ready_to_trade"] = bool(creds.get("kite_api_key") and creds.get("kite_access_token"))
     return creds
 
 
-# ── Autonomous AI trader (Claude) ─────────────────────────────────────────────
-from ai_trader import ai_trader
-
-class AgentStartRequest(BaseModel):
-    watchlist: list[dict] | None = None
-
-class AgentChatRequest(BaseModel):
-    message:         str = Field(min_length=1, max_length=4000)
-    conversation_id: str | None = Field(default=None, max_length=40)
-
-@app.get("/agent/status", tags=["AI Trader"])
-def agent_status():
-    return ai_trader.status()
-
-@app.post("/agent/start", tags=["AI Trader"])
-async def agent_start(req: AgentStartRequest):
-    """Turn on autonomous AI decision cycles (every AI_AGENT_INTERVAL_MIN minutes)."""
-    if not settings.anthropic_api_key:
-        raise HTTPException(400, "ANTHROPIC_API_KEY is not set")
-    watchlist = None
-    if req.watchlist:
-        watchlist = [{"symbol": _clean_symbol(w.get("symbol", "")), "exchange": "NSE"}
-                     for w in req.watchlist]
-    return ai_trader.start(watchlist)
-
-@app.post("/agent/stop", tags=["AI Trader"])
-async def agent_stop():
-    """Turn off autonomous cycles. Open AI positions keep their stops and close at 15:00."""
-    return ai_trader.stop()
-
-@app.post("/agent/cycle", tags=["AI Trader"])
-async def agent_cycle():
-    """Run one decision cycle now (same limits as the scheduled ones)."""
-    summary = await ai_trader.run_cycle()
-    return {"ran": summary is not None, "summary": summary, "status": ai_trader.status()}
-
-@app.post("/agent/close-all", tags=["AI Trader"])
-async def agent_close_all():
-    """Close every open AI position at market."""
-    return {"closed": await ai_trader.close_all("closed from dashboard")}
-
-@app.get("/agent/log", tags=["AI Trader"])
-def agent_log(n: int = 100):
-    return {"log": list(ai_trader.log)[-max(1, min(n, 300)):]}
-
-@app.post("/agent/chat", tags=["AI Trader"])
-async def agent_chat(req: AgentChatRequest):
-    """Chat with the AI trader. It uses the same tools and limits as its autonomous cycles."""
-    return await ai_trader.chat(req.message, req.conversation_id)
+# ── Bot control ───────────────────────────────────────────────────────────────
+@app.post("/bot/start", tags=["Bot"])
+async def start_bot(_body: dict | None = Body(default=None)):
+    """Clear an operator Stop and set every enabled validated agent running (the 08:55 preflight does the same
+    on every trading day unless the bot was stopped). Body ignored (older clients sent strategies / watchlist)."""
+    from platform_scheduler import platform_scheduler
+    return {"status": "started", "agents": platform_scheduler.bot_start()}
 
 
-# ── Dashboard overview (one call per refresh for the animated Overview page) ──
-from collections import deque as _deque
-_pnl_history: _deque = _deque(maxlen=5000)       # (IST hh:mm:ss, day P&L) every 5 s — survives reloads
+@app.post("/bot/stop", tags=["Bot"])
+async def stop_bot():
+    from platform_scheduler import platform_scheduler
+    return {"status": "stopped", "agents": await platform_scheduler.bot_stop()}
 
 
-def _day_pnl() -> float:
-    from trailing_sl_engine import SLStatus
-    live = tick_engine.all_latest()
-    unreal = 0.0
-    for pos in list(trailing_sl_engine._positions.values()):
-        if pos.status == SLStatus.ACTIVE:
-            ltp = (live.get(pos.symbol) or {}).get("ltp") or pos.entry_price
-            unreal += (ltp - pos.entry_price) * pos.quantity * (1 if pos.side == "BUY" else -1)
-    return round(risk_manager.daily_realised_pnl + unreal, 2)
+@app.get("/bot/status", tags=["Bot"])
+def bot_status():
+    from platform_scheduler import platform_scheduler
+    return {"running": platform_scheduler.bot_running(), "mode": settings.trading_mode,
+            "agents": {n: a.get_status() for n, a in ALL_AGENTS.items()}}
 
 
-async def _pnl_sampler() -> None:
-    while True:
-        try:
-            if is_market_open():
-                _pnl_history.append((now_ist().strftime("%H:%M:%S"), _day_pnl()))
-        except Exception as exc:
-            logger.debug("pnl sampler: {}", exc)
-        await asyncio.sleep(5)
+# ── Agents ────────────────────────────────────────────────────────────────────
+@app.get("/agents", tags=["Agents"])
+def agents():
+    return {n: a.get_status() for n, a in ALL_AGENTS.items()}
 
 
-def _validated_compact() -> dict:
-    """Per validated agent: enabled, open positions, today's P&L, live n / net / PF next to the lab's bps."""
-    out = {"validated_only": settings.validated_only, "agents": {}}
-    for n, a in ALL_AGENTS.items():
-        if not getattr(a, "scheduled", False):
-            continue
-        try:
-            live = a.live_stats()
-            lab = getattr(a, "LAB_EXPECTATION", {}) or {}
-            out["agents"][n] = {
-                "lab_id": a.LAB_ID, "enabled": bot_state.is_agent_enabled(n),
-                "entry_block": a.entry_block_reason_readonly(), "open_positions": len(a.positions()),
-                "pnl_today": a.realised_today(), "n": live.get("n", 0), "net": live.get("net"),
-                "pf": live.get("pf"), "net_bps": live.get("net_bps"),
-                "lab_final": (lab.get("FINAL") or {}),
-            }
-        except Exception as exc:
-            out["agents"][n] = {"error": str(exc)[:200]}
-    return out
+@app.post("/agents/{name}/pause", tags=["Agents"])
+def pause_agent(name: str):
+    a = ALL_AGENTS.get(name)
+    if not a:
+        raise HTTPException(404, "Not found")
+    a.stop()
+    return {"status": "paused"}
+
+
+@app.post("/agents/{name}/resume", tags=["Agents"])
+def resume_agent(name: str):
+    a = ALL_AGENTS.get(name)
+    if not a:
+        raise HTTPException(404, "Not found")
+    if not bot_state.is_agent_enabled(name):
+        raise HTTPException(400, f"Agent '{name}' is disabled")
+    a.start()
+    return {"status": "resumed", "scheduled": True}
 
 
 @app.get("/validated", tags=["Agents"])
 def validated_status():
-    """The three lab-validated PAPER agents: full status, plus forward_test's auction comparison."""
+    """The lab-validated PAPER agents: full status, plus forward_test's auction comparison."""
     agents_ = {}
     for n, a in ALL_AGENTS.items():
         if getattr(a, "scheduled", False):
@@ -1425,346 +421,263 @@ def validated_status():
             "agents": agents_, "forward_test": fwd}
 
 
-@app.get("/dashboard/summary", tags=["Dashboard"])
-def dashboard_summary():
-    from trailing_sl_engine import SLStatus
-    from agents.base_agent import _tsl_sl_orders
-    live = tick_engine.all_latest()
-
-    positions, unrealised = [], 0.0
-    for oid, pos in list(trailing_sl_engine._positions.items()):
-        if pos.status != SLStatus.ACTIVE:
-            continue
-        ltp = (live.get(pos.symbol) or {}).get("ltp") or pos.entry_price
-        sign = 1 if pos.side == "BUY" else -1
-        pnl = (ltp - pos.entry_price) * pos.quantity * sign
-        unrealised += pnl
-        cfg = pos.cfg
-        target = ai_trader._targets.get(oid) or round(
-            pos.entry_price * (1 + sign * cfg.target2_pct / 100), 2)
-        trail = ai_trader._trail.get(oid)
-        r_mult = None
-        if trail and trail.get("risk"):
-            r_mult = round((ltp - pos.entry_price) * sign / trail["risk"], 2)
-        entry = _tsl_sl_orders.get(oid, {})
-        positions.append({
-            "id": oid, "symbol": pos.symbol, "strategy": pos.strategy, "side": pos.side,
-            "quantity": pos.quantity, "entry": round(pos.entry_price, 2), "ltp": round(ltp, 2),
-            "stop": round(pos.current_sl, 2), "target": round(target, 2),
-            "pnl": round(pnl, 2), "pnl_pct": round((ltp / pos.entry_price - 1) * 100 * sign, 2),
-            "r_multiple": r_mult, "exchange": entry.get("exchange", "NSE"),
-            "trailing": "AI" if pos.external_trail else ("ON" if pos.trail_active else "WAIT"),
-            "sl_moves": pos.sl_moves, "product": entry.get("product", "MIS"),
-            "hold_until": (ai_trader._swing_meta.get(oid) or {}).get("hold_until"),
-        })
-    for sid, sp in list(ai_trader._spreads.items()):        # AI credit spreads (two legs)
-        pnl = (sp["credit"] - sp["value"]) * sp["qty"]
-        unrealised += pnl
-        positions.append({
-            "id": sid, "symbol": f"{sp['underlying']} {sp['short']['strike']:g}/{sp['long']['strike']:g} {sp['option_type']}",
-            "strategy": "ai_spread", "side": "SELL", "quantity": sp["qty"], "entry": sp["credit"],
-            "ltp": sp["value"], "stop": sp["stop_value"], "target": sp["target_value"], "pnl": round(pnl, 2),
-            "pnl_pct": round((sp["credit"] - sp["value"]) / sp["credit"] * 100, 2) if sp["credit"] else 0.0,
-            "r_multiple": None, "exchange": "NFO", "trailing": "WAIT", "sl_moves": 0, "product": "MIS",
-            "hold_until": None,
-        })
-
-    realised = risk_manager.daily_realised_pnl
-    closed = risk_manager.wins_today + risk_manager.losses_today
-    ai = ai_trader.status()
-
-    activity = [{"t": e["t"], "kind": e["kind"], "text": e["text"], "source": "ai"}
-                for e in list(ai_trader.log)[-40:]]
-    for o in kite_client.orders()[-25:] if settings.trading_mode == "PAPER" else []:
-        activity.append({"t": str(o.get("placed_at", ""))[11:19], "kind": "order",
-                         "source": str(o.get("tag", "")),
-                         "text": f'{o.get("transaction_type")} {o.get("quantity")} {o.get("tradingsymbol")} '
-                                 f'{o.get("order_type")} @ ₹{o.get("price") or o.get("trigger_price") or 0} '
-                                 f'· {o.get("status")}'})
-    activity.sort(key=lambda a: a["t"], reverse=True)
-
-    agents = [{"name": n, "running": a.state.running, "enabled": bot_state.is_agent_enabled(n),
-               "trades_today": a.state.trades_today} for n, a in ALL_AGENTS.items()]
-    agents.append({"name": "ai", "running": ai["enabled"], "enabled": True,
-                   "trades_today": ai["trades_today"], "role": ai.get("role")})
-
-    watch = [{"symbol": sym, "ltp": d.get("ltp"), "change_pct": d.get("change_pct"),
-              "trend": d.get("trend"), "rsi": d.get("rsi_14")} for sym, d in list(live.items())[:40]]
-
-    return {
-        "time_ist": now_ist().strftime("%H:%M:%S"),
-        "date": now_ist().strftime("%a %d %b %Y"),
-        "demo": settings.demo_active,
-        "mode": ai["mode"],
-        "market_open": is_market_open(),
-        "bot_running": master_agent.running,
-        "regime": regime_detector.current_regime.value if regime_detector.current_regime else "UNKNOWN",
-        "sebi_state": sebi_compliance.status().get("state"),
-        "kpis": {
-            "day_pnl": round(realised + unrealised, 2), "realised": round(realised, 2),
-            "unrealised": round(unrealised, 2), "trades_closed": closed,
-            "wins": risk_manager.wins_today, "losses": risk_manager.losses_today,
-            "win_rate": round(risk_manager.wins_today / closed * 100, 1) if closed else None,
-            "profit_factor": round(risk_manager.gross_profit / risk_manager.gross_loss, 2)
-                             if risk_manager.gross_loss else None,
-            "open_positions": len(positions),
-            "max_daily_loss": settings.max_daily_loss,
-            "loss_used_pct": round(min(100.0, max(0.0, -risk_manager.net_realised_pnl())
-                                       / settings.max_daily_loss * 100), 1)
-                             if settings.max_daily_loss else 0.0,
-            "is_halted": risk_manager.is_trading_halted,
-            "ai_cost_usd": ai["cost_today_usd"],
-        },
-        "positions": positions,
-        "agents": agents,
-        "ai": {**{k: ai[k] for k in ("enabled", "alerts_today", "decisions_today", "avg_decision_ms",
-                                     "last_alert", "api_key_set", "trades_today")}, "role": ai.get("role")},
-        "validated": _validated_compact(),
-        "watch": watch,
-        "activity": activity[:50],
-        "pnl_history": [{"t": t, "pnl": v} for t, v in _pnl_history],
-        "scoreboard": performance.scoreboard(_day_pnl(), ai_trader.cost_today_usd),
-        "trend_filter": market_filter.state(),
-        "strategy_stats": [{k: v[k] for k in ("strategy", "label", "trades", "win_rate", "net_pnl",
-                                               "profit_factor", "enabled", "pruned", "trades_until_judgement")}
-                           for v in performance.strategy_stats().values() if v["trades"] or v["pruned"]],
-    }
+@app.get("/settings/agent-enables", tags=["Settings"])
+def get_agent_enables():
+    return dict(bot_state._agent_enabled)
 
 
-# ── Performance scoreboard, pruning, trend filter, momentum ──────────────────
-from performance import performance
-import market_filter
-import momentum_rotation
+@app.post("/settings/agent-enables", tags=["Settings"])
+def set_agent_enables(req: AgentEnablesRequest):
+    for name, val in req.model_dump(exclude_none=True).items():
+        bot_state.set_agent_enabled(name, val)
+        if not val:
+            a = ALL_AGENTS.get(name)
+            if a and a.state.running:
+                a.stop()
+    return dict(bot_state._agent_enabled)
+
+
+# ── Portfolio (paper book) ────────────────────────────────────────────────────
+@app.get("/portfolio/positions", tags=["Portfolio"])
+def positions():
+    try:
+        return kite_client.positions()
+    except Exception as e:
+        logger.error("Portfolio positions error: {}", e)
+        raise HTTPException(500, "Unable to fetch positions")
+
+
+@app.get("/portfolio/orders", tags=["Portfolio"])
+def orders():
+    try:
+        return kite_client.orders()
+    except Exception as e:
+        logger.error("Portfolio orders error: {}", e)
+        raise HTTPException(500, "Unable to fetch orders")
+
+
+@app.post("/orders/squareoff", tags=["Orders"])
+async def squareoff():
+    """Flatten leftover MIS / NRML paper rows now (validated overnight holdings stay)."""
+    from platform_scheduler import platform_scheduler
+    ids = platform_scheduler.squareoff_book()
+    return {"status": "ok", "squared_off": len(ids)}
+
+
+@app.get("/paper-book/status", tags=["Orders"])
+async def paper_book_status():
+    import paper_book
+    return paper_book.status()
+
+
+@app.get("/market/live", tags=["Market"])
+def live_market():
+    return tick_engine.all_latest()
+
+
+# ── Credentials vault ─────────────────────────────────────────────────────────
+_CRED_FIELDS = ("kite_api_key", "kite_api_secret", "kite_user_id", "kite_password", "kite_totp_secret")
+
+
+def _is_loopback(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _credential_view() -> dict:
+    import kite_auto_login
+    creds = kite_client.validate_credentials()
+    for f in ("kite_user_id", "kite_password", "kite_totp_secret"):
+        creds[f] = bool(getattr(settings, f))
+    creds["auto_login"] = kite_auto_login.status()
+    return creds
+
+
+@app.post("/settings/credentials", tags=["Settings"])
+def update_credentials(req: CredentialsUpdateRequest, request: Request):
+    """Set Kite credentials (persist=true: encrypted vault, reloaded at startup). Values are never returned."""
+    from secret_store import secret_store
+    values = {f: v.strip() for f in _CRED_FIELDS if (v := getattr(req, f)) is not None and v.strip()}
+    if not values:
+        raise HTTPException(422, "No credentials given")
+    if "kite_totp_secret" in values:
+        seed = values["kite_totp_secret"].replace(" ", "").upper()
+        if seed.isdigit() or len(seed) < 16:
+            raise HTTPException(422, "KITE_TOTP_SECRET must be the base32 seed shown when enabling TOTP on Zerodha "
+                                     "(16+ letters/digits), not the 6-digit code")
+        try:
+            import pyotp
+            pyotp.TOTP(seed).now()
+        except Exception:
+            raise HTTPException(422, "KITE_TOTP_SECRET is not a valid base32 TOTP seed")
+        values["kite_totp_secret"] = seed
+    if req.persist and not settings.api_key and not _is_loopback(request):
+        raise HTTPException(403, "Set API_KEY in .env before saving keys from another machine")
+    if req.persist:
+        try:
+            secret_store.save(values)
+        except Exception as e:
+            logger.error("Credential vault write failed: {}", e)
+            raise HTTPException(500, "Could not save to the encrypted vault — see server log")
+    for f, v in values.items():
+        setattr(settings, f, v)
+    if set(values) & {"kite_api_key", "kite_api_secret"}:
+        kite_client._kite = None
+    logger.info("Credentials updated: {} (persisted={})", sorted(values), req.persist)
+    return {"status": "saved" if req.persist else "updated", "persisted": req.persist,
+            "credentials": _credential_view(), "vault": secret_store.status()}
+
+
+@app.get("/settings/credentials/status", tags=["Settings"])
+def credentials_status():
+    from secret_store import secret_store
+    return {"credentials": _credential_view(), "vault": secret_store.status()}
+
+
+@app.delete("/settings/credentials", tags=["Settings"])
+def delete_credentials(req: CredentialsDeleteRequest):
+    from secret_store import secret_store
+    secret_store.delete(req.fields)
+    for f in req.fields:
+        setattr(settings, f, "")
+    if set(req.fields) & {"kite_access_token", "kite_api_key", "kite_api_secret"}:
+        kite_client._kite = None
+    logger.info("Credentials deleted: {}", sorted(req.fields))
+    return {"status": "deleted", "credentials": _credential_view(), "vault": secret_store.status()}
+
+
+@app.post("/settings/app-password", tags=["Settings"])
+def update_app_password(req: AppPasswordRequest):
+    from secret_store import secret_store
+    if req.username is not None:
+        settings.admin_username = req.username
+    settings.admin_password_hash = hash_password(req.new_password)
+    try:
+        secret_store.save({"admin_username": settings.admin_username,
+                           "admin_password_hash": settings.admin_password_hash})
+        persisted = True
+    except Exception as e:
+        logger.error("Admin password not saved to vault: {}", e)
+        persisted = False
+    return {"status": "updated", "admin_username": settings.admin_username, "persisted": persisted}
+
+
+# ── SEBI compliance ───────────────────────────────────────────────────────────
+@app.get("/sebi/status", tags=["SEBI Compliance"])
+def sebi_status():
+    return sebi_compliance.status()
+
+
+@app.get("/sebi/disclosures", tags=["SEBI Compliance"])
+def sebi_disclosures():
+    return sebi_compliance.get_disclosure_document()
+
+
+@app.post("/sebi/kill-switch", tags=["SEBI Compliance"])
+async def trigger_kill_switch(reason: str = "Manual kill switch"):
+    sebi_compliance.trigger_kill_switch(reason)
+    return {"status": "KILLED", "reason": reason}
+
+
+@app.post("/sebi/resume", tags=["SEBI Compliance"])
+def resume_trading():
+    ok, msg = sebi_compliance.resume_trading()
+    if not ok:
+        raise HTTPException(409, f"SEBI: {msg}")
+    return {"status": "ACTIVE"}
+
+
+@app.post("/sebi/pause", tags=["SEBI Compliance"])
+def pause_trading(reason: str = "Manual pause"):
+    sebi_compliance.pause_trading(reason)
+    return {"status": "PAUSED", "reason": reason}
+
+
+@app.get("/sebi/audit-log", tags=["SEBI Compliance"])
+def query_audit_log(date: str, strategy: str = None, symbol: str = None, decision: str = None):
+    records = sebi_compliance.query_audit_log(date, strategy, symbol, decision)
+    return {"date": date, "count": len(records), "records": records}
+
+
+@app.get("/sebi/algo-ids", tags=["SEBI Compliance"])
+def get_algo_ids():
+    return {"algo_ids": APPROVED_ALGO_IDS, "total": len(APPROVED_ALGO_IDS)}
+
+
+@app.get("/sebi/strategy-disclosure/{strategy}", tags=["SEBI Compliance"])
+def strategy_disclosure(strategy: str):
+    return sebi_compliance.get_strategy_logic_disclosure(strategy)
+
+
+@app.post("/sebi/reset-kill-switch", tags=["SEBI Compliance"])
+def reset_kill_switch(req: KillSwitchResetRequest):
+    ok, msg = sebi_compliance.reset_kill_switch(req.secret)
+    if not ok:
+        raise HTTPException(403, f"SEBI: {msg}")
+    return {"status": "ACTIVE", "note": "Kill switch reset. Trading re-enabled."}
+
+
+@app.post("/sebi/whitelist-ip", tags=["SEBI Compliance"])
+def whitelist_ip(req: WhitelistIPRequest):
+    sebi_compliance.add_whitelisted_ip(str(req.ip))
+    return {"status": "added", "ip": str(req.ip)}
+
+
+# ── Performance ledger ────────────────────────────────────────────────────────
+def _day_pnl() -> float:
+    return round(sum(float(getattr(a.state, "pnl_today", 0.0) or 0.0) for a in ALL_AGENTS.values()), 2)
 
 
 @app.get("/performance/scoreboard", tags=["Performance"])
 def performance_scoreboard():
-    """Account return vs NIFTY 50 (and Nasdaq-100 for reference), after costs, per period."""
-    return {**performance.scoreboard(_day_pnl(), ai_trader.cost_today_usd),
-            "trend_filter": market_filter.state(), "equity_curve": performance.equity_curve()}
+    from performance import performance
+    return {**performance.scoreboard(), "equity_curve": performance.equity_curve()}
 
 
 @app.get("/performance/strategies", tags=["Performance"])
 def performance_strategies():
-    """Per-strategy win rate, net P&L after costs, profit factor, drawdown and pruning status."""
-    return {"strategies": list(performance.strategy_stats().values()),
-            "rule": {"min_trades": settings.prune_min_trades, "lookback_trades": settings.prune_lookback_trades,
-                     "enabled": settings.prune_enabled}}
+    from performance import performance
+    return {"strategies": list(performance.strategy_stats().values())}
 
 
 @app.get("/performance/execution", tags=["Performance"])
 def performance_execution():
-    """Entry slippage vs the signal price, per strategy (basis points)."""
+    from performance import performance
     return performance.execution_stats()
 
 
 @app.get("/performance/trades", tags=["Performance"])
 def performance_trades(n: int = 100, strategy: str | None = None):
+    from performance import performance
     rows = [t for t in performance.trades if not strategy or t["strategy"] == strategy]
     return {"trades": rows[-max(1, min(n, 1000)):]}
 
 
-@app.post("/performance/strategies/{name}/enable", tags=["Performance"])
-def performance_enable(name: str):
-    return performance.set_enabled(name, True)
-
-
-@app.post("/performance/strategies/{name}/disable", tags=["Performance"])
-def performance_disable(name: str):
-    return performance.set_enabled(name, False, "disabled from the dashboard")
-
-
 @app.post("/performance/snapshot", tags=["Performance"])
 def performance_snapshot():
-    """Store today's result now (the scheduler does this at 15:35)."""
-    return performance.snapshot_today(ai_trader.cost_today_usd)
+    from performance import performance
+    return performance.snapshot_today()
 
 
-@app.get("/risk/portfolio", tags=["Risk"])
-def risk_portfolio():
-    """Open-book VaR vs cap, portfolio heat, rupee risk per trade."""
-    import portfolio_risk
-    return portfolio_risk.status()
-
-
-@app.get("/market/context/{symbol}", tags=["Market Regime"])
-def market_context_view(symbol: str):
-    """Everything known about a symbol beyond its price (cache reads only)."""
-    import market_context
-    from options_resolver import normalize_underlying, INDEX_QUOTE
-    und = normalize_underlying(symbol)
-    return market_context.context_for(INDEX_QUOTE[und] if und else symbol.upper())
-
-
-@app.get("/market/trend-filter", tags=["Market Regime"])
-def trend_filter(refresh: bool = False):
-    return market_filter.state(refresh=refresh)
-
-
-@app.get("/momentum/rankings", tags=["Momentum"])
-async def momentum_rankings(top: int = 20):
-    """12-1 / 6-1 momentum ranking of the universe (history fetch runs off the event loop)."""
-    ranked = await asyncio.to_thread(momentum_rotation.rankings)
-    return {"rankings": ranked[:top], "selection": momentum_rotation.selection(ranked=ranked),
-            "universe": settings.momentum_universe, "top_n": settings.momentum_top_n}
-
-
-@app.post("/momentum/rebalance", tags=["Momentum"])
-async def momentum_rebalance(execute: bool = True):
-    """Run the monthly rotation now (execute=false shows the plan only)."""
-    return await ai_trader.run_momentum_rebalance(execute=execute)
-
-
-@app.post("/backtest/replay", tags=["Backtest"])
-async def backtest_replay(req: ReplayRequest):
-    """Replay real minute bars through the live agent code (same patterns, sizing, trailing
-    stop) with slippage and costs. Returns net results vs buy-and-hold of the symbols and NIFTY."""
-    from bg_compute import run_in_process
-    import replay_backtest as rb
-    out = await run_in_process("replay_job", req.agent, [s.upper() for s in req.symbols], req.days,
-                               req.slippage_bps, req.params, req.include_trades)
-    rb._LAST[req.agent] = {k: v for k, v in out.items() if k not in ("trades", "benchmark")}
-    rb.save_last()
-    return out
-
-
-class AIReplayRequest(BaseModel):
-    days: int = Field(default=5, ge=1, le=15)
-    symbols: list[str] | None = Field(default=None, max_length=25)
-
-
-@app.post("/backtest/ai-replay", tags=["Backtest"])
-async def backtest_ai_replay(req: AIReplayRequest):
-    """Replay the AI trader's intraday stock decisions over the last N sessions on real minute bars,
-    with the configured model (Claude → OpenAI failover), costs and slippage. Runs in the
-    background; poll GET /backtest/ai-replay. Costs real API tokens (~11 model calls per day)."""
-    import ai_replay
-    if not (settings.anthropic_api_key or settings.openai_api_key):
-        raise HTTPException(400, "No AI provider key set — add an Anthropic or OpenAI key under Settings")
-    if ai_replay._LAST.get("status") == "running":
-        return ai_replay._LAST
-    asyncio.create_task(ai_replay.run_and_record(days=req.days, symbols=req.symbols))
-    await asyncio.sleep(0)
-    return {"status": "running", "days": req.days, "symbols": req.symbols or ai_replay.DEFAULT_SYMBOLS}
-
-
-class GateReplayRequest(BaseModel):
-    agents: list[Literal["intraday", "scalping", "swing"]] = Field(default=["intraday", "scalping", "swing"], min_length=1)
-    days: int = Field(default=45, ge=5, le=60)
-    symbols: list[str] | None = Field(default=None, max_length=25)
-    budget_usd: float = Field(default=5.0, gt=0, le=20)
-
-
-@app.post("/backtest/gate-replay", tags=["Backtest"])
-async def backtest_gate_replay(req: GateReplayRequest):
-    """Does the AI reviewer improve the agents? Replays each agent on real bars, asks the live reviewer about
-    every signal as it would have seen it, and compares all signals with AI-approved ones. Background run,
-    capped at budget_usd of API tokens; poll GET /backtest/gate-replay."""
-    import ai_replay
-    if not (settings.anthropic_api_key or settings.openai_api_key):
-        raise HTTPException(400, "No AI provider key set")
-    if ai_replay._GATE_LAST.get("status") == "running":
-        return ai_replay._GATE_LAST
-    asyncio.create_task(ai_replay.run_gate_and_record(req.agents, req.days, req.symbols, req.budget_usd))
-    await asyncio.sleep(0)
-    return {"status": "running", "agents": req.agents, "days": req.days, "budget_usd": req.budget_usd}
-
-
-@app.get("/backtest/gate-replay", tags=["Backtest"])
-def backtest_gate_replay_status(decisions: bool = False):
-    import ai_replay
-    st = dict(ai_replay.gate_last())
-    if not decisions and "results" in st:
-        st["results"] = {a: {k: v for k, v in r.items() if k != "decisions"} for a, r in st["results"].items()}
-    return st
-
-
-@app.get("/backtest/ai-replay", tags=["Backtest"])
-def backtest_ai_replay_status():
-    """Progress of the running AI replay, or the last finished one (survives restarts)."""
-    import ai_replay
-    return ai_replay.last()
-
-
-@app.get("/backtest/bars", tags=["Backtest"])
-async def backtest_bars(symbols: str, days: int = 45):
-    """Minute bars for research (what the replay uses): {symbol: {source, bars: [[ts, o, h, l, c, v], ...]}}.
-    Up to 12 symbols, 60 days. Loaded in a worker thread; Kite history when available."""
-    import replay_backtest as rb
-    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:12]
-    days = max(2, min(days, 60))
-    out = {}
-    for s in syms:
-        bars, src = await asyncio.to_thread(rb.load_bars, s, days)
-        out[s] = {"source": src, "bars": [[b["ts"].isoformat(), b["open"], b["high"], b["low"], b["close"], b["volume"]] for b in bars]}
-    return out
-
-
+# ── Research (read-only) ──────────────────────────────────────────────────────
 @app.get("/shadow-registry", tags=["Research"])
 def shadow_registry_status():
-    """Frozen shadow-incubation registry (read-only): shadows, looks, promotion / demotion status, chain checks."""
     import shadow_registry
     return {"enabled": shadow_registry.enabled(), **shadow_registry.ShadowRegistry().status()}
 
 
 @app.get("/forward-test", tags=["Research"])
 def forward_test_status(quotes: bool = False):
-    """Live paper forward test of the opening-auction fade: per-variant results under the tested ("final") and the
-    realistic pre-open ("live") signal rule, and how well the 09:07 indicative price predicted the auction price."""
     import forward_test
     return forward_test.status(include_quotes=quotes)
 
 
-@app.get("/market-type", tags=["Market Regime"])
-def regime_status():
-    """Today's market-type read (pre-open / first hour), the learned model and each strategy's size factor."""
-    import regime_v2
-    return regime_v2.status()
-
-
-@app.put("/market-type/research", tags=["Market Regime"])
-def market_type_research(payload: dict):
-    """Install the research outputs the router reads: {"model": regime_model.json, "scorecard": regime_scorecard.json}.
-    Either may be omitted; null removes it (routing falls back to 1.0)."""
-    import regime_v2, json as _json
-    def _check_model(m):
-        for stage, e in (m or {}).items():
-            if stage not in ("preopen", "first_hour"):
-                raise HTTPException(422, f"unknown stage {stage}")
-            if e is not None and not ({"feature", "rule"} <= set(e) and all(v in regime_v2.TYPES for v in e["rule"].values())):
-                raise HTTPException(422, f"bad {stage} entry")
-    def _check_card(c):
-        for strat, regs in (c or {}).items():
-            for reg, v in regs.items():
-                if reg not in regime_v2.TYPES or not {"h1", "h2", "trades"} <= set(v):
-                    raise HTTPException(422, f"bad scorecard entry {strat}/{reg}")
-    out = {}
-    for key, path, check in (("model", regime_v2.MODEL_FILE, _check_model), ("scorecard", regime_v2.SCORECARD_FILE, _check_card)):
-        if key not in payload:
-            continue
-        if payload[key] is None:
-            path.unlink(missing_ok=True); out[key] = "removed"; continue
-        check(payload[key])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_json.dumps(payload[key])); out[key] = "installed"
-    return {**out, "status": regime_v2.status()}
-
-
-@app.post("/market-type/refresh", tags=["Market Regime"])
-async def regime_refresh(stage: str = "first_hour"):
-    if stage not in ("preopen", "first_hour"):
-        raise HTTPException(400, "stage must be preopen or first_hour")
-    import regime_v2
-    return await asyncio.to_thread(regime_v2.refresh, stage)
-
-
-@app.get("/backtest/history-bars", tags=["Backtest"])
+@app.get("/backtest/history-bars", tags=["Research"])
 async def backtest_history_bars(symbol: str, start: str, end: str, interval: str = "minute", exchange: str = "NSE"):
-    """Kite history for one symbol over any date range (research data for the regime study): minute bars
-    are fetched in 60-day chunks. Indices use their Kite names ("NIFTY 50", "INDIA VIX").
+    """Kite history for one symbol over any date range (research data fetch scripts use it): minute bars are
+    fetched in 60-day chunks. Indices use their Kite names ("NIFTY 50", "INDIA VIX").
     → {symbol, interval, bars: [[ts, o, h, l, c, v], ...]}"""
     from datetime import datetime as _dt
-    from kite_client import kite_client
     if interval not in ("minute", "3minute", "5minute", "15minute", "60minute", "day"):
         raise HTTPException(400, "interval must be minute, 3/5/15/60minute or day")
     try:
@@ -1774,6 +687,7 @@ async def backtest_history_bars(symbol: str, start: str, end: str, interval: str
     if d1 <= d0 or (d1 - d0).days > 800:
         raise HTTPException(400, "end must be after start, at most 800 days apart")
     sym = symbol.strip().upper()
+
     def _load():
         tok = kite_client.get_instrument_tokens([sym], exchange).get(sym)
         if not tok:
@@ -1782,217 +696,27 @@ async def backtest_history_bars(symbol: str, start: str, end: str, interval: str
     rows = await asyncio.to_thread(_load)
     if rows is None:
         raise HTTPException(404, f"no instrument token for {exchange}:{sym}")
+
     def _ts(d):
         return (d.replace(tzinfo=None) if getattr(d, "tzinfo", None) else d).isoformat()
     return {"symbol": sym, "interval": interval,
             "bars": [[_ts(r["date"]), r["open"], r["high"], r["low"], r["close"], r.get("volume") or 0] for r in rows]}
 
 
-@app.get("/backtest/replay/last", tags=["Backtest"])
-def backtest_replay_last():
-    import replay_backtest as rb
-    return rb._LAST
-
-
-# ── Walk-forward parameter optimisation ───────────────────────────────────
-import optimizer as _optimizer
-
-class OptimizeRequest(BaseModel):
-    symbols: list[str] | None = None      # default: the current watchlist (first 8 NSE symbols)
-    days: int = Field(default=45, ge=5, le=60)
-
-
-def _optimise_universe(req_symbols: list[str] | None) -> list[str]:
-    if req_symbols:
-        return [s.upper() for s in req_symbols][:12]
-    syms = [s for s in tick_engine.symbols() if tick_engine._exchange.get(s, "NSE") == "NSE" and " " not in s][:8]
-    if not syms:
-        from symbol_scanner import NIFTY_50
-        syms = NIFTY_50[:8]
-    return syms
-
-
-@app.post("/optimize/run", tags=["Optimize"])
-async def optimize_run(req: OptimizeRequest):
-    """Walk-forward search over the intraday and scalping parameter grids (background)."""
-    if _optimizer._state["running"]:
-        return {"status": "already running", **_optimizer.status()}
-    asyncio.create_task(_optimizer.run_all_async(_optimise_universe(req.symbols), req.days))
-    return {"status": "started", "symbols": _optimise_universe(req.symbols), "days": req.days}
-
-
-@app.get("/optimize/status", tags=["Optimize"])
-def optimize_status():
-    return _optimizer.status()
-
-
-@app.post("/optimize/params/{agent}/reset", tags=["Optimize"])
-def optimize_reset(agent: Literal["intraday", "scalping"]):
-    _optimizer.reset(agent)
-    return {"status": "reset", "agent": agent, "params": _optimizer.current_params(agent)}
-
-
-# ── Weekly research loop ──────────────────────────────────────────────────
-import research_loop as _research
-
-
-@app.post("/research/run", tags=["Research"])
-async def research_run(symbols: list[str] | None = Body(default=None)):
-    """Run the weekly cycle now: evidence → one Claude proposal → replay A/B → adopt or reject."""
-    return await _research.run_cycle(symbols)
-
-
-@app.get("/research/log", tags=["Research"])
-def research_log(n: int = 20):
-    return {"log": _research.log(n)}
-
-
-@app.get("/research/evidence", tags=["Research"])
-def research_evidence():
-    """What the analyst would be shown right now."""
-    return _research.gather_evidence()
-
-
-@app.get("/backtest/momentum", tags=["Backtest"])
-def backtest_momentum(months: int = 12, top_n: int | None = None):
-    """Monthly momentum rotation vs buy-and-hold NIFTY 50 over the same dates."""
-    return momentum_rotation.backtest(months=months, top_n=top_n)
-
-
-# ── n8n Inbound Webhook ───────────────────────────────────────────────────────
-
-class N8NWebhookRequest(BaseModel):
-    action:  str        # "place_order" | "start_bot" | "stop_bot" | "squareoff" | "get_status"
-    payload: dict = {}
-
-
-async def _verify_n8n_sig(request: Request, body: bytes) -> bool:
-    """Return True if HMAC signature is valid, or if no secret is configured."""
-    secret = settings.n8n_webhook_secret
-    if not secret:
-        return True
-    sig_header = request.headers.get("X-AlgoTrader-Signature", "")
-    if not sig_header.startswith("sha256="):
-        return False
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig_header[7:], expected)
-
-
-@app.post("/webhooks/n8n", tags=["Integration"])
-async def n8n_inbound(request: Request):
-    """Inbound webhook from n8n — routes to internal AlgoTrader actions.
-
-    Requires X-API-Key header (standard auth).
-    Optional HMAC-SHA256 body signature via X-AlgoTrader-Signature header.
-
-    Supported actions:
-      get_status   — returns bot status (read-only)
-      stop_bot     — stops the trading bot
-      squareoff    — squares off all open positions
-      start_bot    — payload: {strategies:[...], watchlist:[...]}
-      place_order  — payload matches OrderRequest fields
-    """
-    body = await request.body()
-    if not await _verify_n8n_sig(request, body):
-        raise HTTPException(401, "Invalid webhook signature")
-    try:
-        data = N8NWebhookRequest.model_validate_json(body)
-    except Exception:
-        raise HTTPException(422, "Invalid JSON body — expected {action, payload}")
-
-    action = data.action
-    p = data.payload
-
-    if action == "get_status":
-        return master_agent.get_status()
-
-    elif action == "stop_bot":
-        await master_agent.stop()
-        return {"status": "stopped"}
-
-    elif action == "squareoff":
-        ids = master_agent.squareoff_book("manual square-off")
-        return {"status": "ok", "squared_off": len(ids)}
-
-    elif action == "start_bot":
-        if master_agent.running:
-            raise HTTPException(400, "Bot already running")
-        strategies = p.get("strategies", [])
-        if not strategies:
-            raise HTTPException(422, "strategies required in payload")
-        watchlist = p.get("watchlist", [])
-        report = master_agent.start(strategies, watchlist)
-        return {"status": "started", "report": report}
-
-    elif action == "place_order":
-        try:
-            req = OrderRequest(**p)
-        except Exception as exc:
-            raise HTTPException(422, f"Invalid order payload: {exc}")
-        ok, reason = order_guard.can_place(req.symbol, "n8n", req.transaction_type)
-        if not ok:
-            raise HTTPException(400, f"Guard blocked: {reason}")
-        ok, reason = risk_manager.check_before_order(
-            req.symbol, req.quantity, req.price or 1.0, req.transaction_type
-        )
-        if not ok:
-            raise HTTPException(400, f"Risk blocked: {reason}")
-        sebi_ok, algo_id, sebi_reason = sebi_compliance.pre_order_check(
-            strategy="n8n", symbol=req.symbol, exchange=req.exchange,
-            transaction_type=req.transaction_type, quantity=req.quantity,
-            order_type=req.order_type, price_at_signal=req.price or 0.0,
-            signal_source="n8n_webhook",
-            regime=regime_detector.current_regime.value if regime_detector.current_regime else "unknown",
-        )
-        if not sebi_ok:
-            raise HTTPException(403, f"SEBI blocked: {sebi_reason}")
-        oid = kite_client.place_order(
-            tradingsymbol=req.symbol, exchange=req.exchange,
-            transaction_type=req.transaction_type, quantity=req.quantity,
-            order_type=req.order_type, product=req.product,
-            price=req.price, trigger_price=req.trigger_price, tag=algo_id,
-        )
-        sebi_compliance.record_order_id("n8n", req.symbol, oid)
-        order_guard.register_order(req.symbol, "n8n", req.transaction_type, oid)
-        await broadcast({"event": "order_placed", "order_id": oid, "symbol": req.symbol})
-        return {"status": "ok", "order_id": oid}
-
-    else:
-        raise HTTPException(422, f"Unknown action: {action!r}")
-
-
-# ── Startup ───────────────────────────────────────────────────────────────────
+# ── Startup / shutdown ────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def on_startup():
-    tick_engine.start_loop()
-    atomic_bracket_engine.ws_broadcast = broadcast
-    logger.info("FastAPI startup: tick engine + atomic bracket engine launched")
-    asyncio.create_task(symbol_scanner.run())
-    asyncio.create_task(_pnl_sampler())
     import paper_book
-    paper_book.restore()                    # PAPER: today's book from before a restart (never in LIVE; never raises)
-    try:
-        ai_trader.restore_swing()           # AI swing (delivery) positions from earlier runs
-    except Exception as exc:
-        logger.error("Swing restore failed: {}", exc)
-    try:
-        _optimizer.apply_params()           # walk-forward-chosen agent parameters, if any
-    except Exception as exc:
-        logger.error("Parameter apply failed: {}", exc)
+    tick_engine.start_loop()
+    paper_book.restore()                    # PAPER: the book from before a restart (never in LIVE; never raises)
     from platform_scheduler import platform_scheduler
-    try:
-        from performance import performance as _perf
-        back = _perf.restore_pruned()
-        if back:
-            logger.info("[startup] PRUNE_ENABLED=false — re-enabled auto-pruned agents: {}", back)
-    except Exception as exc:
-        logger.warning("[startup] restoring pruned agents failed: {}", exc)
     platform_scheduler.start()
-    paper_book.start()                      # periodic snapshots + watchdog for restored positions
+    paper_book.start()                      # periodic snapshots
     try:
-        tick_engine.warm_watchlist("startup")   # real prices on the dashboard before Start Bot
+        tick_engine.warm_watchlist("startup")
     except Exception as exc:
         logger.warning("Warm watchlist failed: {}", exc)
+    logger.info("FastAPI startup complete ({} mode, data: {})", settings.trading_mode, tick_engine.data_source())
 
 
 @app.on_event("shutdown")
@@ -2004,20 +728,13 @@ async def on_shutdown():
         logger.error("Paper book save at shutdown failed: {}", exc)
 
 
-@app.get("/paper-book/status", tags=["Orders"])
-async def paper_book_status():
-    import paper_book
-    return paper_book.status()
-
-
-# HIGH-7: reload=False in production — auto-reload bypasses security middleware
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)
 
 
-# Outermost middleware (added last): strips the /api prefix the built dashboard uses BEFORE the
-# API-key gate looks at the path, so /api/dashboard/summary is protected like /dashboard/summary.
+# Outermost middleware (added last): strips the /api prefix the built dashboard uses BEFORE the gate looks at the
+# path, so /api/v2/overview is protected like /v2/overview.
 @app.middleware("http")
 async def _strip_frontend_prefixes(request: Request, call_next):
     path = request.scope.get("path", "")
