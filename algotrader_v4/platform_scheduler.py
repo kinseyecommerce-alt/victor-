@@ -110,6 +110,16 @@ class PlatformScheduler:
                             day_of_week=VALIDATED_DOW, id="validated_vrp_settle", misfire_grace_time=300)
         self._sched.add_job(self._validated_vrp_mark, "cron", hour="9-15", minute="*/5", day_of_week=VALIDATED_DOW,
                             id="validated_vrp_mark", misfire_grace_time=120)
+        # EV-PEAD-LONG-H60 candidate (agents/validated_pead.py): ONLY with VALIDATED_PEAD_ENABLED=true (default off)
+        # or while it still holds positions / a plan from before the flag went off; PAPER only. Evening after NSE
+        # publishes the day's files (retried hourly), 08:20 retry before the 09:00 order cut-off, 09:15:10 entry
+        if self._pead_wanted():
+            self._sched.add_job(self._validated_pead_evening, "cron", hour="19-22", minute=35, second=0,
+                                day_of_week=VALIDATED_DOW, id="validated_pead_evening", misfire_grace_time=1800)
+            self._sched.add_job(self._validated_pead_evening, "cron", hour=8, minute=20, second=0,
+                                day_of_week=VALIDATED_DOW, id="validated_pead_morning", misfire_grace_time=1200)
+            self._sched.add_job(self._validated_pead_entry, "cron", hour=9, minute=15, second=10,
+                                day_of_week=VALIDATED_DOW, id="validated_pead_entry", misfire_grace_time=60)
         self._sched.add_job(self._validated_catch_up, "date", id="validated_catch_up",
                             run_date=_now_ist() + __import__("datetime").timedelta(seconds=60))
         # shadow-incubation registry (shadow_registry.py): only with SHADOW_REGISTRY_ENABLED=true, PAPER only;
@@ -245,6 +255,19 @@ class PlatformScheduler:
         from ist_clock import is_trading_day
         if is_trading_day():
             await self._validated_call("vrp_winged", "mark")
+
+    def _pead_wanted(self) -> bool:
+        a = self._validated_agents().get("pead_h60")
+        return bool(a is not None and settings.trading_mode == "PAPER" and a.wanted())
+
+    async def _validated_pead_evening(self) -> None:
+        # not gated on is_trading_day: the agent works out the last complete session (and any it missed) itself
+        await self._validated_call("pead_h60", "evening")
+
+    async def _validated_pead_entry(self) -> None:
+        from ist_clock import is_trading_day
+        if is_trading_day():
+            await self._validated_call("pead_h60", "enter_at_open")
 
     async def _validated_catch_up(self) -> None:
         """A process started after 08:55 lacks what the preflight prepared: the session store (refreshed when it

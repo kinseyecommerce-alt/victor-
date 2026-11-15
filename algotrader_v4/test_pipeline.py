@@ -933,7 +933,8 @@ def t_agents_4():
     # four tick-driven strategy agents; the lab-validated agents (scheduled jobs) are registered next to them
     tick = {k for k, a in ALL_AGENTS.items() if not getattr(a, "scheduled", False)}
     assert tick == {"intraday","fno","swing","scalping"}, tick
-    assert {k for k, a in ALL_AGENTS.items() if getattr(a, "scheduled", False)} <= {"auc_fade", "attn_on", "vrp_winged"}
+    assert {k for k, a in ALL_AGENTS.items() if getattr(a, "scheduled", False)} <= {"auc_fade", "attn_on", "vrp_winged",
+                                                                                 "pead_h60"}
 
 def t_intraday_returns_action():
     agent = IntradayAgent()
@@ -13466,7 +13467,9 @@ def t_vo_validated_only_true_blocks_legacy_and_schedules_validated():
         for n in _bs.VALIDATED_AGENTS:
             a = _AA[n]
             assert a.state.running and report[n]["scheduled"], n
-            assert a.entry_block_reason_readonly() is None, (n, a.entry_block_reason_readonly())
+            # pead_h60 is a candidate behind VALIDATED_PEAD_ENABLED (default off): blocked by its own kill switch
+            want = "kill_switch" if n == "pead_h60" and not settings.validated_pead_enabled else None
+            assert a.entry_block_reason_readonly() == want, (n, a.entry_block_reason_readonly())
         # regime plan / master directives / the resume endpoint never start a legacy agent either
         m._agent_watchlists.update({s: wl for s in _bs.LEGACY_AGENTS})
         m._apply_regime_plan(_R.RANGING, _P[_R.RANGING])
@@ -13804,6 +13807,26 @@ run("validated: restart catch-up refreshes the session store and the corporate-a
     t_rv_catch_up_loads_store_and_ca_calendar)
 run("validated: live special sessions / weekend sessions match the lab's calendar",
     t_rv_live_calendars_match_lab)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# CANDIDATE AGENT — EV-PEAD-LONG-H60 post-earnings drift (agents/validated_pead.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("CANDIDATE AGENT — EV-PEAD-LONG-H60 post-earnings drift, PAPER only (agents/validated_pead.py)")
+import test_validated_pead as _TVP
+
+
+def _pead_case(fn):
+    def go():
+        try:
+            fn()
+        except _TVP.Skip as exc:                      # the lab's scratch data set is absent: fixture tests still run
+            print(f"      (skipped: {exc})")
+    return go
+
+
+for _n, _f in _TVP.TESTS:
+    run("PEAD: " + _n[len("test_"):].replace("_", " "), _pead_case(_f))
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -41,9 +41,22 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "auc_fade": "ALGO-AUC-007",
     "attn_on":  "ALGO-ATTN-008",
     "vrp_winged": "ALGO-VRP-009",
+    "pead_h60": "ALGO-PEAD-010",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
+    "pead_h60": {
+        "name": "Post-earnings drift long, 60 sessions (EV-PEAD-LONG-H60, lab CANDIDATE — not proven; PAPER only)",
+        "description": ("Results reaction session (first close after the first public broadcast of the numbers): "
+                        "abnormal return vs NIFTY >= +4 % on above-average volume, stock in the point-in-time top 500 "
+                        "by turnover -> buy at the next session's open, exit at the close of the 60th session "
+                        "(stratlab/events_strategies.py)"),
+        "instruments": "NSE equities (CNC delivery; PAPER only)",
+        "order_types": ["MARKET (pre-open, filled at the official open)", "MARKET (exit at the official close)"],
+        "holding_period": "60 sessions (20 % catastrophe stop)",
+        "risk_controls": "20 % catastrophe stop; max positions / max gross; per-agent daily loss stop and drawdown kill",
+        "parameters": {"min_ar_pct": 4.0, "vol_n": 20, "stop_pct": 20.0, "hold": 60, "notional": 100000, "top_n": 500},
+    },
     "auc_fade": {
         "name": "Opening-auction fade (validated, stratlab/auction.py AUC-FADE-3PCT)",
         "description": "Fade the 09:15 call-auction print when |gap vs previous close| > 3 % (2 % variant "

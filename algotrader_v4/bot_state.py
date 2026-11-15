@@ -12,10 +12,10 @@ import os
 from pathlib import Path
 
 _DEFAULTS = {"intraday": True, "fno": True, "swing": True, "scalping": True,
-             "auc_fade": True, "attn_on": True, "vrp_winged": True}
+             "auc_fade": True, "attn_on": True, "vrp_winged": True, "pead_h60": True}
 LEGACY_AGENTS = ("intraday", "scalping", "swing", "fno")
 # lab-protocol agents (pre-registered DISCOVERY H1/H2 screen + one FINAL look), driven by platform_scheduler jobs
-VALIDATED_AGENTS = ("auc_fade", "attn_on", "vrp_winged")
+VALIDATED_AGENTS = ("auc_fade", "attn_on", "vrp_winged", "pead_h60")   # pead_h60: candidate, VALIDATED_PEAD_ENABLED
 _FILE = Path(os.getenv("AGENT_ENABLES_FILE")
              or Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" / "performance.json")
              .with_name("agent_enables.json"))

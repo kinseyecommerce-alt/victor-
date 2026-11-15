@@ -1475,3 +1475,6 @@ from agents.validated_attention import AttentionOvernightAgent   # noqa: E402
 ALL_AGENTS["attn_on"] = AttentionOvernightAgent()
 from agents.validated_strangle import WingedStrangleAgent   # noqa: E402
 ALL_AGENTS["vrp_winged"] = WingedStrangleAgent()
+# EV-PEAD-LONG-H60: a CANDIDATE (not proven), PAPER only, inert unless VALIDATED_PEAD_ENABLED=true
+from agents.validated_pead import PeadCandidateAgent   # noqa: E402
+ALL_AGENTS["pead_h60"] = PeadCandidateAgent()

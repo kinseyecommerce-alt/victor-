@@ -285,6 +285,7 @@ class AgentEnablesRequest(BaseModel):
     auc_fade: bool | None = None      # validated (lab-protocol) agents: the dashboard toggle (entries only)
     attn_on: bool | None = None
     vrp_winged: bool | None = None
+    pead_h60: bool | None = None      # EV-PEAD-LONG-H60 candidate (VALIDATED_PEAD_ENABLED is the master flag)
 
 class CapitalAllocationRequest(BaseModel):
     total_capital:           float | None = Field(None, ge=10000, le=100_000_000)
