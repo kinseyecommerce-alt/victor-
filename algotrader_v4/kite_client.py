@@ -292,6 +292,11 @@ class KiteClient:
             return self._paper_place(tradingsymbol, exchange, transaction_type,
                                      quantity, order_type, product, price,
                                      trigger_price, tag)
+        # LIVE price protection: a MARKET order goes out as a marketable LIMIT inside ORDER_PROTECTION_BAND_PCT of the
+        # touch (never a raw market order into a thin book); the quote is logged next to the fill
+        quote_px = 0.0
+        if order_type == "MARKET":
+            order_type, price, quote_px = self.protect_market_order(tradingsymbol, exchange, transaction_type)
         # Pre-flight margin check for BUY entries
         if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
             self._check_margin(tradingsymbol, quantity, price)
@@ -312,10 +317,52 @@ class KiteClient:
             )
 
         order_id = _with_retry(_place, label="place_order")
-        logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
+        logger.info("LIVE order | {} {} {} qty={} @ {} (quote {}) | id={}",
                     transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
+                    quantity, price, quote_px or "-", order_id)
+        if quote_px:
+            self._log_live_fill(order_id, tradingsymbol, transaction_type, quantity, quote_px, tag)
         return order_id
+
+    @staticmethod
+    def protection_limit(side: str, bid: float, ask: float, ltp: float, band_pct: float) -> tuple[float, float]:
+        """(limit price, reference touch) of a marketable LIMIT: BUY at ask × (1 + band), SELL at bid × (1 − band),
+        on the exchange tick; the LTP when the touch is missing. (0, 0) without any price."""
+        from options_resolver import round_tick
+        ref = (ask or ltp) if side == "BUY" else (bid or ltp)
+        if not ref or ref <= 0:
+            return 0.0, 0.0
+        b = max(0.0, float(band_pct)) / 100.0
+        px = ref * (1 + b) if side == "BUY" else ref * (1 - b)
+        return max(0.05, round_tick(px)), float(ref)
+
+    def protect_market_order(self, symbol: str, exchange: str, side: str) -> tuple[str, float, float]:
+        """LIVE: (order_type, price, quote) for a MARKET request — a protected marketable LIMIT when Kite has a
+        quote, else MARKET (an exit must still go out; logged)."""
+        try:
+            q = self.quote_kite([f"{exchange}:{symbol}"]).get(f"{exchange}:{symbol}") or {}
+            depth = q.get("depth") or {}
+            bid = float(((depth.get("buy") or [{}])[0]).get("price") or 0)
+            ask = float(((depth.get("sell") or [{}])[0]).get("price") or 0)
+            ltp = float(q.get("last_price") or 0)
+        except Exception as exc:
+            logger.warning("[kite] no quote for price protection of {} ({}) — MARKET", symbol, exc)
+            return "MARKET", 0.0, 0.0
+        px, ref = self.protection_limit(side, bid, ask, ltp, settings.order_protection_band_pct)
+        if px <= 0:
+            logger.warning("[kite] no price for protection of {} — MARKET", symbol)
+            return "MARKET", 0.0, 0.0
+        return "LIMIT", px, ref
+
+    def _log_live_fill(self, order_id: str, symbol: str, side: str, qty: int, quote_px: float, tag: str) -> None:
+        try:
+            fill = self.fill_price(order_id)
+            if fill:
+                import drift_monitor
+                from agents.validated_base import _agent_of
+                drift_monitor.record_fill(_agent_of(tag), symbol, side, qty, quote_px, fill, "LIVE_PROTECTED")
+        except Exception as exc:
+            logger.debug("[kite] live fill not logged: {}", exc)
 
     def modify_order(
         self, order_id: str, price: float = 0.0,
