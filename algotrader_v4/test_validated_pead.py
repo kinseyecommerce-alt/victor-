@@ -444,6 +444,32 @@ def test_flag_default_off_nothing_scheduled_no_entries():
         assert out["opened"] == [] and out["skipped"] == {"*": "kill_switch"} and not _orders(V.ENTRY_TAG)
 
 
+def test_planning_runs_before_auto_start_but_not_under_operator_stop():
+    """After a weekend restart the agent is not running until the 08:55 auto-start; the evening / 08:20 planning
+    step places no order, so it must still plan. The 09:15 entry still needs a running agent; an operator Stop
+    blocks planning too."""
+    import bot_state
+    with pead_env(_ist(D, 19, 35)) as (a, clk, p):
+        saved = bot_state.operator_stopped()
+        try:
+            a.stop()
+            bot_state.set_operator_stopped(False)
+            assert a.entry_block_reason(approval=False) is None
+            assert a.entry_block_reason() == "stopped", "the order stage still needs a running agent"
+            with mock.patch.object(a, "_gather", return_value=_decision_g()):
+                out = asyncio.run(a.evening())
+            assert out["planned"] == ["AAA"], out
+            a.pending, a.last_decision = {}, {}
+            bot_state.set_operator_stopped(True)
+            assert a.entry_block_reason(approval=False) == "stopped"
+            with mock.patch.object(a, "_gather", return_value=_decision_g()):
+                out = asyncio.run(a.evening())
+            assert out["planned"] == [] and a.pending == {}, out
+        finally:
+            bot_state.set_operator_stopped(saved)
+            a.start()
+
+
 def test_paper_flow_decide_enter_stop_and_clock_exit():
     with pead_env(_ist(D, 19, 35), quotes={"AAA": {"open": 107.0, "ltp": 107.5}}) as (a, clk, p):
         with mock.patch.object(a, "_gather", return_value=_decision_g()):
