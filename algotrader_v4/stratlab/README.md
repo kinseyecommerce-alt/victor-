@@ -977,3 +977,90 @@ costs and lot sizes on old years, modelled option premiums, an approximate margi
 drawdowns, and only the 1:3 exit was tested (the rules' textbook exits were not). Outputs: `<scratchpad>/tfgrid/`
 (REPORT.md, summary.json, stage1/, final/, stage2/, controls/, live/, progress.txt). Tests: `tests_tfgrid.py`
 (synthetic), run by `test_pipeline.py`.
+
+## Event study: promoter buying and earnings moves (`events_*.py`, `prereg/events_v1.json`)
+
+Nine variants of two behavioural ideas, pre-registered (sha256 `652d7d155168dfecb7b1369f4d1411d44fed5bc4ef0a8f07cce4fe91187f279c`,
+commit 1c4500a, pushed before any result) and run once on 2026-11-14.
+
+    python3 -I stratlab/events_fetch.py --out <scratch>/events/raw --end 2026-11      # NSE public filing feeds, 1 req / 2 s
+    python3 -I stratlab/events_parse.py --raw <scratch>/events/raw --out <scratch>/events
+    python -m stratlab.events_daily --build                                           # 2012-26 daily cache, top-500 PIT universe
+    python -m stratlab.events_run --preregister | --run --trials <ledger> | --smoke
+
+**Data.** All from NSE's public feeds (`www.nseindia.com` -> `www.nseindia.in`; `api.bseindia.com` refused with 403,
+so BSE was not used):
+* insider / promoter trades (SEBI PIT Reg 7(2)): 335,389 rows, **2015-11-27 .. 2026-11** (the feed starts with
+  PIT 2015);
+* quarterly results: 104,923 events, 2011-10 .. 2026-11;
+* board-meeting notices: 169,842.
+
+Every event is timed on the exchange **broadcast** time, never on the trade date, which comes a median 1-4 days
+earlier. The availability rule (`events_data.py`): a row is usable only if it was broadcast strictly before the
+decision stamp. That stamp is 09:00 of the entry session for next-open orders, and the 15:30 close for a
+"reaction session". A `cutoff()` guard raises `LookAheadError` on any later read. The results time = the first
+public moment of the numbers. A first rule misplaced 2013-18 results; it was caught by an unsigned |move| / volume
+check and fixed before pre-registration. Now every era peaks on the assigned session (|abnormal return| 2.7-2.9 %
+vs 1.4-1.5 %, volume 1.7-2.4 x), and 76-99 % of the dates match the separate board-meeting feed. Daily variants
+run on a new point-in-time universe: the monthly top 500 by turnover, 2012-2026, delisted names kept, renames
+followed, 2023-26 corporate actions checked against the ex-day gap. It is **not survivorship-biased**. The
+intraday variant uses the lab's minute bars (today's NIFTY-100: biased). Data check:
+`<scratch>/events/data_check.json`.
+
+**Variants:**
+* promoter market purchases >= Rs 1 cr within 30 days, buy at the next open, hold 20 / 60 sessions;
+* the same within >= 20 % of the 252-day high, hold 60;
+* promoter market sales -> short the future, 20 sessions;
+* post-earnings drift: reaction-day abnormal return >= +4 % on above-average volume -> buy, hold 20 / 60 sessions;
+* the mirror short (<= -4 %), 20 sessions;
+* buy 5 sessions before a notified results meeting;
+* Chan's earnings-gap intraday momentum (gap >= 0.5 x the 90-day overnight std, to 15:15).
+
+Daily variants carry a 20 % catastrophe stop, the intraday one 5 %. Lab fills and costs (2 bps).
+
+| id | 2023-26 DISCOVERY tr / PF / net | verdict | FINAL | old era tr / PF / net (H1 / H2 net) | verdict | excess vs NIFTY per trade, old era [95 % CI] | placebo |
+|---|---|---|---|---|---|---|---|
+| ev_promoter_buy_h20 | 98 / 1.65 / +2.2 L | FAILED (H2 < 0) | – | 1,164 / 1.61 / +27.0 L (+12.8 / +14.2) | OOS-CONFIRMED | +1.3 % [+0.3, +2.3] | +0.5 % [-0.2, +1.2]; PF 1.33 |
+| ev_promoter_buy_h60 | 86 / 1.31 / +1.4 L | FAILED (MANINFRA 45 %) | – | 932 / 2.05 / +58.0 L (+22.9 / +35.1) | OOS-CONFIRMED | +2.7 % [+0.9, +4.6] | +1.7 % [+0.3, +3.0]; PF 1.67 |
+| ev_promoter_buy_dip_h60 | 46 / 1.40 / +1.1 L | FAILED (46 trades) | – | 524 / 1.59 / +22.4 L (+4.0 / +18.3) | OOS-CONFIRMED | +0.5 % [-1.7, +2.4] | +0.5 % |
+| ev_promoter_sell_short_h20 | 49 / 0.83 / -0.3 L | FAILED | – | 406 / 0.78 / -3.6 L | OOS-FAILED | – | – |
+| ev_pead_long_h20 | 550 / 1.22 / +4.7 L | FAILED (H2 < 0) | – | 2,869 / 1.46 / +54.5 L (+27.7 / +26.8) | OOS-CONFIRMED | +1.6 % [+0.7, +2.4] | -0.0 % |
+| **ev_pead_long_h60** | 529 / 1.35 / +11.5 L | PASSED | **296 / 1.32 / +5.7 L CONFIRMED** | 2,736 / 1.93 / +150.6 L (+90.1 / +60.5) | **OOS-CONFIRMED** | +3.1 % [+1.6, +4.7] (2018-23: +1.9 [-0.4, +4.2]) | +0.3 % [-1.5, +2.0] |
+| ev_pead_short_h20 | 213 / 0.94 / -0.4 L | FAILED | – | 1,168 / 1.02 / +0.9 L | OOS-FAILED | – | – |
+| ev_pre_earnings_h5 | 2,484 / 0.88 / -6.1 L | FAILED | – | 19,473 / 1.05 / +21.7 L (-26.3 / +48.0) | OOS-FAILED | – | – |
+| ev_egap_intraday | 364 / 0.81 / -0.7 L | FAILED | – | 1,271 / 0.84 / -2.6 L (2016-23) | OOS-FAILED | – | – |
+
+**Verdict: 0 of 9 proven.** `ev_pead_long_h60` passes the protocol in both eras and its FINAL. But:
+* DSR is 0.00 with N = 2,522 trials on 2023-26, and only 0.51 with the fair N = 9 (PSR(0) 0.96).
+* Its excess over NIFTY is clear only in 2012-17 (+4.4 % [+2.5, +6.4]). The CI includes 0 in 2018-23, in 2023-26
+  DISCOVERY (+0.8 % [-1.8, +3.5]) and in FINAL (+3.2 % [-1.2, +7.7]).
+* The median trade has lagged NIFTY in every period since 2018.
+
+It is the strongest behavioural candidate so far: a paper-trading candidate at most, never to be re-tuned on these
+results. Promoter buying is not information: random dates in the same stocks (the placebo) earn nearly as much.
+It is mid-cap and market exposure.
+
+Controls: synthetic promoter buys placed before each stock's best 2 % of 20-day forward returns give PF 134; the
+same events delayed 25 sessions give PF 1.10 (the drift baseline), so the engine neither leaks nor misses an edge.
+All verdicts hold at 5 bps.
+
+Report-only:
+* the 1:3 bracket (5 % stop / 15 % target) is worse than the time exit for every long variant (pead_long_h60
+  DISCOVERY PF 1.05 vs 1.35);
+* the Rs 10 lakh account (1 % risk from a 20 % stop = about Rs 50k a position, 8 slots) takes 28 of 529
+  pead_long_h60 signals: +1.0 L on DISCOVERY (+5.1 %/yr, max DD 2.0 %), +0.11 L on FINAL, +4.4 L over 2012-23
+  (+3.8 %/yr, max DD 6.8 %);
+* the stock-future shorts never fit 1 % risk (0 trades).
+
+New trials: 18 on 2023-26 (9 + 9 report-only twins as `explore`; N 2,504 -> 2,522), 8 on 2012-23 (253 -> 261),
+1 on 2016-23 (428 -> 429). sim.py is unchanged, so the simulator controls were not re-run.
+
+Caveats:
+* dividends are not adjusted;
+* shorts are simulated on cash prices with futures costs;
+* the benchmark is NIFTY 50 for a mid-cap universe;
+* 2026-05+ insider documents cover only the 745 recent universe symbols;
+* the intraday variant runs on survivorship-biased names.
+
+Outputs: `<scratchpad>/events/` (run1/report.json, run1/trades, tables.md, data_check.json, progress.txt).
+Tests: `tests_events.py` (18 synthetic), run by `test_pipeline.py`.
