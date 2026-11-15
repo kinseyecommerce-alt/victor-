@@ -611,6 +611,50 @@ def test_v2_read_endpoints_respond_and_are_json():
         assert c.get("/api/v2/strategies/nope").status_code == 404
 
 
+def test_approval_deadline_without_timezone_is_ist_and_never_breaks_status():
+    import approvals as AP
+    with isolated_book():
+        AP.set_mode(True, "tester")
+        tomorrow = (now_ist() + timedelta(days=1)).date().isoformat()
+        t = AP.request("auc_fade", day=tomorrow, deadline=f"{tomorrow}T09:16:00")
+        assert t["deadline"] == f"{tomorrow}T09:16:00+05:30", t
+        assert AP.status()["pending"], "status still works with the stored ticket"
+        d = AP._load()                                     # a ticket written by the old build: naive deadline
+        legacy = dict(t, id="legacy-naive", strategy="attn_on", deadline=f"{tomorrow}T09:16:00")
+        d["tickets"]["legacy-naive"] = legacy
+        AP._save(d)
+        st = AP.status()
+        assert any(x["id"] == "legacy-naive" for x in st["pending"]), st
+        AP.request("vrp_winged", day=tomorrow)             # further requests keep working
+        AP.set_mode(False)
+
+
+def test_reenabling_a_strategy_restores_running_unless_operator_stopped():
+    import bot_state
+    import ist_clock
+    a = ALL_AGENTS["attn_on"]
+    saved = (bot_state.is_agent_enabled("attn_on"), a.state.running, bot_state.operator_stopped())
+    with isolated_book(), patch.object(ist_clock, "is_trading_day", lambda *x, **k: True):
+        try:
+            settings.api_key, key0 = "k-test", settings.api_key
+            c, h = _client(), {"X-API-Key": "k-test"}
+            bot_state.set_operator_stopped(False)
+            a.start()
+            assert c.post("/api/v2/strategies/attn_on/enable", json={"enabled": False}, headers=h).json()["running"] \
+                is False
+            r = c.post("/api/v2/strategies/attn_on/enable", json={"enabled": True}, headers=h).json()
+            assert r["enabled"] is True and r["running"] is True, r
+            c.post("/api/v2/strategies/attn_on/enable", json={"enabled": False}, headers=h)
+            bot_state.set_operator_stopped(True)                     # the operator-wide Stop still wins
+            r = c.post("/api/v2/strategies/attn_on/enable", json={"enabled": True}, headers=h).json()
+            assert r["enabled"] is True and r["running"] is False, r
+        finally:
+            settings.api_key = key0
+            bot_state.set_agent_enabled("attn_on", saved[0])
+            bot_state.set_operator_stopped(saved[2])
+            (a.start() if saved[1] else a.stop())
+
+
 def test_v2_write_endpoints_need_auth_and_act():
     import approvals as AP
     import bot_state

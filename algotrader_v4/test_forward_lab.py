@@ -385,6 +385,56 @@ def test_corporate_action_detection_and_refetch():
     assert np.allclose(first, syn_session("INFY", d0)["c"] * 0.5, atol=0.011, rtol=0)     # the window is the adjusted one
 
 
+
+def test_corporate_action_refetch_failure_rejects_the_session():
+    """A detected corporate action whose window refetch fails (error OR no bars) must leave the day INCOMPLETE and
+    write nothing: never append adjusted bars to an unadjusted history."""
+    d0 = 20260202
+    for mode in ("raise", "empty"):
+        class K:
+            infy_calls = 0
+
+            def historical_data(self, tok, frm, to, interval):
+                if interval == "day":
+                    return [{"date": datetime(2026, 2, dd % 100, tzinfo=_IST), "open": 1, "high": 1, "low": 1,
+                             "close": 1, "volume": 0} for dd in (d0, 20260203)]
+                window = frm.date() <= date(2026, 2, 2)
+                if tok == 1:
+                    K.infy_calls += 1
+                    if K.infy_calls >= 2:                            # the 2nd INFY call = the full-window refetch
+                        if mode == "raise":
+                            raise RuntimeError("kite 502")
+                        return []
+                out = []
+                days = [d0, 20260203] if window else [20260203]
+                for d in days:
+                    z = syn_session("INFY" if tok == 1 else ("_NIFTY50_min" if tok == 2 else "_NIFTYBANK_min"), d)
+                    f = 0.5 if tok == 1 else 1.0                     # INFY back-adjusted by Kite (1:2 split)
+                    for i in range(len(z["t"])):
+                        out.append({"date": datetime(d // 10000, d // 100 % 100, d % 100, int(z["t"][i]) // 60,
+                                                     int(z["t"][i]) % 60, tzinfo=_IST),
+                                    "open": round(float(z["o"][i]) * f, 2), "high": round(float(z["h"][i]) * f, 2),
+                                    "low": round(float(z["l"][i]) * f, 2), "close": round(float(z["c"][i]) * f, 2),
+                                    "volume": float(z["v"][i])})
+                return out
+
+        tmp = Path(_tmp())
+        store = FS.Store(tmp / "bars", cap_root=tmp)
+        for s_ in ("INFY", "_NIFTY50_min", "_NIFTYBANK_min"):
+            store.write_sessions(s_, syn_session(s_, d0))
+        store.mark_session(d0, "complete")
+        before = store.load_symbol("INFY")
+        toks = {"INFY": 1, "_NIFTY50_min": 2, "_NIFTYBANK_min": 3, "_NIFTY50_day": 4, "_VIX_day": 5}
+        with patch.object(FS, "MINUTE_SYMBOLS", ("INFY", "_NIFTY50_min", "_NIFTYBANK_min")):
+            r = FS.fetch_session(store, K(), date(2026, 2, 3), toks, None, log=lambda *a: None)
+        assert not r["complete"] and any("corporate-action refetch failed" in x for x in r["reasons"]), (mode, r)
+        assert r["refetch"] == [] and r["bytes"] == 0, (mode, r)
+        for s_ in ("INFY", "_NIFTY50_min", "_NIFTYBANK_min"):
+            assert list(store.load_symbol(s_).days) == [d0], (mode, s_)      # nothing of the new day stored
+        after = store.load_symbol("INFY")
+        assert np.array_equal(before.c, after.c), mode                      # the old window untouched
+
+
 def test_disk_cap_stops_writing_and_never_deletes():
     tmp = Path(_tmp())
     st = syn_store(tmp, trading_days(date(2026, 2, 2), 2), ("INFY",))
