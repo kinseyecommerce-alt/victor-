@@ -254,7 +254,8 @@ def bar_adjustment_issues(sym: str | None = None) -> list:
 # ══════════════════════════════════════════════════════════════════════════
 # index membership
 # ══════════════════════════════════════════════════════════════════════════
-CHANGE_FIELDS = ("announce_date", "effective_date", "action", "symbol", "lab", "company")
+CHANGE_FIELDS = ("announce_date", "effective_date", "action", "symbol", "lab", "company", "announce_source",
+                 "effective_precision")
 
 
 class ChangeRows(Rows):
@@ -273,7 +274,12 @@ def _load_index():
          "action": np.array([r["action"] for r in ch], dtype=object),
          "symbol": np.array([r["symbol"] for r in ch], dtype=object),
          "lab": np.array([r["lab_symbol"] for r in ch], dtype=object),
-         "company": np.array([r.get("company", "") for r in ch], dtype=object)}
+         "company": np.array([r.get("company", "") for r in ch], dtype=object),
+         # "press" = real press-release date; anything else (or no column) = only "the session before the effective
+         # date" (conservative: never usable for an announcement-to-effective run-up)
+         "announce_source": np.array(["press" if r.get("announce_source") == "press" else "none"
+                                      for r in ch], dtype=object),
+         "effective_precision": np.array([r.get("effective_precision") or "day" for r in ch], dtype=object)}
     _S["idx_changes"] = t
     _S["idx_changes_ix"] = _by(t["index"])
     mem: dict = {}
@@ -286,7 +292,9 @@ def index_changes(index: str, before: int, since: int | None = None) -> ChangeRo
     """Constituent changes of `index` (INDICES) ANNOUNCED strictly before `before` (press release dated < before),
     oldest announcement first; since: only announce_date >= since.  Pending changes (effective_date >= before) are
     included: that is the rebalancing-event calendar.  Columns: announce_date, effective_date (first session with
-    the new composition), action ("IN" | "OUT"), symbol (as in the release), lab (lab symbol), company."""
+    the new composition), action ("IN" | "OUT"), symbol (as in the release), lab (lab symbol), company,
+    announce_source ("press" = the release date is real; "none" = announce_date is only the session before the
+    effective date), effective_precision ("day" | "inferred" | "month")."""
     _load_index()
     sl = _S["idx_changes_ix"].get(index)
     if sl is None:

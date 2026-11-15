@@ -9631,6 +9631,11 @@ from stratlab import tests_flowdata as _tfd  # noqa: E402
 for _n, _f in _tfd.TESTS:
     run(_n, _f)
 
+section("STRATLAB: flow study - bulk/block deals and NIFTY index changes (stratlab/flows_*.py, prereg/flows_v1.json)")
+from stratlab import tests_flows as _tfl  # noqa: E402
+for _n, _f in _tfl.TESTS:
+    run(_n, _f)
+
 section("OPTION BAR ARCHIVER (option_bar_archiver.py, OPTION_BAR_ARCHIVER_ENABLED default off)")
 import test_option_bar_archiver as _toba  # noqa: E402
 for _n, _f in _toba.TESTS:

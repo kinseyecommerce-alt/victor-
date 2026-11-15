@@ -144,6 +144,8 @@ def t_index_membership_point_in_time():
         ch = F.index_changes("NIFTY50", 20240829)
         assert len(ch) == 2 and set(ch.action) == {"IN", "OUT"} and set(ch.effective_date) == {20240930}
         assert dict(zip(ch.action, ch.lab)) == {"IN": "BBB", "OUT": "AAA"}
+        # a file without announce_source / effective_precision: conservatively "no real announcement date"
+        assert set(ch.announce_source) == {"none"} and set(ch.effective_precision) == {"day"}
         assert len(F.index_changes("NIFTY50", 20991231, since=20240901)) == 0
         assert len(F.index_changes("SENSEX", 20991231)) == 0
         # membership switches on the effective date: the day before 09-30 AAA is in, from 09-30 BBB is
