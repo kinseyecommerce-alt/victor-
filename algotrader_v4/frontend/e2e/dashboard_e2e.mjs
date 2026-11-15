@@ -9,6 +9,8 @@
 // dashboard on/off switch, whole-app state, approvals mode + approve / reject, brake reset), checking the result
 // through the API. It CHANGES state on the target server: point it only at a local / throw-away PAPER instance.
 // The forward-lab page is checked twice: as served (404 → "Not enabled yet") and with a mocked response.
+// The builder page: as served (if the server has builder batch BUILDER_BATCH, default 0001, it is opened and a
+// candidate expanded) and with a mocked response that has a proven cell.
 import { createRequire } from 'module'
 import fs from 'fs'
 import path from 'path'
@@ -89,7 +91,7 @@ async function confirm(page, reason) {
   await page.waitForTimeout(400)
 }
 
-const PAGES = ['', 'strategies', 'strategies/auc_fade', 'strategies/vrp_winged', 'trades', 'risk', 'forward', 'shadows', 'system']
+const PAGES = ['', 'strategies', 'strategies/auc_fade', 'strategies/vrp_winged', 'trades', 'risk', 'forward', 'builder', 'shadows', 'system']
 
 const MOCK_FL = {
   enabled: true, as_of: '2026-11-13',
@@ -109,6 +111,35 @@ const MOCK_FL_DETAIL = {
   id: 'AUC-FADE-3PCT',
   daily: Array.from({ length: 30 }, (_, i) => ({ date: `2026-10-${String(i + 1).padStart(2, '0')}`, trades: 2, net: Math.round(Math.sin(i / 3) * 900 + 450) })),
   rule_status: { trades: 212, days: 96, z: 4.61, z_required: 4.36, cleared: true },
+}
+
+
+const MOCK_BUILDER = {
+  enabled: true, rule_version: 'builder/v1', rule_sha256: 'a455009021b9e2cf', lab_trials_count: 2552, n_used: 3372,
+  evaluated: 800, final_looks: 4, promoted: 1, chain_ok: true,
+  agents: ['intraday', 'scalping', 'swing', 'options', 'futures'], market_types: ['RISING', 'FALLING', 'SIDEWAYS', 'HIGH_VOL'],
+  grid: ['intraday', 'scalping', 'swing', 'options', 'futures'].flatMap((a) => ['RISING', 'FALLING', 'SIDEWAYS', 'HIGH_VOL'].map((m) => ({
+    agent: a, mtype: m, proven: a === 'swing' && m === 'RISING' ? 1 : 0, in_forward_lab: a === 'swing' && m === 'RISING' ? 1 : 0, qualified: 0, ready: 0 }))),
+  batches: [
+    { id: '0002', created: '2026-11-21T06:00:05', hash: 'ab12cd34ef56ab12cd34', status: 'evaluated', candidates: 400, discovery_passers: 25, shuffle_expected: 7, shuffle_passers: 7, validation_passers: 2, final_confirmed: 1, proven: 1, errata: 0 },
+    { id: '0001', created: '2026-11-15T08:17:11', hash: 'f506bc1888f72821', status: 'evaluated', candidates: 400, discovery_passers: 27, shuffle_expected: 6, shuffle_passers: 6, validation_passers: 2, final_confirmed: 0, proven: 0, errata: 1 },
+  ],
+}
+const MOCK_BUILDER_BATCH = {
+  id: '0002', created: '2026-11-21T06:00:05', hash: 'ab12cd34ef56ab12cd34', snapshot_end: 20261120, status: 'evaluated',
+  discovery_passers: 25, shuffle_passers: 7, validation_tested: 20, validation_passers: 2, final_confirmed: 1, proven: ['bld0002_swi_ris_03_abcdef'], n_proof: 3372,
+  windows: { discovery: [0, 20241120], validation: [20241121, 20251120], final: [20251121, 20261120] },
+  planted: { gate_intraday: true, gate_scalping: true, gate_swing: true, gate_options: false, gate_futures: true }, errata: [],
+  candidates: [
+    { id: 'bld0002_swi_ris_03_abcdef', agent: 'swing', mtype: 'RISING', block: 'deliv_up', stage: 'proven',
+      text: "Swing in a RISING market (NIFTY above a rising 50-day average): when delivery % >= its 20-day mean + 15 points on >= 2x volume and a >= 2 % up day, buy the stock at the next session's open; hold 20 sessions, exit at the close.",
+      discovery: { trades: 812, pf: 1.42, net: 912000, h1: 401000, h2: 511000, dsr: 0.97, passed: true, shuffle_passed: false, why: [] },
+      validation: { passed: true, trades: 120, pf: 1.3, net: 88000, reasons: [] }, final: { confirmed: true, trades: 70, pf: 1.2, net: 31000 },
+      proof: { dsr: 0.961, gates: { validation: true, final: true, dsr: true, placebo: true, shuffle: true, planted: true }, proven: true } },
+    { id: 'bld0002_int_fal_00_123456', agent: 'intraday', mtype: 'FALLING', block: 'gap_fade', stage: 'discovery',
+      text: "Intraday in a FALLING market: when the stock opens >= 2% away from yesterday's close (call auction), trade the stock against the move at 09:15 (MIS); exit at 15:15.",
+      discovery: { trades: 300, pf: 0.9, net: -12000, h1: -5000, h2: -7000, dsr: 0.0, passed: false, shuffle_passed: false, why: ['H1 net <= 0', 'H2 net <= 0'] } },
+  ],
 }
 
 async function main() {
@@ -143,6 +174,9 @@ async function main() {
     for (const p of PAGES) {
       await visit(phone, p, 'phone')
       await shot(phone, `phone-${p.replace('/', '-') || 'overview'}`)
+      if (p === 'builder') {
+        ok('phone: builder page shows the 5 x 4 grid', (await phone.getByTestId('builder-grid').count()) === 1)
+      }
       if (p === 'forward') {
         ok('phone: forward lab shows "Not enabled yet" (404 / disabled) or the live page',
           (await phone.getByTestId('forward-not-enabled').count()) === 1 || (await phone.getByTestId('forward-maths').count()) === 1)
@@ -255,6 +289,31 @@ async function main() {
     await shot(phone, 'phone-dark-strategies')
     await phone.getByTestId('theme-toggle').click()
 
+    // builder: the served batch (if any) with a candidate expanded
+    const bb = process.env.BUILDER_BATCH || '0001'
+    const served = await fetch(`${BASE}/api/v2/builder/batches/${bb}`, { headers: KEY ? { 'X-API-Key': KEY } : {} })
+    if (served.ok) {
+      await visit(phone, `builder/${bb}`, 'phone')
+      const n = await phone.getByTestId('builder-candidate').count()
+      ok(`phone: builder batch ${bb} lists its candidates`, n > 0 && n <= 40, `${n} shown, the rest behind 'Show more'`)
+      await phone.getByTestId('builder-candidate').first().locator('button').click()
+      ok('phone: candidate detail opens', (await phone.getByTestId('builder-candidate-detail').count()) === 1)
+      await shot(phone, `phone-builder-${bb}`)
+    }
+    // mocked builder (a proven cell)
+    await phone.route('**/api/v2/builder', (r) => r.fulfill({ json: MOCK_BUILDER }))
+    await phone.route('**/api/v2/builder/batches/*', (r) => r.fulfill({ json: MOCK_BUILDER_BATCH }))
+    await visit(phone, 'builder', 'phone (mocked builder)')
+    const cellTxt = await phone.getByTestId('cell-swing-RISING').innerText()
+    const emptyTxt = await phone.getByTestId('cell-options-FALLING').innerText()
+    ok('builder (mock): proven cell and empty cell', cellTxt.includes('1 proven') && emptyTxt.includes('none proven yet'), `${cellTxt} | ${emptyTxt}`)
+    await shot(phone, 'phone-builder-mock')
+    await visit(phone, 'builder/0002', 'phone (mocked builder)')
+    await phone.getByTestId('builder-candidate').first().locator('button').click()
+    const det = await phone.getByTestId('builder-candidate-detail').innerText()
+    ok('builder (mock): proven candidate detail', det.includes('0.961') || det.includes('0.970'), det.slice(0, 80))
+    await shot(phone, 'phone-builder-batch-mock')
+
     // mocked forward lab
     await phone.route('**/api/v2/forward-lab', (r) => r.fulfill({ json: MOCK_FL }))
     await phone.route('**/api/v2/forward-lab/*', (r) => r.fulfill({ json: MOCK_FL_DETAIL }))
@@ -293,6 +352,14 @@ async function main() {
     const firstRow = await desk.locator('[data-testid=forward-table] tbody tr').first().innerText()
     ok('forward lab (mock): sortable table', firstRow.includes('EV-PEAD-LONG-H60'), firstRow.split('\n')[0])
     await shot(desk, 'desktop-forward-mock')
+    await desk.route('**/api/v2/builder', (r) => r.fulfill({ json: MOCK_BUILDER }))
+    await desk.route('**/api/v2/builder/batches/*', (r) => r.fulfill({ json: MOCK_BUILDER_BATCH }))
+    await visit(desk, 'builder', 'desktop (mocked builder)')
+    await shot(desk, 'desktop-builder-mock')
+    await visit(desk, 'builder/0002', 'desktop (mocked builder)')
+    await desk.getByTestId('builder-filter').selectOption('passed')
+    ok('builder (mock): filter "passed discovery"', (await desk.getByTestId('builder-candidate').count()) === 1)
+    await shot(desk, 'desktop-builder-batch-mock')
     await desk.getByTestId('theme-toggle-desktop').click()
     await visit(desk, '', 'desktop')
     await shot(desk, 'desktop-dark-overview')

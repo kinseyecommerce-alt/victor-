@@ -1,6 +1,6 @@
 import { ReactNode, useState } from 'react'
 import clsx from 'clsx'
-import { Activity, FlaskConical, Home, Layers, ListOrdered, Menu, Moon, ShieldAlert, Sun, Ghost, Server } from 'lucide-react'
+import { Activity, FlaskConical, Hammer, Home, Layers, ListOrdered, Menu, Moon, ShieldAlert, Sun, Ghost, Server } from 'lucide-react'
 import { href } from '../lib/router'
 import { stateLabel, stateTone } from '../lib/names'
 import { Badge, Dot } from './ui'
@@ -11,6 +11,7 @@ export const NAV = [
   { id: 'trades', label: 'Positions & trades', short: 'Trades', icon: ListOrdered },
   { id: 'risk', label: 'Risk & controls', short: 'Risk', icon: ShieldAlert },
   { id: 'forward', label: 'Forward lab', icon: FlaskConical },
+  { id: 'builder', label: 'Builder', icon: Hammer },
   { id: 'shadows', label: 'Shadow registry', icon: Ghost },
   { id: 'system', label: 'System', icon: Server },
 ]

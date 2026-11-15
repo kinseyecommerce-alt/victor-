@@ -259,6 +259,21 @@ def v2_builder_data():
     return json_safe(builder_data.api_status())
 
 
+@router.get("/builder")
+def v2_builder():
+    import builder
+    return json_safe(builder.api_status())
+
+
+@router.get("/builder/batches/{bid}")
+def v2_builder_batch(bid: str):
+    import builder
+    out = builder.api_batch(bid)
+    if out is None:
+        raise HTTPException(404, f"unknown builder batch {bid!r}")
+    return json_safe(out)
+
+
 @router.get("/forward-lab/{sid}")
 def v2_forward_lab_strategy(sid: str):
     import forward_lab

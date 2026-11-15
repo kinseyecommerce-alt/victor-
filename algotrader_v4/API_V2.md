@@ -298,6 +298,64 @@ sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root
  "minute_last_run": {"calls": 1500, "windows": 1500, "sessions": 61000, "stopped": "call budget", …}}
 ```
 
+### GET /api/v2/builder
+The AUTOMATIC STRATEGY BUILDER (`builder.py`, rule `builder_rule.json` builder/v1, sha256 pinned in
+`builder.RULE_SHA256`; `BUILDER_ENABLED`, default false → nothing scheduled; the endpoint still reports what is on
+disk). Every Saturday 06:00 IST it builds one batch of 400 candidates from our own data (5 agents × 4 market types ×
+20, `stratlab/builder_grammar.py`), freezes the list in a hash-chained registry before any return is computed,
+evaluates it in its own process (DISCOVERY → ≤ 3 per cell to VALIDATION → one FINAL look → proof) and promotes only
+proven strategies to the forward lab's separate `builder/v1` family. `n_used` = the trial count the Deflated Sharpe
+Ratio uses (lab trials 2,552 + 16 development checks + every builder candidate ever evaluated + every FINAL look ever;
+it never decreases). Batch rows: `discovery_passers` vs `shuffle_expected` (passers of the same candidates with their
+signal dates shuffled), `validation_passers`, `final_confirmed`, `proven`, `errata` (recorded defects; a batch is never
+re-evaluated). A batch `status` can also be `failed` (3 failed evaluation runs, or frozen inputs lost while the live data
+changed): `failure` {reason, attempts}; its candidates still count in `n_used` and are never re-drawn. `promoted_unregistered` = promoted
+strategies whose builder/v1 registration has not succeeded yet (retried by every weekly / daily forward run). `grid`: one entry per agent × market type with `proven`, `in_forward_lab`, `qualified` (builder/v1
+qualification) and `ready` (qualified, consistent, not demoted — a flag for a human; nothing trades on it).
+`chain_ok: false` = the registry chain failed verification. `seed`: the sandbox's batch 0001
+(`builder_seed_0001.json`, sha256 pinned in `builder.SEED_SHA256`) imported as the registry's first records on first
+use (`imported: false` before that; `n_used` is then already the seed's 2,970): its 400 keys are never drawn again, it
+is listed as batch 0001 with `status: "seeded"` (no candidate rows on the server), the server's first batch is 0002.
+```json
+{"enabled": false, "rule_version": "builder/v1", "rule_sha256": "a455009021b9…", "rule_error": null,
+ "agents": ["intraday", "scalping", "swing", "options", "futures"],
+ "market_types": ["RISING", "FALLING", "SIDEWAYS", "HIGH_VOL"],
+ "grammar_sizes": {"intraday": 1176, "scalping": 414, "swing": 685, "options": 576, "futures": 394},
+ "n_used": 2970, "lab_trials_count": 2552, "evaluated": 400, "final_looks": 2, "promoted": 0, "chain_ok": true,
+ "disk_mb": 0.9, "last_run": {"status": "complete", "batch": "0001", "proven": [], "seconds": 81.6},
+ "batches": [{"id": "0001", "created": "2026-11-15T08:17:11", "hash": "f506bc18…", "candidates_sha256": "a3875563…",
+              "snapshot_end": 20261109, "status": "evaluated", "candidates": 400, "discovery_passers": 27,
+              "shuffle_passers": 6, "shuffle_expected": 6, "validation_tested": 21, "validation_passers": 2,
+              "final_confirmed": 0, "proven": 0, "errata": 1, "n_used": 2970,
+              "best_discovery_dsr": {"id": "bld0001_sca_ris_02_3e21a1", "dsr": 0.622}}],
+ "grid": [{"agent": "intraday", "mtype": "RISING", "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0}, …]}
+```
+`status` of a batch: `frozen` (registered, not evaluated), `final_open` (FINAL looks recorded, result not ingested),
+`evaluated`.
+
+### GET /api/v2/builder/batches/{id}
+One batch (404 if unknown): registry hash, candidate-file sha256, data snapshot sha256 and end, generator (grammar
+version + sha256), `n_before`, windows (`discovery` / `validation` / `final`, yyyymmdd), counts, `n_disc` / `n_proof`,
+`v` (cross-trial variance of the DISCOVERY daily Sharpe used by the DSR), `planted` (per agent: the planted-edge
+control at p = 0.65 and the coin flip, `gate_<agent>`), `errata`, and every candidate: plain-English rule `text`
+(generated from the grammar), `stage` (`discovery` = failed discovery, `discovery_passed`, `validation_failed`,
+`final_rejected`, `final_confirmed`, `proven`), `discovery` {trades, pf, net, h1, h2, dsr, passed, shuffle_passed,
+why}, `validation` {passed, trades, pf, net, reasons} | null, `final` {confirmed, trades, pf, net} | null, `proof`
+{dsr, gates, proven} | null.
+```json
+{"id": "0001", "status": "evaluated", "windows": {"discovery": [0, 20241109], "validation": [20241110, 20251109],
+ "final": [20251110, 20261109], "T": 20261109}, "discovery_passers": 27, "shuffle_passers": 6, "validation_tested": 21,
+ "validation_passers": 2, "final_confirmed": 0, "proven": [], "n_disc": 2968, "n_proof": 2970,
+ "errata": [{"batch": "0001", "agent": "options", "issue": "…", "effect": "…", "action": "…"}],
+ "candidates": [{"id": "bld0001_sca_sid_10_ab194a", "agent": "scalping", "mtype": "SIDEWAYS", "block": "gap_fade",
+   "text": "Scalping in a SIDEWAYS market (neither rising nor falling): when the stock opens >= 1% away from yesterday's close (call auction), trade the stock against the move at 09:15 (MIS); exit 10 minutes after entry.",
+   "stage": "final_rejected",
+   "discovery": {"trades": 2109, "pf": 1.286, "net": 238777.0, "h1": …, "h2": …, "dsr": 0.0136, "passed": true,
+                 "shuffle_passed": false, "why": []},
+   "validation": {"passed": true, "trades": 222, "pf": 1.655, "net": 65227.36, "reasons": []},
+   "final": {"confirmed": false, "trades": 288, "pf": 0.947, "net": -7590.51}, "proof": null}, …]}
+```
+
 ### GET /api/v2/archiver
 ```json
 {"enabled": false, "root": "/data/app/option_bars", "archive_mb": 0.0, "max_mb": 1500.0, "estimate_mb_per_week": 25}

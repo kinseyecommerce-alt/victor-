@@ -1714,3 +1714,88 @@ costs and lot sizes on every year; deals classes are name-based. Do not re-tune 
 Outputs: `<scratchpad>/datagen/` (data_check.json, discovery.json, controls_discovery.json, validation.json, final.json,
 proof.json, final_ledger.json, tables.md, trades/, progress.txt). Tests: `tests_datagen.py` (14 synthetic, including an
 end-to-end run of the whole study in a temporary directory), run by `test_pipeline.py`.
+
+## Automatic strategy builder (builder/v1): strategies built from our own data, every week (`builder_*.py`, `../builder*.py`, `../builder_rule.json`)
+
+**Plain language.** No more searching for other people's strategies. Every week the builder writes 400 new candidate
+rules from the lab's own data (5 agents x 4 market types x 20), freezes the list in a hash-chained registry before a
+single return is computed, and judges them with a fixed, pre-registered pipeline. Every candidate it ever makes counts
+in the luck correction; nothing is promoted by eye. **Batch 0001 (real data, 2026-11-15): 0 of 400 proven.**
+
+* **Grammar** (`builder_grammar.py`, version bg1, sha256 `2084ade2…`): signal blocks = the datagen feature families
+  (auction gap / path, volume shocks, expiry, VIX, delivery %, participant OI, ban list, OI quadrants, deals by client
+  class, results timing, corporate actions) + four small blocks (daily volume shock, VIX spike / NIFTY drop on the
+  index, index gap), each with round parameters and a direction fixed by its story; x entry timing x exit (time,
+  stop + target incl. 1:3, signal) x instrument. Sizes: intraday 1,176, scalping 414, swing 685, options 576, futures
+  394 sentences per market type. Draw: per cell, the grammar ordered by sha256(version | batch | cell | key); the first
+  20 never drawn before and not near-duplicates (same block / exit kind / instrument and <= 1 other field different).
+* **Agents**: intraday (MIS, exit by 15:15), scalping (MIS, exit <= 30 min), swing (CNC long / stock-futures short,
+  2-60 sessions), options (NIFTY / BANKNIFTY on REAL end-of-day option prices through nsedata's simulator, fed by
+  `builder_options.load_compact` from both eras' F&O bhavcopies; no VIX-modelled prices), futures (index + stock).
+* **Market types** (point-in-time): RISING / FALLING = NIFTY vs its rising / falling 50-day SMA (slope over 10
+  sessions), SIDEWAYS otherwise, HIGH_VOL = VIX >= 75th percentile of the previous 252 sessions (overrides). 2012-26:
+  RISING 1,687 sessions, FALLING 481, SIDEWAYS 573, HIGH_VOL 859.
+* **Rule** (`builder_rule.json`, sha256 `a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06`): splits
+  DISCOVERY = oldest .. T-24m (halves), VALIDATION = (T-24m, T-12m], FINAL = (T-12m, T]; DISCOVERY gates as datagen
+  (both halves > 0, PF >= 1.15, >= 150 / 60 trades per half, top symbol <= 35 %, survives 5 bps); K = 3 per cell to
+  VALIDATION (protocol.screen); one FINAL look (recorded before it is computed); proven = FINAL confirmed AND DSR >= 0.95
+  (full-history daily P&L) AND placebo (50 random-date draws, p95) AND the candidate's own shuffled signal fails AND
+  the planted-edge control of its agent is detected (gross, p = 0.65) while the coin flip is not. N = lab trials
+  (2,552) + 16 development checks + every builder candidate ever + every FINAL look ever; it never shrinks.
+* **Engine** (`builder_engine.py`): datagen's rule functions, `_trade` fill / cost model (2 bps / 1 bps, Zerodha 2026
+  costs per product), eligibility rules; bracket / signal / scalping exits walk the 1-minute bars (stop first, target
+  one tick through, sim.target_fill); daily brackets on the daily range.
+
+**Batch 0001** (frozen `f506bc18…`, candidates `a3875563…`, snapshot end T = 2026-11-09; 82 s on 4 vCPU with 2
+workers, peak 3.4 GB of one forked worker before the sparse-signal fix, 1.2-1.6 GB per process after it):
+
+| agent | RISING disc / val / final / proven | FALLING | SIDEWAYS | HIGH_VOL |
+|---|---|---|---|---|
+| intraday | 2 / 0 / 0 / 0 | 1 / 1 / 0 / 0 | 2 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| scalping | 1 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 1 / 1 / 0 / 0 | 0 / 0 / 0 / 0 |
+| swing | 6 / 0 / 0 / 0 | 3 / 0 / 0 / 0 | 3 / 0 / 0 / 0 | 1 / 0 / 0 / 0 |
+| options (erratum) | 0 / – / – / 0 | 0 | 0 | 0 |
+| futures | 6 / 0 / 0 / 0 | 1 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+
+* DISCOVERY: 27 of 400 passed; the shuffle-the-feature control passed 6 (swing 5, futures 1): about a quarter of the
+  passers are what random dates in the same stocks and market type also give. 21 carried (<= 3 per cell); 2 passed
+  VALIDATION and both were REJECTED at their one FINAL look: intraday FALLING gap >= 2 % fade from the auction with a
+  1 % stop / 1:2 target (127 trades, PF 0.96, -Rs 3,743) and scalping SIDEWAYS gap >= 1 % fade, 10-minute exit (288
+  trades, PF 0.95, -Rs 7,591) — both neighbours of the lab's known auction fade.
+* N: 2,968 at the DISCOVERY ranking, 2,970 with the 2 FINAL looks. Best DISCOVERY DSR: 0.622 (scalping RISING,
+  stock gaps >= 1 % against NIFTY's gap, fade with a 0.3 % stop / 1:3 target) — it failed VALIDATION (PF 0.99).
+* Planted controls (gross, p = 0.65 / coin flip): intraday PF 1.86 / 0.92, scalping 1.65 / 0.84, swing 1.91 / 1.01,
+  futures 2.01 / 0.95 — all detected, coin flips not. After costs the scalping p = 0.65 control FAILS (PF 1.20 but the
+  5 bps stress is negative): a 65 %-right 25-minute call barely pays the round trip.
+* **Erratum (two registry records, options)**: `nse_old_view` carries option `settle` = 0 on 244 of its 449 index-option
+  expiry days (every one up to 2020-01-30, none after; the 2023-26 `nse` directory has none). nsedata.final_settlement
+  uses the index future's settle first, so only WEEKLY expiries without a future were valued at S = 0 (BANKNIFTY
+  weeklies 2016-05 .. 2020-01, NIFTY weeklies 2019-02 .. 2020-01): the 80 options candidates' DISCOVERY numbers and
+  batch 0001's options planted gate are invalid. Fixed for later batches (a zero
+  expiry-day settle is missing -> official index close); batch 0001 is NOT re-evaluated and its 80 keys are never
+  re-drawn; they keep counting in N. With the fix the options planted control is NOT detected (gross PF 1.04: a
+  65 %-right 3-session direction call on an ATM weekly does not beat its time decay), so no options candidate can be
+  proven until a batch's planted control is detected. Lab results that read old-era option settlement through
+  nsedata + oldera_fo share the issue (not re-run): the 2012-23 OOS looks of `options_r4`'s NIFTY weekly specs
+  (r4_realopt_nf_wk_*, nf_expwk_*, nf_exp_eve_*) in `protocol_oos.py` and `protocol_min_oos.py` (monthly BANKNIFTY
+  specs settle on the future and are unaffected; nf_event_* never fire in the old era). Not affected: every 2023-26
+  result (nse/), options_vrp / VRP-STRANGLE-016-WINGED incl. its live paper parity (Black-Scholes on minute bars,
+  settlement from the 15:00-15:29 minute closes), options_r3 / options_vrp_vix (minute bars), web_run's earnings
+  straddles (stock options; the old view has no per-strike stock chains).
+* **Resume, failure, forward schedule** (PR #26 review): every batch is frozen together with its immutable inputs
+  (`builder_bundle.py`: the panels and features as arrays, 81 MB at the lab's full scale, the compact option
+  tables, 75 MB, and hard links to the data layer's minute files; written in the snapshot process, verified by
+  sha256 before every run) and every run of it, the first included, reads only them; a batch that fails 3 times
+  or whose frozen inputs are lost while the live data changed is recorded `failed` (counted in N, keys never
+  re-drawn); the builder/v1 family runs on its own 07:05 IST job under `BUILDER_ENABLED`; a promotion whose
+  forward registration failed is persisted and retried until registered.
+* **Seed** (`../builder_seed_0001.json`, sha256 pinned in `builder.SEED_SHA256`): this sandbox batch (400 keys, counts per
+  stage, the 2 FINAL looks, both errata, N after it = 2,970) is imported as the first records of any other registry
+  (the server's) on first use: its N starts at 2,970, the 400 keys are never drawn again and its first batch is 0002.
+  The rule's lab base (2,552) and the 16 development checks are unchanged (counted once).
+* The registry was re-chained once (repair record) after a stale-tail bug with two writers; the data of every record
+  is unchanged; the broken file is kept.
+
+Outputs (sandbox): `<scratchpad>/builder/root/` (registry.jsonl, batches/0001/{candidates.json, result.json.gz,
+work/}). Trials ledger: 423 rows appended (era builder-v1: 400 DISCOVERY, 21 VALIDATION, 2 FINAL). Tests:
+`../test_builder.py` (synthetic data in the server layout), run by `test_pipeline.py`.

@@ -1,0 +1,166 @@
+{
+ "version": "builder/v1",
+ "written": "2026-11-15",
+ "statement": "Written before any builder candidate was evaluated. The builder builds strategies ONLY from the lab's own data (no published strategy is searched for or tested). Every candidate it ever makes is evaluated and counted in the luck correction; nothing is promoted by eye. Do not tune on results: a changed rule, grammar or gate is a new version (and the old counts carry over: N never shrinks). Nothing here switches trading on: a promoted strategy goes to the forward lab's builder/v1 family; paper trading after its forward qualification is a human decision (only a 'ready' flag is exposed). PAPER only; LIVE stays impossible.",
+ "grammar": {
+  "module": "stratlab/builder_grammar.py",
+  "version": "bg1",
+  "sha256": "2084ade2c07de51ab95700e54c200e3d60c76f97d0ee38eba0ce464f899589ea",
+  "agents": {
+   "intraday": "NIFTY-100 stocks, MIS, minute grid; signals = minute blocks + the previous evening's end-of-day blocks; entry at a decision minute (09:15 auction .. 09:45); exit by 15:15 (time 14:30 / 15:15, stop 0.5 / 1 / 1.5 % with 1:1.5 / 1:2 / 1:3 targets, VWAP signal exit)",
+   "scalping": "NIFTY-100 stocks, MIS, 1-5-minute opening signals; exit <= 30 minutes after entry (5 / 10 / 15 / 25 minutes, stop 0.3 / 0.5 % with 1:2 / 1:3 within 30 minutes, VWAP signal within 30 minutes)",
+   "swing": "point-in-time top-500 stocks, decided in the evening, entered at the next open; long = CNC delivery, short = stock futures (F&O names only); 2-60 sessions (hold, bracket 3 / 5 / 8 % x 1:2 / 1:3 on the daily range within 20 / 60 sessions, close through the 10-session mean, event date)",
+   "options": "NIFTY / BANKNIFTY options on REAL end-of-day prices through nsedata's simulator (stratlab/builder_options.py); long ATM / debit spread in the block's direction, short strangle / iron condor for premium blocks; weekly / monthly expiry; hold 1 / 3 / 5, to expiry, premium bracket 1:3, signal exit",
+   "futures": "NIFTY / BANKNIFTY futures (index spot stands in) and stock futures (cash price, futures costs): daily blocks of both directions 1-10 sessions, overnight / 5-session minute blocks, index-gap intraday rules"
+  },
+  "market_types": {
+   "RISING": "NIFTY 50 close > its 50-session SMA and the SMA above its value 10 sessions earlier",
+   "FALLING": "NIFTY 50 close < its 50-session SMA and the SMA below its value 10 sessions earlier",
+   "SIDEWAYS": "neither RISING nor FALLING",
+   "HIGH_VOL": "India VIX close >= the 75th percentile of its previous 252 sessions (>= 200 values); overrides the three",
+   "point_in_time": "a daily-grid decision in the evening of t uses the type of t (closes <= t); a minute-grid decision during t uses the type of the previous daily session; options decided in the evening of t enter at t+1's close",
+   "rule": "each candidate trades only on sessions whose market type is its own"
+  }
+ },
+ "batch": {
+  "per_cell": 20,
+  "cells": "5 agents x 4 market types",
+  "size": 400,
+  "draw": "per cell, the grammar list ordered by sha256('bg1|<batch id>|<agent>|<market type>|<candidate key>'); the first 20 whose key was never drawn in an earlier batch and that are not near-duplicates of one already taken in this batch (deterministic in the batch id and the registry)",
+  "near_duplicate": "same agent, market type, block, exit kind and instrument and at most ONE other signature field (each block parameter, entry time, option structure, each exit parameter) different",
+  "exhaustion": "a cell whose grammar has no undrawn, non-duplicate sentence left contributes fewer than 20 (recorded); the grammar is never widened inside builder/v1"
+ },
+ "freeze": "before any return is computed: the batch's full candidate list (ids, keys, grammar sentences), the generator version + grammar sha256 and the data snapshot ids (sha256 / sizes of every input, snapshot end T) are hashed and appended to the hash-chained builder registry; the evaluation refuses a batch whose candidate file or data snapshot does not match its registry record",
+ "splits": {
+  "T": "the batch's data snapshot end (min of the daily and minute calendars' last session)",
+  "discovery": "the oldest data of the candidate's grid .. T - 24 months (halves by session count)",
+  "validation_months_before_end": 24,
+  "final_months_before_end": 12,
+  "validation": "(T - 24 months, T - 12 months]",
+  "final": "(T - 12 months, T]",
+  "membership": "a trade belongs to the window of its entry date; a hold passing a window end exits at the window's last close (overnight minute exits beyond it are skipped)"
+ },
+ "costs": {
+  "fill_model": "datagen_run._trade: slippage against us on BOTH fills, 2 bps per side stocks / 1 bps index futures; options: nsedata haircut max(Rs 0.05, 1 %) per leg per fill",
+  "fees": "costs.round_trip_cost (2026 Zerodha / NSE schedule): equity_mis intraday + scalping, equity_cnc delivery longs, future for stock / index futures; options: options_replay.leg_cost",
+  "size": "Rs 1 lakh per stock trade (whole shares), 1 lot per index-futures trade (sim.LOT_SIZES), options lots from nsedata.lot_size; <= 10 entries per day per candidate (strongest first), 1 for index instruments, one open position per symbol"
+ },
+ "discovery_gates": {
+  "both_halves_net_positive": true,
+  "min_pf": 1.15,
+  "min_trades_per_half": {
+   "intraday": 150,
+   "positional": 60
+  },
+  "max_symbol_share": 0.35,
+  "stress": "net > 0 in both halves again at 5 bps (index 2.5 bps; options 2.5 x the haircut)",
+  "source": "stratlab.datagen_run.judge_discovery's gates on the builder's windows (stratlab.builder_engine.judge_discovery)"
+ },
+ "carry": {
+  "K_per_cell": 3,
+  "rank": "discovery passers ranked by DISCOVERY DSR at N_disc (below) and V; ties by id; at most K per (agent, market type) cell go to VALIDATION"
+ },
+ "validation": "protocol.screen on the VALIDATION window (its own halves by sessions): both halves net > 0, PF >= 1.15, >= 150 intraday / 60 positional trades, top symbol <= 35 % (not for one-instrument candidates)",
+ "final": {
+  "verdict": "protocol.final_verdict: net > 0 and PF >= 1.05 -> CONFIRMED",
+  "looks": "one look per validation passer; the look is appended to the registry BEFORE the FINAL return is computed and counts in N (FINAL windows of later batches overlap this one, so every FINAL look ever is a trial)"
+ },
+ "dsr": {
+  "min": 0.95,
+  "formula": "trials.dsr (Bailey & Lopez de Prado): daily Sharpe, skew, non-excess kurtosis",
+  "series": "proof: daily net P&L of DISCOVERY + VALIDATION + FINAL (trials.daily_pnl convention); carry ranking: DISCOVERY only",
+  "lab_trials_count": 2552,
+  "development_evaluations": 16,
+  "N": "N_disc = lab_count + development_evaluations (16 DISCOVERY-only engine checks on real data while the engine was written, draw id 'try') + every builder candidate ever evaluated (all earlier batches + this batch's) + every FINAL look of earlier batches; N_proof = N_disc + this batch's FINAL looks; lab_count = max(2552, the trials ledger's 2023-26 variant count when it is readable); the registry keeps N_used = max(previous N_used, N_proof): N never shrinks",
+  "V": "max(robust (1.4826 x MAD)^2 variance of the batch's DISCOVERY daily Sharpes, the median noise floor 1 / (T_days - 1))"
+ },
+ "controls": {
+  "shuffle": {
+   "what": "every candidate's trigger cells permuted to random eligible dates of the same symbol and market type inside DISCOVERY (seed sha256(version|batch|id|shuffle)), run through the identical pipeline",
+   "report": "per batch and per cell: discovery passers observed vs shuffled passers (the expected count under no information)",
+   "gate": "a candidate whose own shuffled version passes the DISCOVERY gates cannot be proven (its result is market exposure, not the signal)"
+  },
+  "placebo": {
+   "n": 50,
+   "what": "random eligible cells of the candidate's market type on VALIDATION + FINAL, same trade count, same long share, same hold",
+   "gate": "the candidate's VALIDATION + FINAL net > the 95th percentile of the 50 placebo nets"
+  },
+  "planted": {
+   "p": 0.65,
+   "p_random": 0.5,
+   "what": "per agent, a fraction of eligible DISCOVERY cells whose side is the sign of the realised move of the carrier's own entry -> exit with probability p (p_random = coin flip), through the identical pipeline",
+   "gate": "for the candidate's agent: the p = 0.65 control passes the DISCOVERY gates on its GROSS P&L (before fees; slippage included) AND the coin-flip control does not (a power check of the signal -> trade -> judge pipeline, independent of the cost wall the candidate itself must clear); otherwise no candidate of that agent can be proven in the batch. The after-fees result of both controls is reported next to it (whether a 65 %-right signal of that agent can pay Zerodha's costs at all)",
+   "carriers": {
+    "intraday": {
+     "block": "gap_fade",
+     "entry": "o0920",
+     "exit": [
+      "time",
+      "o1515"
+     ],
+     "instrument": "STOCKS",
+     "product": "mis",
+     "frac": 0.02
+    },
+    "scalping": {
+     "block": "gap_fade",
+     "entry": "o0920",
+     "exit": [
+      "time_min",
+      25
+     ],
+     "instrument": "STOCKS",
+     "product": "mis",
+     "frac": 0.02
+    },
+    "swing": {
+     "block": "deliv_up",
+     "entry": "next_open",
+     "exit": [
+      "hold",
+      5
+     ],
+     "instrument": "STOCKS",
+     "product": "cnc/fut",
+     "frac": 0.01
+    },
+    "futures": {
+     "block": "fii_flow",
+     "entry": "next_open",
+     "exit": [
+      "hold",
+      5
+     ],
+     "instrument": "NIFTY",
+     "product": "fut",
+     "frac": 0.3
+    },
+    "options": {
+     "block": "fii_flow",
+     "entry": "close",
+     "exit": [
+      "opt_hold",
+      3
+     ],
+     "instrument": "NIFTY",
+     "product": "opt",
+     "structure": "long_atm:weekly",
+     "frac": 0.3
+    }
+   }
+  }
+ },
+ "proven": "VALIDATION passed AND FINAL CONFIRMED AND DSR >= 0.95 (N_proof, V) AND placebo gate AND own shuffle failed AND planted gate of its agent",
+ "promotion": {
+  "what": "a proven candidate becomes a catalogue-compatible spec in the generated module <builder root>/catalog/builder_gen.py (written by code: batch id, candidate key, grammar sentence, registry hash) and is registered with the forward lab's SEPARATE family builder/v1 (builder_forward_rule.json); forward_lab_rule.json (family 1,276) is not touched",
+  "paper": "only after its builder/v1 qualification, and only by a human: the API exposes a 'ready' flag, nothing switches on"
+ },
+ "trials_ledger": "every candidate's DISCOVERY row (stage builder_discovery), every VALIDATION screen (builder_validation) and every FINAL look (builder_final) is appended to the lab trials ledger when it is configured (era builder-v1, family builder; the lab's 2023-26 count is unchanged by them)",
+ "schedule": {
+  "when": "one batch per week, Saturday 06:00 IST (outside market hours)",
+  "flag": "BUILDER_ENABLED (default false: no job scheduled, nothing read or written)",
+  "process": "freeze in the app process, evaluation in a separate process (python -m builder_run), nice 10, <= 2 workers, address-space limit BUILDER_MEM_MB, wall-clock limit BUILDER_TIME_LIMIT_S; resumable (finished units are kept); its results are ingested only after a successful run",
+  "disk": "BUILDER_MAX_MB (default 400) for the builder directory; at the cap nothing more is written (status disk_cap), nothing is deleted; caches (compact option tables) live on ephemeral disk (BUILDER_CACHE_DIR)",
+  "isolation": "no order entry point, agent, risk or trading state is imported, read or changed; PAPER only"
+ }
+}

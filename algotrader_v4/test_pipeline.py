@@ -5333,6 +5333,16 @@ for _n, _f in _TBD.TESTS:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# AUTOMATIC STRATEGY BUILDER — grammar, freeze-before-evaluate, splits, N, promotion, builder/v1 (test_builder.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("STRATEGY BUILDER — grammar, frozen rule, registry, evaluation process, N, promotion, builder/v1 family, API")
+import test_builder as _TBL
+
+for _n, _f in _TBL.TESTS:
+    run("builder: " + _n[len("test_"):].replace("_", " "), _f)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()
