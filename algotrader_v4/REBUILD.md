@@ -163,4 +163,4 @@ this rebuild, and LIVE remains impossible for these strategies (their guards ref
   the better of quote and stream touch. Auction-fade entries (official open) and settlements are unaffected.
 * An operator Stop now persists until `/bot/start` (the old 09:16 auto-start of the tick agents silently cleared it).
 * The 15:15 square-off runs every trading day in PAPER (before: only when the old master had been started).
-* The old dashboard (`frontend/`) calls many removed endpoints until the new dashboard replaces it.
+* The dashboard (`frontend/`) was rebuilt on the v2 API (mobile-first; Overview, Strategies, Positions & trades, Risk & controls, Forward lab, Shadow registry, System). It polls instead of using the removed `/ws`; see TESTING.md.

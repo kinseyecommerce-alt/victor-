@@ -38,6 +38,25 @@ curl -s localhost:8010/api/v2/strategies | head -c 300
 Without `API_KEY` the API is open (local only). With `API_KEY` set, `/api/v2/*` (except `/api/v2/health`) and every
 write need `X-API-Key` or a Bearer JWT (`POST /auth/login`).
 
+### Dashboard (frontend/)
+
+React + TypeScript + Tailwind (Vite), built into `frontend/dist` and served by the same process at `/dashboard`
+(files under `/assets`); the Docker image builds it in its first stage. It uses only `/api/v2/*` (API_V2.md) plus
+`/auth/login`, `/auth/login-url`, `/auth/kite/auto-login`, `/bot/start|stop` and `/shadow-registry`, polls (15 s while
+the market is open, 60 s otherwise; no websocket) and signs in with the dashboard password (JWT) or the API key.
+`GET /api/v2/forward-lab` is optional: a 404 shows "Not enabled yet".
+
+```bash
+cd algotrader_v4/frontend && npm ci && npm run build      # then restart uvicorn (it mounts dist/assets at start-up)
+npm run dev                                               # :5000, proxies /api and /auth to :8000
+# end-to-end check (Playwright + Chromium; CHANGES trading states / approvals on the target — local PAPER only):
+BASE_URL=http://127.0.0.1:8010 API_KEY=... ADMIN_USER=admin ADMIN_PASS=... OUT=/tmp/shots node e2e/dashboard_e2e.mjs
+```
+The e2e script loads every page at iPhone 13 and 1440 px desktop size, fails on any uncaught error or page wider than
+the screen, signs in both ways, clicks every write control (strategy state switch with Cancel / confirm, dashboard
+on/off switch, whole-app state, approvals mode, approve / reject, brake reset when tripped) and checks the result
+through the API; the forward lab is checked as served and with a mocked response.
+
 ## 3. Real-price paper trading
 
 `.env` / server environment:
