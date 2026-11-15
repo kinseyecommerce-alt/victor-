@@ -1,0 +1,166 @@
+# Core rebuild (Nov 2026)
+
+Decision: "Re-create entire app with new strategies and trading engine and remove old" → **clean rebuild on core**,
+strategies **"proven + candidates"**, everything **PAPER only**.
+
+| Strategy | Key | Status | Default |
+|---|---|---|---|
+| AUC-FADE-2PCT (opening-auction fade; variant via `VALIDATED_AUCTION_VARIANT`, code default 3PCT) | `auc_fade` | proven | on |
+| SWING-ATTN-ON-3X (attention overnight long) | `attn_on` | proven | on |
+| VRP-STRANGLE-016-WINGED (NIFTY weekly winged strangle) | `vrp_winged` | candidate | on |
+| EV-PEAD-LONG-H60 (post-earnings drift) | `pead_h60` | candidate | **off** (`VALIDATED_PEAD_ENABLED=false`) |
+
+The four agents' rule implementations are unchanged (their lab-parity tests pass unchanged). The only edits in
+`agents/validated_*.py`: the entry size is multiplied by the risk-budget factor (`alloc_scale()`, exactly 1.0 by
+default; the strangle's lots go through `alloc_lots()`, 2 → 2), and PEAD's evening *planning* step calls
+`entry_block_reason(approval=False)` (the semi-auto approval is checked at its 09:15 entry instead).
+
+## 1. Removed
+
+### Files (62)
+Legacy strategies and their engine: `agents/intraday_v2.py`, `agents/research_agents.py`, `agents/master_agent.py`,
+`master_agent_v5.py`, the legacy agents inside `agents/strategy_agents.py` (now only the registry), `strategies/`,
+`strategy_signals.py`, `signal_engine.py`, `gamma_scalp.py`, `momentum_rotation.py`, `market_filter.py`,
+`multi_timeframe.py`, `opportunity_scanner.py`, `symbol_scanner.py`, `universe.py`, `nifty100.py`.
+AI / LLM: `ai_trader.py`, `ai_replay.py`, `llm_provider.py`, `claude_trade_gate.py`, `debate_gate.py`,
+`allocator.py` (LLM allocator), `adaptive_engine.py`, `historical_learner.py`, `trade_memory.py`,
+`research_loop.py`, `optimizer.py`, `regime_v2.py`, `market_regime.py`, `market_context.py`.
+Old execution / risk of the tick book: `atomic_bracket.py`, `trailing_sl_engine.py`, `order_guard.py`,
+`risk_manager.py`, `portfolio_risk.py`, `correlation_guard.py`, `execution.py`.
+Backtest / replay engines: `backtest_engine.py`, `replay_backtest.py`, `auto_backtest_runner.py`, `bg_compute.py`,
+`bg_worker.py`, `daily_data.py`.
+Data / intelligence: `market_data.py` (NSE quote/yfinance/GBM simulator — its NSE JSON client moved to
+`nse_http.py`), `truedata_client.py`, `levels_engine.py`, `institutional_flow.py`, `iv_surface.py`,
+`options_flow.py`, `options_intelligence.py`, `pre_market_report.py`.
+Other: `n8n_bridge.py`, `phase4_trade_lifecycle.py`, `phase5_intelligence.py`, `phase6_resilience.py`,
+`paper_trade_sim.py`, `startup.py`, `run_demo.sh`, `static/dashboard.html`, `dashboard_e2e.py`, `playwright_e2e.py`,
+`test_buttons.py`, `test_sim_orders_flow.py`.
+Slimmed (kept file, legacy parts removed): `main.py` (rewritten), `platform_scheduler.py`, `agents/base_agent.py`,
+`agents/strategy_agents.py`, `paper_book.py`, `performance.py` (no pruning, no yfinance), `tick_engine.py` (price feed
+only: no candles/indicators/strategy queues/simulator), `kite_client.py` (GTT and ticker helpers), `config.py`,
+`ist_clock.py` (demo clock), `bot_state.py`, `event_calendar.py`, `secret_store.py`, `test_pipeline.py`.
+
+### Endpoints (80 removed; 52 old paths kept + the v2 API)
+`POST /adaptive/review`, `GET /adaptive/status`, `POST /agent/chat|close-all|cycle|start|stop`,
+`GET /agent/log|status`, `POST /ai/providers/test`, `GET /allocator`, `POST /allocator/run`,
+`GET|POST /backtest/ai-replay`, `GET /backtest/approved/{strategy}`, `GET /backtest/bars`, `POST /backtest/batch`,
+`POST /backtest/compare`, `GET /backtest/equity/{symbol}/{strategy}`, `GET|POST /backtest/gate-replay`,
+`GET /backtest/momentum`, `POST /backtest/replay`, `GET /backtest/replay/last`, `POST /backtest/run`,
+`GET /backtest/trades/{symbol}/{strategy}`, `POST /backtest/weekly`, `GET /bot/directives`, `GET /brackets`,
+`POST /brackets/manual`, `GET /brackets/{id}`, `GET /dashboard/summary`, `GET /gate/log`, `GET /market-type`,
+`POST /market-type/refresh`, `PUT /market-type/research`, `GET /market/context/{symbol}`,
+`GET /market/live/{symbol}`, `GET /market/opportunities`, `GET /market/option-chain/{symbol}`, `GET /market/status`,
+`GET /market/trend-filter`, `GET /momentum/rankings`, `POST /momentum/rebalance`,
+`POST /optimize/params/{agent}/reset`, `POST /optimize/run`, `GET /optimize/status`, `POST /orders/place`,
+`DELETE /orders/{order_id}`, `POST /performance/strategies/{name}/enable|disable`, `GET /regime/history|plans|status`,
+`POST /regime/refresh`, `GET /research/evidence|log`, `POST /research/run`, `GET /risk/portfolio`, `GET /risk/status`,
+`PATCH /risk/update`, `GET|PATCH /settings/capital-allocation`, `GET|PATCH /settings/trading-limits`,
+`POST /signals/generate`, `POST /simulate/price-tick`, `GET /symbols/criteria|selected|universe`,
+`POST /symbols/scan`, `GET /symbols/scores/{strategy}`, `GET /trailing-sl/configs|status`,
+`PATCH /trailing-sl/config`, `GET /universe`, `POST /universe/refresh`, `POST /webhooks/n8n`, `WS /ws`,
+`WS /ws-proxy/ws`.
+
+Kept (scripts and the operator still use them): `/health`, `/validated`, `/shadow-registry`, `/forward-test`,
+`/backtest/history-bars` (stratlab data-fetch scripts), auth + Kite login + vault + app password, `/bot/start|stop|status`
+(no body needed now), `/agents…`, `/settings/agent-enables`, `/portfolio/positions|orders`, `/orders/squareoff`,
+`/paper-book/status`, `/market/live`, `/sebi/*`, `/performance/scoreboard|strategies|execution|trades|snapshot`,
+`/status/connections`, `/config/validate`, `/docs`, `/redoc`, `/login`, `/dashboard`.
+
+### Config fields
+Removed (≈140): the AI trader (`AI_AGENT_*`, `AI_PROVIDER_*`, `ANTHROPIC_API_KEY`, `OPENAI_*`), trade gates
+(`USE_CLAUDE_TRADE_GATE`, `CLAUDE_GATE_*`, `GATE_*`, debate), regime (`USE_REGIME_ROUTING`, `REGIME_*`), MTF/Kelly,
+allocator, master review, backtest gate (`BT_*`), trade limits / capital buckets of the tick agents
+(`MAX_TRADES_*`, `*_CAPITAL_PCT`, `MAX_*_POSITIONS`, `INTRADAY_LEVERAGE`, `STOP_LOSS_PCT`, `TARGET_PCT`, …),
+portfolio risk (`RISK_PER_TRADE_PCT`, `PORTFOLIO_VAR_*`, `VAR_*`, `FNO_*`, `MAX_PORTFOLIO_HEAT`), pruning
+(`PRUNE_*`), trend filter / momentum (`TREND_FILTER_*`, `MOMENTUM_*`), auto-start of the tick agents
+(`AUTO_START_STRATEGIES`, `USE_NIFTY100_WATCHLIST`, `USE_ROLLING_UNIVERSE`, `UNIVERSE_*`, `AI_AGENT_AUTO_START`),
+TrueData, n8n, `DEMO_MODE`, `INDICATOR_MIN_INTERVAL_S`, `USE_LIMIT_ENTRIES`, `ENTRY_LIMIT_BUFFER_PCT`,
+`SQUAREOFF_CLOSES_TRACKED`, `USD_INR`, …. **Unknown variables are ignored** (`extra="ignore"`), so a deployment that
+still sets them starts normally. `AUTO_START_WATCHLIST` stays (price-feed warm list).
+Added: `RISK_BUDGET_DAILY_VOL`, `RISK_BUDGET_ALLOW_UPSCALE`, `RISK_BUDGET_MAX_SCALE`, `RISK_CAPITAL`,
+`RISK_BRAKE_REDUCE_PCT`, `RISK_BRAKE_HALT_PCT`, `APPROVAL_MODE`, `DRIFT_TELEGRAM`, `ORDER_PROTECTION_BAND_PCT`,
+`KITE_STATIC_IP`.
+
+### Scheduler jobs and Telegram
+Removed: `pre_market` (09:00 report), `morning_data` (09:10 levels/events/institutional/correlation/opportunity
+warm-up), `allocate_morning|midday` (LLM allocator), `auto_start` + `auto_start_catch_up` (09:16 start of the tick
+agents / AI trader), `regime_preopen|first_hour`, `universe_refresh`, `options_cache`, master's
+`master_review` (1-min), `nightly_adaptive`, `weekly_backtest|optimise|research|memory_synthesis`,
+`monthly_momentum`. Their Telegram messages (pre-market report, regime changes, universe, AI start, momentum,
+"bot auto-started") go with them; the master's Telegram commands never existed beyond these notifications.
+Kept / moved into `platform_scheduler`: Kite login 08:45/08:55/09:05 (+ startup), validated jobs (unchanged times),
+forward test, 09:15 daily reset (was master's), square-off at `SQUAREOFF_TIME` (was master's, PAPER), 15:35
+scoreboard (+ its Telegram), shadow registry, option-bar archiver. Added: `risk_brake` (every minute),
+`drift_monitor` (17:15).
+
+### Requirements
+Dropped: `yfinance`, `truedata-ws`, `slowapi`, `python-jose`, `passlib`, `anthropic`, `openai`, `ta`, `matplotlib`,
+`aiofiles`, `playwright`. Added explicitly (were transitive): `cryptography` (vault), `requests` (PEAD / stratlab
+NSE fetches). The Dockerfile is unchanged apart from three env lines of removed files.
+
+## 2. Kept core
+
+Kite (`kite_client.py`, `kite_auto_login.py`, `kite_ticker.py`, `tick_engine.py` price feed), paper broker and
+`paper_book.py`, `sebi_compliance.py` (pre-order checks, kill switch), `performance.py` ledger, `costs.py`,
+`forward_test.py`, `shadow_registry.py`, `option_bar_archiver.py`, `validated_data.py`, `validated_parity.py`,
+`pead_data.py`, `pead_parity.py`, `event_calendar.py` (+ `nse_http.py`), `options_resolver.py`, `options_replay.py`,
+`greeks_engine.py` (the strangle's lab engine), `ist_clock.py`, `auth.py`, `secret_store.py`, `bot_state.py`,
+`agents/validated_*.py`, `stratlab/` (untouched).
+
+## 3. Persistent state on the volume (loads unchanged; nothing deleted or rewritten)
+
+| File | Old content | Behaviour |
+|---|---|---|
+| `performance.json` | trades of every strategy, days, pruned, enabled_since | loaded as is; rows of removed strategies stay (shown with `kept: false`); unknown top-level keys and `pruned` / `enabled_since` are written back unchanged |
+| `agent_enables.json` | intraday / fno / swing / scalping + validated keys | legacy keys ignored but written back unchanged on the next toggle |
+| `bot_stopped.json` | operator Stop | unchanged semantics (persists until `/bot/start`) |
+| `paper_book.json` | schema 1 with `tracked`, `tsl`, `ai`, `risk`, `guard`, legacy agents' day state | kept blocks restored (paper rows, GTT records, validated books, kept agents' day state); removed blocks ignored; the first such restore writes a byte-identical copy `paper_book.pre-rebuild.json`; legacy paper rows are listed as `orphan_rows` (an MIS/NRML orphan is flattened by the 15:15 square-off as before; a CNC orphan stays) |
+| shadow ledgers, PEAD store, option-bar archive, session store, forward test ledger, vault | — | untouched; the vault may hold keys of removed features (Anthropic/OpenAI/TrueData): they stay in the vault and are simply not applied |
+| new: `trading_state.json`, `approvals.json`, `drift_state.json`, `fill_log.jsonl` | — | created next to the ledger on first use |
+
+Tested in `test_rebuild.py` (old-format paper book same-day and earlier-session, corrupt / foreign snapshot, legacy
+enables, old ledger, vault with removed keys).
+
+## 4. Engine upgrades
+
+| Module | What | Default (Monday unchanged because…) |
+|---|---|---|
+| `risk_budget.py` | per-strategy size factor = budget share ÷ lab daily P&L std (`lab_risk.json`), capped at 1.0 (or `RISK_BUDGET_MAX_SCALE` if `RISK_BUDGET_ALLOW_UPSCALE`); agents' own hard caps stay upper bounds; latching portfolio drawdown brake on realised net of the kept strategies: ≥ `RISK_BRAKE_REDUCE_PCT` % of `RISK_CAPITAL` → REDUCE_ONLY, ≥ `RISK_BRAKE_HALT_PCT` % → HALTED; reset via API | `RISK_BUDGET_DAILY_VOL=0` → scale exactly 1.0 = lab sizing; brake 16 % / 24 % of ₹25 L = ₹4 L / ₹6 L, above the lab's combined block-bootstrap p99 drawdown (₹3.25 L), so a lab-like path never trips it |
+| `trading_state.py` | global + per-strategy `ACTIVE / REDUCE_ONLY / HALTED`, persisted, logged (who / why), most restrictive of global, strategy and brake; enforced in `ValidatedAgent.entry_block_reason()` (every entry stage) and in the paper order helpers (an order that opens / enlarges a position is refused when not ACTIVE; reducing orders, settlements, reconciliations and corporate-action bookings always pass) | everything ACTIVE |
+| `approvals.py` | semi-auto mode: a strategy's entries of the day need an approved ticket (opened at 08:55 or on demand; deadline = its entry time); HALTED cancels pending tickets; exits never need approval | `APPROVAL_MODE=false` |
+| `drift_monitor.py` | per strategy: trade frequency vs lab, entry slippage vs the lab fill model, quote-vs-fill log, last-20-trade mean vs the lab bootstrap band, live drawdown vs block-bootstrap p95/p99; warnings only; Telegram at most once per strategy per day | `DRIFT_TELEGRAM=false` (no new messages) |
+| `kite_client.py` LIVE path | a MARKET order goes out as a marketable LIMIT within `ORDER_PROTECTION_BAND_PCT` (0.5 %) of the touch; quote vs fill logged | PAPER path untouched; the paper helpers only log quote vs fill |
+| `live_readiness.py` | LIVE prerequisites report (static IP in `KITE_STATIC_IP`, API key, JWT secret, kill-switch secret, Kite keys, …); logged at startup; `/api/v2/readiness` | always `ready_for_live: false`: the kept strategies refuse LIVE |
+| `api_v2.py` | the dashboard API (`API_V2.md`) | read-only except the documented write endpoints |
+
+### Trading states — precise definition
+* **ACTIVE**: entries and exits by the rule.
+* **REDUCE_ONLY**: entry stages skip (`trading_state:REDUCE_ONLY`); any order that would open or enlarge a position
+  is refused (`TradingStateRefused`); every exit, stop, settlement, square-off and reconciliation runs by the rule.
+* **HALTED**: as REDUCE_ONLY, and pending approvals are cancelled; the order path accepts **risk exits only** (orders
+  that reduce an open position). All exits of the four kept rules are risk exits (time stops, stop-losses, expiry
+  settlement, the MIS square-off), so positions still leave at their tested exit — holding them past it would add
+  risk the lab never measured.
+
+### Streaming half-candle hazard
+`stratlab.indicators.build_sessions` treats the last candle of the data it is given as complete. **No kept live path
+uses it** (checked by `test_rebuild.test_streaming_half_candle_hazard_not_on_a_live_path`, which greps every kept
+module). The only live minute-bar store, `validated_data.refresh_store`, drops today's session before 15:35 (tested
+at 14:00 vs 15:40); the strangle settles only on the full 15:00-15:29 window; PEAD reads daily bars of completed
+sessions; the tick feed no longer builds candles at all.
+
+### Static IP for LIVE (Kite, from 1 Apr 2026)
+Kite accepts API orders only from a static outbound IP registered in the developer console. Railway's default egress
+is not static: LIVE needs Railway's static-egress add-on or a fixed-IP host (AWS Mumbai + Elastic IP, `deploy/AWS.md`).
+Put the IP in `KITE_STATIC_IP`; `/api/v2/readiness` and the startup log report it. Infrastructure is not set up by
+this rebuild, and LIVE remains impossible for these strategies (their guards refuse LIVE).
+
+## 5. Behaviour differences the operator should know
+
+* The price feed subscribes only the warm watchlist (first 20 NIFTY 50 names + the two indices, or
+  `AUTO_START_WATCHLIST`). The old 09:16 auto-start additionally subscribed the legacy agents' watchlist; for symbols
+  that are no longer streamed, a paper marketable order fills at the quote's touch (the price the rule saw) instead of
+  the better of quote and stream touch. Auction-fade entries (official open) and settlements are unaffected.
+* An operator Stop now persists until `/bot/start` (the old 09:16 auto-start of the tick agents silently cleared it).
+* The 15:15 square-off runs every trading day in PAPER (before: only when the old master had been started).
+* The old dashboard (`frontend/`) calls many removed endpoints until the new dashboard replaces it.
