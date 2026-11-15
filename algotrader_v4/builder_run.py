@@ -59,6 +59,12 @@ def evaluate(root: str, bid: str, source: str = "lab", data_root: str | None = N
     from stratlab.builder_source import make_source
     b = builder.Builder(root)
     src = make_source(source, data_root)
+    inp = (b.state()["batches"].get(bid) or {}).get("inputs")
+    if source == "bundle" and (not inp or src.man is None or
+                               __import__("stratlab.builder_bundle", fromlist=["x"]).manifest_sha(data_root)
+                               != inp["manifest_sha256"]):
+        from stratlab.builder_bundle import BundleCorrupt
+        raise BundleCorrupt(f"batch {bid}: the frozen inputs at {data_root} are not the ones in its registry record")
     doc = b.verify_frozen(bid, src.snapshot())
     rec = b.state()["batches"][bid]
     cands = [(r["id"], G.Candidate.from_json(r["cand"])) for r in doc["candidates"]]
@@ -93,6 +99,7 @@ def main(argv=None) -> int:
     ap.add_argument("--forward", action="store_true", help="builder/v1 forward family: trades up to --day")
     ap.add_argument("--day", type=int, default=None)
     ap.add_argument("--snapshot", action="store_true", help="write the data snapshot ids to <root>/snapshot.json")
+    ap.add_argument("--bundle", action="store_true", help="with --snapshot: also write the frozen inputs")
     ap.add_argument("--source", default="server")
     ap.add_argument("--data-root", default=None)
     ap.add_argument("--jobs", type=int, default=1)
@@ -101,11 +108,14 @@ def main(argv=None) -> int:
     _limit(a.mem_mb)
     if a.snapshot:
         import builder
-        snap = builder.data_snapshot(a.source, a.data_root)
+        from stratlab.builder_source import make_source
+        src = make_source(a.source, a.data_root)
+        snap = src.snapshot()
+        inputs = builder.write_inputs(a.root, src) if a.bundle else None
         os.makedirs(a.root, exist_ok=True)
         tmp = os.path.join(a.root, "snapshot.json.tmp")
         with open(tmp, "w") as fh:
-            json.dump(snap, fh, default=str)
+            json.dump({"snapshot": snap, "inputs": inputs}, fh, default=str)
         os.replace(tmp, os.path.join(a.root, "snapshot.json"))
         return 0
     if a.forward:

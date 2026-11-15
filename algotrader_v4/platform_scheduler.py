@@ -23,6 +23,7 @@ Jobs (IST):
   23:05, 05:30 (+10:05, 15:05 Sat-Sun)  builder NSE archives; 18:40, 06:10 (+11:40, 14:40 Sat-Sun)  builder Kite
                           minute backfill (BUILDER_DATA_ENABLED)
   Sat 06:00               automatic strategy builder: one frozen batch of 400 candidates (BUILDER_ENABLED)
+  07:05                   builder/v1 forward family: pending sessions of promoted builder strategies (BUILDER_ENABLED)
   every minute            portfolio drawdown brake (risk_budget.py)
 
 Validated jobs run every day of the week and gate on ist_clock.is_trading_day (weekend Budget sessions included).
@@ -124,6 +125,11 @@ class PlatformScheduler:
             # automatic strategy builder: one batch a week, Saturday 06:00 IST (outside market hours; the job re-checks
             # the flag and PAPER and holds the builder data layer's lock while it freezes / evaluates)
             self._sched.add_job(self._builder_weekly, "cron", day_of_week="sat", hour=6, minute=0, id="builder_weekly",
+                                misfire_grace_time=6 * 3600, max_instances=1, coalesce=True)
+            # the builder/v1 forward family on its own flag (independent of FORWARD_LAB_ENABLED): every morning at
+            # 07:05 IST, after the data layer's overnight NSE (05:30) and Kite (06:10) runs, so the previous session
+            # is complete in both; holds the data layer's lock; also registers promotions whose registration failed
+            self._sched.add_job(self._builder_forward, "cron", hour=7, minute=5, id="builder_forward",
                                 misfire_grace_time=6 * 3600, max_instances=1, coalesce=True)
         # engine upgrades: drawdown brake (every minute), drift monitor (after the last settlement retry)
         self._sched.add_job(self._risk_brake, "interval", minutes=1, id="risk_brake", misfire_grace_time=60)
@@ -458,6 +464,15 @@ class PlatformScheduler:
             await asyncio.to_thread(builder.weekly_job_locked)
         except Exception as exc:
             logger.error("[platform] builder weekly job failed: {}", exc)
+
+    async def _builder_forward(self) -> None:
+        """builder/v1 forward family (builder_forward.run_pending_locked re-checks BUILDER_ENABLED and PAPER; the
+        trade computation runs in its own process)."""
+        try:
+            import builder_forward
+            await asyncio.to_thread(builder_forward.run_pending_locked)
+        except Exception as exc:
+            logger.error("[platform] builder forward job failed: {}", exc)
 
     async def _kite_login_at_startup(self) -> None:
         """Server (re)started on a trading day without a working token → log in now."""

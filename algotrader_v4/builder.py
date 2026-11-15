@@ -39,6 +39,7 @@ SEED_SHA256 = "15c6c036cd8153ca8be6463be234f55efd3da33e86a4376911d73abd5b3c40d8"
 # sha256 of builder_rule.json as committed (the pre-registration). An edited rule file is refused.
 RULE_SHA256 = "a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06"
 DEFAULT_MAX_MB = 400.0
+MAX_ATTEMPTS = 3            # failed evaluation runs of one batch before it is recorded `failed` (bookkeeping, not a gate)
 _LOCK = threading.RLock()
 
 
@@ -120,13 +121,18 @@ def max_bytes() -> int:
 
 
 def dir_bytes(root) -> int:
+    """Bytes this directory costs: a regular file with other hard links (a frozen batch's link to a data-layer minute
+    file) costs nothing until it is the last link (the data layer replaced its file), then it counts in full."""
     tot = 0
     for dp, _dn, fn in os.walk(str(root)):
         for f in fn:
             try:
-                tot += os.lstat(os.path.join(dp, f)).st_size
+                st = os.lstat(os.path.join(dp, f))
             except OSError:
-                pass
+                continue
+            if st.st_nlink > 1 and not os.path.islink(os.path.join(dp, f)):
+                continue
+            tot += st.st_size
     return tot
 
 
@@ -197,7 +203,7 @@ class Builder:
     # ── folded registry state ──
     def state(self) -> dict:
         st = {"genesis": None, "batches": {}, "final_open": {}, "results": {}, "promoted": [], "n_used": 0,
-              "evaluated": 0, "final_looks": 0}
+              "evaluated": 0, "final_looks": 0, "attempts": {}}
         for rec in self.registry.records():
             k, d = rec["kind"], rec["data"]
             if k == "genesis":
@@ -212,7 +218,20 @@ class Builder:
                 st["evaluated"] += int(d["candidates"])
                 st["n_used"] = max(st["n_used"], int(d["n_used"]))
             elif k == "promoted":
-                st["promoted"].append({**d, "ts": rec["ts"], "hash": rec["hash"]})
+                st["promoted"].append({**d, "ts": rec["ts"], "hash": rec["hash"], "forward_registered": False})
+            elif k in ("forward_registered", "forward_register_failed"):
+                for pr in st["promoted"]:
+                    if pr["id"] == d["id"]:
+                        if k == "forward_registered":
+                            pr["forward_registered"], pr["forward_error"] = True, None
+                        else:
+                            pr["forward_error"] = d.get("error")
+            elif k == "attempt":
+                st["attempts"][d["batch"]] = int(d["n"])
+            elif k == "batch_failed":
+                st["results"][d["batch"]] = {**d, "failed": True, "ts": rec["ts"], "proven": []}
+                st["evaluated"] += int(d["candidates"])
+                st["n_used"] = max(st["n_used"], int(d["n_used"]))
             elif k == "erratum":
                 st.setdefault("errata", {}).setdefault(d["batch"], []).append({**d, "ts": rec["ts"]})
             elif k == "seed":
@@ -311,7 +330,8 @@ class Builder:
                    + st["final_looks"], 0)
 
     # ── 1. freeze (the automatic pre-registration) ──
-    def freeze(self, snapshot: dict, batch_id: Optional[str] = None, per_cell: Optional[int] = None) -> dict:
+    def freeze(self, snapshot: dict, batch_id: Optional[str] = None, per_cell: Optional[int] = None,
+               inputs: Optional[dict] = None) -> dict:
         from stratlab import builder_grammar as G
         from stratlab.builder_source import snapshot_sha
         with _LOCK:
@@ -338,6 +358,8 @@ class Builder:
                    "cells": per, "generator": doc["generator"], "rule_sha256": self.rule["_sha256"],
                    "snapshot_sha256": snapshot_sha(snapshot), "snapshot_end": snapshot.get("end"),
                    "source": snapshot.get("source"), "n_before": self.n_base(st)}
+            if inputs:
+                rec["inputs"] = inputs                   # the immutable inputs the evaluation runs on (builder_bundle)
             self.registry.append("batch_frozen", rec)
             return self.state()["batches"][bid]
 
@@ -358,6 +380,85 @@ class Builder:
         if snapshot is not None and snapshot_sha(snapshot) != b["snapshot_sha256"]:
             raise NotFrozen(f"batch {bid}: data snapshot changed since the freeze")
         return json.loads(p.read_text())
+
+    # ── frozen inputs, attempts, terminal failure ──
+    def inputs_dir(self, bid: str, st: Optional[dict] = None) -> Optional[Path]:
+        st = st or self.state()
+        inp = (st["batches"].get(bid) or {}).get("inputs")
+        return (self.root / "inputs" / inp["dir"]) if inp else None
+
+    def inputs_problem(self, bid: str, st: Optional[dict] = None) -> Optional[str]:
+        """None when the batch's frozen inputs are present and unchanged (or it has none); else what is wrong."""
+        st = st or self.state()
+        inp = (st["batches"].get(bid) or {}).get("inputs")
+        if not inp:
+            return None
+        d = self.root / "inputs" / inp["dir"]
+        mp = d / "manifest.json"
+        if not mp.exists():
+            return "frozen inputs missing"
+        if file_sha256(mp) != inp["manifest_sha256"]:
+            return "frozen inputs changed"
+        return None
+
+    def record_attempt(self, bid: str, error: str) -> int:
+        n = int(self.state()["attempts"].get(bid, 0)) + 1
+        self.registry.append("attempt", {"batch": bid, "n": n, "error": str(error)[:400]})
+        return n
+
+    def fail(self, bid: str, reason: str) -> dict:
+        """Terminal failure: the batch is closed `failed`; every candidate stays counted in N and in the never-redraw
+        set (its candidate file is kept), every FINAL look already opened stays counted, the queue moves on."""
+        with _LOCK:
+            st = self.state()
+            if bid in st["results"]:
+                return st["results"][bid]
+            fb = st["batches"][bid]
+            n = int(fb["n_candidates"])
+            n_used = max(st["n_used"], self.n_base(st) + n)
+            rec = {"batch": bid, "reason": str(reason)[:400], "attempts": int(st["attempts"].get(bid, 0)),
+                   "candidates": n, "final_looks": list(st["final_open"].get(bid, [])), "n_used": n_used,
+                   "discovery_passers": None, "shuffle_passers": None, "validation_tested": None,
+                   "validation_passers": None, "final_confirmed": None, "best_discovery_dsr": None}
+            self.registry.append("batch_failed", rec)
+            d = self.inputs_dir(bid, st)
+            if d is not None:
+                shutil.rmtree(d, ignore_errors=True)
+            return self.state()["results"][bid]
+
+    def _register_forward(self, p: dict) -> bool:
+        try:
+            import builder_forward
+            builder_forward.BuilderForward(self.root / "forward").register(
+                [{"id": p["id"], "batch": p["batch"], "cand": p["cand"], "reference": p["reference"],
+                  "fingerprint": p.get("fingerprint") or sha256_obj(p["cand"])[:16]}],
+                first_day=int(p.get("first_day") or 0))
+        except Exception as exc:
+            self.registry.append("forward_register_failed", {"id": p["id"], "error": f"{type(exc).__name__}: {exc}"[:300]})
+            return False
+        self.registry.append("forward_registered", {"id": p["id"]})
+        return True
+
+    def reconcile_forward(self) -> list:
+        """Register every promoted strategy the builder/v1 family does not hold yet (a failed or interrupted
+        registration); idempotent. Returns the ids registered now."""
+        st = self.state()
+        todo = [p for p in st["promoted"] if not p.get("forward_registered")]
+        if not todo:
+            return []
+        done = []
+        import builder_forward
+        fw_root = self.root / "forward"
+        have = set()
+        if (fw_root / "registry.jsonl").exists():
+            have = set(builder_forward.BuilderForward(fw_root).state()["strategies"])
+        for p in todo:
+            if p["id"] in have:
+                self.registry.append("forward_registered", {"id": p["id"], "found": True})
+                done.append(p["id"])
+            elif self._register_forward(p):
+                done.append(p["id"])
+        return done
 
     def erratum(self, bid: str, note: dict) -> dict:
         """A recorded defect of an evaluated batch. Results are never recomputed (that would be a second look):
@@ -396,6 +497,9 @@ class Builder:
                    "result_sha256": hashlib.sha256(blob).hexdigest(), "seconds": summary.get("seconds"),
                    "peak_rss_mb": summary.get("peak_rss_mb")}
             self.registry.append("batch_result", rec)
+            d = self.inputs_dir(bid, st)
+            if d is not None:
+                shutil.rmtree(d, ignore_errors=True)        # the batch is evaluated: its frozen inputs are done
             out = {"result": rec}
             if trials_path:
                 out["trials_appended"] = append_trials(trials_path, bid, summary)
@@ -416,16 +520,13 @@ class Builder:
         ref = reference_series(self, bid, cid, res)
         rec = {"id": cid, "batch": bid, "key": row["key"], "cand": row["cand"], "text": row["text"],
                "frozen_hash": st["batches"][bid]["frozen_hash"], "dsr": res["proof"]["dsr"]["dsr"],
-               "reference": ref}
+               "reference": ref, "first_day": int(summary["windows"]["T"]),
+               "fingerprint": sha256_obj(row["cand"])[:16]}
+        # persisted as NOT yet registered with builder/v1: reconcile_forward() retries on every weekly and daily
+        # forward run until a "forward_registered" record exists
         self.registry.append("promoted", rec)
         write_catalog(self)
-        try:
-            import builder_forward
-            builder_forward.BuilderForward(self.root / "forward").register(
-                [{"id": cid, "batch": bid, "cand": row["cand"], "reference": ref,
-                  "fingerprint": sha256_obj(row["cand"])[:16]}], first_day=int(summary["windows"]["T"]))
-        except Exception as exc:                     # pragma: no cover - registration is retried by the weekly job
-            rec["forward_error"] = str(exc)[:200]
+        rec["forward_registered"] = self._register_forward(rec)
         return rec
 
 
@@ -516,6 +617,9 @@ def run_process(root: Path, bid: str, source: str = "server", jobs: int = 1, tim
     a crash, the memory limit or an error. Returns the run's summary (also kept in the work directory)."""
     work = Path(root) / "batches" / bid / "work"
     work.mkdir(parents=True, exist_ok=True)
+    d = Builder(root).inputs_dir(bid)
+    if d is not None:                              # always evaluate on the inputs frozen with the batch
+        source, data_root = "bundle", str(d)
     cmd = [sys.executable, "-m", "builder_run", "--root", str(root), "--batch", bid, "--source", source,
            "--jobs", str(max(1, min(2, int(jobs)))), "--mem-mb", str(int(mem_mb))]
     if data_root:
@@ -552,6 +656,10 @@ def _status_path(root: Path) -> Path:
     return Path(root) / "status.json"
 
 
+class _Done(Exception):
+    """weekly_job finished early with its status already set (a terminal batch failure)."""
+
+
 def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server", runner=None,
                snapshot_fn=None) -> dict:
     """Scheduler entry point. Off (flag false or LIVE) -> returns at once: nothing read or written."""
@@ -570,24 +678,52 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
         if not vr["ok"]:
             status.update({"status": "tamper", "error": vr["error"]})
             return status
+        status["forward_reconciled"] = b.reconcile_forward()
         st = b.state()
         pending = [bid for bid in st["batches"] if bid not in st["results"]]
+        from stratlab.builder_source import snapshot_sha
+
+        def live_differs(bid_):
+            live = snapshot_fn() if snapshot_fn else snapshot_process(root, source, bundle=False)[0]
+            return snapshot_sha(live) != st["batches"][bid_]["snapshot_sha256"]
         if pending:
             bid = sorted(pending)[0]                      # resume an unfinished batch before a new one
+            problem = b.inputs_problem(bid, st)
+            if problem and live_differs(bid):
+                b.fail(bid, f"{problem} and the live data changed since the freeze: it can never be evaluated "
+                            f"on its frozen inputs")
+                status.update({"status": "failed", "batch": bid, "reason": problem})
+                raise _Done()
         else:
-            snap = snapshot_fn() if snapshot_fn else snapshot_process(root, source)
-            bid = b.freeze(snap)["batch"]
+            if snapshot_fn:
+                snap, inputs = snapshot_fn(), None
+            else:
+                snap, inputs = snapshot_process(root, source)
+            bid = b.freeze(snap, inputs=inputs)["batch"]
         status["batch"] = bid
         s = _settings()
-        if runner is not None:
-            summary = runner(root, bid)
-        else:
-            summary = run_process(root, bid, source, jobs=int(getattr(s, "builder_jobs", 2)),
-                                  time_limit_s=int(getattr(s, "builder_time_limit_s", 14400)),
-                                  mem_mb=int(getattr(s, "builder_mem_mb", 3584)))
+        try:
+            if runner is not None:
+                summary = runner(root, bid)
+            else:
+                summary = run_process(root, bid, source, jobs=int(getattr(s, "builder_jobs", 2)),
+                                      time_limit_s=int(getattr(s, "builder_time_limit_s", 14400)),
+                                      mem_mb=int(getattr(s, "builder_mem_mb", 3584)))
+        except Exception as exc:
+            n = b.record_attempt(bid, f"{type(exc).__name__}: {exc}")
+            err = str(exc)
+            unrecoverable = ("NotFrozen" in err or "BundleCorrupt" in err) and live_differs(bid)
+            if n >= MAX_ATTEMPTS or unrecoverable:
+                why = "inputs unusable and the live data changed" if unrecoverable else f"{n} failed attempts"
+                b.fail(bid, f"{why}; last error: {err[:300]}")
+                status.update({"status": "failed", "batch": bid, "attempts": n, "error": err[:400]})
+                raise _Done()
+            raise
         out = b.ingest(bid, summary, os.getenv("BUILDER_TRIALS_LEDGER") or None)
         status.update({"status": "complete", "proven": summary["proven"], "seconds": summary.get("seconds")})
         status["ingest"] = {k: v for k, v in out.items() if k != "result"}
+    except _Done:
+        pass
     except DiskCapReached as exc:
         status.update({"status": "disk_cap", "error": str(exc)})
     except RuleChanged as exc:
@@ -629,19 +765,46 @@ def data_snapshot(source: str = "server", data_root: Optional[str] = None) -> di
 
 
 def snapshot_process(root: Path, source: str = "server", data_root: Optional[str] = None, time_limit_s: int = 3600,
-                     mem_mb: int = 4096) -> dict:
-    """data_snapshot in a separate process (python -m builder_run --snapshot): the API process never builds panels."""
+                     mem_mb: int = 4096, bundle: bool = True) -> tuple:
+    """data_snapshot in a separate process (python -m builder_run --snapshot): the API process never builds panels.
+    With bundle=True the process also writes the batch's IMMUTABLE inputs (stratlab/builder_bundle.py) under
+    <root>/inputs/ (server sources; dropped again when the builder directory would pass BUILDER_MAX_MB).
+    Returns (snapshot, inputs | None)."""
     out = Path(root) / "snapshot.json"
     if out.exists():
         out.unlink()
     cmd = [sys.executable, "-m", "builder_run", "--snapshot", "--root", str(root), "--source", source,
-           "--mem-mb", str(int(mem_mb))] + (["--data-root", str(data_root)] if data_root else [])
+           "--mem-mb", str(int(mem_mb))] + (["--data-root", str(data_root)] if data_root else []) + \
+        (["--bundle"] if bundle else [])
     env = dict(os.environ, BUILDER_CACHE_DIR=str(cache_dir()))
     p = subprocess.run(cmd, cwd=str(HERE), env=env, capture_output=True, text=True, timeout=int(time_limit_s),
                        start_new_session=True)
     if p.returncode != 0 or not out.exists():
         raise RunFailed(f"snapshot process exit {p.returncode}: {(p.stderr or '')[-400:]}")
-    return json.loads(out.read_text())
+    doc = json.loads(out.read_text())
+    inputs = doc.get("inputs")
+    if inputs:
+        d = Path(root) / "inputs" / inputs["dir"]
+        if dir_bytes(root) >= max_bytes():
+            shutil.rmtree(d, ignore_errors=True)
+            inputs = None
+            doc["inputs_error"] = "frozen inputs dropped: BUILDER_MAX_MB reached"
+    return doc["snapshot"], inputs
+
+
+def write_inputs(root, src) -> Optional[dict]:
+    """In the snapshot process: the frozen inputs of the next batch (server-layout sources only)."""
+    from stratlab import builder_bundle as BB
+    from stratlab.builder_source import snapshot_sha
+    if not getattr(src, "minute_root", None):
+        return None
+    snap = src.snapshot()
+    name = snapshot_sha(snap)[:16] + "-" + datetime.now().strftime("%Y%m%d%H%M%S")
+    d = Path(root) / "inputs" / name
+    d.parent.mkdir(parents=True, exist_ok=True)
+    man = BB.write_bundle(src, str(d))
+    return {"dir": name, "manifest_sha256": BB.manifest_sha(str(d)), "snapshot_sha256": snapshot_sha(man["snapshot"]),
+            "bytes": dir_bytes(d)}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -696,12 +859,14 @@ def api_status(root=None) -> dict:
         r = st["results"].get(bid)
         row = {"id": bid, "created": fb["created"], "hash": fb["frozen_hash"],
                "candidates_sha256": fb["candidates_sha256"], "snapshot_end": fb.get("snapshot_end"),
-               "status": "seeded" if fb.get("seeded") else
-               ("evaluated" if r else ("final_open" if bid in st["final_open"] else "frozen")),
+               "status": "seeded" if fb.get("seeded") else ("failed" if (r or {}).get("failed") else
+               ("evaluated" if r else ("final_open" if bid in st["final_open"] else "frozen"))),
                "candidates": fb["n_candidates"]}
         if r:
-            row.update({k: r[k] for k in ("discovery_passers", "shuffle_passers", "validation_tested",
-                                          "validation_passers", "final_confirmed", "n_used", "best_discovery_dsr")})
+            row.update({k: r.get(k) for k in ("discovery_passers", "shuffle_passers", "validation_tested",
+                                              "validation_passers", "final_confirmed", "n_used", "best_discovery_dsr")})
+            if r.get("failed"):
+                row["failure"] = {"reason": r.get("reason"), "attempts": r.get("attempts")}
             row["proven"] = len(r["proven"])
             row["errata"] = len((st.get("errata") or {}).get(bid, []))
             row["shuffle_expected"] = r["shuffle_passers"]
@@ -724,6 +889,7 @@ def api_status(root=None) -> dict:
             g["ready"] += int(bool(f.get("ready")))
     out["grid"] = list(grid.values())
     out["promoted"] = len(st["promoted"])
+    out["promoted_unregistered"] = sum(1 for p in st["promoted"] if not p.get("forward_registered"))
     return out
 
 
@@ -767,7 +933,8 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
     out = {"id": bid, "created": fb["created"], "hash": fb["frozen_hash"],
            "candidates_sha256": fb["candidates_sha256"], "snapshot_sha256": fb["snapshot_sha256"],
            "snapshot_end": fb.get("snapshot_end"), "generator": fb["generator"], "n_before": fb.get("n_before"),
-           "status": "evaluated" if res else "frozen", "candidates": rows,
+           "status": "failed" if (st["results"].get(str(bid)) or {}).get("failed") else
+           ("evaluated" if res else "frozen"), "candidates": rows,
            "errata": (st.get("errata") or {}).get(str(bid), []), "seeded": bool(fb.get("seeded"))}
     if fb.get("seeded"):
         sd = st.get("seed") or {}

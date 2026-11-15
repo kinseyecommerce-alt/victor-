@@ -1782,6 +1782,13 @@ workers, peak 3.4 GB of one forked worker before the sparse-signal fix, 1.2-1.6 
   result (nse/), options_vrp / VRP-STRANGLE-016-WINGED incl. its live paper parity (Black-Scholes on minute bars,
   settlement from the 15:00-15:29 minute closes), options_r3 / options_vrp_vix (minute bars), web_run's earnings
   straddles (stock options; the old view has no per-strike stock chains).
+* **Resume, failure, forward schedule** (PR #26 review): every batch is frozen together with its immutable inputs
+  (`builder_bundle.py`: the panels and features as arrays, 81 MB at the lab's full scale, the compact option
+  tables, 75 MB, and hard links to the data layer's minute files; written in the snapshot process, verified by
+  sha256 before every run) and every run of it, the first included, reads only them; a batch that fails 3 times
+  or whose frozen inputs are lost while the live data changed is recorded `failed` (counted in N, keys never
+  re-drawn); the builder/v1 family runs on its own 07:05 IST job under `BUILDER_ENABLED`; a promotion whose
+  forward registration failed is persisted and retried until registered.
 * **Seed** (`../builder_seed_0001.json`, sha256 pinned in `builder.SEED_SHA256`): this sandbox batch (400 keys, counts per
   stage, the 2 FINAL looks, both errata, N after it = 2,970) is imported as the first records of any other registry
   (the server's) on first use: its N starts at 2,970, the 400 keys are never drawn again and its first batch is 0002.

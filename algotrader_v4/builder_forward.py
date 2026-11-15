@@ -31,6 +31,8 @@ HERE = Path(__file__).resolve().parent
 RULE_FILE = HERE / "builder_forward_rule.json"
 RULE_SHA256 = "80d8bfa640e5ba5a2fe5b2e101c39603de0802ae09fec27361bc775533b621bb"
 MAX_DAYS_PER_RUN = 10
+import threading  # noqa: E402
+_RUN_LOCK = threading.RLock()
 
 
 def load_rule(path=RULE_FILE, expect: Optional[str] = None) -> dict:
@@ -259,8 +261,20 @@ def run_pending(root=None, data_root: Optional[str] = None, runner=None, today: 
     if runner is None and not builder.enabled():
         return {"skipped": "BUILDER_ENABLED is off or not PAPER"}
     root = Path(root) if root is not None else builder.default_root() / "forward"
+    with _RUN_LOCK:
+        return _run_pending(root, data_root, runner, today)
+
+
+def _run_pending(root: Path, data_root, runner, today) -> dict:
+    import builder
+    reconciled = []
+    if (root.parent / "registry.jsonl").exists():     # promoted strategies whose registration failed earlier
+        try:
+            reconciled = builder.Builder(root.parent).reconcile_forward()
+        except Exception as exc:
+            reconciled = [f"error: {exc}"[:200]]
     if not (root / "registry.jsonl").exists():
-        return {"skipped": "no builder strategy registered"}
+        return {"skipped": "no builder strategy registered", "reconciled": reconciled}
     bf = BuilderForward(root)
     st = bf.state()
     if not st["strategies"]:
@@ -294,7 +308,27 @@ def run_pending(root=None, data_root: Optional[str] = None, runner=None, today: 
         out.append(bf.ingest_day(d, trades))
     ev = bf.evaluate_all(write=True) if pending else {}
     status = {"processed": [r["day"] for r in out], "status": "complete" if out else "nothing to do",
+              "reconciled": reconciled,
               "written": datetime.now().isoformat(timespec="seconds"),
               "new_status": [{"id": k, "status": v["status"]} for k, v in ev.items() if v.get("new")]}
     (root / "status.json").write_text(json.dumps(status))
     return status
+
+
+def run_pending_locked(**kw) -> dict:
+    """The scheduler's entry point (platform_scheduler job builder_forward, BUILDER_ENABLED, PAPER): run_pending holding
+    the builder data layer's lock, so the data it reads are never half-written. Off -> returns at once."""
+    import builder
+    if not builder.enabled():
+        return {"skipped": "BUILDER_ENABLED is off or not PAPER"}
+    try:
+        import builder_data
+        lock = builder_data._LOCK
+    except Exception:
+        lock = threading.Lock()
+    got = lock.acquire(timeout=3600)
+    try:
+        return run_pending(**kw)
+    finally:
+        if got:
+            lock.release()

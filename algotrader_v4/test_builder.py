@@ -576,8 +576,9 @@ def test_subprocess_limits():
 def test_snapshot_in_its_own_process():
     root = os.path.join(_TMP, "snapproc")
     shutil.rmtree(root, ignore_errors=True)
-    snap = B.snapshot_process(Path(root), "synthetic", data_root=syn_root(), mem_mb=0)
+    snap, inputs = B.snapshot_process(Path(root), "synthetic", data_root=syn_root(), mem_mb=0)
     assert snap["end"] == syn_source().end and snap["inputs"]["delivery"]["sha256"]
+    assert inputs and (Path(root) / "inputs" / inputs["dir"] / "manifest.json").exists()
     from stratlab.builder_source import snapshot_sha
     assert snapshot_sha(snap) == snapshot_sha(syn_source().snapshot())
 
@@ -724,6 +725,149 @@ def test_seed_skipped_in_its_source_registry():
         assert b.ensure_seed() is None
     assert "seed" not in [r["kind"] for r in b.registry.records()]
     del st0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# regressions (PR #26 review): resume on frozen inputs, terminal failure, own forward schedule, registration retry
+# ══════════════════════════════════════════════════════════════════════════
+SAT = None
+
+
+def _sat():
+    from datetime import datetime
+    return datetime(2026, 11, 21, 6, 0)
+
+
+def _data_copy(name: str) -> str:
+    d = os.path.join(_TMP, name)
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.copytree(syn_root(), d)
+    return d
+
+
+def _refresh_data(d: str) -> None:
+    """What the data layer does between two runs: one more ban row (an end-of-day file changes)."""
+    p = os.path.join(d, "nse", "ban.csv.gz")
+    with gzip.open(p, "rt") as fh:
+        txt = fh.read()
+    with gzip.open(p, "wt") as fh:
+        fh.write(txt + "2026-11-10,SYN00\n")
+
+
+class _Crash(RuntimeError):
+    pass
+
+
+def test_regression_resume_uses_frozen_inputs_after_data_refresh():
+    """P1: an evaluation that died must resume on the inputs frozen with the batch, even after the data layer
+    refreshed its files (before the fix the retry was refused for ever: NotFrozen on the changed snapshot)."""
+    d = _data_copy("data_resume")
+    root = os.path.join(_TMP, "resume")
+    shutil.rmtree(root, ignore_errors=True)
+
+    def crash(r, bid):
+        raise B.RunFailed("time limit 2s exceeded (resumable: finished units are kept)")
+    with patch.dict(os.environ, {"BUILDER_DATA_DIR": d}), patch.object(settings, "builder_enabled", True), \
+            patch.object(settings, "builder_jobs", 1):
+        s1 = B.weekly_job(now=_sat(), root=root, source="server", runner=crash)
+        assert s1["status"] == "error" and s1["batch"] == "0002", s1
+        _refresh_data(d)
+        s2 = B.weekly_job(now=_sat(), root=root, source="server")
+    assert s2["status"] == "complete" and s2["batch"] == "0002", s2
+    st = B.Builder(root).state()
+    assert "0002" in st["results"] and st["evaluated"] == 800
+
+
+def test_regression_terminal_failure_unblocks_queue():
+    """P1: a batch that keeps failing is recorded `failed` after the rule's attempts; its candidates stay counted in N
+    and in the never-redraw set, and the next run freezes a new batch (before the fix: blocked for ever)."""
+    root = os.path.join(_TMP, "terminal")
+    shutil.rmtree(root, ignore_errors=True)
+
+    def crash(r, bid):
+        raise B.RunFailed("engine exit -9: killed")
+    snap = lambda: {"source": "test", "end": 20261109}
+    with patch.object(settings, "builder_enabled", True):
+        seen = [B.weekly_job(now=_sat(), root=root, runner=crash, snapshot_fn=snap) for _ in range(4)]
+    b = B.Builder(root)
+    st = b.state()
+    assert seen[0]["batch"] == "0002"
+    assert any(x.get("status") == "failed" and x.get("batch") == "0002" for x in seen), seen
+    assert st["results"]["0002"].get("failed") is True
+    assert "0003" in st["batches"], list(st["batches"])
+    keys2 = {c["key"] for c in json.loads(b.candidates_path("0002").read_text())["candidates"]}
+    assert keys2 <= b.drawn_keys(st)
+    keys3 = {c["key"] for c in json.loads(b.candidates_path("0003").read_text())["candidates"]}
+    assert not (keys2 & keys3)
+    assert st["evaluated"] >= 800 and b.n_base(st) >= SEED_N + 400
+
+
+def test_regression_lost_inputs_and_changed_data_fail_terminally():
+    """P1: frozen inputs lost (ephemeral disk wiped) AND the live data changed -> the batch is failed at once (it can
+    never be evaluated on its frozen inputs again), counted, and the queue moves on."""
+    d = _data_copy("data_lost")
+    root = os.path.join(_TMP, "lost")
+    shutil.rmtree(root, ignore_errors=True)
+
+    def crash(r, bid):
+        raise B.RunFailed("crash")
+    with patch.dict(os.environ, {"BUILDER_DATA_DIR": d}), patch.object(settings, "builder_enabled", True):
+        B.weekly_job(now=_sat(), root=root, source="server", runner=crash)
+        for p in Path(root).glob("inputs/*"):
+            shutil.rmtree(p, ignore_errors=True)
+        _refresh_data(d)
+        s = B.weekly_job(now=_sat(), root=root, source="server", runner=crash)
+    assert s.get("status") == "failed" and s.get("batch") == "0002", s
+    st = B.Builder(root).state()
+    assert st["results"]["0002"]["failed"] and st["evaluated"] == 800
+
+
+def test_regression_builder_forward_scheduled_without_forward_lab():
+    """P2: with BUILDER_ENABLED and FORWARD_LAB_ENABLED off, the builder/v1 family still gets its own job."""
+    from unittest.mock import MagicMock
+    import asyncio
+    import platform_scheduler as PS
+    with patch.object(settings, "builder_enabled", True), patch.object(settings, "forward_lab_enabled", False):
+        ps = PS.PlatformScheduler()
+        ps._sched = MagicMock()
+        ps.start()
+        ids = [c.kwargs.get("id") for c in ps._sched.add_job.call_args_list]
+        assert "forward_lab" not in ids and "builder_forward" in ids, ids
+        job = [c for c in ps._sched.add_job.call_args_list if c.kwargs.get("id") == "builder_forward"][0]
+        fn = job.args[0]
+        with patch.object(BF, "run_pending", return_value={"status": "complete"}) as rp:
+            asyncio.run(fn())
+        assert rp.called
+    with patch.object(settings, "builder_enabled", False):
+        ps = PS.PlatformScheduler()
+        ps._sched = MagicMock()
+        ps.start()
+        assert "builder_forward" not in [c.kwargs.get("id") for c in ps._sched.add_job.call_args_list]
+
+
+def test_regression_forward_registration_retried():
+    """P2: a promotion whose forward registration failed is persisted as unregistered and registered on the next run
+    (weekly or the daily forward step); idempotent."""
+    with patch.object(settings, "builder_enabled", True):
+        b = new_builder("regretry")
+        rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
+        s = _fake_proven_summary(b, rec["batch"])
+        pid = s["proven"][0]
+        with patch.object(BF.BuilderForward, "register", side_effect=OSError("volume full")):
+            b.ingest(rec["batch"], s)
+        st = b.state()
+        assert [p["id"] for p in st["promoted"]] == [pid]
+        fw = BF.BuilderForward(b.root / "forward")
+        assert pid not in fw.state()["strategies"]
+        # the next daily forward step reconciles it
+        BF.run_pending(b.root / "forward", runner=lambda r, dr, day: {"day": day, "calendar": [], "trades": {}},
+                       today=20261120)
+        assert pid in BF.BuilderForward(b.root / "forward").state()["strategies"]
+        assert B.Builder(b.root).state()["promoted"][0].get("forward_registered") is True
+        BF.run_pending(b.root / "forward", runner=lambda r, dr, day: {"day": day, "calendar": [], "trades": {}},
+                       today=20261120)
+        regs = [r for r in BF.BuilderForward(b.root / "forward").registry.records() if r["kind"] == "register"]
+        assert len(regs) == 1
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]

@@ -353,6 +353,13 @@ def option_spec(E, cand, sid: str, entries: dict) -> N.OptionSpec:
 
 
 def ensure_loaded(E) -> None:
+    fixed = getattr(E.src, "option_tables_path", None)
+    if fixed:                                         # a frozen batch's own tables (stratlab/builder_bundle.py)
+        if _LOADED.get("sig") != "file:" + fixed:
+            tabs = _load(fixed)
+            install(tabs)
+            _LOADED.update({"sig": "file:" + fixed, "tabs": tabs})
+        return
     cache = getattr(E, "cache_dir", None) or os.path.join(os.environ.get("BUILDER_CACHE_DIR", "/tmp"), "builder_cache")
     load_compact(E.src.option_dirs(), cache, log=getattr(E, "log", None))
 

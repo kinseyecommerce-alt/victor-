@@ -136,6 +136,9 @@ def make_source(kind: str = "lab", root: str | None = None):
     if kind == "server":
         from .builder_server_panels import ServerSource
         return ServerSource(root)
+    if kind == "bundle":
+        from .builder_bundle import BundleSource
+        return BundleSource(root)
     if kind == "synthetic":
         from .builder_server_panels import SyntheticSource
         return SyntheticSource(root)

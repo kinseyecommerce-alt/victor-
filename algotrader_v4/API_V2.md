@@ -308,7 +308,9 @@ proven strategies to the forward lab's separate `builder/v1` family. `n_used` = 
 Ratio uses (lab trials 2,552 + 16 development checks + every builder candidate ever evaluated + every FINAL look ever;
 it never decreases). Batch rows: `discovery_passers` vs `shuffle_expected` (passers of the same candidates with their
 signal dates shuffled), `validation_passers`, `final_confirmed`, `proven`, `errata` (recorded defects; a batch is never
-re-evaluated). `grid`: one entry per agent × market type with `proven`, `in_forward_lab`, `qualified` (builder/v1
+re-evaluated). A batch `status` can also be `failed` (3 failed evaluation runs, or frozen inputs lost while the live data
+changed): `failure` {reason, attempts}; its candidates still count in `n_used` and are never re-drawn. `promoted_unregistered` = promoted
+strategies whose builder/v1 registration has not succeeded yet (retried by every weekly / daily forward run). `grid`: one entry per agent × market type with `proven`, `in_forward_lab`, `qualified` (builder/v1
 qualification) and `ready` (qualified, consistent, not demoted — a flag for a human; nothing trades on it).
 `chain_ok: false` = the registry chain failed verification. `seed`: the sandbox's batch 0001
 (`builder_seed_0001.json`, sha256 pinned in `builder.SEED_SHA256`) imported as the registry's first records on first
