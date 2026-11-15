@@ -274,6 +274,377 @@ def test_scheduler_has_no_legacy_jobs_and_keeps_the_validated_ones():
     assert "validated_pead_entry" not in ids, "PEAD stays off by default"
 
 
+# ── engine upgrades ────────────────────────────────────────────────────────────
+
+@contextlib.contextmanager
+def kite_paper():
+    """PAPER with Kite data, validated entries allowed by settings, every agent enabled and running."""
+    import bot_state
+    keys = ("trading_mode", "paper_data_source", "validated_only", "approval_mode", "risk_budget_daily_vol",
+            "risk_budget_allow_upscale", "risk_budget_max_scale", "risk_capital", "risk_brake_reduce_pct",
+            "risk_brake_halt_pct", "drift_telegram", "validated_pead_enabled")
+    saved = {k: getattr(settings, k) for k in keys}
+    saved_en = dict(bot_state._agent_enabled)
+    saved_run = {n: a.state.running for n, a in ALL_AGENTS.items()}
+    saved_stop = bot_state.operator_stopped()
+    try:
+        settings.trading_mode, settings.paper_data_source, settings.validated_only = "PAPER", "KITE", True
+        for n in bot_state._agent_enabled:
+            bot_state._agent_enabled[n] = True
+        for a in ALL_AGENTS.values():
+            a.state.running = True
+        bot_state._operator_stopped = False
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(settings, k, v)
+        bot_state._agent_enabled.clear(); bot_state._agent_enabled.update(saved_en)
+        for n, a in ALL_AGENTS.items():
+            a.state.running = saved_run[n]
+        bot_state._operator_stopped = saved_stop
+
+
+def _fresh_ledger():
+    path = Path(tempfile.mkdtemp()) / "perf.json"
+    with patch.object(perf_mod, "FILE", path):
+        p = perf_mod.Performance()
+    return p, path
+
+
+def test_trading_states_persist_and_most_restrictive_wins():
+    import trading_state as TS
+    with isolated_book() as d:
+        assert TS.effective("auc_fade") == "ACTIVE" and TS.entry_block("auc_fade") is None
+        TS.set_strategy("attn_on", "REDUCE_ONLY", "test", "tester")
+        assert TS.effective("attn_on") == "REDUCE_ONLY" and TS.effective("auc_fade") == "ACTIVE"
+        TS.set_global("HALTED", "maintenance", "tester")
+        assert TS.effective("auc_fade") == "HALTED" and TS.entry_block("attn_on") == "trading_state:HALTED"
+        TS.reload()                                       # a restart reads the file
+        assert TS.global_state() == "HALTED" and TS.strategy_state("attn_on") == "REDUCE_ONLY"
+        TS.set_global("ACTIVE", "done", "tester")
+        assert TS.effective("attn_on") == "REDUCE_ONLY"
+        hist = TS.snapshot()["history"]
+        assert [h["to"] for h in hist] == ["REDUCE_ONLY", "HALTED", "ACTIVE"] and hist[0]["by"] == "tester"
+        assert (d / "trading_state.json").exists()
+        try:
+            TS.set_global("PAUSED")
+            raise AssertionError("bad state accepted")
+        except ValueError:
+            pass
+
+
+def test_trading_state_blocks_entries_but_never_exits():
+    import trading_state as TS
+    from agents.validated_base import paper_marketable, paper_fill_at
+    with isolated_book(), kite_paper():
+        a = ALL_AGENTS["attn_on"]
+        assert a.entry_block_reason() is None and a.entry_block_reason_readonly() is None
+        TS.set_strategy("attn_on", "REDUCE_ONLY", "test")
+        assert a.entry_block_reason() == "trading_state:REDUCE_ONLY"
+        assert a.entry_block_reason_readonly() == "trading_state:REDUCE_ONLY"
+        assert ALL_AGENTS["auc_fade"].entry_block_reason() is None, "per-strategy state"
+        q = {"ltp": 100.0, "bid": 99.9, "ask": 100.1}
+        try:
+            paper_marketable("NHPC", "NSE", "BUY", 10, "CNC", q, "VAL-ATTN-IN")
+            raise AssertionError("an opening order went out under REDUCE_ONLY")
+        except TS.TradingStateRefused:
+            pass
+        assert not kite_client._paper_orders, "nothing reached the paper broker"
+        TS.set_strategy("attn_on", "ACTIVE", "test")
+        oid, fill = paper_marketable("NHPC", "NSE", "BUY", 10, "CNC", q, "VAL-ATTN-IN")
+        assert fill == 100.1, "paper fill semantics unchanged: the quote's ask"
+        TS.set_global("HALTED", "test")
+        oid2, px = paper_fill_at("NHPC", "NSE", "SELL", 10, "CNC", 101.0, "VAL-ATTN-OUT", "AUCTION")
+        assert px == 101.0, "the exit (a risk exit) still runs under HALTED"
+        assert next(r for r in kite_client._paper_positions if r["tradingsymbol"] == "NHPC")["quantity"] == 0
+        try:
+            paper_fill_at("ABB", "NSE", "SELL", 5, "MIS", 100.0, "VAL-AUC-IN", "AUCTION")
+            raise AssertionError("a short entry went out under HALTED")
+        except TS.TradingStateRefused:
+            pass
+        paper_fill_at("NHPC", "NSE", "BUY", 3, "CNC", 0.0, "VAL-PEAD-CA", "CORPORATE_ACTION")   # book-keeping passes
+
+
+def test_approval_mode_gates_entries_by_day_ticket():
+    import approvals as AP
+    import trading_state as TS
+    late = {k: dtime(23, 59, 59) for k in AP.DEADLINES}      # deadlines later today, whenever the test runs
+    with isolated_book(), kite_paper(), patch.dict(AP.DEADLINES, late):
+        a = ALL_AGENTS["auc_fade"]
+        assert AP.mode_on() is False and a.entry_block_reason() is None, "default OFF: nothing changes"
+        AP.set_mode(True, "tester")
+        assert a.entry_block_reason_readonly() == "awaiting_approval"
+        assert AP.status()["pending"] == [], "a status read never opens a ticket"
+        assert a.entry_block_reason() == "awaiting_approval"
+        t = AP.status()["pending"][0]
+        assert t["strategy"] == "auc_fade" and t["deadline"].endswith("23:59:59+05:30")
+        assert AP.request("auc_fade")["id"] == t["id"], "idempotent while pending"
+        AP.decide(t["id"], True, "tester")
+        assert a.entry_block_reason() is None, "approved today"
+        assert ALL_AGENTS["attn_on"].entry_block_reason() == "awaiting_approval", "per strategy"
+        t2 = AP.status()["pending"][0]
+        AP.decide(t2["id"], False, "tester")
+        assert ALL_AGENTS["attn_on"].entry_block_reason() == "approval_rejected"
+        assert ALL_AGENTS["pead_h60"].entry_block_reason(approval=False) in (None, "kill_switch"), \
+            "a planning step is never gated"
+        AP.request("vrp_winged", deadline=(now_ist() - timedelta(minutes=1)).isoformat())
+        assert ALL_AGENTS["vrp_winged"].entry_block_reason() == "approval_expired"
+        AP.request("attn_on", day=(now_ist() + timedelta(days=1)).date().isoformat())
+        TS.set_global("HALTED", "test")
+        assert not AP.status()["pending"] and any(x["status"] == "cancelled" for x in AP.status()["recent"])
+        TS.set_global("ACTIVE", "test")
+        AP.set_mode(False)
+        assert ALL_AGENTS["attn_on"].entry_block_reason() is None
+
+
+def test_risk_budget_defaults_to_lab_sizing_and_only_scales_down():
+    import risk_budget as RB
+    with isolated_book(), kite_paper():
+        assert all(RB.scale(n) == 1.0 for n in ALL_AGENTS), "default: lab sizing"
+        assert all(a.alloc_scale() == 1.0 for a in ALL_AGENTS.values()) and ALL_AGENTS["vrp_winged"].alloc_lots(2) == 2
+        lab = {n: RB.lab_stats(n)["daily_std"] for n in ALL_AGENTS}
+        settings.risk_budget_daily_vol = 3000.0              # 3 active strategies (PEAD off) → ₹1,000 each
+        active = RB._active_names()
+        assert "pead_h60" not in active and len(active) == 3
+        assert RB.scale("attn_on") == round(min(1.0, 1000 / lab["attn_on"]), 4)
+        assert RB.scale("vrp_winged") == round(1000 / lab["vrp_winged"], 4) < 1.0
+        settings.risk_budget_daily_vol = 10_000_000.0
+        assert all(RB.scale(n) == 1.0 for n in active), "never above 1.0 unless upscaling is allowed"
+        settings.risk_budget_allow_upscale, settings.risk_budget_max_scale = True, 1.5
+        assert all(RB.scale(n) == 1.5 for n in active)
+        settings.risk_budget_allow_upscale = False
+        settings.risk_budget_daily_vol = 3000.0
+        assert ALL_AGENTS["vrp_winged"].alloc_lots(2) == int(2 * RB.scale("vrp_winged"))
+        st = RB.status()
+        assert st["strategies"]["auc_fade"]["hard_caps"]["max_gross"] == settings.validated_auction_max_gross
+
+
+def test_drawdown_brake_escalates_latches_and_resets():
+    import risk_budget as RB
+    import trading_state as TS
+    with isolated_book(), kite_paper():
+        p, f = _fresh_ledger()
+        settings.risk_capital, settings.risk_brake_reduce_pct, settings.risk_brake_halt_pct = 100_000.0, 10.0, 20.0
+        with patch.object(perf_mod, "performance", p):
+            def book(net):
+                p.record_trade("auc_fade", "ABB", "SELL", 100, 100.0, net, "NSE", "MIS", cost_kind="equity_mis",
+                               charge_risk=False)
+            book(5000.0)
+            assert RB.apply_brake() is None and TS.brake_state() == "ACTIVE"
+            book(-16000.0)
+            RB.apply_brake()
+            assert TS.brake_state() == "REDUCE_ONLY" and TS.effective("auc_fade") == "REDUCE_ONLY"
+            assert ALL_AGENTS["auc_fade"].entry_block_reason() == "trading_state:REDUCE_ONLY"
+            book(-6000.0)
+            RB.apply_brake()
+            assert TS.brake_state() == "HALTED"
+            book(30000.0)                                       # recovery never de-escalates by itself
+            assert RB.apply_brake() is None and TS.brake_state() == "HALTED"
+            st = RB.reset_brake("tester", "test")
+            assert TS.brake_state() == "ACTIVE" and st["brake"]["drawdown"] == 0.0, st["brake"]
+            assert ALL_AGENTS["auc_fade"].entry_block_reason() is None
+
+
+def test_drift_monitor_warns_never_trades_and_messages_once_a_day():
+    import drift_monitor as DM
+    import trading_state as TS
+    with isolated_book(), kite_paper():
+        p, _ = _fresh_ledger()
+        settings.drift_telegram = True
+        fl = str(Path(tempfile.mkdtemp()) / "fills.jsonl")
+        with patch.object(perf_mod, "performance", p), patch.dict(os.environ, {"FILL_LOG_FILE": fl}):
+            row = DM.record_fill("attn_on", "NHPC", "BUY", 10, 100.0, 100.05, "MARKETABLE")
+            assert row["slip_bps"] == 5.0 and DM.recent_fills("attn_on")[-1]["fill"] == 100.05
+            a = ALL_AGENTS["attn_on"]
+            ok = DM.strategy_drift("attn_on", a)
+            assert ok["status"] == "ok" and ok["trades"] == 0
+            for _ in range(25):                                 # 25 losers: below the lab band, deep drawdown
+                p.record_trade("attn_on", "NHPC", "BUY", 1000, 80.0, -2000.0, "NSE", "CNC", cost_kind="future",
+                               charge_risk=False, signal_price=79.0)
+            d = DM.strategy_drift("attn_on", a)
+            text = " ".join(d["warnings"] + d["alerts"])
+            assert "below the lab band" in text and "drawdown" in text and "slippage" in text, d
+            sent = []
+
+            async def tg(msg):
+                sent.append(msg)
+            with patch("agents.base_agent.send_telegram", tg):
+                asyncio.run(DM.daily_job())
+                asyncio.run(DM.daily_job())
+            assert len([m for m in sent if "attn_on" in m]) == 1, "at most one message per strategy per day"
+            assert TS.effective("attn_on") == "ACTIVE" and not kite_client._paper_orders, "warnings only"
+
+
+def test_price_protection_live_only_paper_unchanged():
+    from kite_client import KiteClient
+    assert KiteClient.protection_limit("BUY", 99.9, 100.1, 100.0, 0.5) == (100.6, 100.1)
+    assert KiteClient.protection_limit("SELL", 99.9, 100.1, 100.0, 0.5) == (99.4, 99.9)
+    assert KiteClient.protection_limit("SELL", 0, 0, 0, 0.5) == (0.0, 0.0)
+    with isolated_book():
+        kite_client.place_order("RELIANCE", "NSE", "BUY", 1, order_type="MARKET", product="MIS")
+        assert kite_client._paper_orders[-1]["order_type"] == "MARKET", "PAPER path untouched"
+    kc = KiteClient()
+
+    class FakeKite:
+        VARIETY_REGULAR = "regular"
+
+        def __init__(self):
+            self.placed = []
+
+        def quote(self, ins):
+            return {ins[0]: {"last_price": 100.0, "depth": {"buy": [{"price": 99.9}], "sell": [{"price": 100.1}]}}}
+
+        def place_order(self, **kw):
+            self.placed.append(kw)
+            return "LIVE-1"
+
+        def order_history(self, oid):
+            return [{"status": "COMPLETE", "average_price": 100.15}]
+
+        def margins(self):
+            return {"equity": {"available": {"live_balance": 1e9}}}
+    fk = FakeKite()
+    kc._kite = fk
+    saved = (settings.trading_mode, settings.kite_access_token)
+    fills = []
+    try:
+        settings.trading_mode, settings.kite_access_token = "LIVE", "x"
+        with patch("drift_monitor.record_fill", lambda *a: fills.append(a)):
+            kc.place_order("RELIANCE", "NSE", "BUY", 5, order_type="MARKET", product="MIS", tag="VAL-ATTN-IN")
+        o = fk.placed[-1]
+        assert o["order_type"] == "LIMIT" and o["price"] == 100.6, o
+        assert fills and fills[-1][4] == 100.1 and fills[-1][5] == 100.15, "quote vs fill logged"
+    finally:
+        settings.trading_mode, settings.kite_access_token = saved
+
+
+def test_validated_agents_still_refuse_live():
+    from agents.validated_base import paper_marketable
+    with kite_paper():
+        settings.trading_mode = "LIVE"
+        for a in ALL_AGENTS.values():
+            assert a.entry_block_reason() == "live_mode_refused"
+        for fn in (lambda: paper_marketable("X", "NSE", "BUY", 1, "MIS", {"ask": 1.0}, "VAL-AUC-IN"),
+                   lambda: kite_client.paper_fill_at("X", "NSE", "BUY", 1, "MIS", 1.0, "t", "AUCTION")):
+            try:
+                fn()
+                raise AssertionError("a LIVE order path was reachable")
+            except RuntimeError:
+                pass
+
+
+def test_live_readiness_reports_static_ip_and_never_ready():
+    import live_readiness as LR
+    saved = settings.kite_static_ip
+    try:
+        settings.kite_static_ip = ""
+        r = LR.check()
+        assert "static_ip" in r["blockers"] and r["ready_for_live"] is False
+        settings.kite_static_ip = "10.0.0.5"
+        assert "static_ip" in LR.check()["blockers"], "a private address is not a static egress IP"
+        settings.kite_static_ip = "13.235.10.20"
+        r = LR.check()
+        assert "static_ip" not in r["blockers"] and r["ready_for_live"] is False
+        assert "strategies_live_capable" in r["blockers"]
+        assert not any(s["live_capable"] for s in r["strategies"].values())
+    finally:
+        settings.kite_static_ip = saved
+
+
+def test_streaming_half_candle_hazard_not_on_a_live_path():
+    """stratlab's build_sessions treats the last candle as complete; no kept live module uses it, and the only live
+    minute-bar store (validated_data.refresh_store) keeps today's session only after 15:35."""
+    import re
+    import validated_data as VD
+    here = Path(__file__).resolve().parent
+    live = [p for p in here.glob("*.py") if not p.name.startswith(("test_", "lab_risk_build"))] + \
+        list((here / "agents").glob("*.py"))
+    for p in live:
+        assert not re.search(r"\bbuild_sessions\b", p.read_text()), p.name
+    today = now_ist().date()
+    rows = []
+    for d in (today - timedelta(days=1), today):
+        for i in range(300):
+            ts = datetime.combine(d, dtime(9, 15), tzinfo=_IST) + timedelta(minutes=i)
+            rows.append({"date": ts, "open": 100, "high": 101, "low": 99, "close": 100 + i * 0.01, "volume": 10})
+
+    class K:
+        def get_instrument_tokens(self, syms, ex):
+            return {s: 1 for s in syms}
+
+        def historical_data(self, tok, frm, to, iv):
+            return rows
+    got = {}
+    for hhmm, has_today in ((dtime(14, 0), False), (dtime(15, 40), True)):
+        at = datetime.combine(today, hhmm, tzinfo=_IST)
+        with patch("kite_client.kite_client", K()), patch("ist_clock.now_ist", lambda: at), \
+                patch.object(VD, "set_store", lambda out, persist=False, missing=(): got.update(out=out)), \
+                patch.object(VD, "UNIVERSE", ("ABB",)):
+            VD.refresh_store()
+        days = [s.day for s in got.pop("out")["ABB"]]
+        ymd = int(today.strftime("%Y%m%d"))
+        assert (ymd in days) is has_today, (hhmm, days)
+
+
+def _client():
+    import main
+    from fastapi.testclient import TestClient
+    return TestClient(main.app)
+
+
+def test_v2_read_endpoints_respond_and_are_json():
+    with isolated_book():
+        c = _client()
+        for path in ("/api/v2/health", "/api/v2/overview", "/api/v2/strategies", "/api/v2/strategies/vrp_winged",
+                     "/api/v2/positions", "/api/v2/trades", "/api/v2/shadow-registry", "/api/v2/archiver",
+                     "/api/v2/risk-budget", "/api/v2/drift", "/api/v2/fills", "/api/v2/trading-state",
+                     "/api/v2/approvals", "/api/v2/readiness", "/api/v2/system", "/health", "/validated",
+                     "/shadow-registry", "/forward-test"):
+            r = c.get(path)
+            assert r.status_code == 200, (path, r.status_code, r.text[:200])
+            r.json()
+        cards = c.get("/api/v2/strategies").json()["strategies"]
+        assert [x["name"] for x in cards] == ["auc_fade", "attn_on", "vrp_winged", "pead_h60"]
+        assert {x["name"]: x["status"] for x in cards} == {"auc_fade": "proven", "attn_on": "proven",
+                                                            "vrp_winged": "candidate", "pead_h60": "candidate"}
+        assert all(x["allocator_scale"] == 1.0 for x in cards)
+        assert c.get("/api/v2/strategies/nope").status_code == 404
+
+
+def test_v2_write_endpoints_need_auth_and_act():
+    import approvals as AP
+    import bot_state
+    import trading_state as TS
+    saved = (settings.api_key, settings.jwt_secret_key, bot_state.is_agent_enabled("vrp_winged"))
+    with isolated_book(), patch.dict(AP.DEADLINES, {k: dtime(23, 59, 59) for k in AP.DEADLINES}):
+        try:
+            settings.api_key, settings.jwt_secret_key = "k-test", "j" * 40
+            c = _client()
+            body = {"scope": "strategy", "strategy": "attn_on", "state": "REDUCE_ONLY", "reason": "test"}
+            assert c.post("/api/v2/trading-state", json=body).status_code == 401
+            assert c.get("/api/v2/overview").status_code == 401, "v2 reads need auth when API_KEY is set"
+            assert c.get("/api/v2/health").status_code == 200
+            h = {"X-API-Key": "k-test"}
+            r = c.post("/api/v2/trading-state", json=body, headers=h)
+            assert r.status_code == 200 and TS.strategy_state("attn_on") == "REDUCE_ONLY"
+            assert r.json()["changed"]["by"] == "api-key"
+            assert c.post("/api/v2/trading-state", json={**body, "state": "PAUSED"}, headers=h).status_code == 422
+            assert c.post("/api/v2/approvals/mode", json={"on": True}, headers=h).json()["mode"] is True
+            t = c.post("/api/v2/approvals", json={"strategy": "auc_fade"}, headers=h).json()["ticket"]
+            r = c.post(f"/api/v2/approvals/{t['id']}/approve", json={"note": "ok"}, headers=h)
+            assert r.status_code == 200 and r.json()["ticket"]["status"] == "approved"
+            assert c.post(f"/api/v2/approvals/{t['id']}/reject", json={}, headers=h).status_code == 409
+            assert c.post("/api/v2/approvals/zzz/approve", json={}, headers=h).status_code == 404
+            r = c.post("/api/v2/strategies/vrp_winged/enable", json={"enabled": False}, headers=h)
+            assert r.status_code == 200 and not bot_state.is_agent_enabled("vrp_winged")
+            r = c.post("/api/v2/risk/brake/reset", json={"reason": "test"}, headers=h)
+            assert r.status_code == 200 and TS.brake_state() == "ACTIVE"
+            AP.set_mode(False)
+        finally:
+            settings.api_key, settings.jwt_secret_key = saved[0], saved[1]
+            bot_state.set_agent_enabled("vrp_winged", saved[2])
+
+
 TESTS = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
 
 

@@ -130,6 +130,11 @@ async def _rate_limiter(request: Request, call_next):
     return await call_next(request)
 
 
+# ── the versioned dashboard API (api_v2.py, API_V2.md) ────────────────────────
+from api_v2 import router as _v2_router  # noqa: E402
+app.include_router(_v2_router)
+
+
 # ── models ────────────────────────────────────────────────────────────────────
 class TokenRequest(BaseModel):
     request_token: str | None = None
@@ -716,6 +721,14 @@ async def on_startup():
         tick_engine.warm_watchlist("startup")
     except Exception as exc:
         logger.warning("Warm watchlist failed: {}", exc)
+    try:
+        import live_readiness
+        rd = live_readiness.check()
+        (logger.warning if settings.trading_mode == "LIVE" else logger.info)(
+            "[readiness] LIVE prerequisites: {} (blockers: {})", "met" if rd["ready_for_live"] else "NOT met",
+            ", ".join(rd["blockers"]) or "none")
+    except Exception as exc:
+        logger.warning("LIVE readiness check failed: {}", exc)
     logger.info("FastAPI startup complete ({} mode, data: {})", settings.trading_mode, tick_engine.data_source())
 
 
