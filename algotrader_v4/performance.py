@@ -42,6 +42,7 @@ STRATEGY_LABELS = {
     "auc_fade": "Auction fade (validated)",
     "attn_on": "Attention overnight (validated)",
     "vrp_winged": "NIFTY winged strangle (validated)",
+    "pead_h60": "Post-earnings drift 60d (candidate)",
 }
 
 

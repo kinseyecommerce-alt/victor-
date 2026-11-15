@@ -1118,3 +1118,156 @@ units. Kite's minute series omits a few trades that its daily candle (= the NSE 
     python -m stratlab.optmin --check
 
 Tests: `stratlab/tests_flowdata.py` (synthetic files; section "STRATLAB: flow data" of `test_pipeline.py`).
+
+## Flow study: bulk / block deals and NIFTY index changes (`flows_*.py`, `prereg/flows_v1.json`)
+
+Eight variants of two flow ideas, pre-registered (sha256 `6f15ec62cbb7a7e0ee0ffc0d3a7d88bc9345ea3bf718ae14649c4acc09bf55ea`,
+commit 64574d6, before any result) and run once on 2026-11-15 on the flow data above. The framework is the event
+study's (`events_run.py` functions reused unchanged), on the same point-in-time top-500 daily cache.
+
+    python -m stratlab.flows_run --data-check            # counts only
+    python -m stratlab.flows_run --preregister | --smoke | --run --trials <ledger>
+
+**Rules fixed before the run.**
+* Deals are usable from the next open. Each client's bulk and block deals of a session are netted (BUY - SELL). Same-day
+  round trips (the 2021-26 HFT / prop flow) therefore drop out. Intra-group transfers are removed first: equal quantity
+  and price, the same first word of the client name. In 2022 these were about 2,500 rows, mostly iShares Mauritius ->
+  iShares ETF.
+* Client classes come from a fixed, ordered keyword list (`flows_strategies.CLIENT_CLASSES`), written from client names
+  and counts only:
+  * the institution classes are MF, INSURANCE and FUND (FPI / ETF / pension / sovereign / AIF);
+  * PROP_BROKER (prop, HFT, brokers, ODI, arbitrage desks) and OTHER (individuals, companies, promoters, family trusts)
+    are excluded.
+* Deal rows 2012-26: OTHER 100,667, PROP_BROKER 69,298, FUND 9,984, MF 2,300, INSURANCE 548.
+* Institution net events >= Rs 10 cr on a top-500 member day: 2,501 buys (FUND 1,560 / MF 722 / INSURANCE 219) and 738
+  sells. That is 40-190 a year to 2020, then 330-450 a year from 2023.
+* The "or >= 0.5 % of shares" clause of the sketch was dropped: every bulk deal is >= 0.5 % by definition.
+* Index changes: NIFTY 50 and NIFTY 100 are pooled into additions and deletions, one event per (stock, effective date).
+  Month-precision rows are never used. Rows without a real announcement date (63 of 736 change rows; 10 usable pooled
+  events) are used only by the effective-date variants; month precision drops 21 pooled events. Usable pooled events per period (2012-17 / 2018-23 / 2023-26):
+  * additions: 68 / 71 / 37 (run-up: 64 / 71 / 37);
+  * deletions: 61 / 71 / 37 (run-down: 58 / 69 / 36).
+  The prereg stated before the run that every index variant must fail the 2023-26 screen on trade count.
+* Every variant has a 20 % catastrophe stop and a clock exit. Longs pay CNC costs; shorts pay futures costs on the cash
+  price and need a listed stock future. Notional is Rs 1 lakh, slippage 2 bps. Every variant gets the old-era look.
+
+| id | 2023-26 DISCOVERY tr / PF / net (H1 / H2) | verdict | FINAL | 2012-23 tr / PF / net (H1 / H2) | verdict | excess vs NIFTY 50 / NIFTY 500 per trade, 2012-23 [95 % CI] | placebo 2012-23 |
+|---|---|---|---|---|---|---|---|
+| fl_inst_buy_h20 | 248 / 1.43 / +3.6 L (+4.3 / -0.7) | FAILED (H2 < 0) | – | 644 / 1.18 / +4.4 L (+2.6 / +1.8) | OOS-CONFIRMED | -0.0 % [-1.2, +1.1] / -0.2 % [-1.2, +0.8] | 667 / 1.10 / +2.8 L |
+| **fl_inst_buy_h60** | 232 / 1.66 / +8.5 L (+7.8 / +0.7) | PASSED | **78 / 1.55 / +2.4 L CONFIRMED** | 622 / 1.34 / +14.0 L (+4.1 / +9.9) | **OOS-CONFIRMED** | -0.5 % [-2.4, +1.3] / -0.8 % [-2.6, +0.8]; median -2.3 % | **645 / 1.50 / +20.6 L** |
+| fl_inst_sell_short_h20 | 64 / 0.89 / -0.2 L | FAILED | – | 179 / 0.86 / -1.6 L | OOS-FAILED | – | 172 / 1.03 / +0.3 L |
+| fl_inst_cluster_h20 | 91 / 1.36 / +1.1 L | FAILED (H2 < 0, ETERNAL 43 %) | – | 134 / 1.30 / +1.4 L (-0.2 / +1.6) | OOS-FAILED (H1 33 tr) | +0.3 % [-1.5, +2.0] | 121 / 1.32 / +1.6 L |
+| fl_idx_add_runup | 24 / 0.80 / -0.2 L | FAILED (24 trades) | – | 135 / 1.73 / +3.3 L (+2.2 / +1.2) | OOS-CONFIRMED | **+2.0 % [+0.7, +3.6] / +1.9 % [+0.7, +3.4]** | 131 / 1.39 / +1.6 L, +0.5 % [-1.2, +2.2] |
+| fl_idx_add_reversal | 15 / 0.32 / -0.5 L | FAILED (15 trades) | – | 96 / 0.60 / -1.6 L | OOS-FAILED | – | 93 / 1.10 / +0.3 L |
+| fl_idx_del_rebound | 23 / 1.00 / -0.0 L | FAILED (23 trades) | – | 127 / 1.36 / +1.5 L (+0.6 / +0.9) | OOS-FAILED (H1 59 tr < 60) | +0.2 % [-2.3, +2.4] | 123 / 1.05 / +0.2 L |
+| fl_idx_del_rundown | 21 / 0.12 / -1.1 L | FAILED | – | 109 / 0.83 / -1.0 L | OOS-FAILED | – | 92 / 0.75 / -1.1 L |
+
+**Verdict: 0 of 8 proven.**
+
+* `fl_inst_buy_h60` passes the protocol in both eras and its FINAL, but DSR is 0.00 with N = 2,538 and 0.36 with the
+  fair N = 8 (PSR(0) 0.98). It is not an information edge:
+  * the placebo (the same stocks on random dates) earns MORE over 2012-23 (PF 1.50, +20.6 L vs PF 1.34, +14.0 L);
+  * its excess return over NIFTY 50 / NIFTY 500 has a CI that includes 0 in every period (DISCOVERY +1.8 % [-0.8, +3.8]
+    and FINAL +3.1 % [-2.4, +11.8]);
+  * the median trade lags NIFTY in 2012-23 and in FINAL.
+  It is long exposure to large and mid caps held for 60 sessions.
+* `fl_idx_add_runup` (buy at the first open after a NIFTY 50 / 100 addition is announced, sell at the close before it
+  takes effect) has the one excess return whose 2012-23 CI excludes 0: +2.0 % per trade, with 2018-23 alone at
+  +2.4 % [+0.8, +4.2], and placebo +0.5 %. In 2023-26 it lost:
+  * 24 trades, -3.3 % excess per trade;
+  * the CI [-3.9, -2.6] covers only 4 reviews, so it understates the uncertainty.
+  This matches the literature on the index effect being arbitraged away. It fails on trade count by design and cannot
+  be proven. It must not be re-tuned on these results.
+* The post-inclusion reversal short and the deletion run-down short lose in both eras. The deletion rebound misses the
+  old-era H1 minimum by one trade (59 < 60; no relaxation), with excess +0.2 % [-2.3, +2.4]. Institutional SELLS
+  carry no tradable signal (shorts PF 0.86-0.89).
+
+Controls:
+* Planted edge: synthetic Rs 50 cr MF buys before each stock's best 2 % of 20-session returns give PF 134 (5,543
+  trades); delayed 25 sessions, PF 1.10.
+* The planted NIFTY 50 additions (effective 21 sessions later) produce exactly the same trades through
+  `fl_idx_add_runup`. This is by construction: the same entry and a 20-session hold. So the index path reads its events
+  too.
+* All verdicts hold at 5 bps.
+
+Report-only:
+* the 1:3 bracket (5 % / 15 %) is worse than the time exit for every deal long (inst_buy_h60 old era PF 0.89 vs 1.34);
+* the Rs 10 lakh account takes 28 inst_buy_h60 signals on DISCOVERY: +1.2 L (+5.9 %/yr, max DD 2.0 %);
+* over 2012-23 it takes 150 signals: +0.5 L (+0.4 %/yr, max DD 12.8 %);
+* idx_add_runup over 2012-23: 78 trades, +1.0 L (+0.8 %/yr);
+* the stock-future shorts never fit 1 % risk (0 trades).
+
+New trials:
+* 2023-26: 16 (8 + 8 report-only twins as `explore`), N 2,522 -> 2,538;
+* 2012-23: 8, 261 -> 269.
+The ledger was backed up first (`trials_v2.csv.bak_flows_20261115_011904`). sim.py is unchanged.
+
+Caveats:
+* client classes are name-based (one AMC under two names counts as two buyers in the cluster rule);
+* value_cr is nominal rupees;
+* dividends are not adjusted;
+* shorts are simulated on cash prices;
+* a run-up's hold is counted in the stock's own sessions (a suspended day would delay the exit);
+* weekend announcements fill one session late (conservative).
+
+Outputs: `<scratchpad>/flows/` (data_check.json, run1/report.json, run1/trades, tables.md, progress.txt). Tests:
+`tests_flows.py` (11 synthetic), run by `test_pipeline.py`.
+
+## How established backtesting projects test strategies, and what that says about this lab (`robustness.py`, `<scratchpad>/ghtest/`)
+
+**Plain language.** We compared the lab with the well-known open-source backtesters (QuantConnect LEAN, backtrader,
+zipline-reloaded, vectorbt, backtesting.py, NautilusTrader, freqtrade, bt, Jesse) and the standard overfitting tests
+(López de Prado, Bailey et al., White, Hansen, Harvey-Liu-Zhu), replayed 13 of our strategies through two of those
+engines, and ran the tests we did not have. The lab's simulator is correct: backtrader reproduces it trade for trade and
+to the rupee where the two engines' rules coincide, and every other difference is a rule on which the lab is the
+cautious side. One real bug was found (below); it changes no verdict. The lab is much stricter than common practice —
+full Zerodha costs and 2 bps slippage where engines default to zero, next-open fills, one-tick-through targets, a
+one-look hold-out, two eras — and that is why so much fails: the same lab decisions for four intraday rules lose
+Rs 9.9 lakh in the lab but show +Rs 5.6 lakh, profit factor 1.10-1.25, under backtrader's or backtesting.py's default
+settings. Nothing in the new diagnostics changes a verdict or adds a trial; they are reports.
+
+* **Methods** (`<scratchpad>/ghtest/METHODS.md`): practice -> which projects do it -> what the lab does -> gap. Lab
+  STRICTER: costs, slippage, fills (next open, stop first, gaps at the open, one-tick targets, entry-bar stops vs
+  backtrader's bracket), pre-registration, one-look FINAL, H1 AND H2, two eras, trials ledger + DSR. Lab WEAKER: the
+  look-ahead audit slices precomputed indicator arrays on 1 in 29 sessions (cannot catch an indicator bug); no volume /
+  partial-fill model; survivorship and unadjusted corporate actions in the minute eras, dividends ignored; verdicts on
+  net > 0, not net > NIFTY; trade-level statistics ignore same-day clustering; no PBO / SPA / Monte Carlo / warm-up
+  check (now added as reports).
+* **Engine cross-check** (`<scratchpad>/ghtest/CROSSCHECK.md`, scripts in `ghtest/scripts/`): backtrader 1.9.78.123 and
+  backtesting.py 0.6.6 (vectorbt skipped: 800 MB venv > budget) on the SAME bars3y bars and the SAME decisions of 13
+  strategies (2 daily, 1 15:20-decision swing, 2 weekly, 3 intraday 5m/15m, 1 scalping, 1 candlestick, AUC-FADE-2PCT,
+  SWING-ATTN-ON-3X, 1 Kite rule), DISCOVERY, matched settings (next open, 2 bps, costs.py as a per-leg engine commission,
+  stop first). backtrader matches AUC-FADE-2PCT 1,090 / 1,090, SWING-ATTN-ON-3X 580 / 580, r3_tf15m_fh_break 3,263 and
+  the daily / Kite rules exactly; remaining differences are classified with 0 unexplained: engines fill targets on a
+  touch (304 trades, +Rs 31 k), backtrader slips gapped limit fills, backtesting.py validates sl/tp against the last
+  close and never calls `next()` on the first bar (adapter fixed), cost rounding, knock-on.
+  **Bug:** `sim_positional` resumes decisions on the exit day (`day = max(k, day + 1)`); for `decision_time` specs the
+  09:16 / 15:20 decision can come BEFORE that day's exit (15:29 max-hold close, late stop), so the lab holds two
+  positions in one symbol and books both. 15 trades in the compared runs (r3_swing_close_down4 695 -> 684 trades,
+  +11.31 L -> +10.91 L; r3_tfweekly_wk_loser_rev 72 -> 71, PF 1.34 -> 1.32, screen still passes); certain overlaps in
+  18 of 43 decision_time positional strategies' 3-year trade files (heaviest: r3_futures_*_ibs_ls, ~45 % of trades; all
+  FAILED SCREEN). No verdict changes. Fix in a future round (continue at k + 1 when the exit is at/after the decision
+  minute, bump FILL_MODEL_VERSION); sim.py is unchanged here.
+* **Robustness reports** (`stratlab/robustness.py`, `<scratchpad>/ghtest/ROBUSTNESS.md`; tests `tests_robustness.py`,
+  section "STRATLAB: robustness diagnostics" of `test_pipeline.py`):
+
+      python -m stratlab.robustness --scratch <scratchpad> --out <scratch dir> [--parts pbo,spa,mc,wf,lookahead]
+
+  - PBO by CSCV (S = 16, 12,870 halves) over 681 variants with 3-year trade files, 23 families with >= 8 variants. Low
+    PBO in all-losing families only means the least-bad variant stays least bad; overfit selection in r3_tfweekly (PBO
+    0.84), nb 0.68, r4_participant 0.59, r4_mechanics 0.55. OOS-on-IS slope negative in every family with a spread.
+  - White RC / Hansen SPA (stationary bootstrap): over all 681 variants the best beats zero (SPA_c p 0.001) but **none
+    beats NIFTY buy-and-hold on the same capital (p 0.38)**; within-family, AUC-FADE (0.004 vs 0 / 0.009 vs NIFTY) and
+    the winged strangle family beat NIFTY; SWING-ATTN beats zero (0.002) but not NIFTY at 5 % (0.077). DISCOVERY only.
+  - Monte Carlo (10,000 shuffles / bootstraps + daily block bootstrap): 2023-26 drawdowns of AUC / ATTN / VRP are inside
+    the shuffled range; the 2016-23 drawdowns of the three stock books are beyond the shuffled 99th percentile (losses
+    cluster in time). Daily-block 95th-percentile drawdowns per 3 years at Rs 1 lakh/trade: AUC-2PCT 0.68 L, AUC-3PCT
+    0.47 L, ATTN 0.22 L, VRP-WINGED 3.46 L. VRP-WINGED 2023-26 t = 1.03, trade-bootstrap P(net <= 0) 15 %. Daily t > 3
+    (Harvey-Liu-Zhu) on 2023-26 only for ATTN (3.55) and AUC-3PCT (3.41).
+  - Walk-forward view (rolling 12 months, monthly step, old era + 2023-26): ATTN positive in 97 % of windows, VRP 92 %,
+    AUC-2PCT 83 %, AUC-3PCT 71 %, ev_pead_long_h60 83 %, fl_inst_buy_h60 62 % (7 losing years of 15).
+  - freqtrade-style look-ahead (data truncated at every signal bar, all indicators recomputed) and recursive (warm-up)
+    checks on 14 strategies: 0 decision and 0 indicator differences (3,474 intraday cuts, 1,103 positional days). Hazard:
+    `build_sessions` treats the last 5-minute block of its input as complete, so on streaming data it would use a
+    half-built 5-minute candle (the lab itself is not affected). Warm-up: with only 120 sessions of history 6-15 % of
+    EMA-rule decisions change, so bars3y H1 decisions of daily EMA rules were made on short history.

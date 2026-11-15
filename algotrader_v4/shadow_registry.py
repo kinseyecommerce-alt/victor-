@@ -577,9 +577,13 @@ class ShadowRegistry:
 #   SWING-ATTN-ON-3X 12,951.31 (dd/r2_swing_out trades, futures costs)
 #   VRP-STRANGLE-016-WINGED 129,760 (dd/vrp/final_run DISCOVERY max_dd, 2 lots; FINAL 104,495)
 #   AUC-FADE-1TO3PCT: never run in the lab -> None (demotion cannot fire; flagged in the evaluation)
+#   EV-PEAD-LONG-H60 1,118,594 (events/run1 ev_pead_long_h60_2023-26 trades, net summed by exit day, ₹1 L / trade,
+#     CNC costs, DISCOVERY + FINAL) — a CANDIDATE, enrolled only once VALIDATED_PEAD_ENABLED=true (agent.shadow_enrol)
 BACKTEST_MAX_DD = {"AUC-FADE-3PCT": 24605.28, "AUC-FADE-2PCT": 29535.33, "AUC-FADE-1TO3PCT": None,
-                   "SWING-ATTN-ON-3X": 12951.31, "VRP-STRANGLE-016-WINGED": 129760.0}
-AGENT_MAX_HOLD_DAYS = {"auc_fade": 0, "attn_on": 5, "vrp_winged": 10}   # calendar days, weekends/holidays covered
+                   "SWING-ATTN-ON-3X": 12951.31, "VRP-STRANGLE-016-WINGED": 129760.0,
+                   "EV-PEAD-LONG-H60": 1118594.0}
+# calendar days, weekends/holidays covered (pead_h60: 60 sessions ≈ 84 days + holidays)
+AGENT_MAX_HOLD_DAYS = {"auc_fade": 0, "attn_on": 5, "vrp_winged": 10, "pead_h60": 95}
 
 
 def forward_test_specs() -> list[ShadowSpec]:
@@ -607,7 +611,7 @@ def agent_spec(agent) -> ShadowSpec:
            "lab_fingerprint": str(agent.LAB_FINGERPRINT), "product": getattr(agent, "product", ""),
            "fill_model": "agent paper fills: marketable LIMIT at the quote touch (ask/bid), LTP without a touch",
            "max_hold_days": AGENT_MAX_HOLD_DAYS.get(agent.name, 10), "backtest_max_dd": BACKTEST_MAX_DD.get(lab_id),
-           "per_trade_notional": 100000 if agent.name in ("auc_fade", "attn_on") else None}
+           "per_trade_notional": 100000 if agent.name in ("auc_fade", "attn_on", "pead_h60") else None}
     return ShadowSpec(id=f"{agent.name}@{agent.VERSION}", family=lab_id, strategy_ref=f"{type(agent).__module__}:"
                       f"{type(agent).__name__}", source="validated_agent", config=cfg)
 
@@ -706,7 +710,11 @@ def daily_job(reg: Optional[ShadowRegistry] = None, agents: Optional[dict] = Non
     if agents is None:
         from agents.strategy_agents import ALL_AGENTS
         agents = {n: a for n, a in ALL_AGENTS.items() if getattr(a, "scheduled", False)}
-    out = {"enrolled": ensure_enrolled(reg, agents)}
+    # a candidate agent that is switched off is not ENROLLED (registering it would grow the Bonferroni family of
+    # every shadow for a strategy that never trades); once enrolled its trades are still copied after a switch-off.
+    # The three validated agents have no such switch
+    enrol = {n: a for n, a in agents.items() if getattr(a, "shadow_enrol", True)}
+    out = {"enrolled": ensure_enrolled(reg, enrol)}
     out["forward_trades_added"] = sync_forward_test(reg)
     out["agent_trades_added"] = sync_validated_agents(reg, agents)
     out["evaluation"] = reg.evaluate_all(write=True)

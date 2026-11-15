@@ -69,6 +69,15 @@ chain. It stays in the Bonferroni family, so retiring losers cannot loosen anyon
 - Validated agents: `auc_fade@<VERSION>` (the configured variant), `attn_on@<VERSION>`, `vrp_winged@<VERSION>`,
   copied from the performance ledger rows of that `VERSION` (the agents' own paper fills: marketable LIMIT at the
   quote touch, LTP without one).
+- Candidate agent `pead_h60@EV-PEAD-LONG-H60/ev1/v1` (post-earnings drift, `agents/validated_pead.py`; not proven:
+  DSR 0.51 at N = 9): enrolled **only while `VALIDATED_PEAD_ENABLED=true`** (`daily_job` skips an agent whose
+  `shadow_enrol` is false; the three validated agents have no such switch). The first enrolment is permanent: under
+  rule v2 the Bonferroni family grows by one for good (6 forward-test + 3 validated-agent shadows = 9 → 10), so every
+  later look of every shadow uses `0.05 / (n_family × 3)` with the larger `n_family` — expected and intended (it is
+  one more strategy under test). Config: `max_hold_days` 95 (60 sessions ≈ 84 calendar days + holidays: only trades
+  entered after registration are accepted), `per_trade_notional` ₹1 L, demotion reference ₹11,18,594 = max drawdown
+  of the lab's 2023-26 net totals by exit day at ₹1 L per trade (CNC costs, DISCOVERY + FINAL). Fills: pre-open
+  order at the official open, exits at the official close / the stop (the agent's paper fills).
 
 `paper_fill()` / `record_paper_trade()` give a new shadow the same fill model: BUY at the ask / SELL at the bid,
 else the reference ± 2.1 bps half-spread, with `costs.trade_cost`.

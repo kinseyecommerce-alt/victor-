@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     validated_vrp_max_margin: float = 250_000.0             # lab margin ≈ ₹1.08–1.32 L for 2 lots
     validated_vrp_max_loss: float = 75_000.0                # max risk per structure; lab worst −₹51,922 (2 lots)
     validated_vrp_dd_kill: float = 195_000.0                # 1.5 × lab max drawdown ₹129,760
+    # EV-PEAD-LONG-H60 (agents/validated_pead.py): post-earnings drift CANDIDATE — passed both eras + its FINAL in
+    # the lab but NOT proven (DSR 0.51 at N = 9). PAPER only, never live; OFF by default (no job is scheduled).
+    # Sized from the lab's 2023-26 trades at ₹1 L / trade; money limits scale with validated_notional_scale.
+    validated_pead_enabled: bool = False
+    validated_pead_max_positions: int = 100                 # lab concurrent open trades: mean 57, p95 80, max 88
+    validated_pead_max_gross: float = 10_000_000.0          # ₹1 cr = 100 × ₹1 L (lab peak open notional ₹87 L)
+    validated_pead_daily_loss_stop: float = 240_000.0       # 1.5 × lab worst exit day −₹1,59,630
+    validated_pead_dd_kill: float = 1_680_000.0             # 1.5 × lab max drawdown ₹11,18,594 (realised, by exit day)
     # Shadow-incubation registry (shadow_registry.py): copies the forward test's and the validated agents' PAPER
     # trades into frozen, hash-chained ledgers and evaluates the pre-registered promotion rule. Observation only:
     # never places an order. Off by default; its scheduler job exists only when true (PAPER only)
