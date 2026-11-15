@@ -163,9 +163,16 @@ def apply_to(settings, store: "SecretStore | None" = None) -> list[str]:
     except Exception as e:          # a broken vault must not stop the server starting
         print(f"[secret_store] vault not loaded: {e}", file=sys.stderr)
         return []
+    applied = []
     for name, value in values.items():
+        # a vault written by an older build may hold keys of removed features (AI providers, TrueData): they stay
+        # in the vault untouched and are simply not applied
+        known = getattr(type(settings), "model_fields", None)
+        if known is not None and name not in known:
+            continue
         setattr(settings, name, value)
-    return sorted(values)
+        applied.append(name)
+    return sorted(applied)
 
 
 secret_store = SecretStore()

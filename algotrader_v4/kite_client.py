@@ -1,8 +1,8 @@
 """
 kite_client.py  (v5 — Kite API limit-aware)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Zerodha Kite used EXCLUSIVELY for orders + portfolio.
-Market data comes from NSE India API + yfinance (market_data.py).
+Zerodha Kite: orders, portfolio, quotes and historical candles. PAPER mode simulates every order in memory
+(_paper_orders / _paper_positions); the LIVE order path is never used by the validated agents (they refuse LIVE).
 
 Kite Connect API limits enforced here
 ──────────────────────────────────────
@@ -218,47 +218,6 @@ class KiteClient:
             logger.warning("[kite] No instrument tokens found for: {}", missing)
         return token_map
 
-    def setup_ticker(
-        self,
-        token_to_symbol: dict[int, str],
-        on_tick_cb,
-        on_connect_cb=None,
-        on_error_cb=None,
-        on_close_cb=None,
-    ):
-        """Create and return a KiteTicker wired to the given callbacks.
-        Caller is responsible for starting it in a daemon thread."""
-        from kiteconnect import KiteTicker
-        tokens = list(token_to_symbol.keys())
-        access_token = (
-            settings.kite_access_token
-            or (getattr(self._kite, "access_token", "") if self._kite else "")
-        )
-        ticker = KiteTicker(api_key=settings.kite_api_key, access_token=access_token)
-
-        def _on_connect(ws, response):
-            logger.info("[KiteTicker] Connected — subscribing {} tokens", len(tokens))
-            ws.subscribe(tokens)
-            ws.set_mode(ws.MODE_FULL, tokens)
-            if on_connect_cb:
-                on_connect_cb(ws, response)
-
-        def _on_error(ws, code, reason):
-            logger.warning("[KiteTicker] Error {}: {}", code, reason)
-            if on_error_cb:
-                on_error_cb(ws, code, reason)
-
-        def _on_close(ws, code, reason):
-            logger.info("[KiteTicker] Closed {}: {}", code, reason)
-            if on_close_cb:
-                on_close_cb(ws, code, reason)
-
-        ticker.on_ticks = on_tick_cb
-        ticker.on_connect = _on_connect
-        ticker.on_error = _on_error
-        ticker.on_close = _on_close
-        return ticker
-
     def validate_credentials(self) -> dict:
         """Return status of all required credentials and Kite initialisation."""
         return {
@@ -266,7 +225,6 @@ class KiteClient:
             "kite_api_secret":    bool(settings.kite_api_secret),
             "kite_access_token":  bool(settings.kite_access_token),
             "kite_initialised":   self._kite is not None,
-            "anthropic_api_key":  bool(settings.anthropic_api_key),
             "telegram_bot_token": bool(settings.telegram_bot_token),
             "api_key_set":        bool(settings.api_key),
             "trading_mode":       settings.trading_mode,
@@ -334,6 +292,11 @@ class KiteClient:
             return self._paper_place(tradingsymbol, exchange, transaction_type,
                                      quantity, order_type, product, price,
                                      trigger_price, tag)
+        # LIVE price protection: a MARKET order goes out as a marketable LIMIT inside ORDER_PROTECTION_BAND_PCT of the
+        # touch (never a raw market order into a thin book); the quote is logged next to the fill
+        quote_px = 0.0
+        if order_type == "MARKET":
+            order_type, price, quote_px = self.protect_market_order(tradingsymbol, exchange, transaction_type)
         # Pre-flight margin check for BUY entries
         if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
             self._check_margin(tradingsymbol, quantity, price)
@@ -354,10 +317,52 @@ class KiteClient:
             )
 
         order_id = _with_retry(_place, label="place_order")
-        logger.info("LIVE order | {} {} {} qty={} @ {} | id={}",
+        logger.info("LIVE order | {} {} {} qty={} @ {} (quote {}) | id={}",
                     transaction_type, tradingsymbol, order_type,
-                    quantity, price, order_id)
+                    quantity, price, quote_px or "-", order_id)
+        if quote_px:
+            self._log_live_fill(order_id, tradingsymbol, transaction_type, quantity, quote_px, tag)
         return order_id
+
+    @staticmethod
+    def protection_limit(side: str, bid: float, ask: float, ltp: float, band_pct: float) -> tuple[float, float]:
+        """(limit price, reference touch) of a marketable LIMIT: BUY at ask × (1 + band), SELL at bid × (1 − band),
+        on the exchange tick; the LTP when the touch is missing. (0, 0) without any price."""
+        from options_resolver import round_tick
+        ref = (ask or ltp) if side == "BUY" else (bid or ltp)
+        if not ref or ref <= 0:
+            return 0.0, 0.0
+        b = max(0.0, float(band_pct)) / 100.0
+        px = ref * (1 + b) if side == "BUY" else ref * (1 - b)
+        return max(0.05, round_tick(px)), float(ref)
+
+    def protect_market_order(self, symbol: str, exchange: str, side: str) -> tuple[str, float, float]:
+        """LIVE: (order_type, price, quote) for a MARKET request — a protected marketable LIMIT when Kite has a
+        quote, else MARKET (an exit must still go out; logged)."""
+        try:
+            q = self.quote_kite([f"{exchange}:{symbol}"]).get(f"{exchange}:{symbol}") or {}
+            depth = q.get("depth") or {}
+            bid = float(((depth.get("buy") or [{}])[0]).get("price") or 0)
+            ask = float(((depth.get("sell") or [{}])[0]).get("price") or 0)
+            ltp = float(q.get("last_price") or 0)
+        except Exception as exc:
+            logger.warning("[kite] no quote for price protection of {} ({}) — MARKET", symbol, exc)
+            return "MARKET", 0.0, 0.0
+        px, ref = self.protection_limit(side, bid, ask, ltp, settings.order_protection_band_pct)
+        if px <= 0:
+            logger.warning("[kite] no price for protection of {} — MARKET", symbol)
+            return "MARKET", 0.0, 0.0
+        return "LIMIT", px, ref
+
+    def _log_live_fill(self, order_id: str, symbol: str, side: str, qty: int, quote_px: float, tag: str) -> None:
+        try:
+            fill = self.fill_price(order_id)
+            if fill:
+                import drift_monitor
+                from agents.validated_base import _agent_of
+                drift_monitor.record_fill(_agent_of(tag), symbol, side, qty, quote_px, fill, "LIVE_PROTECTED")
+        except Exception as exc:
+            logger.debug("[kite] live fill not logged: {}", exc)
 
     def modify_order(
         self, order_id: str, price: float = 0.0,
@@ -435,88 +440,6 @@ class KiteClient:
             order_ids.append(oid)
             logger.info("Square-off {} {} qty={}", side, pos["tradingsymbol"], qty)
         return order_ids
-
-    # ── GTT (good-till-triggered) stops for delivery positions ─────────────
-    # A day SL order on a CNC holding expires at the close; a single-leg GTT stays at
-    # Zerodha until it triggers (it then places a LIMIT order), so it protects a swing
-    # position overnight and while this server is down. Paper GTTs are recorded only:
-    # the software stop closes paper positions.
-
-    def place_gtt_stop(self, tradingsymbol: str, exchange: str, quantity: int,
-                       trigger_price: float, limit_price: float, last_price: float,
-                       product: str = "CNC") -> int:
-        """Single-leg GTT that SELLs `quantity` when price falls to trigger_price (a long
-        delivery holding, or a long option held overnight with product NRML)."""
-        if settings.trading_mode == "PAPER":
-            gid = int(time.time() * 1000) % 1_000_000_000 + len(self._paper_gtts)   # unique across restarts
-            self._paper_gtts[gid] = {"id": gid, "tradingsymbol": tradingsymbol, "exchange": exchange,
-                                     "quantity": quantity, "trigger": trigger_price,
-                                     "limit": limit_price, "status": "active"}
-            logger.info("PAPER GTT {} | SELL {} {} trigger {} limit {}", gid, quantity,
-                        tradingsymbol, trigger_price, limit_price)
-            return gid
-        kite = self.ensure_session()
-        res = _with_retry(lambda: kite.place_gtt(
-            trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol, exchange=exchange,
-            trigger_values=[trigger_price], last_price=last_price,
-            orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
-                     "quantity": quantity, "order_type": "LIMIT", "product": product,
-                     "price": limit_price}]), label="place_gtt")
-        gid = int(res["trigger_id"])
-        logger.info("LIVE GTT {} | SELL {} {} trigger {} limit {}", gid, quantity,
-                    tradingsymbol, trigger_price, limit_price)
-        return gid
-
-    def modify_gtt_stop(self, gtt_id: int, tradingsymbol: str, exchange: str, quantity: int,
-                        trigger_price: float, limit_price: float, last_price: float,
-                        product: str = "CNC") -> None:
-        if settings.trading_mode == "PAPER":
-            g = self._paper_gtts.get(int(gtt_id))
-            if g:
-                g.update(trigger=trigger_price, limit=limit_price, quantity=quantity)
-            return
-        kite = self.ensure_session()
-        _with_retry(lambda: kite.modify_gtt(
-            trigger_id=int(gtt_id), trigger_type=kite.GTT_TYPE_SINGLE, tradingsymbol=tradingsymbol,
-            exchange=exchange, trigger_values=[trigger_price], last_price=last_price,
-            orders=[{"exchange": exchange, "tradingsymbol": tradingsymbol, "transaction_type": "SELL",
-                     "quantity": quantity, "order_type": "LIMIT", "product": product,
-                     "price": limit_price}]), label="modify_gtt")
-
-    def delete_gtt(self, gtt_id: int) -> None:
-        if settings.trading_mode == "PAPER":
-            g = self._paper_gtts.get(int(gtt_id))
-            if g:
-                g["status"] = "deleted"
-            return
-        kite = self.ensure_session()
-        _with_retry(lambda: kite.delete_gtt(int(gtt_id)), label="delete_gtt")
-
-    def gtt_status(self, gtt_id: int) -> str:
-        """active | triggered | cancelled | deleted | expired | rejected | disabled | unknown"""
-        if settings.trading_mode == "PAPER":
-            return self._paper_gtts.get(int(gtt_id), {}).get("status", "unknown")
-        kite = self.ensure_session()
-        try:
-            return str(_with_retry(lambda: kite.get_gtt(int(gtt_id)), label="get_gtt").get("status", "unknown"))
-        except Exception:
-            return "unknown"
-
-    def order_margin(self, tradingsymbol: str, exchange: str, transaction_type: str, quantity: int,
-                     product: str, order_type: str, price: float) -> Optional[float]:
-        """Margin Zerodha would block for this order (₹), or None when it can't be asked."""
-        if settings.trading_mode == "PAPER" or not self.has_session():
-            return None
-        kite = self.ensure_session()
-        try:
-            res = _with_retry(lambda: kite.order_margins([{
-                "exchange": exchange, "tradingsymbol": tradingsymbol,
-                "transaction_type": transaction_type, "variety": "regular", "product": product,
-                "order_type": order_type, "quantity": quantity, "price": price}]), label="order_margins")
-            return float(res[0]["total"])
-        except Exception as exc:
-            logger.warning("[kite] order_margins failed for {}: {}", tradingsymbol, exc)
-            return None
 
     # ── Historical data (rate-limited + auto-chunked) ──────────────────────
 

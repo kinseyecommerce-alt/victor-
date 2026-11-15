@@ -94,6 +94,35 @@ def serialized(fn):
 
 
 # ── order helpers (PAPER) ─────────────────────────────────────────────────────
+_TAG_AGENT = (("VAL-AUC", "auc_fade"), ("VAL-ATTN", "attn_on"), ("VAL-VRP", "vrp_winged"), ("VAL-PEAD", "pead_h60"))
+_NO_STATE_CHECK = ("SETTLEMENT", "RECONCILE", "CORPORATE_ACTION")   # book-keeping fills, not trading decisions
+
+
+def _agent_of(tag: str) -> Optional[str]:
+    return next((a for p, a in _TAG_AGENT if str(tag or "").startswith(p)), None)
+
+
+def _increases(symbol: str, product: str, side: str) -> bool:
+    """True when an order of `side` would open or enlarge the paper row of (symbol, product)."""
+    row = paper_row(symbol, product)
+    q = int((row or {}).get("quantity") or 0)
+    return q == 0 or (q > 0) == (side == "BUY")
+
+
+def _state_check(symbol: str, product: str, side: str, tag: str) -> None:
+    """Trading-state order guard (trading_state.py): non-ACTIVE refuses orders that open / enlarge a position."""
+    import trading_state
+    trading_state.check_order(_agent_of(tag), _increases(symbol, product, side))
+
+
+def _log_fill(tag: str, symbol: str, side: str, qty: int, quote_px: float, fill: float, kind: str) -> None:
+    try:
+        import drift_monitor
+        drift_monitor.record_fill(_agent_of(tag), symbol, side, qty, quote_px, fill, kind)
+    except Exception as exc:
+        logger.debug("[validated] fill not logged: {}", exc)
+
+
 def paper_row(symbol: str, product: str) -> Optional[dict]:
     """The paper broker's net row of (symbol, product), or None."""
     from kite_client import kite_client
@@ -112,16 +141,22 @@ def paper_marketable(symbol: str, exchange: str, side: str, qty: int, product: s
     px = float((q.get("ask") if side == "BUY" else q.get("bid")) or 0) or float(q.get("ltp") or 0)
     if px <= 0:
         raise ValueError(f"{symbol}: no price in the quote")
+    _state_check(symbol, product, side, tag)
     oid = kite_client.place_order(tradingsymbol=symbol, exchange=exchange, transaction_type=side, quantity=qty,
                                   order_type="LIMIT", product=product, price=round(px, 2), tag=tag)
     fill = kite_client.fill_price(oid)
-    return oid, float(fill if fill else px)
+    fill = float(fill if fill else px)
+    _log_fill(tag, symbol, side, qty, round(px, 2), fill, "MARKETABLE")
+    return oid, fill
 
 
 def paper_fill_at(symbol: str, exchange: str, side: str, qty: int, product: str, price: float, tag: str,
                   fill_kind: str) -> tuple[str, float]:
     from kite_client import kite_client
+    if fill_kind not in _NO_STATE_CHECK:
+        _state_check(symbol, product, side, tag)
     oid = kite_client.paper_fill_at(symbol, exchange, side, qty, product, price, tag, fill_kind)
+    _log_fill(tag, symbol, side, qty, float(price), float(price), fill_kind)
     return oid, float(price)
 
 
@@ -255,13 +290,30 @@ class ValidatedAgent(BaseAgent):
     def _scale(self) -> float:
         return float(getattr(settings, "validated_notional_scale", 1.0) or 1.0)
 
+    def alloc_scale(self) -> float:
+        """The risk-budget allocator's size factor for this strategy (risk_budget.py): 1.0 = lab sizing (default);
+        only scales down unless RISK_BUDGET_ALLOW_UPSCALE. Never raises (falls back to 1.0)."""
+        try:
+            import risk_budget
+            return float(risk_budget.scale(self.name))
+        except Exception as exc:
+            logger.error("[{}] risk budget unavailable ({}) — lab sizing", self.name, exc)
+            return 1.0
+
+    def alloc_lots(self, lots: int) -> int:
+        """Lot count after the allocator's factor (floor; 1.0 keeps the tested lots)."""
+        f = self.alloc_scale()
+        return int(lots) if f == 1.0 else int(lots * f)
+
     def daily_loss_limit(self) -> float:
         return float(self._setting("daily_loss_stop", 0.0) or 0.0) * self._scale()
 
     def dd_limit(self) -> float:
         return float(self._setting("dd_kill", 0.0) or 0.0) * self._scale()
 
-    def entry_block_reason(self) -> Optional[str]:
+    def entry_block_reason(self, approval: bool = True) -> Optional[str]:
+        """None when a new entry may go out, else the skip reason. approval=False: a planning step (PEAD's evening
+        decision) that places no order — the semi-auto approval is checked at the entry stage only."""
         import bot_state
         if settings.trading_mode != "PAPER":
             return "live_mode_refused"
@@ -271,6 +323,9 @@ class ValidatedAgent(BaseAgent):
             return "validated_only_off"
         if not self._setting("enabled", True):
             return "kill_switch"
+        ts = self._trading_state_block()
+        if ts:
+            return ts
         enabled = bot_state.is_agent_enabled(self.name)
         if self._dd_killed is not None:
             if not enabled:
@@ -294,7 +349,15 @@ class ValidatedAgent(BaseAgent):
         lim = self.daily_loss_limit()
         if lim > 0 and self.realised_today() <= -lim:
             return "daily_loss_stop"
-        return None
+        return self._approval_block(create=True) if approval else None
+
+    def _trading_state_block(self) -> Optional[str]:
+        import trading_state
+        return trading_state.entry_block(self.name)
+
+    def _approval_block(self, create: bool) -> Optional[str]:
+        import approvals
+        return approvals.entry_gate(self.name, create=create, now=self._now())
 
     # ── logging ──
     def _log(self, stage: str, symbol: str, outcome: str, reason: str = "") -> None:
@@ -495,6 +558,9 @@ class ValidatedAgent(BaseAgent):
             return "validated_only_off"
         if not self._setting("enabled", True):
             return "kill_switch"
+        ts = self._trading_state_block()
+        if ts:
+            return ts
         enabled = bot_state.is_agent_enabled(self.name)
         if self._dd_killed is not None and not enabled:
             return "drawdown_kill"
@@ -508,7 +574,7 @@ class ValidatedAgent(BaseAgent):
         lim = self.daily_loss_limit()
         if lim > 0 and self.realised_today() <= -lim:
             return "daily_loss_stop"
-        return None
+        return self._approval_block(create=False)
 
     def _mark(self, p: ValidatedPosition) -> Optional[float]:
         row = paper_row(p.symbol, p.product)

@@ -191,6 +191,8 @@ What the candlestick results do and do not test (read before quoting a pass):
 * **Positional**: stop/target checked on daily high/low (stop first); a gap through the stop fills at the
   open; the position is closed at the close of its `max_hold`-th session, or at the close of the last session of
   the period being simulated (`period_end`), so DISCOVERY trades never use FINAL-period prices. Delivery is long-only.
+  With `decision_time` the (partial) fill session is not counted: the position is closed at the close of the
+  `max_hold`-th session AFTER the fill day (documented by the Nov 2026 audit; the code always did this).
 * **Not modelled**: order-book depth, partial fills, circuit limits, short-selling bans, corporate actions
   (the bars are used as given — check `data_quality.json` for unadjusted splits), options.
 
@@ -1271,3 +1273,237 @@ settings. Nothing in the new diagnostics changes a verdict or adds a trial; they
     `build_sessions` treats the last 5-minute block of its input as complete, so on streaming data it would use a
     half-built 5-minute candle (the lab itself is not affected). Warm-up: with only 120 sessions of history 6-15 % of
     EMA-rule decisions change, so bars3y H1 decisions of daily EMA rules were made on short history.
+
+## Simulator audit and corrected-data re-run (`refsim.py`, `audit_run.py`, `corrected.py`, `rerun_corrected.py`, `prereg/rerun_corrected_v1.json`)
+
+**Plain language.** The user asked whether ~2,500 failures mean the simulator is wrong. It is not. A second
+backtester written from scratch from the README's rules (`refsim.py`: its own JSON reader, fills and Zerodha cost
+table) produces the same trades as `sim.py`, to the paisa, wherever both read a strategy's rule the same way; 30
+randomly drawn trades check out against the raw bar rows and a hand-computed Zerodha bill; look-ahead tests are clean;
+random entries break even before costs; and buy-and-hold reproduces the raw market return exactly. The fill rules are
+slightly *conservative*, by about Rs 2 per Rs 1 lakh trade, against a cost of about Rs 122 per trade. Most strategies
+fail for one of two plain reasons: 43 % lose money even with zero costs, and another 42 % make a little before costs
+(an intraday median of Rs 12 per Rs 1 lakh trade) that the Rs 82 of charges and Rs 40 of slippage wipe out.
+Correcting the data (wrong demerger / rights factors, dividends subtracted in rupees, Kite's stale 09:15 prints, the
+2023-11 seam, unadjusted volume) changed 4 of 608 catalogue screen verdicts (2 fewer passes; the one new passer failed
+its first FINAL look) and no FINAL verdict of record (one recomputed FINAL, cs_gravestone_doji_d, would now confirm,
+but its original look stands). On the old eras one strategy lost its 2016-23 pass (r3_tfweekly_wk_excess_loser_rev)
+and one, r3_swing_quiet_loser_rev, now meets the "proven in both eras" definition — mostly because of the
+point-in-time NIFTY 100 universe and a first look at the 2016-23 minute era, and on thin evidence (38 FINAL trades).
+The three live PAPER strategies are unchanged in substance.
+
+### Part 1 — the simulator audit (original data, 2023-26 DISCOVERY only; FINAL never touched)
+
+* **Independent engine** (`refsim.py`, reads `bars3y/*.json` itself; imports no sim / data / indicators / costs /
+  catalogue code). 22 strategies re-implemented from their one-line descriptions (ORB / gap / previous-day / VWAP /
+  time-of-day intraday, 2 scalping, 5m / 15m / 60m candle rules, daily swing, calendar, weekly, daily candlestick, a
+  Tradetron (Kite-ecosystem) ORB, a GitHub (Williams Oops) rule, stock futures intraday and positional, AUC-FADE-2PCT /
+  3PCT, SWING-ATTN-ON-3X) on all 97 symbols: **310,448 of 310,470 trades identical** (entry / exit date, time, price,
+  side, qty, gross, cost, net) when the rule is read as the catalogue code reads it; 89.3 % with the literal one-line
+  reading. Mismatch classes: (a) **rule ambiguity** in the one-liner — window end inclusive (`pdh_pdl_reject`;
+  `between()` is half-open), "15m candle 09:45-14:00" = candle END (`r3_tf15m_slotvol_shock`), Tradetron target =
+  broken edge + range, not fill + range, 2 trades a day (`r5_kite_tt_orb15_stock`), Oops buy stop armed by the gap bar
+  (`r7_gh2_oops_stock`), EMA20 warm-up (`cs_bull_engulfing_d`), a `decision_time` spec holds max_hold sessions AFTER
+  the fill day (`r3_tfweekly_*`; this README said "closed at the close of its max_hold-th session"); (b)
+  **undocumented hygiene filters** — a > 25 % daily jump blocks a stock for 130 sessions (`r3_swing_tom`: INDUSINDBK's
+  real March 2025 fall) and the SIEMENS / VEDL CA-gap list (the last 22 trades). **No engine mismatch.**
+* **Hand checks** (`audit/hand_checks.txt`, seed 20261115): **30 / 30** trades across 22 strategies match the raw JSON
+  rows (entry = open x (1 +/- 2 bps), market exits at the open, stops inside the bar range, targets traded through by a
+  tick, max-hold at the day's last close) and a manual Zerodha bill (brokerage, STT, NSE 0.00307 %, SEBI, stamp, GST,
+  DP) to the paisa.
+* **Costs = Zerodha's published schedule.** zerodha.com/charges (fetched 2026-11-15): intraday 0.03 % or Rs 20 per
+  order, STT 0.025 % sell; delivery no brokerage, STT 0.1 % both sides, stamp 0.015 %, DP Rs 15.34; futures STT 0.05 %
+  sell, NSE 0.00183 %; NSE equity 0.00307 %, SEBI Rs 10 / crore, GST 18 % on brokerage + exchange + SEBI. `costs.py`
+  equals refsim's own table on 3,000 random order values x 3 products (+-1 paisa). Rs 1 lakh intraday round trip
+  = Rs 82.7.
+* **Look-ahead** (`audit/lookahead.json`): truncated views on 10 intraday strategies (every 15th bar of every 7th
+  session, 20 symbols: 350,400 checks) — 0 differences, while the planted 30-bar cheat is caught 2,920 times; whole
+  future removed (data cut at 2025-03-03) for 10 intraday + 8 positional strategies — 0 of 49,416 earlier trades
+  differ. One-bar shift: a planted one-bar look-ahead collapses from gross PF 24.9 to 0.975; the 18 real rules degrade
+  smoothly or not at all (`r7_gh2_oops_stock` 1.218 -> 1.186, `r3_swing_vix_capitulation` 7.1 -> 5.1, `orb15_break`
+  1.086 -> 1.088).
+* **Pessimism?** (`audit/fill_bias.json`, 289,424 trades of the 14 intraday refsim rules, zero cost): "target first" on
+  a two-sided bar +Rs 0.04 per trade (101 ties), a bare touch filling the target +Rs 1.82, a gapped stop filled at the
+  stop instead of the open +Rs 0.14: under Rs 2 per Rs 1 lakh trade in total. Slippage is charged once per side
+  (entry and market exits; targets are limit orders), costs once, short-side signs verified (hand checks, mirror).
+* **Benchmarks** (`audit/benchmarks.json`): buy-and-hold through `sim.py` = the raw bar return exactly for NIFTY and 6
+  stocks (NIFTY +32.66 % over DISCOVERY; official index close-to-close +33.13 %; tfgrid's published +3.36 L on Rs 10 L).
+  Random entries, 5 seeds x 97 stocks: 30-minute exits PF 0.97-1.06 at zero cost (mean 1.007), 0.39-0.43 at real cost;
+  +-0.5 % bracket PF 0.95-1.02 / 0.56-0.60; the cost drag is Rs 121.7 per trade = Rs 82.2 charges + Rs 39.5 slippage,
+  as expected (the zero-cost trades minus that drag give the observed PF to 0.01). Random 5-day swing longs: PF
+  1.09-1.18 before costs (NIFTY rose 33 %), 0.89-0.97 after.
+
+### Part 1b — gross vs net (`audit/gross_net.json`)
+
+Every catalogue strategy with zero costs and zero slippage (606 with trades, DISCOVERY):
+
+| | all | intraday (342) | positional (264) |
+|---|---|---|---|
+| lose money BEFORE costs | **259 (42.7 %)** | 113 (33.0 %) | 146 (55.3 %) |
+| profitable before costs, killed only by costs | **254 (41.9 %)** | 223 (65.2 %) | 31 (11.7 %) |
+| net > 0 after costs | 93 (15.3 %) | | |
+| pass the screen after / before costs | 17 / 66 | | |
+| median gross PF | 1.03 | 1.05 | 0.94 |
+| median gross per Rs 1 lakh trade | | Rs +12 (vs Rs 82 cost + Rs 40 slippage) | Rs -107 (vs Rs 234 cost) |
+
+Mirror test (each rule flipped to the other side, stops / targets reflected, zero cost): rule and mirror both lose
+before costs in 63 of 606 pairs (10.4 %; intraday 14 of 342 = 4.1 %, positional 49 of 264); the intraday rule + mirror
+sum has a median of **+Rs 7** per trade — the engine is not biased against trading (if anything a fill at a 1-minute
+open is a hair optimistic, which the 2 bps slippage covers). The positional pairs' negative sum is the asymmetry of
+% stops / targets over multi-day holds in a trending market, not a fill effect.
+tfgrid (Rs 10 lakh accounts, 1:3 bracket, 1,090 combos with trades): 36.5 % lose before costs, 48.7 % are
+killed only by costs; 90 pass the account screen at zero cost, 8 with costs. Median gross over DISCOVERY by
+timeframe: 1m -1.41 L, 3m / 5m +0.16 L, 15m +0.27 L, 30m +1.44 L, 60m +0.84 L, daily +0.21 L, weekly +0.18 L,
+against median nets of -59.6 L, -48.9 / -33.9 L, -11.3 L, -6.0 L, -3.2 L, -0.06 L, +0.17 L: with 1 % risk and a
+close 1:3 stop the positions are large (MIS up to 5x), so charges and slippage are about Rs 1,000 per scalping
+trade against Rs 10,000 at risk.
+
+### Part 2 — corrected data (`corrected.py`; applied on load, no file changed; maps in `audit/corrected/`)
+
+One convention for both minute eras: official NSE prints x F(d) (splits, bonuses, consolidations, rights, demergers);
+dividends NOT back-adjusted (as-traded prices = what a live strategy sees; Kite's files mixed ratio, rupee and no
+adjustment). `corrected.validate()`: **all 119 minute-era rows of bar_adjustment_issues.csv pass** (step of corrected
+/ official = 1 across every date; additive offsets < 0.2 % of price afterwards; demergers ADANIENT 2018-04-05 / 09-06,
+GRASIM, ABB, MOTHERSON, NMDC, ITC, SIEMENS, VEDL; rights BHARTIARTL / CANBK / INDHOTEL / TATASTEEL; the 2023-11-09/10
+seam for IOC / ONGC / PETRONET within 0.5 % of the official gap; overnight ratios median error 0.17 %, the remainder is
+NSE's 30-minute-VWAP close vs the 15:29 minute close; the largest, HINDPETRO 2018-10-08, sits after two excluded
+sessions). Found on the way: Kite prints a stale 09:15 bar on special pre-open days (demerger ex-dates: ABB 1,456 vs
+the official open 1,324 at ~09:50) — 2 such bars dropped on 2023-26, 149 on 2016-23; dividends subtracted in rupees
+also on 2023-26 (16 segments: BANKBARODA, CANBK, GAIL, HEROMOTOCO, HINDPETRO, IOC, OFSS, TATASTEEL, TECHM, VEDL;
+intraday % moves there were off by 1-4 %), 233 such segments on 2016-23. Volume: 7 unadjusted-volume windows (2016-23)
+rescaled and flagged. Daily file: the 10 nse_old issues repaired by official / applied factor. **Excluded** (shape
+disagrees with the official prints): 0 sessions on 2023-26, 112 symbol-sessions on 2016-23 (VEDL 36, IOC 18, CANBK 6,
+...; `build_report.json`); 63 sessions on 2023-26 have no official print and keep their segment's map. Universe for the
+2012-23 DAILY look: point-in-time NIFTY 100 from `index_members` (100 / 100 constituents present on every sampled
+date). The MINUTE re-run keeps today's 97 names: still survivorship-biased.
+
+### Part 3 — re-run on corrected data (pre-registered in commit cdb0cb5, before any corrected result)
+
+Same hypotheses (not new trials: ledger stages `corrected_*`, N unchanged), corrected result of record, one-look FINAL.
+
+* **Catalogue, 608 ids, 2023-26 DISCOVERY:** 17 -> 15 pass. Changed: `r3_swing_vix_spike` (pass -> fail; its FINAL was
+  already REJECTED), `r7_gh2_clenow_ct_stock` (pass -> fail; FINAL REJECTED), `r5_kite_vars_cs_bull_marubozu_nxo`
+  (pass -> fail), `r5_kite_vars_bb20_d` (fail -> PASS; FINAL never opened -> one look: 1,243 trades, PF 0.88, net
+  -3.02 L, **REJECTED ON FINAL**). 502 ids moved by more than Rs 1; the biggest moves are rules that compare price with
+  absolute levels (option-OI strikes, round numbers), which now line up with the as-traded prices.
+* **Modules** (original looks stand): AUC-FADE-3PCT DISC +2.35 -> +2.40 L, FINAL +49,240 -> +48,412 (PF 1.32 -> 1.32);
+  AUC-FADE-2PCT FINAL +22,434 -> +19,341 (PF 1.08 -> 1.07); SWING-ATTN-ON-3X FINAL +10,748 -> +10,615 (PF 1.175 ->
+  1.172); SCALP-AUC-FADE-1TO3-0925 FINAL -45,107 -> -43,143. VRP-STRANGLE-016-WINGED reads only index / option data:
+  unchanged by construction. ev_pead_long_h60: identical (FINAL +5.68 L, 2012-23 OOS-CONFIRMED).
+* **Opened FINALs recomputed** (original look stands): r3_swing_vix_capitulation +3.09 -> +3.16 L,
+  r3_swing_quiet_loser_rev +33,981 -> +41,085, r3_tfweekly_wk_loser_rev +68,341 -> +68,310, r4_delivery_brk_fake_short
+  +27,153 -> +37,277 (all still CONFIRMED); cs_gravestone_doji_d +1,147 (PF 1.034, REJECTED) -> +3,925 (PF 1.117, would
+  be CONFIRMED — the original look stands because no simulator bug was found); every other opened FINAL keeps its verdict.
+* **tfgrid** (668 grid + 608 natives, Rs 10 lakh, 1:3): 8 -> 7 stage-1 passes; `nat:cs_bear_engulfing_d:rr3` and
+  `nat:cs_tweezer_top_d:rr3` fail now (H1 <= 0), `nat:r3_swing_quiet_loser_rev:rr3` passes (no fresh FINAL: the same
+  signal's FINAL was already seen through the Rs 1 lakh protocol). 2016-23 on the corrected old view for the 9 combos that passed
+  either run: all fail as before except `nat:r3_swing_quiet_loser_rev:rr3` (OOS-CONFIRMED; no FINAL look of its
+  own and DSR far below 0.95, so not proven).
+* **2012-23 daily, corrected file, PIT NIFTY 100** (17 eligible ids): OOS-CONFIRMED r3_tfdaily_aroon_cross,
+  r4_delivery_lowdel_selloff_long, r7_gh2_clenow_ct_stock (as before) and now also r3_swing_bb_lower_sma100 (PF 1.18) and
+  r3_swing_quiet_loser_rev (PF 1.25). The universe, not the data, does that: on the corrected
+  file with the original turnover top-100 both still fail (`rerun/oldera_daily_turnover_universe.json`). r3_swing_vix_capitulation still fails (PF 1.04, H2 <= 0).
+* **2016-23 minute, corrected old view** (27 ids; daily strategies were judged on this era for the first time):
+  the live / proven modules stay OOS-CONFIRMED and get slightly stronger — AUC-FADE-3PCT +4.16 -> +5.07 L (PF
+  1.35 -> 1.49), AUC-FADE-2PCT +6.45 -> +7.52 L (PF 1.29 -> 1.37), SWING-ATTN-ON-3X +4.50 -> +4.36 L (PF 1.60 ->
+  1.60), SCALP-AUC-FADE-1TO3-0925 +13.2 -> +14.0 L (still fails at 5 bps); r3_futures_stk_tom_long OOS-CONFIRMED
+  as before. Changed: r3_tfweekly_wk_excess_loser_rev OOS-CONFIRMED -> OOS-FAILED (H1 <= 0). First looks that
+  pass: r3_swing_quiet_loser_rev (747 trades, PF 1.59, passes at 5 bps), r3_tfdaily_aroon_cross,
+  r4_delivery_lowdel_selloff_long, r5_kite_vars_bb20_d, r7_gh2_clenow_ct_stock (none of the last four has a
+  confirmed FINAL). r3_swing_vix_capitulation (PF 0.97), r3_tfweekly_wk_loser_rev (PF 1.05) and
+  r4_delivery_brk_fake_short (PF 0.96) fail.
+* **DSR** (N = 2,538 variants, unchanged; FINAL N = 43): every corrected FINAL-confirmed strategy stays far below 0.95
+  (AUC-FADE-3PCT 0.08, SWING-ATTN-ON-3X 0.05, AUC-FADE-2PCT 0.03, ev_pead_long_h60 0.15, r3_swing_quiet_loser_rev 0.11,
+  r3_swing_vix_capitulation 0.08, r3_tfweekly_wk_loser_rev 0.07); DISCOVERY DSR 0.00 for all.
+* **Proven** (FINAL-CONFIRMED on 2023-26 AND OOS-CONFIRMED on 2016-23, unchanged definition): **7 before, 8
+  after.** The same 7 (AUC-FADE-3PCT, AUC-FADE-2PCT, SWING-ATTN-ON-3X and the 4 modelled option structures, whose
+  index data the correction does not touch) plus **r3_swing_quiet_loser_rev** (5-day return <= -8 % on below-average
+  volume: buy, hold 5, 12 % stop): FINAL 38 trades PF 1.55 (corrected 41, PF 1.65), 2016-23 minute 747 trades PF
+  1.59, 2012-23 daily on point-in-time NIFTY 100 PF 1.25. Treat it as weak: 38 FINAL trades, DSR 0.11, long-only on
+  survivorship-biased names, and its original 2012-23 look on the turnover universe failed. The 2 proven / 3 live
+  + ev_pead_long_h60, before -> after: AUC-FADE-2PCT FINAL +22,434 -> +19,341, 2016-23 PF 1.29 -> 1.37;
+  SWING-ATTN-ON-3X FINAL +10,748 -> +10,615, 2016-23 PF 1.60 -> 1.60; AUC-FADE-3PCT FINAL +49,240 -> +48,412,
+  2016-23 PF 1.35 -> 1.49; VRP-STRANGLE-016-WINGED unchanged; ev_pead_long_h60 unchanged. None of this is a reason
+  to switch anything to LIVE.
+
+Commands: `python -m stratlab.audit_run compare|handcheck|lookahead|shiftcontrol|bias|benchmarks|catalog|grossnet`,
+`python -m stratlab.corrected --build --validate`, `python -m stratlab.rerun_corrected --stage
+screen|modules|tfgrid|final|events|oldera|oldmin|tfgrid_oos|ledger`. Outputs: `<scratchpad>/audit/` (progress.txt,
+refsim/, catalog/, rerun/, corrected/, ledgers/, tfgrid_corrected/, tfgrid_gross/). Tests: `tests_audit.py`, run by
+`test_pipeline.py` (section "STRATLAB: simulator audit + corrected data").
+
+## Web-sourced strategies: low volatility, dividend month, earnings straddles (`web_strategies.py`, `web_run.py`, `prereg/web_v1.json`)
+
+**Plain language.** We searched the published research (academic journals, SSRN / NBER, NSE and IIM work, replication
+studies, practitioner research) for strategies with evidence beyond a backtest: tested in India, still working after
+publication, seen in many countries, with an economic reason, and cheap enough to trade. Of 25 candidates, most were
+already tested by this lab (volatility selling on NIFTY, momentum, reversal, earnings drift, calendar effects, FII /
+delivery data, index inclusion) or could not be tested with our data (value / quality need balance sheets). Four
+variants of three ideas were left and run once. **None is proven.** Low-volatility stocks and the dividend month made
+money in 2012-23, but random stocks / random months from the same pool did as well, and both failed on 2023-26. Buying
+option straddles before results captures the known rise in option prices before announcements, but not enough to pay
+the option spreads and decay, except briefly in 2024.
+
+Shortlist with sources and scores: `<scratchpad>/webstrats/SHORTLIST.md` (sha256 recorded in the prereg). Selection
+rule, fixed before any data look: evidence score >= 5/10, feasible, never tested by the lab, a published rule, able to
+reach the trade minimum on availability counts (`webstrats/data_check.json`: counts only). Pre-registered in
+`prereg/web_v1.json` (sha256 `abfc2e5c704b5265e391affba45138bf858a45666524107faddb20fd34e94308`, byte-identical to
+`<scratchpad>/webstrats/PREREGISTERED_WEB.json`, commit 26b0726, before any result).
+
+    python -m stratlab.web_run --data-check | --preregister | --smoke | --run --trials <ledger>
+
+**Variants** (published rules, no tuning; Rs 1 lakh per stock trade, CNC costs + 2 bps; options 1 lot, real NSE EOD
+prices through nsedata's simulator, haircut max(Rs 0.05, 1 %) per leg per fill + Zerodha fees):
+* `web_lowvol30_nifty100` — NSE's NIFTY100 Low Volatility 30 methodology: point-in-time NIFTY 100 F&O names, 1-year
+  daily log-return std to the end of Feb / May / Aug / Nov, 30 lowest, existing members kept while ranked <= 60; held
+  Apr-Jun / Jul-Sep / Oct-Dec / Jan-Mar (one trade per name-quarter; equal weight instead of 1/vol). Sources: NSE
+  methodology (Nov 2026) and 2018 whitepaper; Frazzini-Pedersen 2014; Joshipura 2020 (India).
+* `web_divm_pred_exmonth` — dividend-month premium (Hartzmark-Solomon, JFE 2013; India +1.01 %/month, t = 8.35, in
+  Hameed-Xie-Zhong 2024): buy every top-500 stock that went ex-dividend in the same calendar month a year earlier,
+  hold that month; dividends received are credited (prices are not dividend-adjusted).
+* `web_ea_straddle_m3_0` / `web_ea_straddle_m1_p1` — Gao-Xing-Zhang (JFQA 2018): long ATM stock straddle (10-60 days
+  to expiry) from the close of day -3 to the close of day 0 / from day -1 to day +1, day 0 = first session on / after
+  the notified results board meeting (notice before 15:00 of the entry day; skipped if results already out). India:
+  Saurav-Agarwalla-Varma (2024) show implied volatility rising into results on Indian stock options.
+
+**Results** (L = Rs 1 lakh; old era = 2012-23 with the point-in-time universe; one look each):
+
+| id | 2023-26 DISCOVERY tr / PF / net (H1 / H2) | verdict | FINAL | 2012-23 tr / PF / net (H1 / H2) | verdict |
+|---|---|---|---|---|---|
+| web_lowvol30_nifty100 | 238 / 1.81 / +6.5 L (+3.3 / +3.2) | PASSED | **120 / 0.76 / -1.6 L REJECTED** | 1,288 / 2.14 / +46.1 L (+24.2 / +21.9) | OOS-CONFIRMED |
+| web_divm_pred_exmonth | 1,151 / 0.85 / -6.9 L (+3.5 / -10.4) | FAILED | – | 5,972 / 1.45 / +96.7 L (+57.8 / +38.9) | OOS-CONFIRMED |
+| web_ea_straddle_m3_0 | 1,362 / 1.16 / +8.5 L (+12.1 / -3.6) | FAILED (H2) | – | 5,186 / 0.83 / -35.5 L (-5.7 / -29.8) | OOS-FAILED |
+| web_ea_straddle_m1_p1 | 1,408 / 0.64 / -35.9 L | FAILED | – | 5,400 / 0.62 / -126.0 L | OOS-FAILED |
+
+**Proven on past unseen data: 0 of 4.** DSR = 0.000 for every variant at N = 2,542 (all 2023-26 trials); with the fair
+N = 4 the best is 0.031 (m3_0; PSR(0) 0.91). Why the two OOS passes are not edges:
+* Excess return per trade (month-clustered 95 % CI, dividends included, vs a PRICE index — which flatters a total-return
+  strategy by ~0.1 %/month): low-vol vs NIFTY 100 +0.77 % per quarter [-0.07, +1.63] in 2012-23, +0.20 % [-1.00, +1.50]
+  in 2023-26; price-only +0.00 % in 2012-23. Random 30 NIFTY 100 names each quarter (placebo) did as well: PF 1.94 on
+  2023-26 DISCOVERY and 1.69 in 2012-23 (excess +0.52 % [-0.57, +1.62]). It is NIFTY-100 beta plus dividends.
+* Dividend month vs NIFTY 500: +0.96 % per month [+0.38, +1.47] in 2012-23 (H1 +1.56 %, H2 +0.45 % with CI over 0),
+  but dividends credited are Rs 69 L of the Rs 97 L net (without them PF 1.11, excess -0.21 %), and the placebo (same
+  stocks, random months, real dividends) earned +0.79 % [+0.30, +1.29]: the predicted month adds ~0.2 %/month, not
+  Hameed et al.'s 1 %. In 2023-26 it lost (-0.55 % [-1.54, +0.42]; price-only -1.09 % [-2.07, -0.14]).
+* Straddles: random-date straddles (placebo) lose PF 0.56-0.60, so the pre-results window is better than random (m3_0
+  PF 0.83 in 2012-23, 1.16 in 2023-26 DISCOVERY) — the implied-volatility run-up is real — but at a 2.5x haircut m3_0
+  loses on 2023-26 too (PF 0.78) and H2 of DISCOVERY already lost. Holding through the announcement (m1_p1) is the
+  volatility crush: PF 0.62-0.64 in both eras. Average straddle premium Rs 54,000; 72 entries skipped (untraded strike).
+* Controls: planted edges are found (low-vol selected by next quarter's return PF 19.6; dividends planted before each
+  stock's best months PF inf vs PF 1.28 one month later; meetings planted before the largest 3-day moves PF 20.8 vs
+  0.48 delayed 25 sessions). All verdicts hold at 5 bps (stocks) or are worse at the 2.5x option haircut.
+
+Rs 10 lakh account (capital.py, report-only; the stock variants are sized as a 20 % stop = Rs 50,000 a position, so
+the swing agent's slots take few signals): low-vol +0.15 L on 2023-26 DISCOVERY (0.7 %/yr), +2.0 L over 2012-23
+(1.75 %/yr, max DD 3.5 %); dividend month +0.18 L (0.9 %/yr) / +1.1 L (1.0 %/yr); m3_0 +1.7 L (8.3 %/yr, max DD 12 %)
+on 2023-26 DISCOVERY but -4.7 L over 2012-23 (max DD 71 %); m1_p1 -1.4 L / -39.5 L. NIFTY buy-and-hold made more than
+the stock variants on the same capital.
+
+New trials: 2023-26 +4 variants (N 2,538 -> 2,542; 5 rows incl. one FINAL), 2012-23 +4 (269 -> 273); ledger backed up
+first (`trials_v2.csv.bak_web_20261115_042035`). No variant reads minute bars, so the 2016-23 minute era and the
+corrected-data overlay do not apply. sim.py unchanged. Caveats: equal weights instead of NSE's 1/vol weights; quarter
+entry approximates NSE's effective dates; the low-vol index's live record (2016-) overlaps our eras; dividends credited
+gross (taxed at the investor's slab rate from April 2020); stock-option EOD closes are last trades and the 1 % haircut
+may be optimistic for illiquid strikes. Do not re-tune any of these on these results. Outputs: `<scratchpad>/webstrats/`
+(SHORTLIST.md, data_check.json, run1/report.json, run1/trades, progress.txt). Tests: `tests_web.py` (9 synthetic), run
+by `test_pipeline.py`.

@@ -1,0 +1,329 @@
+{
+ "availability_rule": {
+  "board_meetings": "the LATEST results-meeting notice broadcast before 15:00 IST of the entry session (events_data cutoff); skipped if results were already published since that notice",
+  "calendar": "exchange session calendar treated as public (day 0 = first session on / after the meeting)",
+  "corporate_actions": "flowdata.corp_actions with before = decision day + 1 (nsedata.cutoff(decision day + 1) clips every flowdata read): only dividends whose ex-date is before the next session",
+  "index_membership": "flowdata.index_members(NIFTY100, cut-off + 1): changes in force by the cut-off",
+  "lowvol_selection": "built once per cut-off from daily closes dated <= the cut-off (W.lv_volatility slices by date; tested on truncated data); the holding quarter starts ~1 month later",
+  "option_chain": "strike and expiry chosen from the previous F&O session's EOD chain (nsedata rule); filled at the entry session's EOD close only if both legs traded that day"
+ },
+ "citations": {
+  "web_divm_pred_exmonth": [
+   "Hartzmark & Solomon (2013) JFE 109(3) 640-660 'The dividend month premium'",
+   "Hameed, Xie & Zhong (2024) 'Preferences for dividends and stock returns around the world' (India: predicted ex-month minus other months 1.010 %/month, t = 8.35, 1993-2018)"
+  ],
+  "web_ea_straddle_m1_p1": [
+   "Gao, Xing & Zhang (2018/2013 WP): [-1,+1] 3.09 %",
+   "as above"
+  ],
+  "web_ea_straddle_m3_0": [
+   "Gao, Xing & Zhang (2018) JFQA 53(6) 2587-2617 'Anticipating uncertainty: straddles around earnings announcements' ([-3,0] 3.34 %)",
+   "Saurav, Agarwalla & Varma (2024) American Business Review 27(2) 459-487 (IV rises into results in Indian stock options)",
+   "Chung & Louis (2017) JEF 40 220-235"
+  ],
+  "web_lowvol30_nifty100": [
+   "NSE Indices, Methodology Document (Nov 2026) pp. 190-192, NIFTY100 Low Volatility 30; factsheet Oct 2026",
+   "NSE whitepaper NIFTY100 Low Volatility 30 (June 2018)",
+   "Frazzini & Pedersen (2014) JFE 'Betting against beta'; Blitz & van Vliet (2007) JPM",
+   "Joshipura (2020) IMFI; Pandey & Samanta (contrary, CNX 100 2001-14)"
+  ]
+ },
+ "code_sha256": {
+  "capital.py": "382986bba85b4229c3adabcd94b81e1f54825e05a2f7501d4257135f5d99903d",
+  "data_daily.py": "0d07ace83d42d712960a434423c1e6cddf3a5aedc59c94b4d3228804c54999c6",
+  "events_daily.py": "7986b283b2f23a3edf58ed1784ecee325fc09b3ab2971ccce88675e9abe23b1d",
+  "events_data.py": "6c6d2ba958b6944ca53329c7974a28b44c4c37baeea8591f077afc67a9b363db",
+  "events_run.py": "a9937144da233f5cafe2f5926bf37ad97afe65bcfc5eef1186f6f698d0729c31",
+  "flowdata.py": "947bbbc6fa63cf5df28d812b865e73aa9969d72bf934f306934c835dc8418069",
+  "nsedata.py": "5b776ab3ba9e1f0163696020fb29afc24c1cd401760bfc0e67ad082630960db8",
+  "oldera_fo.py": "58a7325ebf86e1569961c2c917e8491b96b8e7efcd1ff8873fa533f042c18584",
+  "protocol.py": "6929839143dbca9dc0bb6d8d0a5fb7b2941d20ea8c1b6a0ced969bd8ad16af9a",
+  "protocol_oos.py": "86cd23799bcf492a734ccb257cfe3cac1c3f2e2614932356649d0a7a2c8e817a",
+  "sim.py": "315a8448f69fa220aa88bd8a9363fef1cac9ec89c177b323359fb90daaf8ee72",
+  "trials.py": "4685dc564f0312f63f4657f8861c20f9a2b01dac815b54fc027d62771f7086fc",
+  "web_run.py": "c15811696733dad7a31bf4664c122ea1284641d75ceec1de4ffa4984d839dbd8",
+  "web_strategies.py": "94cb51140ef01a4dcf991f836c240b5169b39e5881fa4260481c3c0add0ca349"
+ },
+ "data": {
+  "daily_cache": {
+   "first": 20120102,
+   "last": 20261109,
+   "sessions": 3659,
+   "top_n": 500,
+   "version": "ed1"
+  },
+  "data_check_sha256": "5bc5d596bf217948d2b50be84c7e79379a283a3419eca35293ad5ee8e4985da4",
+  "data_check_summary": {
+   "divm_predicted_events_by_year": {
+    "2013": 537,
+    "2014": 564,
+    "2015": 579,
+    "2016": 515,
+    "2017": 529,
+    "2018": 528,
+    "2019": 550,
+    "2020": 582,
+    "2021": 492,
+    "2022": 537,
+    "2023": 571,
+    "2024": 581,
+    "2025": 568,
+    "2026": 579
+   },
+   "ea_meetings": {
+    "2012-23": {
+     "results_meeting_notices_by_year": {
+      "2012": 1209,
+      "2013": 1231,
+      "2014": 1232,
+      "2015": 1219,
+      "2016": 1274,
+      "2017": 1287,
+      "2018": 1338,
+      "2019": 1307,
+      "2020": 1236,
+      "2021": 1190,
+      "2022": 1181,
+      "2023": 1835
+     },
+     "underlyings": 351
+    },
+    "2023-26": {
+     "results_meeting_notices_by_year": {
+      "2023": 48,
+      "2024": 2102,
+      "2025": 1158,
+      "2026": 1121
+     },
+     "underlyings": 286
+    }
+   }
+  },
+  "tables_sha256": {
+   "corpactions/corpactions.csv.gz": "3de229e4e994a15a9dad66c87baef5a5efb2d72a8a90c8b0bef1d45a0818cc20",
+   "events/boardmeet.csv.gz": "7831b82bf7ce27d4b24a54316428b775a760486e1dcb454cc17e22a3a95153af",
+   "events/results.csv.gz": "db63f17ea1c2f05cf284d4dbf8522f58674b2d0e738e4e1866b16747d1f9bf6f",
+   "index_membership/index_members.csv.gz": "b5e55edf150ada1807479da4499662898ac942ef4c488499fc803f47a4f67bb0"
+  }
+ },
+ "eras": {
+  "2012-23": {
+   "era": [
+    20120101,
+    20231109
+   ],
+   "h1": [
+    20120101,
+    20171231
+   ],
+   "h2": [
+    20180101,
+    20231109
+   ],
+   "options_data": "oldera_fo view (<scratch>/nse_old_view)",
+   "protocol": "protocol_oos.evaluate (one look, webstrats/oos_ledger.json)"
+  },
+  "2016-23_minute": "not applicable: no variant reads minute bars",
+  "2023-26": {
+   "daily_calendar": "trials.calendar_3y",
+   "ledgers": [
+    "<events_daily cache>/final_ledger.json",
+    "<bars3y cache>/final_ledger.json"
+   ],
+   "option_calendar": "nsedata.lab_calendar(bars3y)",
+   "protocol": "protocol.evaluate (DISCOVERY 70 % H1/H2 + FINAL 30 %, FINAL once for screen passers)"
+  },
+  "corrected_overlay": "not applicable (corrected.py corrects minute bars; the daily cache is NSE bhavcopy, adjusted for splits / bonuses / large demergers)",
+  "old_era_look": "EVERY variant (recommended and adopted)"
+ },
+ "expected": "small or no edge after costs is the base case for every variant (published gross edges: low-vol ~1-3 %/yr excess; dividend month ~1 %/month gross vs ~0.3 % costs; straddles 1-3 % per trade gross vs ~2-3 % round-trip haircut + fees)",
+ "fills_costs": {
+  "daily": {
+   "corporate_action_rule": "events_run.drop_excluded (unexplained gaps / scheme ex-days), reported both ways",
+   "cost_model": "2026-11/f2/web1",
+   "dividends": "web_divm_pred_exmonth AND web_lowvol30_nifty100: cash dividends going ex while held (entry < ex-date <= exit) credited gross to the trade (prices are not dividend-adjusted); report-only: the net without the credit",
+   "notional": 100000.0,
+   "simulator": "sim.sim_positional unchanged: next-open fill, close exits, CNC costs (costs.round_trip_cost), slippage 2 bps per side (5 bps report-only)",
+   "stops": "none (published rules have none)"
+  },
+  "options": {
+   "cost_model": "2026-11/nse_eod1",
+   "sensitivity": "haircut x2.5 (report-only, DISCOVERY and old era)",
+   "simulator": "nsedata OptionSpec simulator: EOD-close fills, haircut max(Rs 0.05, 1 %) per leg per fill, options_replay.leg_cost fees (Zerodha 2026), 1 lot (exchange lot in force), exit at the EOD close of the hold-th session (stale close flagged), settlement at intrinsic if a leg expires first"
+  }
+ },
+ "gates": {
+  "dsr_min": 0.95,
+  "final": {
+   "min_pf": 1.05,
+   "net_gt_0": true
+  },
+  "long_only_excess": {
+   "benchmarks": {
+    "web_divm_pred_exmonth": "NIFTY500",
+    "web_lowvol30_nifty100": "NIFTY100"
+   },
+   "rule": "for 'proven' only: month-clustered bootstrap 95 % CI lower bound of the mean excess return per trade (dividends included) > 0 in 2023-26 (DISCOVERY + FINAL trades) AND in 2012-23"
+  },
+  "no_relaxation": "nothing is pooled, relaxed or re-defined after results",
+  "oos": {
+   "era": [
+    20120101,
+    20231109
+   ],
+   "h1": [
+    20120101,
+    20171231
+   ],
+   "h2": [
+    20180101,
+    20231109
+   ],
+   "max_symbol_share": 0.35,
+   "min_pf": 1.15,
+   "min_trades_per_half": {
+    "intraday": 150,
+    "positional": 60
+   },
+   "net_gt_0": [
+    "h1",
+    "h2"
+   ],
+   "sens_bps": 5.0,
+   "universe": "universe_monthly.csv: top 100 by 60-session turnover before each month, gate on decision day"
+  },
+  "proven": "CONFIRMED on 2023-26 FINAL and OOS-CONFIRMED on 2012-23 and DSR >= 0.95 at N = all 2023-26 trials in the ledger (fair N = 4 also reported) [+ long_only_excess]",
+  "screen": {
+   "max_symbol_share": 0.35,
+   "min_pf": 1.15,
+   "min_trades": {
+    "intraday": 150,
+    "positional": 60
+   },
+   "net_gt_0": [
+    "H1",
+    "H2"
+   ]
+  }
+ },
+ "gates_fingerprint": "1cbbb3ea72c1",
+ "n_variants": 4,
+ "name": "web_v1",
+ "question": "Do the highest-evidence strategies found in the published literature (chosen on EXTERNAL evidence only) give a tradable edge on NSE after full costs, in two eras?",
+ "report_only": {
+  "account": "capital.py Rs 10 lakh: swing agent for the stock variants (sized as a 20 % stop = Rs 50,000 a position), options agent for the straddles (premium as margin)",
+  "excess": "mean / median excess per trade vs NIFTY 50, NIFTY Next 50, NIFTY 100, NIFTY 500 with 2000 month-block bootstrap resamples (long-only stock variants; with and without dividends)",
+  "placebo": {
+   "options": "board-meeting / results / insider tables with every event moved to a random session of the same stock and era (events_run.placebo_tables)",
+   "seed": 20261115,
+   "web_divm_pred_exmonth": "every cash-dividend row moved to a random session of the same stock in the same era (same count); real dividends still credited",
+   "web_lowvol30_nifty100": "30 names drawn at random from the same eligible set each quarter"
+  },
+  "planted_edge": {
+   "options": "results meetings planted on each underlying's top 2 % |3-session move| sessions (2012-23, every 3rd underlying) must give web_ea_straddle_m3_0 a large profit; the same delayed 25 sessions must not",
+   "web_divm_pred_exmonth": "dividend rows planted 12 months before each stock's best 2 % of calendar months (2012-23) must give a large profit; planted one month later (buying the month after) must not",
+   "web_lowvol30_nifty100": "selection by the NEXT quarter's return (cheat) must give a large profit"
+  }
+ },
+ "selection": {
+  "no_data_look": "only availability counts (data_check.json) were computed before this file",
+  "rule": "score >= 5/10 on (India evidence, post-publication survival, cross-country replication, economic reason, tradability), feasible with the lab's data, never tested by the lab, a published rule, able to reach the trade minimum on availability counts; at most 10 variants (4 taken)",
+  "shortlist_file": "webstrats/SHORTLIST.md",
+  "shortlist_sha256": "58ccc466010c8ca06f4b532d31dccff65c01fb7ba0eaa1cebab140debdaced87"
+ },
+ "strategies": {
+  "web_divm_pred_exmonth": {
+   "fingerprint": "2fa62ff45c32"
+  },
+  "web_ea_straddle_m1_p1": {
+   "fingerprint": "209292d7ea3e"
+  },
+  "web_ea_straddle_m3_0": {
+   "fingerprint": "cb6a064e946b"
+  },
+  "web_lowvol30_nifty100": {
+   "fingerprint": "6133e1efce70"
+  }
+ },
+ "trials": "each of the 4 variants is one trial on 2023-26 and one on 2012-23 (stage 'oos'); controls are not trials",
+ "universe": {
+  "options": "every stock with per-strike EOD option data in the era (nsedata optstk cache: 2023-26 <nse>, 2012-23 <nse_old_view>); renamed symbols mapped to current NSE symbols",
+  "web_divm_pred_exmonth": "point-in-time monthly top 500 by turnover (events_daily), delisted names kept; member on the decision day",
+  "web_lowvol30_nifty100": "point-in-time NIFTY 100 members (flowdata.index_members, membership in force at the cut-off's close) that are in the events_daily cache, trade a stock future on the cut-off day (F&O bhavcopy) and have >= 250 daily returns; positions open only on top-500 member days (data_daily.gate)"
+ },
+ "variants": [
+  {
+   "family": "web_lowvol",
+   "fingerprint": "6133e1efce70",
+   "horizon": "positional",
+   "id": "web_lowvol30_nifty100",
+   "kind": "swing",
+   "params": {
+    "buffer": 60,
+    "cutoff_months": [
+     2,
+     5,
+     8,
+     11
+    ],
+    "min_history": 250,
+    "n": 30,
+    "stop_pct": null,
+    "window": 250
+   },
+   "rule": "NSE NIFTY100 Low Volatility 30 rule: 30 least volatile (1-year daily log-return std, data to end Feb/May/Aug/Nov, retain if rank <= 60) of point-in-time NIFTY 100 F&O names; buy first open of Apr/Jul/Oct/Jan, sell at the quarter's last close; Rs 1 lakh each, no stop"
+  },
+  {
+   "family": "web_divm",
+   "fingerprint": "2fa62ff45c32",
+   "horizon": "positional",
+   "id": "web_divm_pred_exmonth",
+   "kind": "swing",
+   "params": {
+    "credit_dividends": true,
+    "lag_months": 12,
+    "stop_pct": null
+   },
+   "rule": "Dividend-month premium (Hartzmark-Solomon 2013): at a month's last close buy (next open) every top-500 member that went ex-dividend in the same calendar month a year earlier; sell at that month's last close; dividends received credited; no stop"
+  },
+  {
+   "family": "web_ea",
+   "fingerprint": "cb6a064e946b",
+   "horizon": "positional",
+   "id": "web_ea_straddle_m3_0",
+   "kind": "options",
+   "params": {
+    "ahead": 3,
+    "decide_hhmm": 1500,
+    "hold": 3,
+    "max_dte": 60,
+    "min_dte": 10,
+    "moneyness": [
+     0.95,
+     1.05
+    ]
+   },
+   "rule": "Long 1-lot ATM straddle (10-60 DTE) at the EOD close 3 sessions before the results day (day 0 = first session on/after the notified board-meeting date), sold at day 0's close (Gao-Xing-Zhang 2018 [-3,0]); real NSE EOD prices"
+  },
+  {
+   "family": "web_ea",
+   "fingerprint": "209292d7ea3e",
+   "horizon": "positional",
+   "id": "web_ea_straddle_m1_p1",
+   "kind": "options",
+   "params": {
+    "ahead": 1,
+    "decide_hhmm": 1500,
+    "hold": 2,
+    "max_dte": 60,
+    "min_dte": 10,
+    "moneyness": [
+     0.95,
+     1.05
+    ]
+   },
+   "rule": "Long 1-lot ATM straddle (10-60 DTE) at the EOD close of the session before the results day, sold at the close of the session after it (Gao-Xing-Zhang [-1,+1]); real NSE EOD prices"
+  }
+ ],
+ "written": "2026-11-15 04:20"
+}

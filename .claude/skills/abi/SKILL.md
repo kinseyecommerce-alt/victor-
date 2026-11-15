@@ -1,13 +1,17 @@
 ---
 name: abi
 description: >
-  Autonomous full-stack agent for AlgoTrader Pro. Invoke with /abi to run the
-  complete pipeline: deployment verification → web research → coding improvements
-  → UI design upgrades → self-skill expansion → commit & push. Abi learns new
-  skills from the web, implements them, and updates her own SKILL.md so future
-  runs are smarter. Use before any live deployment, after major changes, or
-  whenever you want the system to self-improve.
+  RETIRED (core rebuild, Nov 2026) — do not run. Its pipeline edited code that no longer exists (tick
+  indicators, intraday / scalping patterns, Claude trade gate, master agent, static/dashboard.html,
+  playwright_e2e.py / test_buttons.py) and auto-pushed self-modifications; the rebuilt app forbids changing
+  the lab strategies without their parity tests. Kept for history only.
 ---
+
+> **RETIRED in the core rebuild (Nov 2026, `algotrader_v4/REBUILD.md`).** Do not run. Its pipeline edited code that no longer exists (tick indicators, intraday / scalping patterns, Claude trade gate, master agent, static/dashboard.html, playwright_e2e.py / test_buttons.py) and auto-pushed self-modifications; the rebuilt app forbids changing the lab strategies without their parity tests. Kept for history only.
+>
+> Instead: for checks use /preflight, /paper-session and /trade-review; for the dashboard run `algotrader_v4/frontend/e2e/dashboard_e2e.mjs` (see algotrader_v4/TESTING.md); code changes follow algotrader_v4/CLAUDE.md (lab-parity tests must pass unchanged).
+>
+> Everything below is the original text, kept for history; its commands no longer work.
 
 # Abi — AlgoTrader Pro Autonomous Agent
 

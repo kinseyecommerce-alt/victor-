@@ -1,249 +1,106 @@
-# Testing AlgoTrader Pro
+# Testing AlgoTrader Pro (core rebuild)
 
-Four levels, from "see it work in two minutes" to "trust it with money". Run them in order.
+The app now runs four lab-validated strategies in PAPER only (REBUILD.md). The demo simulator, the AI trader and the
+legacy tick agents were removed, so there is no "demo mode" any more: without Kite data the server starts and serves
+the API, and the agents take no entries (`no_kite_data`).
 
-| Level | What it proves | Needs | Time |
-|---|---|---|---|
-| 1. Demo | The dashboard and the whole pipeline work end to end | Python 3.11, Node 18+ | 2 min |
-| 2. Automated tests | Logic, limits and the dashboard behave as designed | same | 5 min |
-| 3. Real-price paper | Strategies on **real** market prices, no real orders | Kite Connect app + daily login | 2–4 weeks |
-| 4. Small live | Real orders, tiny size | everything above, passed | ongoing |
+| Level | What it proves | Needs |
+|---|---|---|
+| 1. Automated tests | Logic, lab parity, persistence, engine overlays, API | Python 3.11+ |
+| 2. Local smoke start | The server starts without credentials and every endpoint answers | same |
+| 3. Real-price paper | The strategies on real Kite prices, simulated orders | Kite Connect app + daily login |
+| 4. Live | not possible for the kept strategies (they refuse LIVE) | — |
 
----
-
-## 1. Demo — see it running (any time, no keys)
-
-```bash
-cd algotrader_v4
-pip install -r requirements.txt          # first time
-./run_demo.sh
-```
-
-Open **http://localhost:5000**. You land on the **Overview** dashboard.
-
-Demo mode = paper trading on the built-in price simulator, with the IST clock starting at
-10:00 so the "market" is open whenever you test. Nothing touches Zerodha, nothing needs keys.
-It only activates with `TRADING_MODE=PAPER` + `PAPER_DATA_SOURCE=SIM`.
-
-**What you should see within about a minute**
-
-| Area | Look for |
-|---|---|
-| Top bar | `PAPER-SIM` and `DEMO` badges, green "Market open", clock ticking |
-| Ticker tape | Symbols scrolling, cells flashing green/red as prices move (hover pauses it) |
-| KPI cards | Numbers counting up/down smoothly; Day P&L card glows green or red |
-| Intraday P&L | Curve drawing itself as the session runs |
-| Agents | Intraday and Scalping orbs pulsing ("running") |
-| Open positions | Cards slide in; the dot moves along **SL → entry → TGT**; the SL label pops and "moves" counts up when the stop trails |
-| Live activity | Orders and stops sliding in at the top (IST times) |
-| Risk | Gauge fills as realised losses use the daily loss limit |
-
-Try: **Stop bot / Start bot** in the top bar, **Trading view** (the original chart + order panel)
-and **✨ Overview** to come back. The page also works at phone width.
-
-`NO_AUTOSTART=1 ./run_demo.sh` starts without the bot, so you can press **Start bot** yourself.
-Ctrl+C stops everything.
-
-> The demo turns off the multi-timeframe filter (`USE_MULTI_TIMEFRAME=false`) so trades appear
-> quickly on simulated prices. Keep it **on** for real use.
-
-### Demo with the AI trader
-Add your Claude key to try the AI on simulated prices (this costs real API money — watch
-"AI API cost" on the dashboard):
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-... ./run_demo.sh
-```
-Then press **Start AI** in the top bar, or use the **AI Trader** tab in Trading view to chat
-("what are you watching?"). AI decisions, alerts and trail moves appear in Live activity.
-
----
-
-## 2. Automated tests
-
-With the demo still running (it provides the backend and dashboard):
+## 1. Automated tests
 
 ```bash
 cd algotrader_v4
-
-# Dashboard in a real browser (27 checks, saves screenshots to e2e_screenshots/)
-pip install playwright==1.52.0 && python3 -m playwright install chromium   # first time
-python3 dashboard_e2e.py
+python3 test_pipeline.py            # full suite: lab parity of the agents, stratlab, paper book, SEBI, vault,
+                                    # Kite login, auth, PEAD (test_validated_pead.py) and test_rebuild.py
+python3 test_shadow_registry.py
+python3 test_validated_pead.py
+python3 test_option_bar_archiver.py
+python3 test_rebuild.py             # old state files load; trading states, approvals, risk budget, drift, v2 API
+python3 test_forward_lab.py         # forward lab: frozen rule, Bonferroni / bootstrap, looks, demotion, store,
+                                    # engine process + time limit, no look-ahead, lab parity (needs the lab scratch)
 ```
+Every run must end with zero failures. The agents' lab-parity tests are the acceptance gate for any change to an
+agent, `validated_base.py`, `validated_data.py`, `pead_data.py` or the paper broker.
 
-Without anything running:
+## 2. Local smoke start (no credentials)
 
 ```bash
-python3 test_pipeline.py          # ~340 unit/integration tests, includes the AI trader with a
-                                  # fake Claude client (no API spend)
-python3 test_sim_orders_flow.py   # paper order flow
-cd frontend && npx tsc --noEmit && npm run build    # dashboard type-check + production build
+cd algotrader_v4
+TRADING_MODE=PAPER PERFORMANCE_FILE=/tmp/at/performance.json uvicorn main:app --port 8010
+curl -s localhost:8010/health
+curl -s localhost:8010/validated | head -c 300
+curl -s localhost:8010/api/v2/overview
+curl -s localhost:8010/api/v2/strategies | head -c 300
 ```
+Without `API_KEY` the API is open (local only). With `API_KEY` set, `/api/v2/*` (except `/api/v2/health`) and every
+write need `X-API-Key` or a Bearer JWT (`POST /auth/login`).
 
-All must pass before you move on. Section 13 of `test_pipeline.py` needs a real Anthropic key;
-if only that section fails, that is expected without one.
+### Dashboard (frontend/)
 
----
+React + TypeScript + Tailwind (Vite), built into `frontend/dist` and served by the same process at `/dashboard`
+(files under `/assets`); the Docker image builds it in its first stage. It uses only `/api/v2/*` (API_V2.md) plus
+`/auth/login`, `/auth/login-url`, `/auth/kite/auto-login`, `/bot/start|stop` and `/shadow-registry`, polls (15 s while
+the market is open, 60 s otherwise; no websocket) and signs in with the dashboard password (JWT) or the API key.
+`GET /api/v2/forward-lab` is optional: a 404 shows "Not enabled yet".
 
-## 3. Real-price paper trading (the important one)
+```bash
+cd algotrader_v4/frontend && npm ci && npm run build      # then restart uvicorn (it mounts dist/assets at start-up)
+npm run dev                                               # :5000, proxies /api and /auth to :8000
+# end-to-end check (Playwright + Chromium; CHANGES trading states / approvals on the target — local PAPER only):
+BASE_URL=http://127.0.0.1:8010 API_KEY=... ADMIN_USER=admin ADMIN_PASS=... OUT=/tmp/shots node e2e/dashboard_e2e.mjs
+```
+The e2e script loads every page at iPhone 13 and 1440 px desktop size, fails on any uncaught error or page wider than
+the screen, signs in both ways, clicks every write control (strategy state switch with Cancel / confirm, dashboard
+on/off switch, whole-app state, approvals mode, approve / reject, brake reset when tripped) and checks the result
+through the API; the forward lab is checked as served and with a mocked response.
 
-Real Kite prices, simulated orders. This is where you find out whether the strategies and the
-AI actually make money.
+## 3. Real-price paper trading
 
-`.env`:
+`.env` / server environment:
 ```
 TRADING_MODE=PAPER
 PAPER_DATA_SOURCE=KITE
-DEMO_MODE=false
-API_KEY=<long random>       # protects the dashboard/API — set this before saving any keys
+VALIDATED_AUCTION_VARIANT=2PCT
+API_KEY=<long random>
+JWT_SECRET_KEY=<long random>
 ```
+Kite keys and the daily auto-login fields (user id, password, TOTP seed) go into the encrypted vault through
+`POST /settings/credentials` (never into chat or files you share). The server logs in at 08:45 / 08:55 / 09:05 IST.
 
-**Your keys — enter them in the app, not in chat or files you share.** Trading view → ⚙ Settings →
-**API Keys**: paste the Kite API key and secret (from developers.kite.trade) and, for the AI trader,
-the Anthropic key. With "Remember on this server" ticked they are saved **encrypted** in
-`.secrets/vault.enc` (permissions 600, git-ignored), reloaded at startup, and never shown again —
-only the last 4 characters. **Remove** deletes one from the vault and the running server.
-`python3 secret_store.py` prints what is stored (no values).
+Each trading day the scheduler does everything (times in `platform_scheduler.py`). Watch:
+* `GET /api/v2/overview` — Kite connected, market open, trading states, portfolio P&L and drawdown brake;
+* `GET /api/v2/strategies` — per strategy: entry block reason, today's plan / positions / trades, P&L vs the lab,
+  readiness progress, drift warnings;
+* `GET /api/v2/system` — scheduled jobs and the price feed.
 
-In the Kite developer console set the redirect URL to `http://<your-server>:8000/auth/kite/callback`.
+Operator controls: `POST /api/v2/trading-state` (REDUCE_ONLY / HALTED, global or per strategy),
+`POST /bot/stop` (persists until `POST /bot/start`), `POST /api/v2/strategies/{name}/enable`, the SEBI kill switch
+(`POST /sebi/kill-switch`).
 
-**Your Zerodha user ID, password and TOTP are never entered into this app.** Kite Connect requires
-you to log in yourself on Zerodha's own page once a day; the app only receives the day's access token,
-which it keeps (encrypted) until Kite expires it the next morning.
+## 4. Live
 
-Each trading day:
-1. Settings → API Keys → **Log in with Zerodha** and log in on Zerodha's page.
-2. In Claude Code run `/preflight` — it must say **GO**.
-3. Start the bot and/or the AI from the Overview top bar. Use `/paper-session` to have Claude
-   watch it for you.
-4. After the close run `/trade-review`.
+Not possible for the kept strategies: every validated agent refuses LIVE. `GET /api/v2/readiness` lists the LIVE
+prerequisites (static outbound IP registered with Kite in `KITE_STATIC_IP` — required for API orders since
+1 April 2026 —, API key, JWT secret, kill-switch reset secret, Kite keys); it reports `ready_for_live: false` while
+no strategy is live-capable.
 
-Move on only after 2–4 weeks that are profitable **after brokerage and taxes**, with no flags in
-`/trade-review` (no position without a stop, no leftover stop orders, no reversed positions).
+## Deploying
 
-### What the AI can trade
-
-| Type | Product | Direction | Held | Stop | On by default |
-|---|---|---|---|---|---|
-| Intraday stocks | MIS | long / short | closed 15:00 | SL-M order | yes |
-| Index options | MIS (NFO) | buy CE / PE only | closed 15:00 | SL-limit order | yes |
-| Index futures | MIS (NFO) | long / short | closed 15:00 | SL-limit order | **no** — `AI_AGENT_FUTURES_ENABLED=true` |
-| Swing stocks | CNC delivery | long only | up to 15 days | **GTT** at Zerodha | yes |
-| Bearish swing (puts) | NRML long put, stock or index | bearish | up to 15 days | **GTT** at Zerodha | yes |
-| Option selling | MIS credit spreads (sell 1 + buy 1 further OTM) | bull put / bear call | closed 15:00 | code: % of credit | **no** — `AI_AGENT_OPTION_SELLING_ENABLED=true` |
-
-- **Swing:** a daily scan at 14:50 shortlists uptrending stocks (breakout or pullback to the
-  20-day EMA) and Claude decides on the daily chart. The stop is a GTT, so it works overnight
-  and if the server is off. Open swing positions are saved to `data/ai_swing_positions.json`
-  and picked up again on restart; code sells on the last day of the holding period. Check in the
-  Kite app (Orders → GTT) that every swing position has its GTT.
-- **Bearish swing:** delivery shares can't be shorted overnight, so the AI buys a put (F&O stock
-  or index) expiring at least a week after its planned exit. The most it can lose is the premium.
-- **Option selling:** only as credit spreads. The protective option is bought first and the short
-  option is sold only after that fills; on exit the short is bought back first and the
-  protective leg is sold only after that fills. Worst case = (strike width − credit) × quantity,
-  capped at ₹10,000 by default. Spreads are not saved across a server restart — if the server
-  stops mid-day, close them in Kite (Zerodha also squares off MIS positions near 15:20).
-- **Futures:** one lot of NIFTY is ~₹18 lakh of contract value, so a 1% move is ~₹18,000. The
-  code caps the loss at the stop (₹5,000 by default), the margin per trade and the lots. Your
-  account must have the F&O segment active and enough margin.
-
----
-
-### Is it beating the index?
-
-The Overview dashboard has an **"Are we beating the index?"** panel (`GET /performance/scoreboard`).
-It compares the account's return **after brokerage, taxes and the Claude API bill** with
-NIFTY 50 (what a Zerodha account could simply hold instead) and, for reference, Nasdaq-100,
-for today, the week, the month, the year and since tracking began. A snapshot is stored every
-day at 15:35 (`data/performance.json`). After 20+ trading days the verdict line tells you
-plainly whether an index fund would have done better.
-
-**Strategy health** (`GET /performance/strategies`) shows each strategy's trades, win rate, net
-P&L and profit factor. Once a strategy has 30 closed trades, if its last 50 are net losers
-(negative P&L after costs and profit factor < 1) it is **switched off automatically** and you
-are told on Telegram. The dashboard button re-enables it; the judgement then restarts.
-
-**Trend filter:** when NIFTY 50 is below its 200-day EMA the AI halves its intraday size and
-makes no new swing or momentum buys (bearish trades are unaffected). Shown on the scoreboard.
-
-**Momentum rotation** (`MOMENTUM_ENABLED`): on the first trading day of each month the top 5
-Nifty 100 stocks by 12-month momentum (skipping the latest month, 12-1) are bought as delivery
-with a 12% GTT stop and names that dropped out are sold — code only, no Claude call. Check the
-plan first: `POST /momentum/rebalance?execute=false`; backtest it against NIFTY with
-`GET /backtest/momentum?months=24` (real data only once the server has Kite/yfinance access).
-
-**Portfolio risk** (`GET /risk/portfolio`): every entry, AI or rule agent, is sized so a stop
-hit costs at most `RISK_PER_TRADE_PCT` of capital, is blocked or scaled when correlated with
-open positions or ahead of a results/RBI event, and must fit under the book's one-day VaR cap.
-The AI is told the maximum size and why; agents are scaled down silently (see the log).
-
-**What the AI sees** (`GET /market/context/{symbol}`, tool `get_market_context`): regime and
-India VIX, event risk, support/resistance, institutional flow, option-chain data, multi-timeframe
-alignment, correlation with the book, the trend filter and recent trade lessons. A compact form
-rides on every real-time alert.
-
-**Replay backtest** (`POST /backtest/replay`, `/backtest` skill): feeds real minute bars from
-Kite (or yfinance) through the *same* agent code that trades live — patterns, scoring,
-cooldowns, risk sizing, the trailing-stop engine — with slippage and Zerodha costs, and
-compares the result with NIFTY over the same days. In the paper simulator it runs on
-synthetic bars and says so. Use it, not the older 15-minute approximation, to judge a change.
-
-**Walk-forward optimiser** (`POST /optimize/run`, Saturday 21:30): tries small grids of the
-agents' stop / target / score thresholds on the last 45 days, scoring each candidate on
-time-ordered train folds and then on the unseen test folds, and adopts one only if it beats
-the current parameters out of sample with enough trades and no worse drawdown.
-`GET /optimize/status`, `POST /optimize/params/{agent}/reset`.
-
-**Research loop** (`POST /research/run`, Sunday 21:30, `/research` skill): Claude is shown
-the week — results per strategy after costs, slippage, the scoreboard, pruning, trade lessons,
-the optimiser's report — and proposes **one** parameter change from the allowed grid. The
-proposal is A/B-replayed on the last 30 days; it is adopted only if it wins after costs.
-Every cycle is logged (`GET /research/log`). Claude proposes; the replay decides.
-
-**Bull-vs-bear review:** before any AI entry goes to the broker, a separate Claude call argues
-the bear case and rules on the trade (`AI_AGENT_DEBATE_ENABLED`). Below the confidence
-threshold the entry is rejected and the AI sees the objection; it can also halve the size.
-If the API is down the review fails open — it can shrink or stop a trade, never add one.
-
-**Kronos forecasts** (`GET /forecast/{symbol}`, `GET /forecast/status`): an optional
-open-source candlestick model forecasting the next bars; without it a labelled drift+volatility
-fallback runs. The AI sees it in `market_context` as mild evidence only. Before trusting it on a
-symbol, run `GET /backtest/forecast-skill?symbol=RELIANCE&days=20`: it walks forward through
-past bars and reports the hit-rate against a coin flip.
-
-**Backtest gate:** every symbol/strategy backtest now also compares its out-of-sample return
-with buying and holding NIFTY 50 over the same windows, and fails if it does not beat it.
-
-## Deploying to a server
-
-`deploy/AWS.md` walks through a Mumbai EC2 server: `deploy/user-data.sh` installs everything
-on first boot, `deploy/setup-ec2.sh` is the idempotent installer (systemd + nginx + HTTPS +
-dashboard build + generated secrets, PAPER on real prices), `deploy/update.sh` pulls new code
-and restarts **only if the test suite passes**.
-
-## 4. Small live trading
-
-```
-TRADING_MODE=LIVE
-AI_AGENT_ALLOW_LIVE=true          # only if the AI trader should place live orders
-AI_AGENT_MAX_POSITION_VALUE=10000
-AI_AGENT_MAX_TRADES_PER_DAY=2
-MAX_DAILY_LOSS=1000
-```
-Needs a static IP whitelisted in your Kite developer console. Start tiny, raise limits slowly.
-Emergency controls: **Stop bot / Stop AI** in the dashboard, **SEBI kill switch** in Trading
-view, and the Kite app itself (always works).
-
----
+Railway builds `deploy/Dockerfile` (root directory `algotrader_v4`); persistent state lives on the volume under
+`/data` (ledger, paper book, agent enables, trading states, approvals, shadow ledgers, PEAD store, option-bar
+archive, vault). `deploy/AWS.md` describes a Mumbai EC2 host with a fixed IP (the static-IP route for a future LIVE).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Dashboard says "Cannot reach the backend" | Is `uvicorn` running on :8000? `curl localhost:8000/health` |
-| Dashboard says "needs your API key" | Trading view → ⚙ Settings → paste the `API_KEY` from `.env` |
-| No trades in demo after 2 min | Check the bot is running (Agents orbs pulse); restart `./run_demo.sh` |
-| No trades in real-price paper | Normal outside 09:15–15:30 IST; strategies only fire on real setups |
-| "Market closed" during market hours | Server clock/timezone — the app uses IST internally; check `date` |
-| `dashboard_e2e.py` can't launch a browser | `python3 -m playwright install chromium`, or set `CHROMIUM_PATH` |
+| Every agent shows `no_kite_data` | `PAPER_DATA_SOURCE=KITE` and a Kite session for today (`GET /auth/kite/status`) |
+| `stopped` | the operator Stop is persisted: `POST /bot/start` |
+| `trading_state:…` | `GET /api/v2/trading-state`; a brake level needs `POST /api/v2/risk/brake/reset` |
+| `awaiting_approval` | semi-auto mode is on: approve today's ticket (`GET/POST /api/v2/approvals…`) or turn the mode off |
+| `no_data:store_stale` | the session store missed a day; it refreshes at 08:55, at restart and at 15:40 |
