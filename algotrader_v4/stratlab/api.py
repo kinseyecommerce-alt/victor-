@@ -39,6 +39,15 @@ class Entry:
     rr: float | None = None
     time_stop: int | None = None
     trail: tuple | None = None
+    # Optional (round 5, default None = unchanged behaviour):
+    # exit_sig  bool array over the session's bars: True at bar k = exit decided at the close of bar k, filled at
+    #           the open of bar k+1 (market order, pays slippage). Only bars k >= the fill bar count. Must be causal
+    #           (audited like the entry). A new entry decided at that same bar k may fill at the same open (reversal).
+    # bracket   ("pts", stop, target) or ("pct", stop, target): stop / target placed at that distance from the FILL
+    #           price (points, or % of the fill); replaces `stop` / `target`. A stop distance of None keeps the
+    #           absolute `stop` price (fill-relative target, fixed stop).
+    exit_sig: object = None
+    bracket: tuple | None = None
 
 
 @dataclass
@@ -55,6 +64,31 @@ class Swing:
     target: float | None = None
     max_hold: int = 10
     rr: float | None = None
+    # Optional (round 5, default None = unchanged behaviour):
+    # exit_fn  callable(DailyView) -> bool, called at the close of every held session (the view ends at that
+    #          session); True = exit at the next session's open (market order, pays slippage). After such an exit the
+    #          strategy is asked again on the signal session, so an opposite entry fills at the same open (reversal).
+    # lots     index futures only: lots for this trade instead of the spec's `lots`.
+    exit_fn: object = None
+    lots: int | None = None
+    # Optional (round 7, default None = unchanged behaviour: market entry at the next open):
+    # entry    a resting order for the next `valid` sessions instead of the market entry (next-open specs only):
+    #          ("stop", level) buy stop (sell stop for a short): fills when the session trades at / through `level`,
+    #             at max(open, level) for a long (min for a short), paying slippage;
+    #          ("stop", level, arm) the stop becomes active only once the session trades beyond `arm` (below it for a
+    #             long, above for a short), e.g. Turtle Soup; fills at `level` (+ slippage). Daily bars cannot tell
+    #             whether the high came before the low, so a session that reaches both `arm` and `level` counts as
+    #             filled (the pessimistic reading: the unknown cases close below the level);
+    #          ("limit", level) buy limit (sell limit for a short): fills only if the session trades one tick through
+    #             `level`, at min(open, level) for a long (max for a short), no slippage (a resting limit).
+    #          Not filled after `valid` sessions: no trade, the strategy is asked again on the next session.
+    #          On the fill session only the stop is checked (pessimistically: a low at / below the stop is taken to
+    #          come after the fill); targets and exit_fn start at that session's close / the next session.
+    # entry_stop_ticks  stop = min(stop, fill-session low) - ticks x tick for a long (max(stop, high) + ticks x tick
+    #          for a short), fixed at the fill session's close ("one tick under today's low"); stop may be None.
+    entry: tuple | None = None
+    valid: int = 1
+    entry_stop_ticks: int | None = None
 
 
 @dataclass

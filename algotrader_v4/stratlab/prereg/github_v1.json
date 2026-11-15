@@ -1,0 +1,1174 @@
+{
+ "title": "GitHub-sourced strategy shortlist, re-implemented from source (known bugs fixed) - pre-registration v1",
+ "written": "2026-11-14 07:31 UTC",
+ "status": "Written BEFORE any P&L, CAGR, profit factor or verdict of any strategy below was computed (only error / trade-count / exposure / look-ahead smoke runs on short windows, no P&L printed). Nothing below changes after results. One look per strategy per era. No parameter was tuned.",
+ "source_root": "scratchpad/dl/github (downloaded repositories, read only, never executed)",
+ "classification_counts": {
+  "a": 5,
+  "b": 13,
+  "c": 2
+ },
+ "classification_key": {
+  "a": "testable as coded (after the listed bug fixes)",
+  "b": "testable with one plain default per unspecified / unavailable field",
+  "c": "not testable (reason given)"
+ },
+ "dedup": "trials_v2.csv (2,374 rows, 1,148 distinct ids incl. exploratory 'X:' effects) and the 66 round-5 ids contain no strategy with identical rules. Same-family neighbours exist and are NOT duplicates: r3_swing_ibs_low / r3_futures_*_ibs_ls (time-series IBS) vs the cross-sectional IBS book; X:1/3/6-month momentum deciles, fm_* and r5_kite_vars_momentum12 (raw return momentum) vs residual / smooth (QMOM) / Clenow / turnover-conditioned momentum - these are CORRELATED variants of a family already tested (counted as new trials all the same); X:NIFTY TSMOM and r3_tfweekly_tsmom13_* (index) vs per-stock TSMOM; X:beta-adjusted residual REVERSAL vs 36-month residual MOMENTUM; pdh_pdl_break / scalp_pivot_bounce vs R-Breaker's floor-pivot stop-and-reverse.",
+ "global_conventions": {
+  "simulator": "stratlab.sim (unchanged; round-5 optional fields Entry.exit_sig / Swing.exit_fn used): next-bar / next-session open fills, rule exits at the next open, same-open stop-and-reverse",
+  "index_futures": "index future (underlying NIFTY / BANKNIFTY: spot index bars stand in for the future, 1 lot, 2026 lot sizes 65 / 30, futures costs, 1 bps slippage; 2.5 bps sensitivity)",
+  "stocks": "stocks: 2023-26 the ~97 NIFTY-100 names of bars3y; 2012-23 point-in-time top-100 (universe gate on the decision day)",
+  "long_short_book": "long / short book = stock futures simulated on the adjusted cash price (lab convention: no basis, roll or margin interest), 'future' statutory costs + 10 bps slippage per side; long side +0.5, short side -0.5 of equity (gross 1) unless the source fixes the weights",
+  "portfolio_engine": "stratlab.r6_portfolio.backtest = factor_momentum.backtest generalised to negative weights and other schedules; no-trade band 0.5 %, stale-name rules, CNC (long-only) or futures (long / short) statutory costs + 10 bps per side, Rs 10 lakh, cash at 0 %",
+  "no_stop": "a placeholder stop 50 % away (never hit) where the source has none"
+ },
+ "protocols": {
+  "2023-26": {
+   "protocol": "stratlab/protocol.py unchanged: DISCOVERY first 70 pct (H1/H2), FINAL last 30 pct only for screen passers; screen = net > 0 in H1 and H2, PF >= 1.15, >= 150 intraday / 60 positional trades, top symbol <= 35 % (skipped for one-instrument index futures); CONFIRMED = FINAL net > 0 and PF >= 1.05",
+   "cost_model": "2026-11/f2",
+   "slippage_bps": {
+    "stocks": 2.0,
+    "index": 1.0,
+    "sens_stocks": 5.0,
+    "sens_index": 2.5
+   },
+   "run": "python -m stratlab.run --data <bars3y> --kind <kind> --ids <r6 ids> --out <scratch>/github/run3y_<kind> --trials <trials_v2.csv>"
+  },
+  "2012-23": {
+   "protocol": "stratlab/protocol_oos.py unchanged (gates fingerprint below), one look, every daily per-symbol id",
+   "gates": {
+    "era": [
+     20120101,
+     20231109
+    ],
+    "h1": [
+     20120101,
+     20171231
+    ],
+    "h2": [
+     20180101,
+     20231109
+    ],
+    "min_pf": 1.15,
+    "min_trades_per_half": {
+     "intraday": 150,
+     "positional": 60
+    },
+    "max_symbol_share": 0.35,
+    "net_gt_0": [
+     "h1",
+     "h2"
+    ],
+    "sens_bps": 5.0,
+    "universe": "universe_monthly.csv: top 100 by 60-session turnover before each month, gate on decision day"
+   },
+   "run": "python -m stratlab.protocol_oos --prereg <PREREGISTERED_GITHUB.json> --ids <r6 daily ids> --out <scratch>/oldera_oos/run1/github_daily"
+  },
+  "portfolio": {
+   "engine": "stratlab.r6_portfolio",
+   "gates": "factor_momentum.judge: era1 H1 CAGR > 0 and > NIFTY, H2 CAGR > 0 and > NIFTY, era1 Sharpe >= 0.5, era2 CAGR > 0 and > NIFTY (PASS needs all seven)",
+   "era1": {
+    "first_decision": 20130131,
+    "end": 20231109,
+    "h1_end": 20171231,
+    "data": "nse_old adjusted, point-in-time top-100 by turnover, delisted kept"
+   },
+   "era2": {
+    "first_decision": 20231130,
+    "data": "bars3y current ~97 names (survivorship-biased), history spliced from nse_old"
+   },
+   "report_for_every_pass": "excess over NIFTY per era-1 half and era 2 (Round 5: long-only rules pass 'net > 0' by riding the index)",
+   "run": "python -m stratlab.r6_portfolio --prereg <PREREGISTERED_GITHUB.json> --ledger <scratch>/github/portfolio_ledger.json --out <scratch>/github/portfolio --trials <trials_v2.csv>"
+  },
+  "excess_vs_nifty_for_trade_level_passers": "for every per-symbol screen / OOS pass: net minus (entry notional x NIFTY close-to-close return from the session before entry to the exit session) per half"
+ },
+ "gates_fingerprint": "1cbbb3ea72c1",
+ "trials_before": {
+  "N_2023_26": 1169,
+  "N_2012_23": 203,
+  "ledger": "scratchpad/stratlab_cache/trials_v2.csv"
+ },
+ "entries": [
+  {
+   "no": 1,
+   "name": "Residual momentum",
+   "source": "QuantConnect Tutorials, Strategy Library 136 (and Quantpedia's QC port)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/136 Residual Momentum/02 Method.html",
+     "sha256": "69b2b035473a92e71d0dfa7125681df6287a0c9a8263bc847e3633c5117522da"
+    },
+    {
+     "path": "scratchpad/dl/github/paperswithbacktest_awesome-systematic-trading/static/strategies/residual-momentum-factor.py",
+     "sha256": "888404e3bbfec2deee9992661c440490f6f2b05e5885349531c4e0c1ba95ff1d"
+    }
+   ],
+   "rule_as_coded": "monthly: OLS of each stock's 36 monthly returns on Fama-French Mkt, SMB, HML; score = sum of the residuals of the trailing 12 months excluding the most recent month / their std; long top decile, short bottom decile, equal weight",
+   "classification": "b",
+   "ids": [
+    "r6_gh_resid_mom_long",
+    "r6_gh_resid_mom_ls"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "factors": "NIFTY monthly return only (intercept + beta): there are no Fama-French factors for India in the lab",
+    "score_window": "residuals of months t-11..t-1 (the 12 most recent monthly returns minus the latest; 11 values), population std (scale-free for the ranking)",
+    "universe": "point-in-time top-100 by turnover (era1) / ~97 current names (era2) instead of the top-10 % by market cap",
+    "price_filter": "the $1 filter has no Indian analogue in a top-100 universe: none",
+    "versions": "long-only top decile (CNC) and long top / short bottom decile (stock futures, +-0.5 gross)",
+    "decile": "max(1, int(0.10 x eligible))",
+    "history": "eligible = 37 month-end closes, traded >= 90 % of sessions over them; era1 starts 2015-01-30 (36 monthly returns need data from 2012-01): H1 = 2015-01..2017-12"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 2,
+   "name": "Same-calendar-month seasonality",
+   "source": "QuantConnect Strategy Library 269 (Heston & Sadka 'Common factors in return seasonalities'); QC 125 for the bug",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/269 Seasonality Effect based on Same-Calendar Month Returns/02 Method.html",
+     "sha256": "64645a9186104059c3ed855003ec8b2fd23c7079fd5c7816f9c809d6bef57e4b"
+    },
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/125 12 Month Cycle in Cross-Section of Stocks Returns/02 Method.html",
+     "sha256": "40ce34c681d75bae4f20b478a1fba40fb015789f08c72ce34426457c9d5b6003"
+    }
+   ],
+   "rule_as_coded": "monthly: rank by the same calendar month's return one year earlier, long the top N / short the bottom N, equal weight",
+   "classification": "b",
+   "ids": [
+    "r6_gh_season_1y",
+    "r6_gh_season_5y"
+   ],
+   "bug_fixes": [
+    "rank by percent return (QC 125 ranks by absolute price change, history_end - history_start)",
+    "month return = last close of the month / last close of the previous month - 1 (QC 269 uses the first to the last close of the month, dropping the first day)"
+   ],
+   "defaults_fixed_before_any_run": {
+    "n": "10 long / 10 short (the tutorial text does not show num_long / num_short; a decile of the 100-name universe)",
+    "variant_5y": "average of the available same-month returns of years t-1..t-5 (>= 1 year; in 2013-2016 fewer than 5 years exist, so early on it equals or approximates the 1-year version) - the tutorial's suggested extension",
+    "a_year_is_used_only_if": "the stock traded on both month-end sessions of that month",
+    "book": "long / short book = stock futures simulated on the adjusted cash price (lab convention: no basis, roll or margin interest), 'future' statutory costs + 10 bps slippage per side; long side +0.5, short side -0.5 of equity (gross 1) unless the source fixes the weights"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 3,
+   "name": "Momentum x turnover",
+   "source": "QuantConnect Strategy Library 66 (Lee & Swaminathan 2000)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/66 Combining Momentum Effect with Volume/02 Method.html",
+     "sha256": "2b2b1c53feca5dda2f65d10a39e42c8551e181afbbcaff647ef82f7ee66094c8"
+    }
+   ],
+   "rule_as_coded": "monthly: ROC(12 months) top / bottom 20 %; within each, sort by turnover (volume / shares outstanding) and take the highest; long the winners, short the losers; each portfolio held 3 months, 1/3 rebalanced monthly",
+   "classification": "b",
+   "ids": [
+    "r6_gh_mom_turnover"
+   ],
+   "bug_fixes": [
+    "turnover is inverted in the code (BasicAverageShares / Volume): fixed by construction (proxy below, higher = more turnover)",
+    "int(len x 0.01) of a 20-name tail selects nobody: the method text's 'terciles' is used (highest third, int(20/3) = 6)",
+    "overlapping tranches: the code liquidates list(portfolios)[0] AFTER appending the new one (a 2-month hold) and SetHoldings overwrites a name held by two tranches: fixed to three additive 1/3 tranches each held 3 months"
+   ],
+   "defaults_fixed_before_any_run": {
+    "turnover_proxy": "LABEL: shares outstanding are not in the data; turnover proxy = decision-day traded value (close x volume) / its mean over the last 60 sessions - a relative-activity measure, not share turnover",
+    "roc": "C[t] / C[t-252] - 1",
+    "weights": "per tranche +1/3 / n_long and -1/3 / n_short (as coded), total gross ~2",
+    "book": "stock futures (long / short), 'future' costs + 10 bps"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 4,
+   "name": "Liquidity premium",
+   "source": "QuantConnect Strategy Library 24",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/24 Liquidity Effect in Stocks/02 Method.html",
+     "sha256": "11c15775d72fbac0ee84373ceac0f9c48a8e2d5281ee66175ef26b7b7c87349d"
+    }
+   ],
+   "rule_as_coded": "yearly: in the lowest market-cap quartile of the 1,500 largest US stocks, long the lowest-turnover 5 % (annual volume / shares outstanding), short the highest-turnover 5 %",
+   "classification": "c",
+   "ids": [],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "needs shares outstanding (turnover) and market capitalisation (the small-cap quartile); the lab has neither. The lab's universe is the 100 MOST liquid NSE stocks - the opposite end of the population the effect lives in - so a proxy (e.g. Amihud illiquidity within the top 100) would be a different strategy on the wrong population. Not run."
+  },
+  {
+   "no": 5,
+   "name": "NIFTYBEES vs GOLDBEES quarterly paired switch",
+   "source": "marketcalls vectorbt-backtesting-skills dual_momentum_backtest.py; QuantConnect Strategy Library 33",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/marketcalls_vectorbt-backtesting-skills/backtesting/dual_momentum_backtest.py",
+     "sha256": "9353b152333f88066820ac4f445415832414d1383ff2869e8c1145722836f990"
+    },
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/33 Paired Switching/02 Method.html",
+     "sha256": "305c96b71bf7a8197864951c7df7e9dea327329933734bdb547c6854e977ebf2"
+    }
+   ],
+   "rule_as_coded": "quarterly: hold the ETF with the higher return over the quarter that just ended, 75 % of equity, rebalance only on a switch",
+   "classification": "a",
+   "ids": [
+    "r6_gh_etf_switch"
+   ],
+   "bug_fixes": [
+    "two-quarter lag: winner.shift(1) of quarter-end returns makes the code buy the winner of the quarter BEFORE the one that just ended; fixed: the quarter just ended (decided at its last close, executed at the next session's open)"
+   ],
+   "defaults_fixed_before_any_run": {
+    "data": "NIFTYBEES and GOLDBEES from nse_old eq_daily_adj (2012-2023) and the NSE bhavcopy (2023-11..2026-11, spliced at 2023-11-10; no split / bonus in that window)",
+    "allocation": "75 % as coded (the rest is cash at 0 %); costs CNC + 10 bps (instead of the code's 0.1 %)",
+    "tie": "idxmax: NIFTYBEES on an exact tie",
+    "benchmark": "NIFTY 50 price index (the gates)"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 6,
+   "name": "R-Breaker",
+   "source": "letianzj QuantResearch backtest/r_breaker.py",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/letianzj_QuantResearch/backtest/r_breaker.py",
+     "sha256": "912b1f36171548d7bb53ebce8f1ae8925c1b88a771d775ad6df0950235c1aab4"
+    },
+    {
+     "path": "scratchpad/dl/github/letianzj_QuantResearch/backtest/bt/r_breaker.py",
+     "sha256": "070d290c818c845f6d0b33fc63658691c6eb73955d3dd5fa775492d1674bc511"
+    }
+   ],
+   "rule_as_coded": "pivots from yesterday's H/L/C: pivot=(H+C+L)/3, r1=2P-L, r2=P+(H-L), r3=H+2(P-L), s1=2P-H, s2=P-(H-L), s3=L-2(H-P); flat: close>r3 long, close<s3 short; long: (today's high>r2 and close<r1) or close<s3 -> flip short; short: (today's low<s2 and close>s1) or close>r3 -> flip long",
+   "classification": "b",
+   "ids": [
+    "r6_gh_rbreaker_nifty",
+    "r6_gh_rbreaker_banknifty"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "timeframe": "5-minute Kite-aligned candles (the code runs on daily bars of SPX); 'today's high / low' = the running session high / low through the candle; yesterday = the previous full session's H / L / 15:29 close",
+    "instrument": "index future (underlying NIFTY / BANKNIFTY: spot index bars stand in for the future, 1 lot, 2026 lot sizes 65 / 30, futures costs, 1 bps slippage; 2.5 bps sensitivity)",
+    "holding": "flips are stop-and-reverse at the next 1-minute open; flat at the 15:15 square-off; no other stop",
+    "levels": "exactly the coded floor pivots (not the classic R-Breaker 0.35 / 1.07 / 0.25 coefficients)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "no": 7,
+   "name": "5-EMA alert candle",
+   "source": "Screeni-py src/classes/Screener.py monitorFiveEma + the original Power-of-Stocks method",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/screenipy/src/classes/Screener.py",
+     "sha256": "9b42f739cd550224dadc301ca6925568644aca4bd602e6d164206bff5f37fd8f"
+    }
+   ],
+   "rule_as_coded": "sell: a 5-minute candle entirely above the 5 EMA (low > EMA and low - EMA > 0.5) is the alert; short when a later price breaks the alert low, stop = alert high, target 1:3; buy: a 15-minute candle entirely below the 5 EMA (EMA - high > 0.5), long on a break of its high, stop = alert low, 1:3",
+   "classification": "b",
+   "ids": [
+    "r6_gh_ema5_nifty",
+    "r6_gh_ema5_banknifty"
+   ],
+   "bug_fixes": [
+    "Screeni-py alerts on a CLOSE beyond the EMA with misaligned stop / target rows (reset_index of two differently filtered frames); the original method's break-of-the-alert-candle entry is used"
+   ],
+   "defaults_fixed_before_any_run": {
+    "trigger_window": "only the candle immediately after the alert candle (each completed alert candle opens its own window); alert candles of the previous session are not carried over",
+    "fill": "decision at the close of the first 1-minute bar whose low (high) breaks the alert low (high), filled at the next 1-minute open (lab convention; a resting stop-entry would fill at the level)",
+    "target": "fill -/+ 3 x (stop - fill) (Entry rr=3)",
+    "ema": "TA-Lib-style EMA(5) (SMA seed) on the continuous candle series, values rounded to 2 dp for the alert test (as Screeni-py)",
+    "instrument": "index future (underlying NIFTY / BANKNIFTY: spot index bars stand in for the future, 1 lot, 2026 lot sizes 65 / 30, futures costs, 1 bps slippage; 2.5 bps sensitivity)",
+    "holding": "stop / target / 15:15"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "no": 8,
+   "name": "TD Sequential 9 with perfection",
+   "source": "freqtrade-strategies berlinguyinca/TDSequentialStrategy.py",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/freqtrade-strategies/user_data/strategies/berlinguyinca/TDSequentialStrategy.py",
+     "sha256": "c146c1fa3d5d8ad5f87dd32f921d036a0a5ca95acc3109afdbf4689faf44e5b5"
+    }
+   ],
+   "rule_as_coded": "seq_buy = run of closes < close 4 bars earlier; exceed_low at count 8 / >= 9 vs the lows of bars 6 and 7 of the count (count 9 also inherits bar 8's flag); enter long when seq_buy > 8 and exceed_low; exit when exceed_high or seq_sell > 8; stoploss -5 %",
+   "classification": "a",
+   "ids": [
+    "r6_gh_td9_stock",
+    "r6_gh_td9_nifty",
+    "r6_gh_td9_banknifty"
+   ],
+   "bug_fixes": [
+    "perfection: the code tests 'low < low6 OR low < low7'; its docstring and DeMark's rule need the low of bar 8 or 9 below BOTH lows of bars 6 and 7 - fixed to min(low6, low7) (sell side: max of the highs)"
+   ],
+   "defaults_fixed_before_any_run": {
+    "timeframe": "daily (the code's default is 1h)",
+    "direction": "long only (enter_long only, as coded)",
+    "exit": "as coded: perfected sell count (8 or later) or sell count >= 9, decided at the close, out at the next open; -5 % stop from the fill on the daily low (gap through: the open)",
+    "roi": "minimal_roi 500 %: never reached",
+    "instruments": "stocks (CNC delivery) and NIFTY / BANKNIFTY daily index futures: index future (underlying NIFTY / BANKNIFTY: spot index bars stand in for the future, 1 lot, 2026 lot sizes 65 / 30, futures costs, 1 bps slippage; 2.5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "no": 9,
+   "name": "NIFTY-BANKNIFTY implied-vol spread z-score",
+   "source": "beastytitan18 cointegration-vol-trading base-model.ipynb",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/beastytitan18_cointegration-vol-trading/base-model.ipynb",
+     "sha256": "1b453ef556f96ba644730b2e3a1b0ee43c79815cb4818d3343c4afef13a97ad0"
+    }
+   ],
+   "rule_as_coded": "1-minute data: spread = BANKNIFTY IV - NIFTY IV, P&L = position x spread LEVEL x tte^0.7 (not a traded instrument), rolling z (window / entry / exit chosen by a full-sample grid search: 90 / 1.5 / 0.8)",
+   "classification": "c",
+   "ids": [],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "the source never trades options: its P&L is position x the IV-spread LEVEL x tte^0.7 at 1-minute frequency, with window / thresholds grid-searched on the full sample. A faithful test needs a new two-underlying option simulator (ATM straddle IV inversion per index from EOD bhavcopy, vega matching, expiry rolls, theoretical closes for untraded strikes, BANKNIFTY weeklies discontinued from Nov 2024 so the two legs' expiries differ); the lab's OptionSpec simulator holds one underlying per position. Re-timing a 90-MINUTE z-score to 90 sessions would also be a different strategy. Reported as not testable in this round rather than approximated."
+  },
+  {
+   "no": 10,
+   "name": "mr_wings",
+   "source": "pysystemtrade systems/provided/rules/mr_wings.py (+ rules/ewmac.py)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/pst/systems/provided/rules/mr_wings.py",
+     "sha256": "e1f7ed12f65d4659752ae1885dda0c86f4c0329d10c2fa7406e1d03a5612ceba"
+    },
+    {
+     "path": "scratchpad/dl/github/pst/systems/provided/rules/ewmac.py",
+     "sha256": "6794f76f5183e71a760b5a7a05fbd6fa79485374a7ac1d0a72cfd697863702ba"
+    }
+   ],
+   "rule_as_coded": "ewmac = (EWMA4 - EWMA16) / daily price vol; zero where |ewmac| < 3 x rolling(5000, min 3) std of ewmac; forecast = -ewmac",
+   "classification": "b",
+   "ids": [
+    "r6_gh_mrwings_nifty",
+    "r6_gh_mrwings_banknifty"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "position": "BINARY version (stated): +1 lot when the forecast > 0, -1 lot when < 0, flat when 0 (pysystemtrade scales and caps a continuous forecast); entries / exits / reversals at the next open",
+    "vol": "sysquant/estimators/vol.py is not in the download: robust_vol_calc reconstructed from its documented defaults - EWMA std (span 35, min 10) of daily price changes, floored at the rolling 500-day (>= 100 obs) 5 % quantile",
+    "price": "spot index close (stands in for the back-adjusted futures price)",
+    "instrument": "index future (underlying NIFTY / BANKNIFTY: spot index bars stand in for the future, 1 lot, 2026 lot sizes 65 / 30, futures costs, 1 bps slippage; 2.5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "no": 11,
+   "name": "Williams VIX Fix on single stocks",
+   "source": "openalgo examples/python/'william vix fix.py' (Pine CM_Williams_Vix_Fix)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/openalgo/examples/python/william vix fix.py",
+     "sha256": "3ca9d50890f85ea456fec8747f9edd0c889dcba11069c474d14c6aafb218f432"
+    }
+   ],
+   "rule_as_coded": "wvf = (highest(close,22) - low) / highest(close,22) x 100; signal = wvf >= SMA20(wvf) + 2 x stdev20(wvf) or wvf >= 0.85 x highest(wvf,50)",
+   "classification": "b",
+   "ids": [
+    "r6_gh_wvf_stock"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "rule": "buy at the next open after a signal close, exit at the close of the 5th session (pre-registered fixed hold; the example is an indicator chart with no exit), no stop, re-entry allowed after the exit",
+    "stdev": "population (Pine ta.stdev)",
+    "instrument": "stocks, CNC delivery, Rs 1 lakh per trade; stocks: 2023-26 the ~97 NIFTY-100 names of bars3y; 2012-23 point-in-time top-100 (universe gate on the decision day)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "no": 12,
+   "name": "Alpha101 subset #101, #33, #12, #54, #9",
+   "source": "Kakushadze (2016) '101 Formulaic Alphas' (PDF in yli188_WorldQuant_alpha101_code)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/yli188_WorldQuant_alpha101_code/101 Formulaic Alphas.pdf",
+     "sha256": "1f9c21afe32dcb3ee77b31548acdaea00451fbfa1c0ee10c907867bcc736fce9"
+    },
+    {
+     "path": "scratchpad/dl/github/yli188_WorldQuant_alpha101_code/101Alpha_code_1.py",
+     "sha256": "e78cf3b39198a9999e127b977697aa13057a59aba8a6ad5b6b9080433ba6ac3e"
+    }
+   ],
+   "rule_as_coded": "#101 (close-open)/((high-low)+.001); #33 rank(-(1-open/close)); #12 sign(delta(volume,1))*(-delta(close,1)); #54 -((low-close)*open^5)/((low-high)*close^5); #9 ts_min(delta close,5)>0 ? delta : ts_max<0 ? delta : -delta",
+   "classification": "b",
+   "ids": [
+    "r6_gh_alpha101_a101",
+    "r6_gh_alpha101_a33",
+    "r6_gh_alpha101_a12",
+    "r6_gh_alpha101_a54",
+    "r6_gh_alpha101_a9"
+   ],
+   "bug_fixes": [
+    "the yli188 code is NOT used: its rank() is df.rank(pct=True) along TIME (a whole-sample per-stock rank = look-ahead, not cross-sectional) and it back-fills prices; written from the paper with a cross-sectional rank on each day"
+   ],
+   "defaults_fixed_before_any_run": {
+    "portfolio": "every session: rank the day's alpha across eligible stocks, long the top quintile / short the bottom quintile (int(0.2 x n) each), +-0.5 gross, decided at the close, executed at the next open, held one session",
+    "ties": "by symbol name",
+    "a54_zero_range": "low == high -> undefined -> the stock is skipped that day (yli188 substitutes -0.0001)",
+    "volume": "adjusted share volume",
+    "book": "long / short book = stock futures simulated on the adjusted cash price (lab convention: no basis, roll or margin interest), 'future' statutory costs + 10 bps slippage per side; long side +0.5, short side -0.5 of equity (gross 1) unless the source fixes the weights"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 13,
+   "name": "Lunar cycle",
+   "source": "QuantConnect Strategy Library 61",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/61 Lunar Cycle in Equity Market/02 Method.html",
+     "sha256": "fef5a28532851f8a6d4b2528e3ef97bb55a5498ef858c4ea766f3aa2c296b3f8"
+    }
+   ],
+   "rule_as_coded": "long EEM from the last quarter (7 days before the new moon), short from the first quarter (7 days before the full moon)",
+   "classification": "a",
+   "ids": [
+    "r6_gh_lunar_nifty"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "phases": "Meeus, Astronomical Algorithms (2nd ed.) ch. 49 (all periodic and planetary corrections; TD - UT = 69 s) instead of the USNO file",
+    "state": "the latest quarter event at or before the 15:30 IST close of the decision day; position changes at the next open (always in the market after the first event)",
+    "instrument": "NIFTY futures long / short (the source shorts EEM): index future (underlying NIFTY / BANKNIFTY: spot index bars stand in for the future, 1 lot, 2026 lot sizes 65 / 30, futures costs, 1 bps slippage; 2.5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "no": 14,
+   "name": "Ghost-trader filter",
+   "source": "letianzj QuantResearch backtest/ghost_trader.py",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/letianzj_QuantResearch/backtest/ghost_trader.py",
+     "sha256": "1a03f594623a38341c4a861dcb6167948ecb6eaf6994903580ac15b4c725f09d"
+    }
+   ],
+   "rule_as_coded": "setup long: EMA3 > EMA21, RSI9 < 70, high > previous high; the first setup only starts a ghost trade at the close; a later setup with the close below the ghost price (ghost at a loss) enters for real; mirror for shorts; exit long when close <= lowest low of 21 bars, short when high >= highest high of 21 bars",
+   "classification": "a",
+   "ids": [
+    "r6_gh_ghost_nifty",
+    "r6_gh_ghost_banknifty"
+   ],
+   "bug_fixes": [
+    "the Donchian stop window includes the current bar (df.Low.iloc[-21:]): 'close <= lowest low' can then only fire on a close at the bar's own low; fixed to the 21 bars BEFORE the current bar"
+   ],
+   "defaults_fixed_before_any_run": {
+    "timeframe": "daily (as the source, which runs SPX daily)",
+    "indicators": "TA-Lib-style EMA (SMA seed), Wilder RSI",
+    "state": "replayed from the first bar of the data on every decision (causal); the position is the one the replay holds",
+    "instrument": "index future (underlying NIFTY / BANKNIFTY: spot index bars stand in for the future, 1 lot, 2026 lot sizes 65 / 30, futures costs, 1 bps slippage; 2.5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "no": 15,
+   "name": "January barometer",
+   "source": "paperswithbacktest awesome-systematic-trading january-barometer.py (Quantpedia)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/paperswithbacktest_awesome-systematic-trading/static/strategies/january-barometer.py",
+     "sha256": "ebe513ab4a770da979c9af17aaef68e231851a4700413537b4a00c5620f8bdde"
+    }
+   ],
+   "rule_as_coded": "hold the index in January; stay invested Feb-Dec only if January's return was positive, else T-bills until next January",
+   "classification": "b",
+   "ids": [
+    "r6_gh_january_barometer"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "what": "REPORT ONLY, no verdict: NIFTY 2013-2026 gives about 14 January decisions - no statistical power, and no gate (60 trades per half) can be met",
+    "computation": "NIFTY index closes (last December close -> last January close; out years in cash at 0 %), no costs; growth vs buy-and-hold and the out-of-market years are reported"
+   },
+   "eras": [
+    "report only (r6_portfolio --january)"
+   ]
+  },
+  {
+   "no": 16,
+   "name": "Clenow Stocks on the Move",
+   "source": "Suchismit4/NiftyOnTheMove strategy.py / indicators.py (Clenow 2015)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/Suchismit4_NiftyOnTheMove/strategy.py",
+     "sha256": "9e173a788773cdbc29fd39fd0c049cffeabf22d2f2aad2bbb0a9b294ffd5dca4"
+    },
+    {
+     "path": "scratchpad/dl/github/Suchismit4_NiftyOnTheMove/indicators.py",
+     "sha256": "e4cf1b03e82e5701f724d782c9daeff1ffb142efa5dfc1da283832cc7d3077d7"
+    },
+    {
+     "path": "scratchpad/dl/github/Suchismit4_NiftyOnTheMove/main.py",
+     "sha256": "da0f3cd85180aa122bd927c4b0ca9db7bbb1ab6fbd01914f89c45264cc016102"
+    }
+   ],
+   "rule_as_coded": "rank by annualised exponential-regression slope x R^2 (90 days); exclude stocks below SMA100 or with a > 15 % move in 90 days; sell if not in the top 20 % / below SMA100 / gap; buy from the ranking only if the index > its 200-day SMA, shares = equity x 0.1 % / ATR, max 15 stocks; position re-size and portfolio rebalance on a schedule",
+   "classification": "b",
+   "ids": [
+    "r6_gh_clenow"
+   ],
+   "bug_fixes": [
+    "the gap filter tests only UP moves (diff / price > 0.15): fixed to |move| > 15 % (the book)",
+    "'SMA_100' / 'SMA_200' are ExponentialMovingAverage in main.py: simple moving averages used (the book and the names)",
+    "buys walk the WHOLE ranked list while sells drop anything outside the top 20 % (buy-then-sell churn); buys restricted to the top 20 % (the book)",
+    "the extra 'sell on a > 50 % move' rule is replaced by the book's 15 % gap exclusion"
+   ],
+   "defaults_fixed_before_any_run": {
+    "parameters": "the strategy class defaults = the book: 90-day regression, SMA100, index SMA200 (NIFTY), ATR20 (Wilder), risk 0.1 % per ATR, max 15 stocks, momentum >= 0",
+    "schedule": "weekly (decision at the week's last session, executed at the next open); position re-size every other week when the size differs by > 5 % (up only if close > SMA100)",
+    "book": "long-only CNC + 10 bps"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 17,
+   "name": "QMOM smooth momentum",
+   "source": "quantrocket-codeload qmom/qmom.py (Alpha Architect QMOM)",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/quantrocket-codeload_qmom/qmom/qmom.py",
+     "sha256": "7d93e56c0624da50625538bcae68dc6419fb2eb6c44fbb18d5aa330679886ea7"
+    }
+   ],
+   "rule_as_coded": "top 10 % by 12-1 return ((C[t-22]-C[t-252])/C[t-252]); of those the 50 % with the most positive days in 252; equal weight; rebalance at the Feb / May / Aug / Nov month-ends (Q-NOV)",
+   "classification": "b",
+   "ids": [
+    "r6_gh_qmom"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "liquidity_screen": "the code's top-60 %-by-dollar-volume screen is skipped: the universe is already the top 100 by turnover",
+    "exclusions": "financials / ADRs / REITs are not excluded (no point-in-time sector data; NIFTY-100 is about a third financials): stated deviation",
+    "ranks": "pandas rank(ascending=False, pct=True) <= 0.10 / 0.50 as coded",
+    "book": "long-only CNC + 10 bps"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 18,
+   "name": "Dynamic Breakout II on daily stocks",
+   "source": "QuantConnect Strategy Library 04 (Pruitt & Hill) and letianzj backtest/dynamic_breakout_ii.py",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/Tutorials/04 Strategy Library/04 The Dynamic Breakout II Strategy/02 Method.html",
+     "sha256": "c0f6166ec424185bcbe1ffc33f393cae2f94b7ac1ac28fbe0dba4cafae7cf84b"
+    },
+    {
+     "path": "scratchpad/dl/github/letianzj_QuantResearch/backtest/dynamic_breakout_ii.py",
+     "sha256": "7b8c263d2e9a76d6c5958b0157a4117530831e712e38f7cced4d090a55a36a26"
+    }
+   ],
+   "rule_as_coded": "lookback N starts at 20 and changes with the 30-day volatility, clipped to 20..60; long when the close is above the upper Bollinger band (N, 2) and above the N-day high; short when below the lower band and the N-day low; exit at the N-day SMA",
+   "classification": "a",
+   "ids": [
+    "r6_gh_dbo2_stock"
+   ],
+   "bug_fixes": [
+    "letianzj: delta_vol = (vol_t / vol_y) / vol_t (should be (vol_t - vol_y) / vol_t)",
+    "letianzj: the short branch buys (positive target size)",
+    "letianzj: the N-day high / low conditions are commented out",
+    "QC: the vol window indexes close[1:numdays+1] of 31 closes (not the most recent 30 when N < 30): vol = population std of the last 30 closes (the tutorial text)"
+   ],
+   "defaults_fixed_before_any_run": {
+    "bands": "SMA(N) +- 2 population std of the N closes ending at the decision day",
+    "breakout": "close vs the high / low of the N sessions before the decision day",
+    "instrument": "stock futures long / short (lab stock-futures convention), Rs 1 lakh; stocks: 2023-26 the ~97 NIFTY-100 names of bars3y; 2012-23 point-in-time top-100 (universe gate on the decision day)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "no": 19,
+   "name": "Per-stock TSMOM, vol-scaled",
+   "source": "rkohli3/TSMOM core.py (tsmom, get_tsmom, get_exante_vol) and notebooks/MomentumIndia.ipynb",
+   "source_files": [
+    {
+     "path": "scratchpad/dl/github/rkohli3_TSMOM/core.py",
+     "sha256": "a8166fe124e2bfe995cd23968c1376d34927a4d5ee831c21e4387988ff80f618"
+    },
+    {
+     "path": "scratchpad/dl/github/rkohli3_TSMOM/notebooks/MomentumIndia.ipynb",
+     "sha256": "53fd668eef53c3157fad914171ccbe1f01382b5363891394aefbed7b7bff2a34"
+    }
+   ],
+   "rule_as_coded": "monthly: sign of each stock's 12-month return; leverage = 0.5 / ex-ante vol (EWM std, com 60, of daily returns x sqrt(261)); portfolio = mean over stocks",
+   "classification": "b",
+   "ids": [
+    "r6_gh_tsmom_stock"
+   ],
+   "bug_fixes": [
+    "get_tsmom adds the MEAN of the long P&Ls and the MEAN of the short P&Ls (each over its own subset), not the mean over all positions: fixed to weight_i = sign_i x (0.5 / vol_i) / N over all N eligible stocks"
+   ],
+   "defaults_fixed_before_any_run": {
+    "universe": "point-in-time top-100 (the notebook uses CMIE NSE-500 data)",
+    "scale": "0.5 (the notebook's levered run)",
+    "book": "stock futures long / short (gross ~ 0.5 / average vol)",
+    "rebalance": "month-end decision, next open"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  {
+   "no": 20,
+   "name": "Cross-sectional IBS, 1-day horizon",
+   "source": "researcher's shortlist (no source file in the download)",
+   "source_files": [],
+   "rule_as_coded": "IBS = (close - low) / (high - low); long the lowest-IBS stocks, short the highest, one session",
+   "classification": "b",
+   "ids": [
+    "r6_gh_ibs_xs"
+   ],
+   "bug_fixes": [],
+   "defaults_fixed_before_any_run": {
+    "rule": "every session: long the lowest-IBS quintile, short the highest-IBS quintile (int(0.2 x n) each, high == low skipped), +-0.5 gross, decided at the close, executed at the next OPEN, held to the next open (one session)",
+    "book": "long / short book = stock futures simulated on the adjusted cash price (lab convention: no basis, roll or margin interest), 'future' statutory costs + 10 bps slippage per side; long side +0.5, short side -0.5 of equity (gross 1) unless the source fixes the weights"
+   },
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  }
+ ],
+ "strategies": {
+  "r6_gh_dbo2_stock": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "vol_n": 30,
+    "n0": 20,
+    "n_min": 20,
+    "n_max": 60,
+    "k": 2.0
+   },
+   "fingerprint": "4347c5bbf9a4",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_ema5_banknifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/BANKNIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "ema": 5,
+    "tf_short": 5,
+    "tf_long": 15,
+    "gap": 0.5,
+    "rr": 3.0
+   },
+   "fingerprint": "72c520d97761",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r6_gh_ema5_nifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "ema": 5,
+    "tf_short": 5,
+    "tf_long": 15,
+    "gap": 0.5,
+    "rr": 3.0
+   },
+   "fingerprint": "af7ab8913570",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r6_gh_ghost_banknifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/BANKNIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "ma_short": 3,
+    "ma_long": 21,
+    "rsi_n": 9,
+    "oversold": 30,
+    "overbought": 70,
+    "donchian_n": 21
+   },
+   "fingerprint": "6e4455e679df",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_ghost_nifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/NIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "ma_short": 3,
+    "ma_long": 21,
+    "rsi_n": 9,
+    "oversold": 30,
+    "overbought": 70,
+    "donchian_n": 21
+   },
+   "fingerprint": "544d38fb50d5",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_lunar_nifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/NIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "long_after": "LQ",
+    "short_after": "FQ"
+   },
+   "fingerprint": "eb42709c2e0c",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_mrwings_banknifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/BANKNIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "fast": 4,
+    "slow": 16,
+    "k_std": 3.0,
+    "vol_span": 35,
+    "std_window": 5000
+   },
+   "fingerprint": "2ee13b69195c",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_mrwings_nifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/NIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "fast": 4,
+    "slow": 16,
+    "k_std": 3.0,
+    "vol_span": 35,
+    "std_window": 5000
+   },
+   "fingerprint": "11f013cffbe4",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_rbreaker_banknifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/BANKNIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5
+   },
+   "fingerprint": "c5ce672bf9e3",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r6_gh_rbreaker_nifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5
+   },
+   "fingerprint": "4597fde2dd30",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r6_gh_td9_banknifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/BANKNIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "setup": 9,
+    "lag": 4,
+    "stop_pct": 5.0
+   },
+   "fingerprint": "2f39175d8059",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_td9_nifty": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "futures/NIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "setup": 9,
+    "lag": 4,
+    "stop_pct": 5.0
+   },
+   "fingerprint": "bf25c6c9a5c7",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_td9_stock": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "swing",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "setup": 9,
+    "lag": 4,
+    "stop_pct": 5.0
+   },
+   "fingerprint": "90c4fa3e2824",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_wvf_stock": {
+   "module": "stratlab.catalog.r6_github",
+   "kind": "swing",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pd": 22,
+    "bbl": 20,
+    "mult": 2.0,
+    "lb": 50,
+    "ph": 0.85,
+    "hold": 5
+   },
+   "fingerprint": "f3a0084a2ae3",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r6_gh_resid_mom_long": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/cnc",
+   "schedule": "monthly",
+   "params": {
+    "months": 36,
+    "score": "t-11..t-1",
+    "decile": 0.1
+   },
+   "fingerprint": "3ffdd192ab58",
+   "era1_first_decision": 20150130,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_resid_mom_ls": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "monthly",
+   "params": {
+    "months": 36,
+    "score": "t-11..t-1",
+    "decile": 0.1,
+    "gross_side": 0.5
+   },
+   "fingerprint": "8784c7dcd26e",
+   "era1_first_decision": 20150130,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_season_1y": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "monthly",
+   "params": {
+    "years": 1,
+    "n": 10,
+    "gross_side": 0.5
+   },
+   "fingerprint": "3da2bf321e8a",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_season_5y": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "monthly",
+   "params": {
+    "years": 5,
+    "n": 10,
+    "gross_side": 0.5
+   },
+   "fingerprint": "137f9a77ceda",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_mom_turnover": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "monthly",
+   "params": {
+    "roc": 252,
+    "mom_frac": 0.2,
+    "turn_split": 3,
+    "turn_avg": 60,
+    "tranche": 0.3333333333333333,
+    "hold": 3
+   },
+   "fingerprint": "80fda3034017",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_etf_switch": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/cnc",
+   "schedule": "quarterly",
+   "params": {
+    "alloc": 0.75,
+    "assets": "NIFTYBEES,GOLDBEES"
+   },
+   "fingerprint": "7690f90e1497",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_alpha101_a101": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "daily",
+   "params": {
+    "alpha": "a101",
+    "quantile": 0.2,
+    "gross_side": 0.5
+   },
+   "fingerprint": "168efd9f2d80",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_alpha101_a33": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "daily",
+   "params": {
+    "alpha": "a33",
+    "quantile": 0.2,
+    "gross_side": 0.5
+   },
+   "fingerprint": "ef140919ab4c",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_alpha101_a12": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "daily",
+   "params": {
+    "alpha": "a12",
+    "quantile": 0.2,
+    "gross_side": 0.5
+   },
+   "fingerprint": "7060337e31eb",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_alpha101_a54": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "daily",
+   "params": {
+    "alpha": "a54",
+    "quantile": 0.2,
+    "gross_side": 0.5
+   },
+   "fingerprint": "30e2f86860d2",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_alpha101_a9": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "daily",
+   "params": {
+    "alpha": "a9",
+    "quantile": 0.2,
+    "gross_side": 0.5
+   },
+   "fingerprint": "f5ff40db2049",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_ibs_xs": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "daily",
+   "params": {
+    "quantile": 0.2,
+    "gross_side": 0.5
+   },
+   "fingerprint": "b2b137a8372f",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_clenow": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/cnc",
+   "schedule": "weekly",
+   "params": {
+    "lookback": 90,
+    "sma_short": 100,
+    "sma_long": 200,
+    "atr": 20,
+    "risk": 0.001,
+    "gap": 0.15,
+    "min_momentum": 0.0,
+    "top_frac": 0.2,
+    "max_stocks": 15,
+    "resize_tol": 0.05
+   },
+   "fingerprint": "f7239cf1e7c2",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_qmom": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/cnc",
+   "schedule": "q_nov",
+   "params": {
+    "window": 252,
+    "skip": 22,
+    "top_pct": 0.1,
+    "smooth_pct": 0.5
+   },
+   "fingerprint": "ba2e569f2666",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_tsmom_stock": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "portfolio/futures",
+   "schedule": "monthly",
+   "params": {
+    "lookback_months": 12,
+    "scale": 0.5,
+    "com": 60,
+    "vol_tail": 750
+   },
+   "fingerprint": "39e7e10d4dc3",
+   "era1_first_decision": 20130131,
+   "eras": [
+    "portfolio: era1 2013-23 (nse_old, point-in-time top-100, = the 2012-23 out-of-sample test) + era2 2023-26 (bars3y, survivorship-biased), factor_momentum gates, one look (github/portfolio_ledger.json)"
+   ]
+  },
+  "r6_gh_january_barometer": {
+   "module": "stratlab.r6_portfolio",
+   "kind": "report",
+   "params": {},
+   "fingerprint": "95c2226dc4e5",
+   "eras": [
+    "report only"
+   ]
+  }
+ },
+ "n_new_ids": 30
+}

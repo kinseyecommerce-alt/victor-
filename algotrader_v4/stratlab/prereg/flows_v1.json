@@ -1,0 +1,602 @@
+{
+ "adaptations_before_results": [
+  "Size filter: the sketch said 'deal value >= Rs 10 cr OR >= 0.5 % of shares'. A bulk deal is by definition >= 0.5 % of the listed shares, and shares outstanding are not in the data, so the OR clause would admit every bulk deal: the filter is the client's NET value of the session >= Rs 10 crore.",
+  "Netting per client and session (BUY - SELL): bulk deals 2021-26 are dominated by HFT / prop desks that buy and sell the same stock the same day; netting removes round trips mechanically.",
+  "Intra-group transfers removed (flows_strategies.group_transfer_mask): the data check found ~1,000 2022 block 'institution' buys AND sells that are iShares Mauritius subsidiaries handing shares to iShares ETFs at equal quantity and price (a restructuring, not a flow); found from counts by month / client, no return looked at.",
+  "Client classes: fixed keyword list (client_classes), written from the list of the largest client NAMES and counts only. Broker-dealer / ODI / arbitrage names (Societe Generale, BNP Paribas Arbitrage, '- ODI' accounts, Citigroup Global Markets) are not institutions here; family trusts are OTHER (the word TRUST alone is not a keyword).",
+  "Index pooling (index_pooling): NIFTY 50 and NIFTY 100 changes pooled into additions / deletions, deduplicated per (stock, effective date); decided before any return because each index alone has far too few events.",
+  "Index rows with month-precision effective dates are dropped everywhere; rows without a real announcement date are dropped from the two run-up variants only (counts in data_check).",
+  "Effective-date variants enter at the open AFTER the effective date (the sketch allowed 'effective-date close or next open'; the lab fills at next opens).",
+  "flowdata.index_changes now also returns announce_source and effective_precision (needed for the availability rule; a file without the columns counts as 'no real announcement').",
+  "Stock futures do not fit a Rs 10 lakh account at 1 % risk: the account rows of the short variants will show skipped signals (stated before the run)."
+ ],
+ "availability_rule": {
+  "deals": "a deal dated D is published after D's close: decision at D's close, fill at the next session's open (flowdata.deals with before = D + 1; nsedata.cutoff(D + 1) clips everything)",
+  "fo_listed": "short variants need a stock future traded on the decision day (F&O bhavcopy, EOD)",
+  "index_announcement": "only a date exists: assumed published after that date's close; the decision is the first symbol session ON or AFTER the announcement date (announce_date <= decision day), the fill the next session's open (a weekend release fills on the second session after it)",
+  "index_effective": "effective_date = first session of the new composition; index funds trade at the close of the session before it. Effective-date variants decide at the close of the first symbol session on / after the effective date and fill at the next open",
+  "runup_exit": "max_hold = sessions from the entry session to the last calendar session before the effective date (exchange calendar, public in advance); exit at that session's close"
+ },
+ "benchmarks_file_sha256": "111543a5a7fe03e993a2e6c44630243586c451059d38f7011bea07e572456af6",
+ "client_classes": {
+  "counts": {
+   "deal_rows_by_class": {
+    "FUND": 9984,
+    "INSURANCE": 548,
+    "MF": 2300,
+    "OTHER": 100667,
+    "PROP_BROKER": 69298
+   },
+   "distinct_client_names_by_class": {
+    "FUND": 2066,
+    "INSURANCE": 144,
+    "MF": 510,
+    "OTHER": 18439,
+    "PROP_BROKER": 1212
+   },
+   "institution_net_events_ge_10cr": {
+    "all_buy": {
+     "2012": 73,
+     "2013": 51,
+     "2014": 68,
+     "2015": 107,
+     "2016": 87,
+     "2017": 133,
+     "2018": 118,
+     "2019": 223,
+     "2020": 131,
+     "2021": 198,
+     "2022": 218,
+     "2023": 477,
+     "2024": 708,
+     "2025": 604,
+     "2026": 673
+    },
+    "all_sell": {
+     "2012": 50,
+     "2013": 30,
+     "2014": 45,
+     "2015": 62,
+     "2016": 53,
+     "2017": 76,
+     "2018": 70,
+     "2019": 88,
+     "2020": 95,
+     "2021": 89,
+     "2022": 73,
+     "2023": 97,
+     "2024": 195,
+     "2025": 166,
+     "2026": 156
+    },
+    "top500_buy": {
+     "2012": 58,
+     "2013": 40,
+     "2014": 40,
+     "2015": 72,
+     "2016": 40,
+     "2017": 63,
+     "2018": 80,
+     "2019": 189,
+     "2020": 100,
+     "2021": 123,
+     "2022": 139,
+     "2023": 333,
+     "2024": 404,
+     "2025": 394,
+     "2026": 426
+    },
+    "top500_buy_by_class": {
+     "FUND": 1560,
+     "INSURANCE": 219,
+     "MF": 722
+    },
+    "top500_sell": {
+     "2012": 35,
+     "2013": 28,
+     "2014": 36,
+     "2015": 44,
+     "2016": 31,
+     "2017": 40,
+     "2018": 41,
+     "2019": 64,
+     "2020": 65,
+     "2021": 40,
+     "2022": 31,
+     "2023": 49,
+     "2024": 99,
+     "2025": 87,
+     "2026": 48
+    },
+    "top500_sell_by_class": {
+     "FUND": 650,
+     "INSURANCE": 18,
+     "MF": 70
+    }
+   }
+  },
+  "excluded": [
+   "PROP_BROKER (prop / HFT / brokers / ODI issuers / arbitrage desks)",
+   "OTHER (individuals, companies, promoters, family trusts, banks, unclassified foreign entities)"
+  ],
+  "institution_classes": [
+   "MF",
+   "INSURANCE",
+   "FUND"
+  ],
+  "netting": "per (session, stock, client name): net = sum(BUY value) - sum(SELL value) over its bulk and block deals that session (value_cr = qty x price / 1e7, unadjusted); a same-day round trip nets to ~0 and does not qualify. Before netting, intra-group transfers are removed: a BUY and a SELL in the same stock and session with equal quantity and price whose client names start with the same word (ignoring THE, M/S) are both dropped",
+  "ordered_keywords": [
+   {
+    "class": "MF",
+    "regex": [
+     "MUTUAL\\s*FUND",
+     "\\bMF\\b",
+     "TRUSTEE\\s+CO",
+     "\\bAMC\\b"
+    ]
+   },
+   {
+    "class": "INSURANCE",
+    "regex": [
+     "INSURANCE",
+     "ASSURANCE"
+    ]
+   },
+   {
+    "class": "PROP_BROKER",
+    "regex": [
+     "SECURITIES",
+     "BROKING",
+     "\\bBROKERS?\\b",
+     "\\bSHARES?\\s*(?:AND|&)\\s*STOCK",
+     "STOCK\\s*BROK",
+     "ARBITRAGE",
+     "FINANCIAL\\s+MARKETS",
+     "GLOBAL\\s+MARKETS",
+     "CAPITAL\\s+MARKETS",
+     "\\bTRADING\\b",
+     "\\bTRADERS?\\b",
+     "RESEARCH",
+     "COMMODITIES",
+     "DERIVATIVES",
+     "FINSTOCK",
+     "FINSOL",
+     "\\bODI\\b",
+     "MARKETS\\s+LLP"
+    ]
+   },
+   {
+    "class": "FUND",
+    "regex": [
+     "\\bFUNDS?\\b",
+     "\\bETFS?\\b",
+     "PENSION",
+     "INVESTMENT\\s+AUTHORITY",
+     "SOVEREIGN",
+     "GOVERNMENT\\s+OF\\s+SINGAPORE",
+     "MONETARY\\s+AUTHORITY",
+     "NORGES\\s+BANK",
+     "VANGUARD",
+     "ISHARES",
+     "BLACKROCK",
+     "FIDELITY",
+     "\\bAIF\\b",
+     "ALTERNATIVE\\s+INVESTMENT",
+     "ENDOWMENT",
+     "RETIREMENT",
+     "PROVIDENT"
+    ]
+   }
+  ],
+  "rule": "client name upper-cased, dots -> spaces, whitespace collapsed; the FIRST class whose regex list matches wins, in this order; no match = OTHER"
+ },
+ "code_sha256": {
+  "capital.py": "382986bba85b4229c3adabcd94b81e1f54825e05a2f7501d4257135f5d99903d",
+  "data_daily.py": "0d07ace83d42d712960a434423c1e6cddf3a5aedc59c94b4d3228804c54999c6",
+  "events_daily.py": "7986b283b2f23a3edf58ed1784ecee325fc09b3ab2971ccce88675e9abe23b1d",
+  "events_data.py": "6c6d2ba958b6944ca53329c7974a28b44c4c37baeea8591f077afc67a9b363db",
+  "events_run.py": "a9937144da233f5cafe2f5926bf37ad97afe65bcfc5eef1186f6f698d0729c31",
+  "flowdata.py": "947bbbc6fa63cf5df28d812b865e73aa9969d72bf934f306934c835dc8418069",
+  "flows_run.py": "a9bf07766b31801f8554f84b17078581963f39759452393b355066f1c7ce0b79",
+  "flows_strategies.py": "204a6c829fb8d0fc352a5411db485b9b0b2f4fae5b4ec08195b52e242509d5a9",
+  "protocol.py": "6929839143dbca9dc0bb6d8d0a5fb7b2941d20ea8c1b6a0ced969bd8ad16af9a",
+  "protocol_oos.py": "86cd23799bcf492a734ccb257cfe3cac1c3f2e2614932356649d0a7a2c8e817a",
+  "sim.py": "315a8448f69fa220aa88bd8a9363fef1cac9ec89c177b323359fb90daaf8ee72",
+  "trials.py": "8c657c138bc285b78fe0d2fd218459865833bd274be22a5261540cb76d5ce802"
+ },
+ "corporate_action_rule": "events_run.drop_excluded: a trade whose (decision day, exit day] holds an unexplained overnight gap or a demerger / scheme / large-rights ex-day is dropped and counted; reported both ways",
+ "data": {
+  "daily_cache": {
+   "first": 20120102,
+   "last": 20261109,
+   "sessions": 3659,
+   "symbols_ever_members": 1670,
+   "top_n": 500,
+   "version": "ed1"
+  },
+  "flow_tables_sha256": {
+   "deals/deals.csv.gz": "d376ce2288d9a46d914cc69ad14fb05eb39e619f899c84bc530626c72a2589ca",
+   "index_membership/index_changes.csv": "181260a1c5c92f1f843170bdd9eb40f65d6f535874283b1c74244f87d0272df6",
+   "index_membership/index_members.csv.gz": "b5e55edf150ada1807479da4499662898ac942ef4c488499fc803f47a4f67bb0"
+  },
+  "sources": [
+   "NSE bulk / block deals historical report (flowdata deals)",
+   "NSE Indices month-end constituent files + press releases (flowdata index_changes)",
+   "events_daily point-in-time cache (NSE bhavcopy prices)",
+   "NSE F&O bhavcopy (stock futures list)",
+   "NSE index files (NIFTY Next 50 / 100 / 500 benchmark, report-only)"
+  ]
+ },
+ "data_check_sha256": "420478843583973a63a39d9bc96380a5e93269aa3a31ce62195b64dd0df2cc2d",
+ "eras": {
+  "2012-23": {
+   "era": [
+    20120101,
+    20231109
+   ],
+   "h1": [
+    20120101,
+    20171231
+   ],
+   "h2": [
+    20180101,
+    20231109
+   ],
+   "protocol": "protocol_oos.evaluate (one look, ledger flows/oos_ledger.json)"
+  },
+  "2023-26": {
+   "calendar": "the lab's 3-year session calendar (trials.calendar_3y)",
+   "ledger": "<events_daily cache>/final_ledger.json",
+   "protocol": "protocol.evaluate, DISCOVERY 70 % (H1 / H2) + FINAL 30 %, FINAL once and only for screen passers"
+  },
+  "old_era_look": "EVERY variant gets its old-era judgement, whatever its 2023-26 result"
+ },
+ "expected_from_counts": "index events are few: about 6-7 pooled additions and as many deletions per half-yearly review, i.e. well under 60 in the 2023-26 DISCOVERY window; every index variant is therefore expected to FAIL the 2023-26 screen on trade count and cannot be 'proven' (stated before any return was computed). The old era has 58-71 usable pooled events per half (data_check.pooled_index_events), before the member-day, stock-future and one-position-at-a-time rules: at or below the 60-trade minimum, so the trade-count gate may decide the index variants there too",
+ "fills_costs": {
+  "cost_model": "2026-11/f2/fl1",
+  "dividends": "prices are NOT dividend-adjusted",
+  "longs": "delivery (CNC) costs",
+  "notional": 100000.0,
+  "sensitivity_bps": 5.0,
+  "shorts": "stock future on the cash price, futures costs, no basis / lot / roll",
+  "slippage_bps": 2.0,
+  "stops": "20 % catastrophe stop on every variant; exit by the clock"
+ },
+ "gates": {
+  "dsr_min": 0.95,
+  "final": {
+   "min_pf": 1.05,
+   "net_gt_0": true
+  },
+  "no_relaxation": "a variant short of a trade minimum fails on trade count; nothing is pooled, relaxed or re-defined after results",
+  "oos": {
+   "era": [
+    20120101,
+    20231109
+   ],
+   "h1": [
+    20120101,
+    20171231
+   ],
+   "h2": [
+    20180101,
+    20231109
+   ],
+   "max_symbol_share": 0.35,
+   "min_pf": 1.15,
+   "min_trades_per_half": {
+    "intraday": 150,
+    "positional": 60
+   },
+   "net_gt_0": [
+    "h1",
+    "h2"
+   ],
+   "sens_bps": 5.0,
+   "universe": "universe_monthly.csv: top 100 by 60-session turnover before each month, gate on decision day"
+  },
+  "proven": "CONFIRMED on 2023-26 FINAL and OOS-CONFIRMED on 2012-23 and DSR >= 0.95 with N = all 2023-26 trials in the ledger (the fair N = this study's 8 variants is also reported)",
+  "screen": {
+   "max_symbol_share": 0.35,
+   "min_pf": 1.15,
+   "min_trades": {
+    "intraday": 150,
+    "positional": 60
+   },
+   "net_gt_0": [
+    "H1",
+    "H2"
+   ]
+  }
+ },
+ "gates_fingerprint": "1cbbb3ea72c1",
+ "index_pooling": {
+  "additions": "IN to NIFTY 50 (from anywhere, incl. NIFTY Next 50) or IN to NIFTY 100 (a new NIFTY Next 50 member from outside the top 100); one event per (stock, effective date)",
+  "counts": {
+   "add": {
+    "2012-17 all": 71,
+    "2012-17 dropped_month_precision": 2,
+    "2012-17 excluded_from_runup_no_real_announcement": 4,
+    "2012-17 not_in_cache": 1,
+    "2012-17 usable_effective_based": 68,
+    "2012-17 usable_runup_press": 64,
+    "2018-23 all": 80,
+    "2018-23 dropped_month_precision": 9,
+    "2018-23 usable_effective_based": 71,
+    "2018-23 usable_runup_press": 71,
+    "2023-26 all": 38,
+    "2023-26 dropped_month_precision": 1,
+    "2023-26 usable_effective_based": 37,
+    "2023-26 usable_runup_press": 37
+   },
+   "del": {
+    "2012-17 all": 64,
+    "2012-17 dropped_month_precision": 2,
+    "2012-17 excluded_from_runup_no_real_announcement": 3,
+    "2012-17 not_in_cache": 1,
+    "2012-17 usable_effective_based": 61,
+    "2012-17 usable_runup_press": 58,
+    "2018-23 all": 78,
+    "2018-23 dropped_month_precision": 7,
+    "2018-23 excluded_from_runup_no_real_announcement": 2,
+    "2018-23 usable_effective_based": 71,
+    "2018-23 usable_runup_press": 69,
+    "2023-26 all": 37,
+    "2023-26 excluded_from_runup_no_real_announcement": 1,
+    "2023-26 usable_effective_based": 37,
+    "2023-26 usable_runup_press": 36
+   }
+  },
+  "deletions": "OUT of NIFTY 50 (incl. demotion to NIFTY Next 50) or OUT of NIFTY 100",
+  "month_precision": "rows whose effective date is known only to the month are never used (any variant)",
+  "not_events": "NIFTY Next 50 IN / OUT rows that are only moves to / from NIFTY 50 (already counted as NIFTY 50 deletions / additions)",
+  "pooled": true,
+  "runup_variants": "fl_idx_add_runup and fl_idx_del_rundown use ONLY rows with announce_source == 'press' (a real press-release date); rows dated 'the session before the effective date' are excluded from them (counts in data_check.pooled_index_events)"
+ },
+ "n_variants": 8,
+ "name": "flows_v1",
+ "question": "Do big-investor bulk / block deals and NIFTY index inclusions / deletions give a tradable edge on NSE stocks after costs, in two eras?",
+ "report_only": {
+  "account": "capital.py: Rs 10 lakh, 1 % risk per trade from the stop distance, config.py limits, signals in time order; stock-future lot ~ Rs 7.5 lakh contract",
+  "excess": "mean / median excess return per trade vs NIFTY 50 and (mid-cap-fair) NIFTY Next 50, NIFTY 100, NIFTY 500 over each holding window (index open of the entry session -> close of the exit session), 2000 month-block bootstrap resamples",
+  "placebo": "deals: every (stock, session) group of deal rows moved to a random session of the same stock in the same era; index changes: every (stock, announcement, effective) group moved to a random session of the same stock and era with the same session gap; same count, same pipeline, seed 20261115",
+  "planted_edge": "synthetic mutual-fund net buys of Rs 50 cr dated the session before each stock's best 2 % of 20-session forward returns (old era, member days) must give fl_inst_buy_h20 a large profit and the same rows delayed 25 sessions must not; synthetic NIFTY 50 additions announced on those sessions (effective 21 sessions later) do the same for fl_idx_add_runup",
+  "rr3": {
+   "stop_pct": 5.0,
+   "target_pct": 15.0
+  }
+ },
+ "report_only_twins": [
+  {
+   "fingerprint": "2b92bcfd1e34",
+   "id": "fl_inst_buy_h20_rr3",
+   "params": {
+    "hold": 20,
+    "min_cr": 10.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  },
+  {
+   "fingerprint": "184cba4de381",
+   "id": "fl_inst_buy_h60_rr3",
+   "params": {
+    "hold": 60,
+    "min_cr": 10.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  },
+  {
+   "fingerprint": "df3401610446",
+   "id": "fl_inst_sell_short_h20_rr3",
+   "params": {
+    "hold": 20,
+    "min_cr": 10.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  },
+  {
+   "fingerprint": "cb2673c80804",
+   "id": "fl_inst_cluster_h20_rr3",
+   "params": {
+    "hold": 20,
+    "min_buyers": 2,
+    "min_cr": 10.0,
+    "stop_pct": 5.0,
+    "target_pct": 15.0,
+    "window": 10
+   }
+  },
+  {
+   "fingerprint": "66a395aaa24c",
+   "id": "fl_idx_add_runup_rr3",
+   "params": {
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  },
+  {
+   "fingerprint": "7197ceabe8ff",
+   "id": "fl_idx_add_reversal_rr3",
+   "params": {
+    "hold": 20,
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  },
+  {
+   "fingerprint": "a0ef84aa9800",
+   "id": "fl_idx_del_rebound_rr3",
+   "params": {
+    "hold": 20,
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  },
+  {
+   "fingerprint": "015e34df5304",
+   "id": "fl_idx_del_rundown_rr3",
+   "params": {
+    "stop_pct": 5.0,
+    "target_pct": 15.0
+   }
+  }
+ ],
+ "strategies": {
+  "fl_idx_add_reversal": {
+   "fingerprint": "a054967af81e"
+  },
+  "fl_idx_add_reversal_rr3": {
+   "fingerprint": "7197ceabe8ff"
+  },
+  "fl_idx_add_runup": {
+   "fingerprint": "ede81fa349df"
+  },
+  "fl_idx_add_runup_rr3": {
+   "fingerprint": "66a395aaa24c"
+  },
+  "fl_idx_del_rebound": {
+   "fingerprint": "ef98b3a1a711"
+  },
+  "fl_idx_del_rebound_rr3": {
+   "fingerprint": "a0ef84aa9800"
+  },
+  "fl_idx_del_rundown": {
+   "fingerprint": "b7f127f6c4c8"
+  },
+  "fl_idx_del_rundown_rr3": {
+   "fingerprint": "015e34df5304"
+  },
+  "fl_inst_buy_h20": {
+   "fingerprint": "686de7ccc4f6"
+  },
+  "fl_inst_buy_h20_rr3": {
+   "fingerprint": "2b92bcfd1e34"
+  },
+  "fl_inst_buy_h60": {
+   "fingerprint": "d579324cd0c0"
+  },
+  "fl_inst_buy_h60_rr3": {
+   "fingerprint": "184cba4de381"
+  },
+  "fl_inst_cluster_h20": {
+   "fingerprint": "c2185275cb45"
+  },
+  "fl_inst_cluster_h20_rr3": {
+   "fingerprint": "cb2673c80804"
+  },
+  "fl_inst_sell_short_h20": {
+   "fingerprint": "1a1e576fe038"
+  },
+  "fl_inst_sell_short_h20_rr3": {
+   "fingerprint": "df3401610446"
+  }
+ },
+ "trials": "each of the 8 variants is one trial on 2023-26 and one on 2012-23; the 8 report-only twins are recorded as stage 'explore' (they count in N, they cannot be proven)",
+ "universe": "point-in-time monthly top 500 NSE equity shares by 60-session turnover (events_daily), delisted names kept; a position may be opened only on a member day; index variants trade the changed stocks themselves under the same member-day rule; shorts need a listed stock future",
+ "variants": [
+  {
+   "family": "deals",
+   "fingerprint": "686de7ccc4f6",
+   "horizon": "positional",
+   "id": "fl_inst_buy_h20",
+   "kind": "swing",
+   "params": {
+    "hold": 20,
+    "min_cr": 10.0,
+    "stop_pct": 20.0
+   },
+   "rule": "Institution-class client net buyer of >= Rs 10 cr (bulk/block deals of the day): buy next open, 20 sessions"
+  },
+  {
+   "family": "deals",
+   "fingerprint": "d579324cd0c0",
+   "horizon": "positional",
+   "id": "fl_inst_buy_h60",
+   "kind": "swing",
+   "params": {
+    "hold": 60,
+    "min_cr": 10.0,
+    "stop_pct": 20.0
+   },
+   "rule": "Institution-class client net buyer of >= Rs 10 cr (bulk/block deals of the day): buy next open, 60 sessions"
+  },
+  {
+   "family": "deals",
+   "fingerprint": "1a1e576fe038",
+   "horizon": "positional",
+   "id": "fl_inst_sell_short_h20",
+   "kind": "futures",
+   "params": {
+    "hold": 20,
+    "min_cr": 10.0,
+    "stop_pct": 20.0
+   },
+   "rule": "Institution-class client net seller of >= Rs 10 cr: short the stock future next open, 20 sessions"
+  },
+  {
+   "family": "deals",
+   "fingerprint": "c2185275cb45",
+   "horizon": "positional",
+   "id": "fl_inst_cluster_h20",
+   "kind": "swing",
+   "params": {
+    "hold": 20,
+    "min_buyers": 2,
+    "min_cr": 10.0,
+    "stop_pct": 20.0,
+    "window": 10
+   },
+   "rule": ">= 2 distinct institution-class net buyers of >= Rs 10 cr within 10 sessions: buy next open, 20 sessions"
+  },
+  {
+   "family": "index",
+   "fingerprint": "ede81fa349df",
+   "horizon": "positional",
+   "id": "fl_idx_add_runup",
+   "kind": "swing",
+   "params": {
+    "stop_pct": 20.0
+   },
+   "rule": "NIFTY 50 / NIFTY 100 addition (real announcement date): buy first open after it, sell close before effective"
+  },
+  {
+   "family": "index",
+   "fingerprint": "a054967af81e",
+   "horizon": "positional",
+   "id": "fl_idx_add_reversal",
+   "kind": "futures",
+   "params": {
+    "hold": 20,
+    "stop_pct": 20.0
+   },
+   "rule": "NIFTY 50 / NIFTY 100 addition: short the future at the open after the effective date, 20 sessions"
+  },
+  {
+   "family": "index",
+   "fingerprint": "ef98b3a1a711",
+   "horizon": "positional",
+   "id": "fl_idx_del_rebound",
+   "kind": "swing",
+   "params": {
+    "hold": 20,
+    "stop_pct": 20.0
+   },
+   "rule": "NIFTY 50 / NIFTY 100 deletion: buy at the open after the effective date, 20 sessions"
+  },
+  {
+   "family": "index",
+   "fingerprint": "b7f127f6c4c8",
+   "horizon": "positional",
+   "id": "fl_idx_del_rundown",
+   "kind": "futures",
+   "params": {
+    "stop_pct": 20.0
+   },
+   "rule": "NIFTY 50 / NIFTY 100 deletion (real announcement date): short first open after it, cover close before effective"
+  }
+ ],
+ "written": "2026-11-15 01:18"
+}

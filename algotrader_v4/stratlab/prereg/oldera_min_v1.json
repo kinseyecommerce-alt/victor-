@@ -1,0 +1,7412 @@
+{
+ "title": "Old-era minute-bar out-of-sample round (2016-01-01 .. 2023-11-09): one look, no tuning",
+ "written": "2026-11-14 09:26",
+ "era": [
+  20160101,
+  20231109
+ ],
+ "h1": [
+  20160101,
+  20191231
+ ],
+ "h2": [
+  20200101,
+  20231109
+ ],
+ "gates": {
+  "era": [
+   20160101,
+   20231109
+  ],
+  "h1": [
+   20160101,
+   20191231
+  ],
+  "h2": [
+   20200101,
+   20231109
+  ],
+  "min_pf": 1.15,
+  "min_trades_per_half": {
+   "intraday": 150,
+   "positional": 60
+  },
+  "max_symbol_share": 0.35,
+  "net_gt_0": [
+   "h1",
+   "h2"
+  ],
+  "sens_bps": 5.0,
+  "universe": "today's NIFTY-100 names with Kite minute bars 2016-01-01..2023-11-09 (survivorship-biased); no point-in-time gate",
+  "costs": "costs.py 2026 rates for every year"
+ },
+ "gates_fingerprint": "bf4933d2c1f1",
+ "report_only": {
+  "sens": "same strategy at 5 bps slippage per side (index 2.5 bps; auction family 5 bps vs its 2.1; options haircut x2.5) and whether it would pass there",
+  "min_trades_60_intraday": "whether an intraday strategy would pass with 60 trades per half instead of 150",
+  "excess_vs_nifty": "net minus side x the trade's notional x the NIFTY 50 (BANKNIFTY futures: NIFTY BANK) move from the entry minute to the exit minute, per half; the relevant line for long-biased strategies (long share of era trades >= 70%)",
+  "listed_weeklies_only": "NIFTY weekly option strategies: the same trades restricted to entries on or after 2019-02-11 (first listed NIFTY weekly expiry 2019-02-14); before that the weekly contracts did not exist and the modelled trades are synthetic",
+  "attention": "SWING-ATTN-ON-3X also with the 09:16-open exit and with CNC costs (as attention.py reports)"
+ },
+ "combined_verdict": "proven in both eras = FINAL-CONFIRMED on the 2023-26 3-year data AND OOS-CONFIRMED here",
+ "luck_rate": "share of group-c ids with 2023-26 status FAILED SCREEN that are OOS-CONFIRMED here, against the share of 2023-26 FINAL-CONFIRMED ids (groups a+b) that are OOS-CONFIRMED here; ids 'REJECTED ON FINAL' / 'PASSED SCREEN' / 'not screened on bars3y' are reported separately",
+ "cost_model_note": "costs.py 2026 rates (COST_MODEL_VERSION) for every year; each runner's own fill model; NIFTY / BANKNIFTY lot sizes as each module pre-registered (2026 lots for index futures 65 / 30; options 75 NIFTY, BANKNIFTY 30) for every date",
+ "slippage_bps": {
+  "stocks": 2.0,
+  "index": 1.0,
+  "auction_family": 2.1,
+  "ltr": 2.1,
+  "sens_stocks": 5.0,
+  "sens_index": 2.5,
+  "options_haircut": "max(1 pt, 2 %) per leg per fill, sens x2.5"
+ },
+ "options_model": "options_vrp / options_vrp_vix / options_r3: Black-Scholes MODEL premiums on the NIFTY 50 / NIFTY BANK minute bars with the previous India VIX official close (nse_old) as one flat vol, r 6.5 %, no skew; NOT option prices. NIFTY weekly options were listed only from 2019-02 (BANKNIFTY weeklies from 2016-05), so the weekly strangles' 2016-01..2019-02 trades are on contracts that did not exist. The verdict uses the whole era as modelled; the listed-weeklies block is reported next to it.",
+ "data": {
+  "src": "/tmp/claude-0/-home-user-victor-/10a63b67-92f5-5498-8eb5-0d5b292e5470/scratchpad/bars_min_old",
+  "cache": "/tmp/claude-0/-home-user-victor-/10a63b67-92f5-5498-8eb5-0d5b292e5470/scratchpad/oldera_min/cache",
+  "cache_manifest_sha256": "67bd552f3e525dfd5cf0355ce4b8e7342e42d404c9af1ae37081e25513fe5d31",
+  "dirty_links_sha256": "f46fda323b40117ec113404248b566e9eb24f6dc42bf484769651c7c51f9a101",
+  "dirty_rule": "{symbol: sorted dates d} where the overnight link previous-session -> d in the minute data cannot be trusted:\n  * the previous NSE regular session is missing from the symbol's minute data (download holes; the lab's\n    \"previous session\" would silently be two sessions back), or the session itself was dropped (< 200 bars):\n    d = the first available session after the hole;\n  * the Kite overnight ratio (09:15 open / previous 15:29 close) differs from NSE's adjusted ratio (official\n    open / previous close, back-adjusted by nse_old's factors incl. demergers) by more than DIRTY_TOL in log\n    terms: an unadjusted demerger (ADANIENT 2018-09-06, GRASIM 2017-07-19), a wrong Kite adjustment (NMDC\n    2022-10-27) or a bad opening print. Real market moves agree in both sources;\n  * NSE has no EQ row for d or for the previous session (no comparison possible) and the Kite overnight move\n    exceeds NOCMP_TOL in log terms (ABB 2019-12-20, demerger ex-day mis-adjusted by Kite).\nA trade whose entry .. exit dates contain a dirty date of its symbol is excluded (DIRTY RULE, pre-registered);\nfor index instruments only the first rule applies.",
+  "cleaning": {
+   "drop_before": {
+    "IRCTC": 20191014,
+    "PIIND": 20200201
+   },
+   "why": {
+    "IRCTC": "another instrument under the same Kite name before the 2019-10-14 listing",
+    "PIIND": "prints of another instrument mixed in 2016-01..2020-01"
+   }
+  },
+  "daily_aux": "_NIFTY50_day / _VIX_day / _NIFTYBANK_day = nse_old index_daily official OHLC",
+  "lookbacks": "no splice of daily history before 2016-01-01: lookbacks warm up inside 2016 as they did at the start of the 2023-26 data (LTR's 252-session signal starts 2017)",
+  "nsedata": "r4_* specs read nsedata through oldera_fo's old-era view (nse_old_view)",
+  "universe": "today's NIFTY-100 names (97 stocks with data) - SURVIVORSHIP-BIASED in favour of long strategies"
+ },
+ "execution": {
+  "order": "a, then b, then c; c in a fixed random permutation (seed C_ORDER_SEED) in chunks of 100: if time or disk runs out, the judged part of c is the completed prefix of the permutation (a random subset by construction) and is reported as such",
+  "seed": 20160101,
+  "chunk": 100
+ },
+ "live_agents": {
+  "AUC-FADE-3PCT": {
+   "agent": "agents/validated_auction.py",
+   "LAB_FINGERPRINT": "acce4b191d400eb4a0ccb30ab805e4250f8c709f",
+   "VERSION": ""
+  },
+  "SWING-ATTN-ON-3X": {
+   "agent": "agents/validated_attention.py",
+   "LAB_FINGERPRINT": "7aeeaffc15b1aacb"
+  },
+  "VRP-STRANGLE-016-WINGED": {
+   "agent": "agents/validated_strangle.py",
+   "LAB_FINGERPRINT": "80768f8470a56ca9"
+  }
+ },
+ "code_sha256": {
+  "protocol_min_oos.py": "5473ce1f23157132fe494e84039ad58d26ebb848fc7706d7ca8cfaf2dc4c80af",
+  "protocol_oos.py": "86cd23799bcf492a734ccb257cfe3cac1c3f2e2614932356649d0a7a2c8e817a",
+  "protocol.py": "6929839143dbca9dc0bb6d8d0a5fb7b2941d20ea8c1b6a0ced969bd8ad16af9a",
+  "sim.py": "315a8448f69fa220aa88bd8a9363fef1cac9ec89c177b323359fb90daaf8ee72",
+  "data.py": "d950421d9a8a16d6f7abe2ce19af99e9687df43f7b7ce98c584e41bdd47229aa",
+  "auction.py": "f0a7e1def771fb0540f042462c9ab212c74a1e5db0089364b9415ccdd8ba640e",
+  "auction_r2.py": "06af402170622ef5f456975d4fa5007a7a762c8992fb4180e733532916adeab0",
+  "attention.py": "7334f7e61a00a8eae53e766618c56bc15420162b281580b77f82f634342f9e9c",
+  "options_vrp.py": "e35bd40fbb91e4827d9f09021925c8464980f1bf5a2715b19226b1ec80c28e36",
+  "options_vrp_vix.py": "cad94b2433470aef29b035ce2c9827920ed3e86d944576c880ec1dd8892b1566",
+  "options_r3.py": "d38a710c51580fda1f23cad241d07e6133b711b7057e5a0cea72aaba6d25e7a7",
+  "r3_crosssec.py": "9be144e7792c4d6d471d7daf8acc850239a7cd549b97aa5da31ffff5a7f4210c",
+  "ltr.py": "644563e0b27d63ea16f4957c4b6b843957a975e8c1e827e0c69e54934a8e2a27",
+  "nsedata.py": "5b776ab3ba9e1f0163696020fb29afc24c1cd401760bfc0e67ad082630960db8",
+  "oldera_fo.py": "58a7325ebf86e1569961c2c917e8491b96b8e7efcd1ff8873fa533f042c18584",
+  "../costs.py": "3df145f25fdfe71b5e8d3a43c901b5958929958a0a298b58e38ae10c598d6b03",
+  "../options_replay.py": "b2ceffd9f99602b576999a000e4d68ae3185803a5e6c151bb19dd65abc318ea6"
+ },
+ "strategies": {
+  "AUC-FADE-3PCT": {
+   "group": "a",
+   "order": 0,
+   "runner": "auction",
+   "fingerprint": "078913807b85",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_gap": 0.03,
+    "max_gap": 0.2,
+    "max_per_day": 10,
+    "exit": "09:20"
+   },
+   "cost_model": "2026-11/f2+auction1",
+   "status_2023_26": "CONFIRMED"
+  },
+  "SWING-ATTN-ON-3X": {
+   "group": "a",
+   "order": 1,
+   "runner": "attention",
+   "fingerprint": "b3d698d357ea",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "vol_mult": 3.0,
+    "lookback": 20,
+    "max_per_day": 10,
+    "exit": "09:15",
+    "special_median_bars": 300,
+    "costs": "future"
+   },
+   "cost_model": "2026-11/f2+attn1",
+   "status_2023_26": "CONFIRMED"
+  },
+  "VRP-STRANGLE-016-WINGED": {
+   "group": "a",
+   "order": 2,
+   "runner": "options_vrp",
+   "fingerprint": "b851678a37c2",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "short_delta": 0.16,
+    "min_days_left": 3,
+    "wing_pts": 400.0
+   },
+   "cost_model": "2026-11/o1",
+   "status_2023_26": "CONFIRMED"
+  },
+  "AUC-FADE-2PCT": {
+   "group": "b",
+   "order": 0,
+   "runner": "auction",
+   "fingerprint": "8501b5092725",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_gap": 0.02,
+    "max_gap": 0.2,
+    "max_per_day": 10,
+    "exit": "09:20"
+   },
+   "cost_model": "2026-11/f2+auction1",
+   "status_2023_26": "CONFIRMED"
+  },
+  "VRP-STRANGLE-016-NAKED": {
+   "group": "b",
+   "order": 1,
+   "runner": "options_vrp",
+   "fingerprint": "7d8e0e988d63",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "short_delta": 0.16,
+    "min_days_left": 3,
+    "wing_pts": null
+   },
+   "cost_model": "2026-11/o1",
+   "status_2023_26": "CONFIRMED"
+  },
+  "r3_tfweekly_wk_loser_rev": {
+   "group": "b",
+   "order": 2,
+   "runner": "catalogue",
+   "fingerprint": "584a681389c4",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "drop_pct": 10.0,
+    "stop_pct": 10.0,
+    "max_hold": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "CONFIRMED"
+  },
+  "r3_options_ic_25_10": {
+   "group": "b",
+   "order": 3,
+   "runner": "options_r3",
+   "fingerprint": "195c744761c0",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "strangle",
+    "short_delta": 0.25,
+    "wing_delta": 0.1
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "CONFIRMED"
+  },
+  "r3_options_wc_fri": {
+   "group": "b",
+   "order": 4,
+   "runner": "options_r3",
+   "fingerprint": "182ba26d9027",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "week_last",
+    "entry": "15:00",
+    "min_days_left": 1,
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "wing_pts": 400.0
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "CONFIRMED"
+  },
+  "r3_scalping_run7_fade": {
+   "group": "c",
+   "order": 0,
+   "runner": "catalogue",
+   "fingerprint": "3f682a06a999",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 7,
+    "min_move_pct": 1.0,
+    "stop_buf_pct": 0.2,
+    "retrace": 0.5,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "close_momentum": {
+   "group": "c",
+   "order": 1,
+   "runner": "catalogue",
+   "fingerprint": "09cced739597",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move": 1.0,
+    "at": "14:29"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_bottom_60m_conf": {
+   "group": "c",
+   "order": 2,
+   "runner": "catalogue",
+   "fingerprint": "1c07eca6bf4d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_bottom",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_late_vwap_revert": {
+   "group": "c",
+   "order": 3,
+   "runner": "catalogue",
+   "fingerprint": "b9810c3d459c",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_dist_pct": 1.0,
+    "k": 2.0,
+    "stop_pct": 0.75,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_leadlag_5m": {
+   "group": "c",
+   "order": 4,
+   "runner": "catalogue",
+   "fingerprint": "6a392017ba9d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 5,
+    "idx": 0.2,
+    "lag": 0.0,
+    "stop_atr": 0.4,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_gravestone_doji_60m": {
+   "group": "c",
+   "order": 5,
+   "runner": "catalogue",
+   "fingerprint": "0f54540aee24",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "gravestone_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_rsi30_70_fade": {
+   "group": "c",
+   "order": 6,
+   "runner": "catalogue",
+   "fingerprint": "b32defe68156",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rsi": 14,
+    "lo": 30,
+    "hi": 70,
+    "atr_stop": 1.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_gapthru_reclaim": {
+   "group": "c",
+   "order": 7,
+   "runner": "catalogue",
+   "fingerprint": "5f13249287b8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r7_gh2_8020_stock": {
+   "group": "c",
+   "order": 8,
+   "runner": "catalogue",
+   "fingerprint": "32090bf52fb5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "top": 0.8,
+    "bottom": 0.2,
+    "ticks": 5,
+    "exit": "15:15"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_nifty_orb30_trend": {
+   "group": "c",
+   "order": 9,
+   "runner": "catalogue",
+   "fingerprint": "c50fd295ef5a",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "minutes": 30,
+    "rr": 2.0,
+    "last": "13:00",
+    "sma": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_bnf_gapfade": {
+   "group": "c",
+   "order": 10,
+   "runner": "catalogue",
+   "fingerprint": "2a7c964af044",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "gap_min": 0.25,
+    "gap_max": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_ichimoku": {
+   "group": "c",
+   "order": 11,
+   "runner": "catalogue",
+   "fingerprint": "35bee797e92d",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "conv": 9,
+    "base": 26,
+    "span_b": 52,
+    "disp": 26
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inside_bar_15m": {
+   "group": "c",
+   "order": 12,
+   "runner": "catalogue",
+   "fingerprint": "bb7aa798996c",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inside_bar",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_nr4id_break": {
+   "group": "c",
+   "order": 13,
+   "runner": "catalogue",
+   "fingerprint": "6bb72f01b664",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "nr": 4,
+    "b": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_mis_squareoff_fade": {
+   "group": "c",
+   "order": 14,
+   "runner": "catalogue",
+   "fingerprint": "de8edd407b0a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move": 2.5,
+    "at": "14:44",
+    "buf": 0.1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_opendrive_exhaust": {
+   "group": "c",
+   "order": 15,
+   "runner": "catalogue",
+   "fingerprint": "b583ae79a1c5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "atr_k": 0.75,
+    "drive": "09:44",
+    "at": "10:14",
+    "buf": 0.1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_supertrend_15m_agree": {
+   "group": "c",
+   "order": 16,
+   "runner": "catalogue",
+   "fingerprint": "98fef9c40ac8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 3.0,
+    "trail_atr": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_harami_60m": {
+   "group": "c",
+   "order": 17,
+   "runner": "catalogue",
+   "fingerprint": "70e005576867",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_harami",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_volshock_flat": {
+   "group": "c",
+   "order": 18,
+   "runner": "catalogue",
+   "fingerprint": "246bc6a02006",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 2.0,
+    "ret_pct": 2.0,
+    "stop_pct": 10.0,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_inside_down_15m": {
+   "group": "c",
+   "order": 19,
+   "runner": "catalogue",
+   "fingerprint": "384f2dd89259",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_inside_down",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hammer_15m_conf": {
+   "group": "c",
+   "order": 20,
+   "runner": "catalogue",
+   "fingerprint": "468266c2719a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hammer",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_st_flip_nifty": {
+   "group": "c",
+   "order": 21,
+   "runner": "catalogue",
+   "fingerprint": "1d1607f313b0",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "atr": 10,
+    "mult": 3,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_morning_star_15m": {
+   "group": "c",
+   "order": 22,
+   "runner": "catalogue",
+   "fingerprint": "e7330ceeccbe",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "morning_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_bb_squeeze_break": {
+   "group": "c",
+   "order": 23,
+   "runner": "catalogue",
+   "fingerprint": "2c29b3976eec",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "k": 2.0,
+    "look": 120,
+    "min_stop_atr": 1.0,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_inverse_ema_60m": {
+   "group": "c",
+   "order": 24,
+   "runner": "catalogue",
+   "fingerprint": "6bf4ec01612f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60,
+    "fast": 2,
+    "slow": 7
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_bnf_orb30_trend": {
+   "group": "c",
+   "order": 25,
+   "runner": "catalogue",
+   "fingerprint": "3be81219c051",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "minutes": 30,
+    "rr": 2.0,
+    "last": "13:00",
+    "sma": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hammer_5m_conf": {
+   "group": "c",
+   "order": 26,
+   "runner": "catalogue",
+   "fingerprint": "0f5c7724f4c6",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hammer",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inverted_hammer_60m": {
+   "group": "c",
+   "order": 27,
+   "runner": "catalogue",
+   "fingerprint": "51832db79937",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inverted_hammer",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_outside_bar_15m": {
+   "group": "c",
+   "order": 28,
+   "runner": "catalogue",
+   "fingerprint": "26acef608b80",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "outside_bar",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_bnf_id_short": {
+   "group": "c",
+   "order": 29,
+   "runner": "catalogue",
+   "fingerprint": "e55a0117a79c",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "stop_pct": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inverted_hammer_5m_conf": {
+   "group": "c",
+   "order": 30,
+   "runner": "catalogue",
+   "fingerprint": "eec9b3ed68c7",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inverted_hammer",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_top_15m_conf": {
+   "group": "c",
+   "order": 31,
+   "runner": "catalogue",
+   "fingerprint": "f6bc532350ec",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_top",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "VRP-WINGED-HIGHVIX": {
+   "group": "c",
+   "order": 32,
+   "runner": "options_vrp_vix",
+   "fingerprint": "81d7780d6746",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "short_delta": 0.16,
+    "min_days_left": 3,
+    "wing_pts": 400.0,
+    "vix_lookback": 250,
+    "spike_sessions": 5,
+    "spike_pct": 0.15
+   },
+   "cost_model": "2026-11/o1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_hanging_man": {
+   "group": "c",
+   "order": 33,
+   "runner": "catalogue",
+   "fingerprint": "81acaeeb0739",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hanging_man",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_piercing": {
+   "group": "c",
+   "order": 34,
+   "runner": "catalogue",
+   "fingerprint": "f3a8328d8a35",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "piercing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_bnf_vwap2sd_fade": {
+   "group": "c",
+   "order": 35,
+   "runner": "catalogue",
+   "fingerprint": "bf7ce39ce149",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "k": 2.0,
+    "stop_pct": 0.4
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_engulfing_60m": {
+   "group": "c",
+   "order": 36,
+   "runner": "catalogue",
+   "fingerprint": "9ea7604f53d2",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_engulfing",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_vwap3sd_fade": {
+   "group": "c",
+   "order": 37,
+   "runner": "catalogue",
+   "fingerprint": "4c6cef7ef01f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "sd": 3.0,
+    "stop_sd": 4.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_rs_cont_1300": {
+   "group": "c",
+   "order": 38,
+   "runner": "catalogue",
+   "fingerprint": "5d5b18a34ce9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rel": 1.5,
+    "at": "12:59",
+    "q": 0.25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_rs_rev_1100": {
+   "group": "c",
+   "order": 39,
+   "runner": "catalogue",
+   "fingerprint": "b872c3ea291d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rel": 2.5,
+    "at": "10:59",
+    "stop_atr": 0.75
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_pivot_bounce": {
+   "group": "c",
+   "order": 40,
+   "runner": "catalogue",
+   "fingerprint": "36a3c005c774",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "stop_pct": 0.25,
+    "rr": 1.5,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hanging_man_15m": {
+   "group": "c",
+   "order": 41,
+   "runner": "catalogue",
+   "fingerprint": "47f296f1cfcd",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hanging_man",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_ema_macd_rsi": {
+   "group": "c",
+   "order": 42,
+   "runner": "catalogue",
+   "fingerprint": "33ba2c4456a6",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "fast": 9,
+    "slow": 21,
+    "rsi": 7,
+    "hi": 60,
+    "lo": 40
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_harami_5m": {
+   "group": "c",
+   "order": 43,
+   "runner": "catalogue",
+   "fingerprint": "b14373a5ae21",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_harami",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_macd_cross_vwap_dt": {
+   "group": "c",
+   "order": 44,
+   "runner": "catalogue",
+   "fingerprint": "8bf5adb223e2",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "macd": [
+     12,
+     26,
+     9
+    ],
+    "stop_atr": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_white_soldiers_15m": {
+   "group": "c",
+   "order": 45,
+   "runner": "catalogue",
+   "fingerprint": "58c3d7736d56",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_white_soldiers",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_pdc_gapfill_bounce": {
+   "group": "c",
+   "order": 46,
+   "runner": "catalogue",
+   "fingerprint": "3cd66504aab6",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "gap_min_pct": 1.0,
+    "gap_max_pct": 4.0,
+    "stop_pct": 0.4,
+    "rr": 2.0,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dark_cloud_60m": {
+   "group": "c",
+   "order": 47,
+   "runner": "catalogue",
+   "fingerprint": "8df1fc4ddd49",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dark_cloud",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_williams": {
+   "group": "c",
+   "order": 48,
+   "runner": "catalogue",
+   "fingerprint": "9d3d867d63fb",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "n": 14,
+    "os": -80,
+    "ob": -20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dragonfly_doji_60m": {
+   "group": "c",
+   "order": 49,
+   "runner": "catalogue",
+   "fingerprint": "6d9bf0e357e1",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dragonfly_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_open_drive": {
+   "group": "c",
+   "order": 50,
+   "runner": "catalogue",
+   "fingerprint": "f4e5625efa4c",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 1.0,
+    "hold": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_stoch": {
+   "group": "c",
+   "order": 51,
+   "runner": "catalogue",
+   "fingerprint": "4014b87abbd5",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "k": 14,
+    "d": 3,
+    "os": 20,
+    "ob": 80
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_rs13_nifty": {
+   "group": "c",
+   "order": 52,
+   "runner": "catalogue",
+   "fingerprint": "219996007554",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 13,
+    "edge_pp": 10.0,
+    "sma": 30,
+    "stop_pct": 10.0,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dragonfly_doji_5m": {
+   "group": "c",
+   "order": 53,
+   "runner": "catalogue",
+   "fingerprint": "23a2d5193745",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dragonfly_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_mechanics_close_vwap_2sd": {
+   "group": "c",
+   "order": 54,
+   "runner": "catalogue",
+   "fingerprint": "f301ae4390cb",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "mode": "sd",
+    "k": 2.0,
+    "stop_sd": 1.0,
+    "at": "14:59"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_swing_gapdown_recover_1520": {
+   "group": "c",
+   "order": 55,
+   "runner": "catalogue",
+   "fingerprint": "336a3086dd27",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "gap": 0.03,
+    "hold": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "cs_longlegged_doji_15m": {
+   "group": "c",
+   "order": 56,
+   "runner": "catalogue",
+   "fingerprint": "b35f8581649a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "longlegged_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_gravestone_doji_5m": {
+   "group": "c",
+   "order": 57,
+   "runner": "catalogue",
+   "fingerprint": "d5c7480fb38f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "gravestone_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_slotvol_shock": {
+   "group": "c",
+   "order": 58,
+   "runner": "catalogue",
+   "fingerprint": "50ac3a26fa24",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rvol": 3.0,
+    "body": 0.6,
+    "last": "14:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_donch20_long": {
+   "group": "c",
+   "order": 59,
+   "runner": "catalogue",
+   "fingerprint": "3df89df957ec",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "stop_pct": 10.0,
+    "max_hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_ema_pb": {
+   "group": "c",
+   "order": 60,
+   "runner": "catalogue",
+   "fingerprint": "2e076be5a57a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "ema": [
+     20,
+     50
+    ],
+    "pad": 0.25,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_top_5m": {
+   "group": "c",
+   "order": 61,
+   "runner": "catalogue",
+   "fingerprint": "c82dcaee59a6",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_top",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "pdh_pdl_break": {
+   "group": "c",
+   "order": 62,
+   "runner": "catalogue",
+   "fingerprint": "99d7bbc0f4f3",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vol": 1.5,
+    "stop_pct": 0.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_lunch_break_vol": {
+   "group": "c",
+   "order": 63,
+   "runner": "catalogue",
+   "fingerprint": "1aa76961ac49",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vr": 2.0,
+    "rr": 2.0,
+    "last": "14:30"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_sma9_21": {
+   "group": "c",
+   "order": 64,
+   "runner": "catalogue",
+   "fingerprint": "a6a560eced17",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "fast": 9,
+    "slow": 21
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "orb15_trend20": {
+   "group": "c",
+   "order": 65,
+   "runner": "catalogue",
+   "fingerprint": "7279321b873e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 15,
+    "rr": 2.5,
+    "last": "12:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_ss16_stop2x_tp50": {
+   "group": "c",
+   "order": 66,
+   "runner": "options_r3",
+   "fingerprint": "c7eba4d9b50b",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "stop_mult": 2.0,
+    "target_frac": 0.5
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r5_kite_vars_ema15x30_1m": {
+   "group": "c",
+   "order": 67,
+   "runner": "catalogue",
+   "fingerprint": "e9b8a2f8ea32",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 15,
+    "slow": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_volshock_up": {
+   "group": "c",
+   "order": 68,
+   "runner": "catalogue",
+   "fingerprint": "73527ee4f3c0",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 2.0,
+    "ret_pct": 5.0,
+    "stop_pct": 10.0,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_st_flip_bnf": {
+   "group": "c",
+   "order": 69,
+   "runner": "catalogue",
+   "fingerprint": "118c803134cd",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "atr": 10,
+    "mult": 3,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_cci_revert": {
+   "group": "c",
+   "order": 70,
+   "runner": "catalogue",
+   "fingerprint": "629183cf82e9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "cci": 20,
+    "level": 100,
+    "stop_atr": 1.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_ema10_30_nifty": {
+   "group": "c",
+   "order": 71,
+   "runner": "catalogue",
+   "fingerprint": "594edfb5ad5e",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "fast": 10,
+    "slow": 30,
+    "stop_pct": 10.0,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_hammer": {
+   "group": "c",
+   "order": 72,
+   "runner": "catalogue",
+   "fingerprint": "0288b7e0a08f",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hammer",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "nr7_breakout": {
+   "group": "c",
+   "order": 73,
+   "runner": "catalogue",
+   "fingerprint": "56956fd89cc0",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lookback": 7,
+    "rr": 2.0,
+    "last": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_nifty_ibs_ls": {
+   "group": "c",
+   "order": 74,
+   "runner": "catalogue",
+   "fingerprint": "560175bfbd38",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "lo": 0.2,
+    "hi": 0.8,
+    "stop_pct": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "rs_vs_nifty": {
+   "group": "c",
+   "order": 75,
+   "runner": "catalogue",
+   "fingerprint": "558ade7a34c4",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "spread": 1.0,
+    "at": "10:29",
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_harami_15m": {
+   "group": "c",
+   "order": 76,
+   "runner": "catalogue",
+   "fingerprint": "92cbeaf87789",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_harami",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_mechanics_prev_mark_fade": {
+   "group": "c",
+   "order": 77,
+   "runner": "catalogue",
+   "fingerprint": "8b5e750ac459",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "mark": 0.5,
+    "stop": 1.0,
+    "at": "09:19",
+    "hold": 60,
+    "min_bars": 25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_rsi_mr": {
+   "group": "c",
+   "order": 78,
+   "runner": "catalogue",
+   "fingerprint": "0cd40d4f422b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rsi": 14,
+    "lo": 30,
+    "hi": 70,
+    "stop_atr": 1.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_psar": {
+   "group": "c",
+   "order": 79,
+   "runner": "catalogue",
+   "fingerprint": "3f20f5aaa8b0",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "start": 0.02,
+    "inc": 0.02,
+    "max": 0.2
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_idio_cont_1100": {
+   "group": "c",
+   "order": 80,
+   "runner": "catalogue",
+   "fingerprint": "97303293f63b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "idx": 0.25,
+    "move": 2.0,
+    "at": "10:59"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_supertrend_daily": {
+   "group": "c",
+   "order": 81,
+   "runner": "catalogue",
+   "fingerprint": "6510fc5bb567",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 3.0,
+    "min_stop_atr": 0.5,
+    "trail_atr": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_climax_hammer": {
+   "group": "c",
+   "order": 82,
+   "runner": "catalogue",
+   "fingerprint": "73adb5d3f0d2",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vr": 5.0,
+    "range_atr": 2.0,
+    "min_range_pct": 0.4,
+    "wick": 0.6,
+    "rr": 1.5,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_squeeze_break": {
+   "group": "c",
+   "order": 83,
+   "runner": "catalogue",
+   "fingerprint": "da45d8a8cc6f",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 30,
+    "max_width_pct": 0.4,
+    "vr": 3.0,
+    "rr": 2.0,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_adx_cross_nifty": {
+   "group": "c",
+   "order": 84,
+   "runner": "catalogue",
+   "fingerprint": "e58384d68039",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "adx": 14,
+    "level": 25,
+    "stop_atr": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_bottom_5m_conf": {
+   "group": "c",
+   "order": 85,
+   "runner": "catalogue",
+   "fingerprint": "229795e90299",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_bottom",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_onmom20_top5_fut": {
+   "group": "c",
+   "order": 86,
+   "runner": "r3_crosssec",
+   "fingerprint": "a5cbc213e4bd",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "lookback": 21,
+    "n": 20,
+    "k": 5,
+    "H": 1
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "cs_bear_harami_5m": {
+   "group": "c",
+   "order": 87,
+   "runner": "catalogue",
+   "fingerprint": "3ff259aeb7c9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_harami",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_macd_zero_adx": {
+   "group": "c",
+   "order": 88,
+   "runner": "catalogue",
+   "fingerprint": "aaf9bca2a2ea",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "sig": 9,
+    "adx_min": 20,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_bnf_laggard_1100": {
+   "group": "c",
+   "order": 89,
+   "runner": "catalogue",
+   "fingerprint": "252360bdf53e",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "thr": 0.4,
+    "stop_pct": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_nifty_gapfade": {
+   "group": "c",
+   "order": 90,
+   "runner": "catalogue",
+   "fingerprint": "6d9f58cb2586",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "gap_min": 0.25,
+    "gap_max": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_delivery_spike_fade_long": {
+   "group": "c",
+   "order": 91,
+   "runner": "catalogue",
+   "fingerprint": "1a8117d77120",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move_pct": 3.0,
+    "stop_pct": 2.0,
+    "side": 1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_friday_pm_fade": {
+   "group": "c",
+   "order": 92,
+   "runner": "catalogue",
+   "fingerprint": "e7200ff9112d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move": 2.0,
+    "at": "13:59",
+    "buf": 0.1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_orb15_retest": {
+   "group": "c",
+   "order": 93,
+   "runner": "catalogue",
+   "fingerprint": "eab1cd9b04a7",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 1.5,
+    "hold": 20,
+    "last": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r6_gh_rbreaker_nifty": {
+   "group": "c",
+   "order": 94,
+   "runner": "catalogue",
+   "fingerprint": "4597fde2dd30",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_bb_fade_adx": {
+   "group": "c",
+   "order": 95,
+   "runner": "catalogue",
+   "fingerprint": "91c06c87bd08",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "k": 2.0,
+    "adx_max": 20,
+    "pad_atr": 0.25,
+    "hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_cs_trend50": {
+   "group": "c",
+   "order": 96,
+   "runner": "options_r3",
+   "fingerprint": "54bf1950ecf3",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "credit_trend",
+    "sma": 50,
+    "short_delta": 0.25,
+    "width_pts": 200.0
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "INVALID"
+  },
+  "r3_options_ic_10_03": {
+   "group": "c",
+   "order": 97,
+   "runner": "options_r3",
+   "fingerprint": "50393ad870dd",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "strangle",
+    "short_delta": 0.1,
+    "wing_delta": 0.03
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_bnf_ibs_ls": {
+   "group": "c",
+   "order": 98,
+   "runner": "catalogue",
+   "fingerprint": "0ad3715416f0",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "lo": 0.2,
+    "hi": 0.8,
+    "stop_pct": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_stk_tom_long": {
+   "group": "c",
+   "order": 99,
+   "runner": "catalogue",
+   "fingerprint": "200ffb29f98d",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "dom": 25,
+    "stop_pct": 5.0,
+    "hold": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r3_tf60m_supertrend_flip": {
+   "group": "c",
+   "order": 100,
+   "runner": "catalogue",
+   "fingerprint": "b987065889c8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 3.0,
+    "min_stop_atr": 0.5,
+    "trail_atr": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_composite3_top5_cnc10": {
+   "group": "c",
+   "order": 101,
+   "runner": "r3_crosssec",
+   "fingerprint": "ad1cb910131b",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 10,
+    "lookback": 126,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_ls_highvix": {
+   "group": "c",
+   "order": 102,
+   "runner": "options_r3",
+   "fingerprint": "3202d06c4a3f",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "daily",
+    "entry": "09:20",
+    "hold": "intraday",
+    "structure": "straddle_long",
+    "vix_pct_min": 0.6666666666666666
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_delivery_spike_fade_short": {
+   "group": "c",
+   "order": 103,
+   "runner": "catalogue",
+   "fingerprint": "835d9c4a9bc5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move_pct": 3.0,
+    "stop_pct": 2.0,
+    "side": -1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_gap_small_fade": {
+   "group": "c",
+   "order": 104,
+   "runner": "catalogue",
+   "fingerprint": "95e0c7f2c850",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lo": 0.3,
+    "hi": 1.0,
+    "at": "09:29",
+    "buf": 0.1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_cci_100": {
+   "group": "c",
+   "order": 105,
+   "runner": "catalogue",
+   "fingerprint": "0565edcf3730",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "level": 100,
+    "atr_stop": 1.5,
+    "rr": 2.0,
+    "hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_bb_fade_nifty": {
+   "group": "c",
+   "order": 106,
+   "runner": "catalogue",
+   "fingerprint": "3d32306e589a",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "bb": [
+     20,
+     2
+    ],
+    "pad": 0.25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_rsi_pullback": {
+   "group": "c",
+   "order": 107,
+   "runner": "catalogue",
+   "fingerprint": "f01a2a7ea54c",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lo": 25,
+    "hi": 75,
+    "rr": 1.0,
+    "hold": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_rev5d_ls5_fut": {
+   "group": "c",
+   "order": 108,
+   "runner": "r3_crosssec",
+   "fingerprint": "cd7fbf0370c8",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 5,
+    "lookback": 5,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_engulfing_15m": {
+   "group": "c",
+   "order": 109,
+   "runner": "catalogue",
+   "fingerprint": "0c0640aa4a44",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_engulfing",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hanging_man_60m": {
+   "group": "c",
+   "order": 110,
+   "runner": "catalogue",
+   "fingerprint": "1485a39df206",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hanging_man",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_top_60m": {
+   "group": "c",
+   "order": 111,
+   "runner": "catalogue",
+   "fingerprint": "45afa44eb47e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_top",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_cs_trend20": {
+   "group": "c",
+   "order": 112,
+   "runner": "options_r3",
+   "fingerprint": "db67ac4f800c",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "credit_trend",
+    "sma": 20,
+    "short_delta": 0.25,
+    "width_pts": 200.0
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_rsi_pullback_trend": {
+   "group": "c",
+   "order": 113,
+   "runner": "catalogue",
+   "fingerprint": "5bb009c8dc1a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lo": 40,
+    "hi": 60,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_squeeze_break_daydir": {
+   "group": "c",
+   "order": 114,
+   "runner": "catalogue",
+   "fingerprint": "8a382c5a2f8b",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 30,
+    "max_width_pct": 0.4,
+    "vr": 3.0,
+    "rr": 2.0,
+    "hold": 30,
+    "day_pct": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_ema_pb_dtrend": {
+   "group": "c",
+   "order": 115,
+   "runner": "catalogue",
+   "fingerprint": "9d4bf6287246",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "ema": [
+     20,
+     50
+    ],
+    "pad": 0.25,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_adx_ema20_pb": {
+   "group": "c",
+   "order": 116,
+   "runner": "catalogue",
+   "fingerprint": "30900487ec9e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "ema": 20,
+    "adx_min": 25,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_adx": {
+   "group": "c",
+   "order": 117,
+   "runner": "catalogue",
+   "fingerprint": "5ab9d472e60c",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "di": 14,
+    "adx_smooth": 25,
+    "adx_min": 25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_mtf_daily_15mrsi": {
+   "group": "c",
+   "order": 118,
+   "runner": "catalogue",
+   "fingerprint": "3cdfee54c209",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rsi": 14,
+    "lo": 40,
+    "hi": 60,
+    "n": 20,
+    "lowbars": 30,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_bull_marubozu": {
+   "group": "c",
+   "order": 119,
+   "runner": "catalogue",
+   "fingerprint": "2492277668e4",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_marubozu",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_white_soldiers_60m": {
+   "group": "c",
+   "order": 120,
+   "runner": "catalogue",
+   "fingerprint": "980afcbe612b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_white_soldiers",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_pdl_sweep": {
+   "group": "c",
+   "order": 121,
+   "runner": "catalogue",
+   "fingerprint": "9cf2dbb7c9b4",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "sweep_pct": 0.2,
+    "look": 10,
+    "vr": 1.5,
+    "rr": 2.0,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_round_sweep": {
+   "group": "c",
+   "order": 122,
+   "runner": "catalogue",
+   "fingerprint": "c76eccfb0d81",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "grid_pct": 1.0,
+    "poke_pct": 0.1,
+    "vr": 2.0,
+    "rr": 2.0,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_ha_trend_start": {
+   "group": "c",
+   "order": 123,
+   "runner": "catalogue",
+   "fingerprint": "31ee268c6b9b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "ema21_first_pullback": {
+   "group": "c",
+   "order": 124,
+   "runner": "catalogue",
+   "fingerprint": "3f2b1bb02678",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_adx_cross": {
+   "group": "c",
+   "order": 125,
+   "runner": "catalogue",
+   "fingerprint": "b2e40ae48c50",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "adx": 14,
+    "level": 25,
+    "stop_atr": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_0dte_ss_1130": {
+   "group": "c",
+   "order": 126,
+   "runner": "options_r3",
+   "fingerprint": "3c34b4419446",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "expiry_day",
+    "entry": "11:30",
+    "structure": "straddle_short",
+    "stop_mult": 1.5
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_bottom_15m_conf": {
+   "group": "c",
+   "order": 127,
+   "runner": "catalogue",
+   "fingerprint": "8bc0fcd1df97",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_bottom",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_ema5x10_1m": {
+   "group": "c",
+   "order": 128,
+   "runner": "catalogue",
+   "fingerprint": "f1d3f0fc35f4",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 5,
+    "slow": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_vwap3sd_reentry": {
+   "group": "c",
+   "order": 129,
+   "runner": "catalogue",
+   "fingerprint": "86aed920b2b1",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "k": 3.0,
+    "min_dist_pct": 0.75,
+    "target_k": 1.0,
+    "look": 10,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_donchian20_nifty": {
+   "group": "c",
+   "order": 130,
+   "runner": "catalogue",
+   "fingerprint": "2dc36b8483b2",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "n": 20,
+    "atr_stop": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_donchian20": {
+   "group": "c",
+   "order": 131,
+   "runner": "catalogue",
+   "fingerprint": "ab5665fddb72",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "exit_n": 10,
+    "max_stop_atr": 3.0,
+    "trail_atr": 3.0,
+    "start": "10:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_swing_close_down2_sma100": {
+   "group": "c",
+   "order": 132,
+   "runner": "catalogue",
+   "fingerprint": "de0009a31646",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "dn": 0.02,
+    "sma": 100,
+    "hold": 3,
+    "stop_pct": 10.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_wc_mon": {
+   "group": "c",
+   "order": 133,
+   "runner": "options_r3",
+   "fingerprint": "49c012ec8ec6",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "week_first",
+    "entry": "10:20",
+    "min_days_left": 1,
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "wing_pts": 400.0
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_pm_fade_1330": {
+   "group": "c",
+   "order": 134,
+   "runner": "catalogue",
+   "fingerprint": "acc1981e623e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move": 2.0,
+    "at": "13:29",
+    "buf": 0.1,
+    "exit": "15:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_tt_orb15_stock": {
+   "group": "c",
+   "order": 135,
+   "runner": "catalogue",
+   "fingerprint": "2e8a5de94dcd",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_streak_orb5_long": {
+   "group": "c",
+   "order": 136,
+   "runner": "catalogue",
+   "fingerprint": "ce569da6808c",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_donchian20_nifty": {
+   "group": "c",
+   "order": 137,
+   "runner": "catalogue",
+   "fingerprint": "69e0e541faf3",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "exit_n": 10,
+    "max_stop_atr": 3.0,
+    "trail_atr": 3.0,
+    "start": "10:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_mkt_selloff_rs": {
+   "group": "c",
+   "order": 138,
+   "runner": "catalogue",
+   "fingerprint": "8bbcfee2732a",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "mkt_drop_pct": 3.0,
+    "sma": 30,
+    "stop_pct": 10.0,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_leadlag_15m": {
+   "group": "c",
+   "order": 139,
+   "runner": "catalogue",
+   "fingerprint": "4703da098fb2",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 15,
+    "idx": 0.3,
+    "lag": 0.05,
+    "stop_atr": 0.5,
+    "hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_5m_bigbar_fade": {
+   "group": "c",
+   "order": 140,
+   "runner": "catalogue",
+   "fingerprint": "0d8e8299b88c",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "range_atr": 3.0,
+    "min_body_pct": 1.0,
+    "body": 0.7,
+    "stop_buf_pct": 0.1,
+    "retrace": 0.5,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_obv_lead": {
+   "group": "c",
+   "order": 141,
+   "runner": "catalogue",
+   "fingerprint": "dcbd3354c667",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_rev5d_bot5_cnc": {
+   "group": "c",
+   "order": 142,
+   "runner": "r3_crosssec",
+   "fingerprint": "b9ecf1cee98f",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 5,
+    "lookback": 5,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r3_intraday_opendrive_exhaust_rsi5": {
+   "group": "c",
+   "order": 143,
+   "runner": "catalogue",
+   "fingerprint": "758e2e6e96b4",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move": 1.0,
+    "hi": 80,
+    "hi_x": 70,
+    "lo": 20,
+    "lo_x": 30,
+    "rr": 1.5,
+    "buf": 0.1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_3day_reversal": {
+   "group": "c",
+   "order": 144,
+   "runner": "catalogue",
+   "fingerprint": "2c986196a5b5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "days": 3,
+    "move": 5.0,
+    "at": "09:29"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "vwap_reclaim": {
+   "group": "c",
+   "order": 145,
+   "runner": "catalogue",
+   "fingerprint": "b5b8b59607b8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes_away": 30,
+    "vol": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_longlegged_doji_5m_conf": {
+   "group": "c",
+   "order": 146,
+   "runner": "catalogue",
+   "fingerprint": "90e930c82edc",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "longlegged_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_gravestone_doji_60m_conf": {
+   "group": "c",
+   "order": 147,
+   "runner": "catalogue",
+   "fingerprint": "e3ae729d33bd",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "gravestone_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "SCALP-AUC-FADE-1TO3-0925": {
+   "group": "c",
+   "order": 148,
+   "runner": "auction_r2",
+   "fingerprint": "714764401e0f",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_gap": 0.01,
+    "max_gap": 0.03,
+    "max_per_day": 10,
+    "exit": "09:25"
+   },
+   "cost_model": "2026-11/f2+auction1",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r5_kite_at_supertrend": {
+   "group": "c",
+   "order": 149,
+   "runner": "catalogue",
+   "fingerprint": "877c5adb8bd9",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "atr": 10,
+    "mult": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_3down_uptrend": {
+   "group": "c",
+   "order": 150,
+   "runner": "catalogue",
+   "fingerprint": "5e28a4ca6ec9",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "k": 3,
+    "sma": 30,
+    "stop_pct": 10.0,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_top_5m_conf": {
+   "group": "c",
+   "order": 151,
+   "runner": "catalogue",
+   "fingerprint": "1034e3c0cf76",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_top",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "orb15_retest": {
+   "group": "c",
+   "order": 152,
+   "runner": "catalogue",
+   "fingerprint": "e7f268606be5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 15,
+    "rr": 1.5,
+    "last": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_stoch_cross_trend": {
+   "group": "c",
+   "order": 153,
+   "runner": "catalogue",
+   "fingerprint": "c1bbd6354537",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 14,
+    "k": 3,
+    "d": 3,
+    "lo": 20,
+    "hi": 80,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_evening_star": {
+   "group": "c",
+   "order": 154,
+   "runner": "catalogue",
+   "fingerprint": "f8e1e136e6cf",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "evening_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_bb_squeeze_break": {
+   "group": "c",
+   "order": 155,
+   "runner": "catalogue",
+   "fingerprint": "6c384e066574",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "bb": [
+     20,
+     2
+    ],
+    "lookback": 100,
+    "min_stop": 1.0,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hammer_5m": {
+   "group": "c",
+   "order": 156,
+   "runner": "catalogue",
+   "fingerprint": "f6785b596aeb",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hammer",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_ha_run_fade": {
+   "group": "c",
+   "order": 157,
+   "runner": "catalogue",
+   "fingerprint": "c94bf380a90f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "run": 8,
+    "min_move_atr": 3.0,
+    "pad_atr": 0.25,
+    "rr": 1.5,
+    "hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dark_cloud_5m": {
+   "group": "c",
+   "order": 158,
+   "runner": "catalogue",
+   "fingerprint": "0418ecd1d7d6",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dark_cloud",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_engulfing_5m": {
+   "group": "c",
+   "order": 159,
+   "runner": "catalogue",
+   "fingerprint": "d571158ceead",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_engulfing",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_rsi_mr_adxlow": {
+   "group": "c",
+   "order": 160,
+   "runner": "catalogue",
+   "fingerprint": "10dddb8d2fdf",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rsi": 14,
+    "lo": 30,
+    "hi": 70,
+    "stop_atr": 1.5,
+    "adx_max": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_gravestone_doji_5m_conf": {
+   "group": "c",
+   "order": 161,
+   "runner": "catalogue",
+   "fingerprint": "126c12bbb4ce",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "gravestone_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_lunch_break": {
+   "group": "c",
+   "order": 162,
+   "runner": "catalogue",
+   "fingerprint": "e3c52b532ea7",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 2.0,
+    "last": "14:30"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_macd_zero_dtrend": {
+   "group": "c",
+   "order": 163,
+   "runner": "catalogue",
+   "fingerprint": "c2ac1e9176ea",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "sig": 9,
+    "adx_min": 20,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_bottom_5m": {
+   "group": "c",
+   "order": 164,
+   "runner": "catalogue",
+   "fingerprint": "434dbcd1025b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_bottom",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_tsmom13_nifty": {
+   "group": "c",
+   "order": 165,
+   "runner": "catalogue",
+   "fingerprint": "ae82b14aa6b6",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "n": 13,
+    "max_hold": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_orb5": {
+   "group": "c",
+   "order": 166,
+   "runner": "catalogue",
+   "fingerprint": "abe047ff8c9c",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 1.0,
+    "hold": 20,
+    "last": "10:30"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_gap2_lowerlow": {
+   "group": "c",
+   "order": 167,
+   "runner": "catalogue",
+   "fingerprint": "8c92cac82096",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "gap_min_pct": 2.0,
+    "gap_max_pct": 10.0,
+    "n": 5,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_lowvol_ls5_fut20": {
+   "group": "c",
+   "order": 168,
+   "runner": "r3_crosssec",
+   "fingerprint": "77ed726f94fa",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 20,
+    "lookback": 61,
+    "n": 60,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_engulfing_15m": {
+   "group": "c",
+   "order": 169,
+   "runner": "catalogue",
+   "fingerprint": "cce09b253ebc",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_engulfing",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_streak_4th30m_long": {
+   "group": "c",
+   "order": 170,
+   "runner": "catalogue",
+   "fingerprint": "00c08907cbfb",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 30,
+    "nth": 4
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_swing_nr7_break_1520": {
+   "group": "c",
+   "order": 171,
+   "runner": "catalogue",
+   "fingerprint": "b86e7c0c5dc9",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "sma": 50,
+    "rr": 2.0,
+    "hold": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_mtf_15m5m_pb": {
+   "group": "c",
+   "order": 172,
+   "runner": "catalogue",
+   "fingerprint": "9f537c97b8ab",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "ema": 20,
+    "slope": 4,
+    "atr_k": 0.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r7_gh2_8020_banknifty": {
+   "group": "c",
+   "order": 173,
+   "runner": "catalogue",
+   "fingerprint": "c542e3d075ff",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "top": 0.8,
+    "bottom": 0.2,
+    "ticks": 5,
+    "exit": "15:15"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_evening_star_5m": {
+   "group": "c",
+   "order": 174,
+   "runner": "catalogue",
+   "fingerprint": "e5e39ddf52c3",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "evening_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_vwap_60m": {
+   "group": "c",
+   "order": 175,
+   "runner": "catalogue",
+   "fingerprint": "34994225a272",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_donch20": {
+   "group": "c",
+   "order": 176,
+   "runner": "catalogue",
+   "fingerprint": "2a2fa0f7df62",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "exit_n": 10,
+    "max_stop": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_orb30_sweep": {
+   "group": "c",
+   "order": 177,
+   "runner": "catalogue",
+   "fingerprint": "afd062ac4fa0",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "orb": 30,
+    "poke_pct": 0.15,
+    "look": 5,
+    "rr": 2.0,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_rsi_reentry_vwap": {
+   "group": "c",
+   "order": 178,
+   "runner": "catalogue",
+   "fingerprint": "783b17210b88",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lo": 30,
+    "hi": 70,
+    "vwap_gap_atr": 1.0,
+    "atr_stop": 1.5,
+    "hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_swing_gaphold_1520": {
+   "group": "c",
+   "order": 179,
+   "runner": "catalogue",
+   "fingerprint": "4d6ac7a28fda",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "gap": 0.03,
+    "vmult": 2.5,
+    "vol_n": 20,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_harami_5m_conf": {
+   "group": "c",
+   "order": 180,
+   "runner": "catalogue",
+   "fingerprint": "ab4de412203f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_harami",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_harami_5m_conf": {
+   "group": "c",
+   "order": 181,
+   "runner": "catalogue",
+   "fingerprint": "88928ad8e306",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_harami",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r7_gh2_oops_stock": {
+   "group": "c",
+   "order": 182,
+   "runner": "catalogue",
+   "fingerprint": "5450c84d654e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "gap": "open beyond yesterday's low / high",
+    "exit": "15:15"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_black_crows_60m": {
+   "group": "c",
+   "order": 183,
+   "runner": "catalogue",
+   "fingerprint": "e736af7e012f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_black_crows",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_bnf_wk_ic": {
+   "group": "c",
+   "order": 184,
+   "runner": "options_r3",
+   "fingerprint": "c17f276cab9e",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "week_first",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "wing_pts": 1000.0,
+    "week_end_exit": true
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_outside_up_60m": {
+   "group": "c",
+   "order": 185,
+   "runner": "catalogue",
+   "fingerprint": "9f24a5a8092a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_outside_up",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_rsi5_extreme": {
+   "group": "c",
+   "order": 186,
+   "runner": "catalogue",
+   "fingerprint": "376ced1f5bca",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lo": 15,
+    "hi": 85,
+    "day_pct": 1.0,
+    "rr": 1.5,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_piercing_line_60m": {
+   "group": "c",
+   "order": 187,
+   "runner": "catalogue",
+   "fingerprint": "6363c67e066b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "piercing_line",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_morning_star": {
+   "group": "c",
+   "order": 188,
+   "runner": "catalogue",
+   "fingerprint": "95f7971c6a12",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "morning_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_lunch_spike_fade": {
+   "group": "c",
+   "order": 189,
+   "runner": "catalogue",
+   "fingerprint": "b2d8743fa4bb",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vr": 5.0,
+    "range_atr": 3.0,
+    "min_range_pct": 0.4,
+    "body": 0.6,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_nifty_id_short": {
+   "group": "c",
+   "order": 190,
+   "runner": "catalogue",
+   "fingerprint": "839a998b693d",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "stop_pct": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_dark_cloud": {
+   "group": "c",
+   "order": 191,
+   "runner": "catalogue",
+   "fingerprint": "c4c283c96aac",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dark_cloud",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_white_soldiers_5m": {
+   "group": "c",
+   "order": 192,
+   "runner": "catalogue",
+   "fingerprint": "90ffbb5eaa55",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_white_soldiers",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_rsi_regime_pb": {
+   "group": "c",
+   "order": 193,
+   "runner": "catalogue",
+   "fingerprint": "7ab6a3fb9883",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rsi": 14,
+    "lo": 40,
+    "hi": 60,
+    "mid": 50,
+    "look": 10,
+    "ema": 50,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inverted_hammer_15m_conf": {
+   "group": "c",
+   "order": 194,
+   "runner": "catalogue",
+   "fingerprint": "3d662a2b73b9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inverted_hammer",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_bull_engulfing": {
+   "group": "c",
+   "order": 195,
+   "runner": "catalogue",
+   "fingerprint": "4f649477190f",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_engulfing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r3_intraday_vwap2sd_compress": {
+   "group": "c",
+   "order": 196,
+   "runner": "catalogue",
+   "fingerprint": "40f66471d9b2",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "sd": 2.0,
+    "stop_sd": 3.0,
+    "range_atr": 0.75,
+    "gap": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inside_bar_60m": {
+   "group": "c",
+   "order": 197,
+   "runner": "catalogue",
+   "fingerprint": "1c4ee4183782",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inside_bar",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_donch20_vol": {
+   "group": "c",
+   "order": 198,
+   "runner": "catalogue",
+   "fingerprint": "42cdf4a195c4",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "exit_n": 10,
+    "max_stop": 3.0,
+    "rvol": 1.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_volsurp_up5_cnc20": {
+   "group": "c",
+   "order": 199,
+   "runner": "r3_crosssec",
+   "fingerprint": "832779021326",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 20,
+    "lookback": 20,
+    "n": 20,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r3_tf60m_ttm_squeeze": {
+   "group": "c",
+   "order": 200,
+   "runner": "catalogue",
+   "fingerprint": "cac2f98e7f26",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "k": 2.0,
+    "kc": 1.5,
+    "min_on": 6,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_supertrend_flip": {
+   "group": "c",
+   "order": 201,
+   "runner": "catalogue",
+   "fingerprint": "e387f8d274ab",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 3.0,
+    "trail_atr": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_bear_engulfing": {
+   "group": "c",
+   "order": 202,
+   "runner": "catalogue",
+   "fingerprint": "80c7aefa72c2",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_engulfing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_evening_star_60m": {
+   "group": "c",
+   "order": 203,
+   "runner": "catalogue",
+   "fingerprint": "842c75e4c6dc",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "evening_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_rsi_macd_60m": {
+   "group": "c",
+   "order": 204,
+   "runner": "catalogue",
+   "fingerprint": "a431923064ed",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60,
+    "rsi": 3,
+    "os": 15,
+    "ob": 85
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_macd_cross": {
+   "group": "c",
+   "order": 205,
+   "runner": "catalogue",
+   "fingerprint": "a6d8a049da99",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "sig": 9,
+    "stop_pct": 10.0,
+    "max_hold": 40
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inverted_hammer_60m_conf": {
+   "group": "c",
+   "order": 206,
+   "runner": "catalogue",
+   "fingerprint": "ffa16a4516b1",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inverted_hammer",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_gravestone_doji_15m": {
+   "group": "c",
+   "order": 207,
+   "runner": "catalogue",
+   "fingerprint": "c0bcb1699b63",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "gravestone_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_expiry_vwap_fade": {
+   "group": "c",
+   "order": 208,
+   "runner": "catalogue",
+   "fingerprint": "6446e3903c6f",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "k": 2.0,
+    "min_dist_pct": 0.75,
+    "stop_pct": 0.6,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "vwap_2sd_fade": {
+   "group": "c",
+   "order": 209,
+   "runner": "catalogue",
+   "fingerprint": "8fe54ccbb9ae",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "sd": 2.0,
+    "rsi_lo": 30,
+    "rsi_hi": 70
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "orb5_break": {
+   "group": "c",
+   "order": 210,
+   "runner": "catalogue",
+   "fingerprint": "1d66cb006b4c",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 5,
+    "rr": 1.5,
+    "last": "11:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_faber10m_nifty": {
+   "group": "c",
+   "order": 211,
+   "runner": "catalogue",
+   "fingerprint": "9e595256e906",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "months": 10,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_gap2_vwap_loss": {
+   "group": "c",
+   "order": 212,
+   "runner": "catalogue",
+   "fingerprint": "e95866425a47",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "gap_min_pct": 2.0,
+    "gap_max_pct": 10.0,
+    "look": 10,
+    "rr": 2.0,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_rs1015_ls3_vwap": {
+   "group": "c",
+   "order": 213,
+   "runner": "r3_crosssec",
+   "fingerprint": "288435dd33f7",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "k": 3,
+    "lookback": 1,
+    "H": 0
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_williams_vbo": {
+   "group": "c",
+   "order": 214,
+   "runner": "catalogue",
+   "fingerprint": "e829bb6b923c",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "k": 0.5,
+    "last": "14:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_shooting_star_5m_conf": {
+   "group": "c",
+   "order": 215,
+   "runner": "catalogue",
+   "fingerprint": "12617426267a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "shooting_star",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_ttm_squeeze_fire": {
+   "group": "c",
+   "order": 216,
+   "runner": "catalogue",
+   "fingerprint": "014eca9a87b9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "k": 2.0,
+    "kc": 1.5,
+    "min_on": 6,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_gap_vs_trend": {
+   "group": "c",
+   "order": 217,
+   "runner": "catalogue",
+   "fingerprint": "e8cb7244b038",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 20,
+    "slow": 50,
+    "gap": 1.0,
+    "min_stop_atr": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_wk_excess_loser_rev": {
+   "group": "c",
+   "order": 218,
+   "runner": "catalogue",
+   "fingerprint": "01fc5c10cfe7",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "excess_pp": 8.0,
+    "stop_pct": 10.0,
+    "max_hold": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_ema_pb_trend": {
+   "group": "c",
+   "order": 219,
+   "runner": "catalogue",
+   "fingerprint": "ae57fca40035",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 20,
+    "slow": 50,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_marubozu_15m": {
+   "group": "c",
+   "order": 220,
+   "runner": "catalogue",
+   "fingerprint": "2af19ac70c5c",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_marubozu",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_inside_down_60m": {
+   "group": "c",
+   "order": 221,
+   "runner": "catalogue",
+   "fingerprint": "c851665362e5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_inside_down",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_shooting_star_15m_conf": {
+   "group": "c",
+   "order": 222,
+   "runner": "catalogue",
+   "fingerprint": "dd014f90dab3",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "shooting_star",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_same_slot": {
+   "group": "c",
+   "order": 223,
+   "runner": "catalogue",
+   "fingerprint": "db229a0c54f2",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "r": 0.4,
+    "at": "14:44",
+    "end": "15:14",
+    "stop_pct": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_streak_st7_long": {
+   "group": "c",
+   "order": 224,
+   "runner": "catalogue",
+   "fingerprint": "7faa2202b6a7",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 5,
+    "atr": 7,
+    "mult": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r7_gh2_8020_nifty": {
+   "group": "c",
+   "order": 225,
+   "runner": "catalogue",
+   "fingerprint": "a6325fb7ea15",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "top": 0.8,
+    "bottom": 0.2,
+    "ticks": 5,
+    "exit": "15:15"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_shooting_star_15m": {
+   "group": "c",
+   "order": 226,
+   "runner": "catalogue",
+   "fingerprint": "47f5bba271d6",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "shooting_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_dvolshock_follow": {
+   "group": "c",
+   "order": 227,
+   "runner": "catalogue",
+   "fingerprint": "4015c40e03e1",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vol": 3.0,
+    "ret": 3.0,
+    "at": "09:29"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_outside_bar_60m": {
+   "group": "c",
+   "order": 228,
+   "runner": "catalogue",
+   "fingerprint": "8375264f79b2",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "outside_bar",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_ema20_50_cross": {
+   "group": "c",
+   "order": 229,
+   "runner": "catalogue",
+   "fingerprint": "0d2f9a118134",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 20,
+    "slow": 50,
+    "atr_stop": 1.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hanging_man_15m_conf": {
+   "group": "c",
+   "order": 230,
+   "runner": "catalogue",
+   "fingerprint": "9ec535ba24ac",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hanging_man",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_engulfing_60m": {
+   "group": "c",
+   "order": 231,
+   "runner": "catalogue",
+   "fingerprint": "5b434fd91953",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_engulfing",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_macd_5m": {
+   "group": "c",
+   "order": 232,
+   "runner": "catalogue",
+   "fingerprint": "df1714c63eb7",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 5,
+    "fast": 12,
+    "slow": 26,
+    "sig": 9
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_outside_down_15m": {
+   "group": "c",
+   "order": 233,
+   "runner": "catalogue",
+   "fingerprint": "91dd6c03c726",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_outside_down",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_rev1d_ls5_fut": {
+   "group": "c",
+   "order": 234,
+   "runner": "r3_crosssec",
+   "fingerprint": "c1c222c7ba98",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 1,
+    "lookback": 1,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_longlegged_doji_15m_conf": {
+   "group": "c",
+   "order": 235,
+   "runner": "catalogue",
+   "fingerprint": "453b0b005518",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "longlegged_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_mom6_1_ls5_fut": {
+   "group": "c",
+   "order": 236,
+   "runner": "r3_crosssec",
+   "fingerprint": "bd22e59bb4f5",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 20,
+    "lookback": 126,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_longlegged_doji_60m_conf": {
+   "group": "c",
+   "order": 237,
+   "runner": "catalogue",
+   "fingerprint": "575a1782d73b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "longlegged_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hanging_man_5m_conf": {
+   "group": "c",
+   "order": 238,
+   "runner": "catalogue",
+   "fingerprint": "a7bf72e0c61d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hanging_man",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_ls_lowvix": {
+   "group": "c",
+   "order": 239,
+   "runner": "options_r3",
+   "fingerprint": "d5b8e56fd28b",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "daily",
+    "entry": "09:20",
+    "hold": "intraday",
+    "structure": "straddle_long",
+    "vix_pct_max": 0.3333333333333333
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_bnf_wk_ss_stop2x": {
+   "group": "c",
+   "order": 240,
+   "runner": "options_r3",
+   "fingerprint": "2cdb60630fe8",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "week_first",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "stop_mult": 2.0,
+    "week_end_exit": true
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_engulfing_5m": {
+   "group": "c",
+   "order": 241,
+   "runner": "catalogue",
+   "fingerprint": "a5015923a7d8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_engulfing",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_ss16_stop2x": {
+   "group": "c",
+   "order": 242,
+   "runner": "options_r3",
+   "fingerprint": "8ab82df60c87",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "stop_mult": 2.0
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r6_gh_ema5_nifty": {
+   "group": "c",
+   "order": 243,
+   "runner": "catalogue",
+   "fingerprint": "af7ab8913570",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "ema": 5,
+    "tf_short": 5,
+    "tf_long": 15,
+    "gap": 0.5,
+    "rr": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_macd_cross": {
+   "group": "c",
+   "order": 244,
+   "runner": "catalogue",
+   "fingerprint": "57acdfcc7fd9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "macd": [
+     12,
+     26,
+     9
+    ],
+    "stop_atr": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_ema9_21_cross": {
+   "group": "c",
+   "order": 245,
+   "runner": "catalogue",
+   "fingerprint": "5e2176063fe1",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 1.5,
+    "hold": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_aroon_15m": {
+   "group": "c",
+   "order": 246,
+   "runner": "catalogue",
+   "fingerprint": "414c810c62bf",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 15,
+    "n": 12
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_rsi14_60": {
+   "group": "c",
+   "order": 247,
+   "runner": "catalogue",
+   "fingerprint": "1cec160431fb",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 14,
+    "level": 60.0,
+    "stop_pct": 10.0,
+    "max_hold": 40
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_gaprank_fade_ls5": {
+   "group": "c",
+   "order": 248,
+   "runner": "r3_crosssec",
+   "fingerprint": "39c9caf017fa",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lookback": 1,
+    "max_abs_gap": 0.2,
+    "k": 5,
+    "H": 0
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_ibf_400_tp25": {
+   "group": "c",
+   "order": 249,
+   "runner": "options_r3",
+   "fingerprint": "0800b9a33b4c",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "straddle_short",
+    "wing_pts": 400.0,
+    "target_frac": 0.25
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dragonfly_doji_60m_conf": {
+   "group": "c",
+   "order": 250,
+   "runner": "catalogue",
+   "fingerprint": "feab6d007ee3",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dragonfly_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_bottom_60m": {
+   "group": "c",
+   "order": 251,
+   "runner": "catalogue",
+   "fingerprint": "43179a52ca22",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_bottom",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_marubozu_60m": {
+   "group": "c",
+   "order": 252,
+   "runner": "catalogue",
+   "fingerprint": "e01cde80d7ba",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_marubozu",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_range20_break": {
+   "group": "c",
+   "order": 253,
+   "runner": "catalogue",
+   "fingerprint": "6b41fbd14ae1",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "vol": 2.0,
+    "rr": 1.5,
+    "hold": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hammer_60m_conf": {
+   "group": "c",
+   "order": 254,
+   "runner": "catalogue",
+   "fingerprint": "eba188f99e8d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hammer",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_harami_15m_conf": {
+   "group": "c",
+   "order": 255,
+   "runner": "catalogue",
+   "fingerprint": "952f1baacb63",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_harami",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_faber10m": {
+   "group": "c",
+   "order": 256,
+   "runner": "catalogue",
+   "fingerprint": "e93a6d0ec1e8",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "months": 10,
+    "max_hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_black_crows_5m": {
+   "group": "c",
+   "order": 257,
+   "runner": "catalogue",
+   "fingerprint": "cee122ed769e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_black_crows",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_tsmom13_banknifty": {
+   "group": "c",
+   "order": 258,
+   "runner": "catalogue",
+   "fingerprint": "a0217a247f7d",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "n": 13,
+    "max_hold": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "orb15_break": {
+   "group": "c",
+   "order": 259,
+   "runner": "catalogue",
+   "fingerprint": "37dc4172817f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 15,
+    "rr": 1.5,
+    "last": "12:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_climax_hammer_stretched": {
+   "group": "c",
+   "order": 260,
+   "runner": "catalogue",
+   "fingerprint": "1ea1e351522b",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vr": 5.0,
+    "range_atr": 2.0,
+    "min_range_pct": 0.4,
+    "wick": 0.6,
+    "rr": 1.5,
+    "hold": 20,
+    "k": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_evening_star_15m": {
+   "group": "c",
+   "order": 261,
+   "runner": "catalogue",
+   "fingerprint": "0dd4359067e4",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "evening_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_ema_pb_daily": {
+   "group": "c",
+   "order": 262,
+   "runner": "catalogue",
+   "fingerprint": "a0eee13d0370",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 20,
+    "slow": 50,
+    "dsma": 50,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "orb30_break": {
+   "group": "c",
+   "order": 263,
+   "runner": "catalogue",
+   "fingerprint": "092433ba690d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 30,
+    "rr": 1.5,
+    "last": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_marubozu_5m": {
+   "group": "c",
+   "order": 264,
+   "runner": "catalogue",
+   "fingerprint": "2c376967c406",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_marubozu",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_ha_flip_daily": {
+   "group": "c",
+   "order": 265,
+   "runner": "catalogue",
+   "fingerprint": "fec3a7e2ed43",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "LTR-12-1-LOSERS-CNC": {
+   "group": "c",
+   "order": 266,
+   "runner": "ltr",
+   "fingerprint": "09e8517a060b",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "lookback": 252,
+    "skip": 21,
+    "n_names": 10,
+    "hold": 21,
+    "capital": 1000000.0,
+    "per_name": 100000.0,
+    "exec_minute": 914,
+    "min_closes": 252
+   },
+   "cost_model": "ltr-cnc-prereg-1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_rs1015_ls5_vwap": {
+   "group": "c",
+   "order": 267,
+   "runner": "r3_crosssec",
+   "fingerprint": "e7ef3f09e09e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lookback": 1,
+    "k": 5,
+    "H": 0
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_open15_fade": {
+   "group": "c",
+   "order": 268,
+   "runner": "catalogue",
+   "fingerprint": "688d4361de94",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_move_pct": 2.0,
+    "stop_buf_pct": 0.25,
+    "retrace": 0.5,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_shooting_star_60m": {
+   "group": "c",
+   "order": 269,
+   "runner": "catalogue",
+   "fingerprint": "da850081ce80",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "shooting_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_volsurp1015_dir5": {
+   "group": "c",
+   "order": 270,
+   "runner": "r3_crosssec",
+   "fingerprint": "addbb8866904",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lookback": 20,
+    "n": 20,
+    "k": 5,
+    "H": 0
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_ema_cross_15mtrend": {
+   "group": "c",
+   "order": 271,
+   "runner": "catalogue",
+   "fingerprint": "35326d1e5788",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 9,
+    "slow": 21,
+    "ema15": 20,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_marubozu_15m": {
+   "group": "c",
+   "order": 272,
+   "runner": "catalogue",
+   "fingerprint": "f5a136a878fb",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_marubozu",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_harami_15m_conf": {
+   "group": "c",
+   "order": 273,
+   "runner": "catalogue",
+   "fingerprint": "0897b6bba78a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_harami",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_oi_maxoi_break_id": {
+   "group": "c",
+   "order": 274,
+   "runner": "catalogue",
+   "fingerprint": "fb79ddbfddef",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "buf": 0.5,
+    "rr": 2.0,
+    "start": "09:30",
+    "end": "14:30",
+    "px_tol": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_inside_up_60m": {
+   "group": "c",
+   "order": 275,
+   "runner": "catalogue",
+   "fingerprint": "3cefb36d4897",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_inside_up",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "vol_spike_continuation": {
+   "group": "c",
+   "order": 276,
+   "runner": "catalogue",
+   "fingerprint": "43f2a31b0ae5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vol": 5.0,
+    "range_atr": 2.0,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_bb_fade": {
+   "group": "c",
+   "order": 277,
+   "runner": "catalogue",
+   "fingerprint": "f1ecf500c26d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "bb": [
+     20,
+     2
+    ],
+    "pad": 0.25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_mechanics_ban_entry_short_id": {
+   "group": "c",
+   "order": 278,
+   "runner": "catalogue",
+   "fingerprint": "ef7dca601d06",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "rise": 5.0,
+    "stop": 2.0,
+    "at": "09:19"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_bb_squeeze_break": {
+   "group": "c",
+   "order": 279,
+   "runner": "catalogue",
+   "fingerprint": "ff183e0ee1f0",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "k": 2.0,
+    "look": 120,
+    "min_stop_atr": 1.0,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hammer_15m": {
+   "group": "c",
+   "order": 280,
+   "runner": "catalogue",
+   "fingerprint": "6d26b6db2b44",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hammer",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_hour_volshock": {
+   "group": "c",
+   "order": 281,
+   "runner": "catalogue",
+   "fingerprint": "0df4b42221ec",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vol": 3.0,
+    "slots": 20,
+    "q": 0.25,
+    "min_stop_atr": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_datr_exhaust": {
+   "group": "c",
+   "order": 282,
+   "runner": "catalogue",
+   "fingerprint": "f1012788d765",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "datr_mult": 2.0,
+    "rr": 1.5,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_outside_bar_5m": {
+   "group": "c",
+   "order": 283,
+   "runner": "catalogue",
+   "fingerprint": "bf8eca92dd53",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "outside_bar",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_macd_zero_cross": {
+   "group": "c",
+   "order": 284,
+   "runner": "catalogue",
+   "fingerprint": "1ccefc24843e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "atr_stop": 1.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_shooting_star_5m": {
+   "group": "c",
+   "order": 285,
+   "runner": "catalogue",
+   "fingerprint": "ab1acfa45e3e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "shooting_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dragonfly_doji_15m": {
+   "group": "c",
+   "order": 286,
+   "runner": "catalogue",
+   "fingerprint": "07c018172dbd",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dragonfly_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_bear_marubozu": {
+   "group": "c",
+   "order": 287,
+   "runner": "catalogue",
+   "fingerprint": "4740901b0b03",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_marubozu",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_nifty_weekend_short": {
+   "group": "c",
+   "order": 288,
+   "runner": "catalogue",
+   "fingerprint": "6fcf296f0ccc",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "stop_pct": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_morning_star_60m": {
+   "group": "c",
+   "order": 289,
+   "runner": "catalogue",
+   "fingerprint": "9701cd47e8f0",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "morning_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_climax_fade": {
+   "group": "c",
+   "order": 290,
+   "runner": "catalogue",
+   "fingerprint": "f387cd61d6c8",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vol": 5.0,
+    "range_atr": 3.0,
+    "rr": 1.0,
+    "hold": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "gap_and_go": {
+   "group": "c",
+   "order": 291,
+   "runner": "catalogue",
+   "fingerprint": "9d160b022991",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_gap": 0.5,
+    "max_gap": 3.0,
+    "rr": 2.0,
+    "last": "10:30"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_top_15m": {
+   "group": "c",
+   "order": 292,
+   "runner": "catalogue",
+   "fingerprint": "f502ed36c8ec",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_top",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_vwap3sd_idio": {
+   "group": "c",
+   "order": 293,
+   "runner": "catalogue",
+   "fingerprint": "3cded325b2ad",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "k": 3.0,
+    "min_dist_pct": 0.75,
+    "target_k": 1.0,
+    "look": 10,
+    "hold": 30,
+    "nifty_n": 30,
+    "nifty_max_pct": 0.2
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_atr_trend_60m": {
+   "group": "c",
+   "order": 294,
+   "runner": "catalogue",
+   "fingerprint": "38539bc22d75",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60,
+    "atr": 20,
+    "back": 40
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hammer_60m": {
+   "group": "c",
+   "order": 295,
+   "runner": "catalogue",
+   "fingerprint": "f9cdbc6b9847",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hammer",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_morning_star_5m": {
+   "group": "c",
+   "order": 296,
+   "runner": "catalogue",
+   "fingerprint": "7dadaf2a43e1",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "morning_star",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_gap_large_follow": {
+   "group": "c",
+   "order": 297,
+   "runner": "catalogue",
+   "fingerprint": "36531e031104",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lo": 2.0,
+    "hi": 8.0,
+    "at": "09:44"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_volshock_rev": {
+   "group": "c",
+   "order": 298,
+   "runner": "catalogue",
+   "fingerprint": "a931c72c16db",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vr": 8.0,
+    "range_atr": 3.0,
+    "confirm": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_open5_fade_idio": {
+   "group": "c",
+   "order": 299,
+   "runner": "catalogue",
+   "fingerprint": "de1fb160414b",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_move_pct": 1.0,
+    "nifty_max_pct": 0.3,
+    "stop_buf_pct": 0.25,
+    "retrace": 0.5,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_inside_up_15m": {
+   "group": "c",
+   "order": 300,
+   "runner": "catalogue",
+   "fingerprint": "cf4848efa4e1",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_inside_up",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dark_cloud_15m": {
+   "group": "c",
+   "order": 301,
+   "runner": "catalogue",
+   "fingerprint": "39654c30e04d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dark_cloud",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_mechanics_expiry_pin_1300": {
+   "group": "c",
+   "order": 302,
+   "runner": "catalogue",
+   "fingerprint": "5de23342ce4d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "band": 1.0,
+    "at": "12:59"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_ema12_20": {
+   "group": "c",
+   "order": 303,
+   "runner": "catalogue",
+   "fingerprint": "463ae313c63d",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60,
+    "fast": 12,
+    "slow": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_ss16_stop2x_vix33": {
+   "group": "c",
+   "order": 304,
+   "runner": "options_r3",
+   "fingerprint": "2371dabebbe3",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "stop_mult": 2.0,
+    "vix_pct_min": 0.3333333333333333
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r3_tf60m_macd_signal_trend": {
+   "group": "c",
+   "order": 305,
+   "runner": "catalogue",
+   "fingerprint": "9f46ec77ea19",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "sig": 9,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_wfridge_ls5_fut5": {
+   "group": "c",
+   "order": 306,
+   "runner": "r3_crosssec",
+   "fingerprint": "67315f020b86",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 5,
+    "lookback": 21,
+    "h": 5,
+    "alpha": 10.0,
+    "refit": 21,
+    "min_train_days": 100,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_cci_trend": {
+   "group": "c",
+   "order": 307,
+   "runner": "catalogue",
+   "fingerprint": "8cacab1a1077",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "cci": 20,
+    "level": 100,
+    "stop_atr": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dragonfly_doji_5m_conf": {
+   "group": "c",
+   "order": 308,
+   "runner": "catalogue",
+   "fingerprint": "f5cf1ebb973a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dragonfly_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_gravestone_doji_15m_conf": {
+   "group": "c",
+   "order": 309,
+   "runner": "catalogue",
+   "fingerprint": "6bfc874107c9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "gravestone_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_ema_cross_15m_nifty": {
+   "group": "c",
+   "order": 310,
+   "runner": "catalogue",
+   "fingerprint": "02e5c3ed2ec6",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "fast": 9,
+    "slow": 21,
+    "ema15": 20,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_downday_strong_fade": {
+   "group": "c",
+   "order": 311,
+   "runner": "catalogue",
+   "fingerprint": "48a33028dabe",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "idx": -0.75,
+    "move": 1.0,
+    "at": "11:59",
+    "buf": 0.1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_marubozu_60m": {
+   "group": "c",
+   "order": 312,
+   "runner": "catalogue",
+   "fingerprint": "277574974f5b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_marubozu",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_swing_close_down4": {
+   "group": "c",
+   "order": 313,
+   "runner": "catalogue",
+   "fingerprint": "9118a508fbb8",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "dn": 0.04,
+    "hold": 5,
+    "stop_pct": 12.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "cs_three_outside_up_5m": {
+   "group": "c",
+   "order": 314,
+   "runner": "catalogue",
+   "fingerprint": "38d4ed22e6fe",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_outside_up",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_shooting_star_60m_conf": {
+   "group": "c",
+   "order": 315,
+   "runner": "catalogue",
+   "fingerprint": "96d578cbb848",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "shooting_star",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_supertrend_short": {
+   "group": "c",
+   "order": 316,
+   "runner": "catalogue",
+   "fingerprint": "878f9f97fdaa",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 3.0,
+    "max_hold": 40
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_vars_cs_shooting_star": {
+   "group": "c",
+   "order": 317,
+   "runner": "catalogue",
+   "fingerprint": "1d15fffeca3b",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "pattern": "shooting_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "afternoon_vwap_trend": {
+   "group": "c",
+   "order": 318,
+   "runner": "catalogue",
+   "fingerprint": "f8ea7898af76",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_macd": {
+   "group": "c",
+   "order": 319,
+   "runner": "catalogue",
+   "fingerprint": "fe0e49f66f66",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "fast": 12,
+    "slow": 26,
+    "sig": 9
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r6_gh_rbreaker_banknifty": {
+   "group": "c",
+   "order": 320,
+   "runner": "catalogue",
+   "fingerprint": "c5ce672bf9e3",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_oi_lb_long_id": {
+   "group": "c",
+   "order": 321,
+   "runner": "catalogue",
+   "fingerprint": "65a18a001bdf",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "dp": 1.0,
+    "doi": 5.0,
+    "oi_max": 50.0,
+    "stop_pct": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_volshock_follow": {
+   "group": "c",
+   "order": 322,
+   "runner": "catalogue",
+   "fingerprint": "8fa8d484a330",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vol_x": 4.0,
+    "vol_n": 50,
+    "range_atr": 1.5,
+    "close_frac": 0.25,
+    "pad_atr": 0.1,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hanging_man_60m_conf": {
+   "group": "c",
+   "order": 323,
+   "runner": "catalogue",
+   "fingerprint": "982ec6cf2bb2",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hanging_man",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_insideday_break": {
+   "group": "c",
+   "order": 324,
+   "runner": "catalogue",
+   "fingerprint": "8b8623009e7a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "a": "09:30",
+    "b": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_fh_lh_mom": {
+   "group": "c",
+   "order": 325,
+   "runner": "catalogue",
+   "fingerprint": "13e2a0c78838",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "r30": 1.0,
+    "first": "09:44",
+    "at": "14:44",
+    "stop_pct": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_keltner_break_vol": {
+   "group": "c",
+   "order": 326,
+   "runner": "catalogue",
+   "fingerprint": "fcb2eb6208c5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "ema": 20,
+    "atr": 10,
+    "mult": 2.0,
+    "min_stop_atr": 1.0,
+    "rr": 2.0,
+    "vol_x": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_mechanics_expiry_pin_1400": {
+   "group": "c",
+   "order": 327,
+   "runner": "catalogue",
+   "fingerprint": "e16fb265c79f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "band": 1.0,
+    "at": "13:59"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_supertrend_nifty": {
+   "group": "c",
+   "order": 328,
+   "runner": "catalogue",
+   "fingerprint": "8a614ecc8e85",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "n": 10,
+    "mult": 3.0,
+    "min_stop_atr": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_outside_down_5m": {
+   "group": "c",
+   "order": 329,
+   "runner": "catalogue",
+   "fingerprint": "99cac2eed6f7",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_outside_down",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_keltner_break": {
+   "group": "c",
+   "order": 330,
+   "runner": "catalogue",
+   "fingerprint": "1420a43d20d7",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "ema": 20,
+    "atr": 10,
+    "mult": 2.0,
+    "min_stop_atr": 1.0,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r7_gh2_oops_nifty": {
+   "group": "c",
+   "order": 331,
+   "runner": "catalogue",
+   "fingerprint": "221951022f84",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "gap": "open beyond yesterday's low / high",
+    "exit": "15:15"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_dmi_cross": {
+   "group": "c",
+   "order": 332,
+   "runner": "catalogue",
+   "fingerprint": "7516ac8d73f3",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 14,
+    "adx_min": 25,
+    "atr_stop": 1.5,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_outside_down_60m": {
+   "group": "c",
+   "order": 333,
+   "runner": "catalogue",
+   "fingerprint": "972c0d3b84e0",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_outside_down",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_black_crows_15m": {
+   "group": "c",
+   "order": 334,
+   "runner": "catalogue",
+   "fingerprint": "161aae45ec8a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_black_crows",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_lowvol_bot5_cnc20": {
+   "group": "c",
+   "order": 335,
+   "runner": "r3_crosssec",
+   "fingerprint": "099d2312180d",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 20,
+    "lookback": 61,
+    "n": 60,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "REJECTED ON FINAL"
+  },
+  "r3_intraday_6mhigh_cross": {
+   "group": "c",
+   "order": 336,
+   "runner": "catalogue",
+   "fingerprint": "dff41e9a9b03",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 126,
+    "buf": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "scalp_vwap_bounce": {
+   "group": "c",
+   "order": 337,
+   "runner": "catalogue",
+   "fingerprint": "0f4ff1c32bd3",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 1.5,
+    "hold": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_oi_maxoi_fade_id": {
+   "group": "c",
+   "order": 338,
+   "runner": "catalogue",
+   "fingerprint": "62e3db432f42",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "buf": 0.5,
+    "rr": 1.5,
+    "start": "09:30",
+    "end": "14:30",
+    "px_tol": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_harami_60m_conf": {
+   "group": "c",
+   "order": 339,
+   "runner": "catalogue",
+   "fingerprint": "b366e94871e6",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_harami",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_rsi": {
+   "group": "c",
+   "order": 340,
+   "runner": "catalogue",
+   "fingerprint": "49125c647b1d",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "rsi": 14,
+    "os": 30,
+    "ob": 70
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_gap_mid_fade_0920": {
+   "group": "c",
+   "order": 341,
+   "runner": "catalogue",
+   "fingerprint": "90fffd07df04",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lo": 1.0,
+    "hi": 3.0,
+    "at": "09:19",
+    "buf": 0.25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_outside_up_15m": {
+   "group": "c",
+   "order": 342,
+   "runner": "catalogue",
+   "fingerprint": "fc570d4a23e3",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_outside_up",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_rsi2_daily_trend": {
+   "group": "c",
+   "order": 343,
+   "runner": "catalogue",
+   "fingerprint": "24c1ffe4bea5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rsi": 2,
+    "lo": 10,
+    "hi": 90,
+    "dsma": 100,
+    "sma_exit": 5,
+    "atr_stop": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_streak_rsi30m_short": {
+   "group": "c",
+   "order": 344,
+   "runner": "catalogue",
+   "fingerprint": "1d8b9eb42a26",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 30,
+    "rsi": 14,
+    "ob": 70,
+    "os": 30,
+    "sl_pct": 1.0,
+    "tp_pct": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_longlegged_doji_5m": {
+   "group": "c",
+   "order": 345,
+   "runner": "catalogue",
+   "fingerprint": "4569146b4216",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "longlegged_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_inside_down_5m": {
+   "group": "c",
+   "order": 346,
+   "runner": "catalogue",
+   "fingerprint": "3be39d6fa864",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_inside_down",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_crabel_stretch": {
+   "group": "c",
+   "order": 347,
+   "runner": "catalogue",
+   "fingerprint": "7817ab76138e",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "last": "14:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_absorption": {
+   "group": "c",
+   "order": 348,
+   "runner": "catalogue",
+   "fingerprint": "0f4364d267b7",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vr": 8.0,
+    "body_max": 0.25,
+    "range_atr_max": 1.5,
+    "day_pct": 1.0,
+    "stop_buf_pct": 0.1,
+    "rr": 2.0,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "rev_1000": {
+   "group": "c",
+   "order": 349,
+   "runner": "catalogue",
+   "fingerprint": "f3b3f0f7d2f8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move": 0.75,
+    "rr": 1.5,
+    "until": "10:45"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_idmom20_ls5_mis": {
+   "group": "c",
+   "order": 350,
+   "runner": "r3_crosssec",
+   "fingerprint": "e203c7f85355",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lookback": 20,
+    "n": 20,
+    "k": 5,
+    "H": 0
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_tt_orb30_list": {
+   "group": "c",
+   "order": 351,
+   "runner": "catalogue",
+   "fingerprint": "c84488362d45",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 30,
+    "target_ranges": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_nifty_shock_overshoot": {
+   "group": "c",
+   "order": 352,
+   "runner": "catalogue",
+   "fingerprint": "068e999c874e",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 5,
+    "shock_pct": 0.35,
+    "mult": 3.0,
+    "stop_buf_pct": 0.1,
+    "retrace": 0.5,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_fh_break_bnf": {
+   "group": "c",
+   "order": 353,
+   "runner": "catalogue",
+   "fingerprint": "3f788da5e1ac",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "candles": 4,
+    "last": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_gapthru_hold": {
+   "group": "c",
+   "order": 354,
+   "runner": "catalogue",
+   "fingerprint": "ea247d4715b9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 2.0,
+    "buf": 0.25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "gap_fade": {
+   "group": "c",
+   "order": 355,
+   "runner": "catalogue",
+   "fingerprint": "37e14f987791",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_gap": 0.5,
+    "max_gap": 2.0,
+    "last": "11:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r7_gh2_oops_banknifty": {
+   "group": "c",
+   "order": 356,
+   "runner": "catalogue",
+   "fingerprint": "3272065b99bd",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "gap": "open beyond yesterday's low / high",
+    "exit": "15:15"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_hanging_man_5m": {
+   "group": "c",
+   "order": 357,
+   "runner": "catalogue",
+   "fingerprint": "b0dde341b361",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "hanging_man",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "inside_bar_5m": {
+   "group": "c",
+   "order": 358,
+   "runner": "catalogue",
+   "fingerprint": "88c242ba4494",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 1.5,
+    "last": "14:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_mom6_1_top5_cnc": {
+   "group": "c",
+   "order": 359,
+   "runner": "r3_crosssec",
+   "fingerprint": "390579257c9e",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 20,
+    "lookback": 126,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_ema10_30_cross": {
+   "group": "c",
+   "order": 360,
+   "runner": "catalogue",
+   "fingerprint": "13c815100842",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "fast": 10,
+    "slow": 30,
+    "stop_pct": 10.0,
+    "max_hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_st_flip": {
+   "group": "c",
+   "order": 361,
+   "runner": "catalogue",
+   "fingerprint": "c79f1f8f09ad",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "atr": 10,
+    "mult": 3,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_nifty_expiry_eve_long": {
+   "group": "c",
+   "order": 362,
+   "runner": "catalogue",
+   "fingerprint": "23ebe62d1d28",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "stop_pct": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_harami_15m": {
+   "group": "c",
+   "order": 363,
+   "runner": "catalogue",
+   "fingerprint": "6049c0268aad",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_harami",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_oi_sb_short_id": {
+   "group": "c",
+   "order": 364,
+   "runner": "catalogue",
+   "fingerprint": "655614d8ed6c",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "dp": 1.0,
+    "doi": 5.0,
+    "oi_max": 50.0,
+    "stop_pct": 1.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_harami_60m_conf": {
+   "group": "c",
+   "order": 365,
+   "runner": "catalogue",
+   "fingerprint": "348342bf2a85",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_harami",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_piercing_line_15m": {
+   "group": "c",
+   "order": 366,
+   "runner": "catalogue",
+   "fingerprint": "a9f1b7c65bcc",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "piercing_line",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_open5_fade": {
+   "group": "c",
+   "order": 367,
+   "runner": "catalogue",
+   "fingerprint": "e1c44afca720",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "min_move_pct": 1.5,
+    "stop_buf_pct": 0.25,
+    "retrace": 0.5,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_piercing_line_5m": {
+   "group": "c",
+   "order": 368,
+   "runner": "catalogue",
+   "fingerprint": "0bb50f0cbf16",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "piercing_line",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inverted_hammer_5m": {
+   "group": "c",
+   "order": 369,
+   "runner": "catalogue",
+   "fingerprint": "ecce6799649b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inverted_hammer",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inside_bar_5m": {
+   "group": "c",
+   "order": 370,
+   "runner": "catalogue",
+   "fingerprint": "afa238dcf852",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inside_bar",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_nifty_shock_catchup": {
+   "group": "c",
+   "order": 371,
+   "runner": "catalogue",
+   "fingerprint": "b4efe6d0f64d",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 5,
+    "shock_pct": 0.35,
+    "stop_pct": 0.5,
+    "target_pct": 0.75,
+    "hold": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_psar_adx": {
+   "group": "c",
+   "order": 372,
+   "runner": "catalogue",
+   "fingerprint": "5401566bcb54",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "af0": 0.02,
+    "step": 0.02,
+    "afmax": 0.2,
+    "adx_min": 25,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_downday_pdl_short": {
+   "group": "c",
+   "order": 373,
+   "runner": "catalogue",
+   "fingerprint": "adc442b6b235",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "idx": -0.5,
+    "vr": 1.5,
+    "buf": 0.3,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_vwap2sd_quietidx": {
+   "group": "c",
+   "order": 374,
+   "runner": "catalogue",
+   "fingerprint": "872eb7f4a099",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "sd": 2.0,
+    "stop_sd": 3.0,
+    "idx": 0.3
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_open5_rvol": {
+   "group": "c",
+   "order": 375,
+   "runner": "catalogue",
+   "fingerprint": "c0b746aedca9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rvol": 3.0,
+    "days": 10,
+    "body_frac": 0.6
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_idio_hour_fade": {
+   "group": "c",
+   "order": 376,
+   "runner": "catalogue",
+   "fingerprint": "b0ce6475dda8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rel": 1.5,
+    "atr_stop": 1.5,
+    "retr": 0.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_fh_break": {
+   "group": "c",
+   "order": 377,
+   "runner": "catalogue",
+   "fingerprint": "6515a5392f3a",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "candles": 4,
+    "last": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf5m_ichimoku_tk": {
+   "group": "c",
+   "order": 378,
+   "runner": "catalogue",
+   "fingerprint": "f4756c8fd4a9",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tenkan": 9,
+    "kijun": 26,
+    "senkou_b": 52,
+    "disp": 26,
+    "min_stop_atr": 1.0,
+    "rr": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_bollinger_60m": {
+   "group": "c",
+   "order": 379,
+   "runner": "catalogue",
+   "fingerprint": "c64f79291d0b",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60,
+    "n": 7,
+    "k": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bull_harami_60m": {
+   "group": "c",
+   "order": 380,
+   "runner": "catalogue",
+   "fingerprint": "e3c5ba79fa8f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bull_harami",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "pdh_pdl_reject": {
+   "group": "c",
+   "order": 381,
+   "runner": "catalogue",
+   "fingerprint": "3c8f50153cd5",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "rr": 1.5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_stoch_60m": {
+   "group": "c",
+   "order": 382,
+   "runner": "catalogue",
+   "fingerprint": "bdf690be9e10",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60,
+    "fastk": 7,
+    "slowk": 2,
+    "slowd": 2
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_bottom_15m": {
+   "group": "c",
+   "order": 383,
+   "runner": "catalogue",
+   "fingerprint": "018367f897f8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_bottom",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_futures_nifty_vwap2sd_fade": {
+   "group": "c",
+   "order": 384,
+   "runner": "catalogue",
+   "fingerprint": "b6182ceb1eb8",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "k": 2.0,
+    "stop_pct": 0.4
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_bear_marubozu_5m": {
+   "group": "c",
+   "order": 385,
+   "runner": "catalogue",
+   "fingerprint": "eff6c6106887",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "bear_marubozu",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_rev1d_bot5_cnc": {
+   "group": "c",
+   "order": 386,
+   "runner": "r3_crosssec",
+   "fingerprint": "baee877d6fb5",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "H": 1,
+    "lookback": 1,
+    "k": 5
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_inside_break": {
+   "group": "c",
+   "order": 387,
+   "runner": "catalogue",
+   "fingerprint": "22d40c439e9c",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "wait": 2,
+    "rr": 1.5,
+    "last": "14:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_inverted_hammer_15m": {
+   "group": "c",
+   "order": 388,
+   "runner": "catalogue",
+   "fingerprint": "c2106cc3513f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "inverted_hammer",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r6_gh_ema5_banknifty": {
+   "group": "c",
+   "order": 389,
+   "runner": "catalogue",
+   "fingerprint": "72c520d97761",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "ema": 5,
+    "tf_short": 5,
+    "tf_long": 15,
+    "gap": 0.5,
+    "rr": 3.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_donch20_short": {
+   "group": "c",
+   "order": 390,
+   "runner": "catalogue",
+   "fingerprint": "f9b531ad896b",
+   "kind": "futures",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "stop_pct": 10.0,
+    "max_hold": 40
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_longlegged_doji_60m": {
+   "group": "c",
+   "order": 391,
+   "runner": "catalogue",
+   "fingerprint": "f0131f1d5e78",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "longlegged_doji",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_tweezer_top_60m_conf": {
+   "group": "c",
+   "order": 392,
+   "runner": "catalogue",
+   "fingerprint": "180b116e1c14",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "tweezer_top",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_expiry_fade": {
+   "group": "c",
+   "order": 393,
+   "runner": "catalogue",
+   "fingerprint": "237becfde5e8",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "move": 1.5,
+    "at": "13:29",
+    "buf": 0.1
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_0dte_ic_1030": {
+   "group": "c",
+   "order": 394,
+   "runner": "options_r3",
+   "fingerprint": "caba7c266f44",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "expiry_day",
+    "entry": "10:30",
+    "structure": "strangle",
+    "short_delta": 0.16,
+    "wing_pts": 200.0
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_options_ibf_400": {
+   "group": "c",
+   "order": 395,
+   "runner": "options_r3",
+   "fingerprint": "019416f8c1a2",
+   "kind": "options",
+   "horizon": "positional",
+   "single_underlying": true,
+   "params": {
+    "schedule": "weekly_cycle",
+    "entry": "10:20",
+    "min_days_left": 3,
+    "structure": "straddle_short",
+    "wing_pts": 400.0
+   },
+   "cost_model": "2026-11/o1r3",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_at_bollinger": {
+   "group": "c",
+   "order": 396,
+   "runner": "catalogue",
+   "fingerprint": "7e88acc77373",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "n": 20,
+    "k": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tfweekly_supertrend_long": {
+   "group": "c",
+   "order": 397,
+   "runner": "catalogue",
+   "fingerprint": "4212d75583b7",
+   "kind": "swing",
+   "horizon": "positional",
+   "single_underlying": false,
+   "params": {
+    "n": 10,
+    "mult": 3.0,
+    "max_hold": 60
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf15m_fh_break_nifty": {
+   "group": "c",
+   "order": 398,
+   "runner": "catalogue",
+   "fingerprint": "29b9e215a05a",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "candles": 4,
+    "last": "13:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_vwap25sd_climax": {
+   "group": "c",
+   "order": 399,
+   "runner": "catalogue",
+   "fingerprint": "c6120e8334de",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "k": 2.5,
+    "min_dist_pct": 1.0,
+    "vr": 3.0,
+    "stop_k": 0.5,
+    "target_k": 1.0,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r5_kite_ab_reverse_rsi_60m": {
+   "group": "c",
+   "order": 400,
+   "runner": "catalogue",
+   "fingerprint": "970e9965b7f1",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "tf": 60,
+    "rsi": 7,
+    "os": 32,
+    "ob": 70
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r4_mechanics_close_vwap_1pct": {
+   "group": "c",
+   "order": 401,
+   "runner": "catalogue",
+   "fingerprint": "8d6d410baf93",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "mode": "pct",
+    "dev": 1.0,
+    "stop": 0.5,
+    "at": "14:59"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_three_inside_up_5m": {
+   "group": "c",
+   "order": 402,
+   "runner": "catalogue",
+   "fingerprint": "04abba1285cd",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "three_inside_up",
+    "confirm": false,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 5
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "cs_dragonfly_doji_15m_conf": {
+   "group": "c",
+   "order": 403,
+   "runner": "catalogue",
+   "fingerprint": "ebe7aeca8ac6",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "pattern": "dragonfly_doji",
+    "confirm": true,
+    "rr": 2.0,
+    "min_stop_atr": 0.3,
+    "tf": 15
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_ai_crosssec_rev1d_bot5_mis": {
+   "group": "c",
+   "order": 404,
+   "runner": "r3_crosssec",
+   "fingerprint": "43873621eb4f",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "lookback": 2,
+    "k": 5,
+    "H": 0
+   },
+   "cost_model": "2026-11/f2+xsec1",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_squeeze_fakeout": {
+   "group": "c",
+   "order": 405,
+   "runner": "catalogue",
+   "fingerprint": "d805546fa696",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 30,
+    "max_width_pct": 0.4,
+    "within": 3,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "fut_orb15_break": {
+   "group": "c",
+   "order": 406,
+   "runner": "catalogue",
+   "fingerprint": "f42a258aa6cc",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "minutes": 15,
+    "rr": 1.5,
+    "last": "12:00"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_intraday_monday_gapdown_short": {
+   "group": "c",
+   "order": 407,
+   "runner": "catalogue",
+   "fingerprint": "0de0a968a606",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "gap": -0.5,
+    "at": "09:44"
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_bb_fade_adx": {
+   "group": "c",
+   "order": 408,
+   "runner": "catalogue",
+   "fingerprint": "1074d2ea7d77",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 20,
+    "k": 2.0,
+    "adx_max": 20,
+    "pad_atr": 0.25
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_nifty_shock_resist": {
+   "group": "c",
+   "order": 409,
+   "runner": "catalogue",
+   "fingerprint": "095f5a4b0f71",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "n": 5,
+    "shock_pct": 0.35,
+    "stop_pct": 0.5,
+    "target_pct": 0.75,
+    "hold": 30
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_tf60m_donchian20_banknifty": {
+   "group": "c",
+   "order": 410,
+   "runner": "catalogue",
+   "fingerprint": "390c5951c29e",
+   "kind": "futures",
+   "horizon": "intraday",
+   "single_underlying": true,
+   "params": {
+    "n": 20,
+    "atr_stop": 2.0
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  },
+  "r3_scalping_climax_confirm": {
+   "group": "c",
+   "order": 411,
+   "runner": "catalogue",
+   "fingerprint": "82eb3575ea61",
+   "kind": "scalping",
+   "horizon": "intraday",
+   "single_underlying": false,
+   "params": {
+    "vr": 5.0,
+    "range_atr": 2.0,
+    "min_range_pct": 0.4,
+    "within": 3,
+    "rr": 1.5,
+    "hold": 20
+   },
+   "cost_model": "2026-11/f2",
+   "status_2023_26": "FAILED SCREEN"
+  }
+ },
+ "ineligible": [
+  {
+   "id": "r4_mechanics_budget_mom",
+   "reason": "calendar-bound: r4_mechanics.BUDGET lists 2024-2026 Budget days only: never fires in 2016-2023"
+  },
+  {
+   "id": "r4_mechanics_mpc_all_mom",
+   "reason": "calendar-bound: r4_mechanics.MPC lists 2023-12..2026 RBI MPC days only: never fires in 2016-2023"
+  },
+  {
+   "id": "r4_mechanics_mpc_ratesens_mom",
+   "reason": "calendar-bound: r4_mechanics.MPC lists 2023-12..2026 RBI MPC days only"
+  },
+  {
+   "id": "r4_mechanics_preholiday_nifty_1520",
+   "reason": "calendar-bound: r4_mechanics.HOLIDAYS lists 2023-11..2026-11 holidays only"
+  },
+  {
+   "id": "r4_mechanics_preholiday_nifty_id",
+   "reason": "calendar-bound: r4_mechanics.HOLIDAYS lists 2023-11..2026-11 holidays only"
+  },
+  {
+   "id": "r4_mechanics_preholiday_stocks_id",
+   "reason": "calendar-bound: r4_mechanics.HOLIDAYS lists 2023-11..2026-11 holidays only"
+  },
+  {
+   "id": "r4_mechanics_sip_bnf_1520",
+   "reason": "calendar-bound: month's last regular session from r4_mechanics.HOLIDAYS (2023-11..2026-11 only)"
+  },
+  {
+   "id": "r4_mechanics_sip_nifty_1520",
+   "reason": "calendar-bound: month's last regular session from r4_mechanics.HOLIDAYS (2023-11..2026-11 only)"
+  },
+  {
+   "id": "r4_realopt_nf_wk_strangle_3pct",
+   "reason": "FINAL-confirmed on 2023-26, but a daily real-price (EOD bhavcopy) option spec, not a minute-bar one; NIFTY weeklies exist only from 2019-02-11, so H1 (2016-2019) holds ~45 weeks < 60 by construction (excluded from the 2012-23 round for the same reason)"
+  }
+ ],
+ "counts": {
+  "a": 3,
+  "b": 5,
+  "c": 412
+ },
+ "note": "written before any 2016-2023 strategy result was computed (the data check ran no strategy)"
+}

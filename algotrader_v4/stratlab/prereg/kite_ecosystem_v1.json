@@ -1,0 +1,3066 @@
+{
+ "title": "Zerodha / Kite ecosystem published strategies, tested as published - pre-registration v1",
+ "written": "2026-11-14 06:49 UTC",
+ "status": "Written BEFORE any P&L, profit factor or verdict of any strategy below was computed (only error / trade-count / look-ahead smoke runs on short windows, no P&L printed). Nothing below changes after results. One look per strategy per era.",
+ "source_list": "the researcher's 69-entry JSON (scratchpad/kite/strategies_69.json, sha256 below); Pine templates re-read from docs.algotest.in, AlgoBulls code from scratchpad/dl/pyalgostrategypool, Varsity chapters re-read for the candlestick / moving-average / pair-trade rules",
+ "source_sha256": "5d533014cf5a6087e6d613e32501b1cad272fde919ac3e55e3fbee44b700c32e",
+ "industry_file": {
+  "path": "/tmp/claude-0/-home-user-victor-/10a63b67-92f5-5498-8eb5-0d5b292e5470/scratchpad/kite/ref/ind_nifty500list.csv.nsearchives.nseindia.com",
+  "sha256": "31b764a95cc03ad1d7ddb6c42340de9125ed2c78b3d436bf0dbc8440e4e38c5e",
+  "what": "NSE ind_nifty500list.csv (today's NIFTY 500 with Industry), fetched 2026-11-14; names absent from it (delisted) have no industry and form no pair"
+ },
+ "classification_counts": {
+  "a": 23,
+  "b": 26,
+  "c": 20
+ },
+ "dedup": "trials_v2.csv (2,245 rows, 1,113 ids) has no strategy with identical rules (indicator, parameters, timeframe, direction, exits); same-family neighbours with different parameters (e.g. r3_tf5m_dmi_cross, r3_tf60m_rsi30_70_fade, orb15_break, cs_*_d, r4_realopt_nf_wk_condor_2pct_w1) are NOT duplicates and the published versions are tested",
+ "global_conventions": {
+  "simulator": "stratlab.sim with the round-5 optional fields (Entry.exit_sig / bracket, Swing.exit_fn / lots): exits by rule at the next bar's (session's) open as market orders with slippage; an opposite entry decided on the same bar fills at that same open",
+  "intraday": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)",
+  "algotest": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+  "algobulls": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock",
+  "indicators": "stratlab.kite_ind (platform formulas) on continuous candle series with the short last candle kept (stratlab.kite_tf)",
+  "no_stop": "a placeholder stop 50 % away (never hit)",
+  "max_per_day": 75
+ },
+ "protocols": {
+  "2023-26": {
+   "protocol": "stratlab/protocol.py unchanged: DISCOVERY first 70 pct (H1/H2), FINAL last 30 pct only for screen passers; screen = net > 0 in H1 and H2, PF >= 1.15, >= 150 intraday / 60 positional trades, top symbol <= 35 %; CONFIRMED = FINAL net > 0 and PF >= 1.05",
+   "cost_model": "2026-11/f2",
+   "options_cost_model": "2026-11/nse_eod1",
+   "spreads_cost_model": "2026-11/f2/ks1",
+   "run": "python -m stratlab.run --data <bars3y> --kind <kind> --ids <r5 ids> --out <dir> --trials <trials_v2.csv>"
+  },
+  "2012-23": {
+   "protocol": "stratlab/protocol_oos.py unchanged (gates fingerprint below)",
+   "gates": {
+    "era": [
+     20120101,
+     20231109
+    ],
+    "h1": [
+     20120101,
+     20171231
+    ],
+    "h2": [
+     20180101,
+     20231109
+    ],
+    "min_pf": 1.15,
+    "min_trades_per_half": {
+     "intraday": 150,
+     "positional": 60
+    },
+    "max_symbol_share": 0.35,
+    "net_gt_0": [
+     "h1",
+     "h2"
+    ],
+    "sens_bps": 5.0,
+    "universe": "universe_monthly.csv: top 100 by 60-session turnover before each month, gate on decision day"
+   }
+  },
+  "momentum": "factor_momentum.judge gates (see the momentum entry)"
+ },
+ "gates_fingerprint": "1cbbb3ea72c1",
+ "entries": [
+  {
+   "source": "Streak (help center, secondary: search-engine extract; direct fetch 404)",
+   "source_url": "https://help.streak.tech/mobile/create_basic/",
+   "name": "Streak help example: RSI overbought sell",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "30min",
+    "direction": "short",
+    "entry": "RSI crosses below 70 (RSI period unspecified)",
+    "exit": "optional indicator exit: RSI crosses above 30; or SL/TP",
+    "stop_loss": "1% from average entry",
+    "target": "2% from average entry",
+    "holding": "unspecified",
+    "notes": "Quantity 100. Streak requires SL and TP and computes them from the average entry price; any exit (indicator OR SL OR TP) closes the trade. A second example on the same page uses 0.5/1 (context unknown)."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_streak_rsi30m_short"
+   ],
+   "defaults_fixed_before_any_run": {
+    "rsi_period": "14 (unspecified; Kite/Streak default)",
+    "holding": "intraday, 15:15 square-off",
+    "conventions": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Streak (staff reply in Z-Connect comments, secondary)",
+   "source_url": "https://zerodha.com/z-connect/tradezerodha/streak/streak-just-got-a-whole-lot-better",
+   "name": "Streak 5-min opening range breakout",
+   "published_rule": {
+    "instrument": "equity/futures",
+    "timeframe": "unspecified candle interval; 5-min opening range",
+    "direction": "long",
+    "entry": "Close(0) crosses above Opening Range(High,5min)",
+    "exit": "Close(0) crosses below Opening Range(Low,5min)",
+    "stop_loss": "unspecified (mandatory in Streak)",
+    "target": "unspecified (mandatory in Streak)",
+    "holding": "unspecified",
+    "notes": "Staff reply dated 26 Aug 2024."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_streak_orb5_long"
+   ],
+   "defaults_fixed_before_any_run": {
+    "candle_interval": "5-minute (the opening-range interval)",
+    "stop_target": "none besides the published exit (close below the range low); 15:15 square-off",
+    "re_entry": "allowed on a new cross while flat",
+    "conventions": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Streak (staff reply, secondary)",
+   "source_url": "https://zerodha.com/z-connect/tradezerodha/streak/streak-just-got-a-whole-lot-better",
+   "name": "Streak 4th 30-min candle range breakout",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "30min",
+    "direction": "long",
+    "entry": "Close(0) higher than Nth candle(High,30min,4)",
+    "exit": "Close(0) lower than Nth candle(Low,30min,4)",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "Staff reply dated 29 Apr 2021."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_streak_4th30m_long"
+   ],
+   "defaults_fixed_before_any_run": {
+    "stop_target": "none besides the published exit (30m close below the 4th candle's low); 15:15",
+    "conventions": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Streak (staff reply, secondary)",
+   "source_url": "https://zerodha.com/z-connect/streak/introducing-streak-algo-trade-without-coding",
+   "name": "Streak Supertrend(7,0.5) candle-colour",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "unspecified (the user's question mentioned 5-min Heikin Ashi)",
+    "direction": "long",
+    "entry": "Close higher than Open AND Close higher than SuperTrend(7,0.5)",
+    "exit": "Close lower than Open AND Close lower than SuperTrend(7,0.5)",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "Staff reply dated Oct 2019."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_streak_st7_long"
+   ],
+   "defaults_fixed_before_any_run": {
+    "timeframe": "5-minute regular candles (the thread's interval; not Heikin Ashi)",
+    "supertrend": "standard ratcheting Supertrend on hl2, Wilder ATR(7), multiplier 0.5",
+    "stop_target": "none besides the exit rule; 15:15",
+    "conventions": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity, Trading Systems module (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/momentum-portfolios/",
+   "name": "Varsity price-momentum portfolio",
+   "published_rule": {
+    "instrument": "equity (cash)",
+    "timeframe": "daily data, monthly rebalance",
+    "direction": "long-only",
+    "entry": "Universe of about 150-200 stocks (e.g. Nifty 50 / BSE 500). At the close of the last trading day of the month, rank by 12-month return (end/start - 1). Buy the top 12 (10-12 is allowed; the example uses 12) on the first trading day of the month.",
+    "exit": "At the monthly rebalance, sell names that drop out of the top N and buy the new entrants",
+    "stop_loss": "none in the rules",
+    "target": "none",
+    "holding": "CNC, monthly",
+    "notes": "Equal weight is the base case. Variants (fortnightly or weekly rebalance, fundamental momentum) are mentioned. The author notes it works poorly in sideways or falling markets."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_momentum12"
+   ],
+   "defaults_fixed_before_any_run": {
+    "universe": "factor_momentum's: 2013-23 point-in-time top-100 by turnover (delisted kept); 2023-26 current ~97 NIFTY-100 names (survivorship-biased)",
+    "ranking": "C[t]/C[t-252]-1 at the month's last close, top 12",
+    "rebalance": "names staying in the top 12 are not re-weighted; cash from the sales is split equally among the entrants",
+    "execution": "next session's open",
+    "costs": "CNC statutory + 10 bps per side (factor_momentum)",
+    "gates": "factor_momentum.judge: each era-1 half CAGR > 0 and > NIFTY, era-1 Sharpe >= 0.5, era-2 CAGR > 0 and > NIFTY"
+   },
+   "eras": [
+    "2013-23 + 2023-26 portfolio test (kite_momentum ledger, one look)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/trade-identification/",
+   "name": "Varsity pair trade (regression residual, PTM2)",
+   "published_rule": {
+    "instrument": "stock futures pair",
+    "timeframe": "daily",
+    "direction": "long/short spread",
+    "entry": "Regress Y on X and use the residual's z-score. Long pair (buy Y, sell X) at -2 SD; short pair (sell Y, buy X) at +2 SD",
+    "exit": "Residual reverts to the mean (0)",
+    "stop_loss": "\u00b13 SD",
+    "target": "mean (0)",
+    "holding": "until reversion; freeze the regression equation while the trade is open",
+    "notes": "Hedge ratio = slope (beta). The pair filter is a low error ratio (SE of intercept / SE). The ADF p-value cutoff appears only in comments (0.05 or 0.1). The regression lookback is unspecified. Some traders use 2.5 SD (comment)."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_ptm2"
+   ],
+   "defaults_fixed_before_any_run": {
+    "pairs": "same NSE industry (ind_nifty500list.csv), both with stock futures that day, both in the month's top-100 (2012-23)",
+    "lookback": "200 sessions",
+    "orientation": "lower error ratio SE(intercept)/SE(residual)",
+    "adf": "statsmodels adfuller default (constant, AIC lags), p < 0.05, on the 200 residuals at the entry decision",
+    "entry": "2 <= |z| < 3 at the close, both legs at the next open, beta > 0 required",
+    "exit": "z crosses 0 (frozen regression), stop |z| >= 3, at the next open",
+    "sizing": "Rs 1 lakh of Y, round(beta * qty_Y) shares of X",
+    "prices": "adjusted cash prices with futures costs (lab stock-futures convention)"
+   },
+   "eras": [
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)",
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) via kite_spreads (n_symbols = panel names)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/the-pair-trade/",
+   "name": "Varsity pair trade (price ratio density, PTM1)",
+   "published_rule": {
+    "instrument": "stock futures pair",
+    "timeframe": "daily",
+    "direction": "long/short ratio",
+    "entry": "Ratio A/B; density-curve value 0.025-0.003 = long ratio (buy A, sell B); 0.975-0.997 = short ratio (sell A, buy B)",
+    "exit": "Position moves back inside 2 SD (short: density 0.975 or lower)",
+    "stop_loss": "long: density 0.003 or lower (the table's 'or higher' is an acknowledged typo); short: 0.997 or higher",
+    "target": "back inside 2 SD",
+    "holding": "until exit",
+    "notes": "Lookback: the author suggests about 2 years in comments (the example uses about 496 days). Rupee neutrality is intended but not implemented in the example. The author calls the rules generic, and both worked trades entered outside the table's ranges."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_ptm1"
+   ],
+   "defaults_fixed_before_any_run": {
+    "pairs": "same NSE industry, futures listed, top-100 (2012-23); A = alphabetically first",
+    "lookback": "496 sessions (the chapter's example; 'about 2 years')",
+    "density": "normal CDF of the ratio vs its rolling mean / SD (recomputed daily)",
+    "long": "enter 0.003 <= density <= 0.025, exit >= 0.025, stop <= 0.003 (acknowledged table typos resolved by symmetry with the short side)",
+    "short": "enter 0.975..0.997, exit <= 0.975, stop >= 0.997",
+    "sizing": "rupee-neutral, Rs 1 lakh per leg",
+    "fills": "next open"
+   },
+   "eras": [
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)",
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/calendar-spreads/",
+   "name": "Varsity calendar spread (SBIN example)",
+   "published_rule": {
+    "instrument": "single-stock futures (near vs next month)",
+    "timeframe": "daily",
+    "direction": "long/short spread",
+    "entry": "Spread mean and SD over 200 days; spread > mean+1SD: sell near / buy next; spread < mean-1SD: buy near / sell next",
+    "exit": "Spread returns to the mean",
+    "stop_loss": "unspecified",
+    "target": "mean",
+    "holding": "usually 1-2 days",
+    "notes": "The article's sign convention is internally inconsistent, so check it. Sell-spread trades were profitable in the sample; buy-spread trades were not."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_calendar"
+   ],
+   "defaults_fixed_before_any_run": {
+    "spread": "(near - next) / near on stock futures closes (percent: futures closes are not split-adjusted)",
+    "sign": "spread > mean + 1 SD: sell near / buy next; < mean - 1 SD: buy near / sell next (the article's convention is inconsistent; this is the mean-reverting reading of its actions)",
+    "window": "last 200 sessions on which both contracts traded",
+    "exit": "spread back to the rolling mean, or forced at the close of the session before the near expiry",
+    "fills": "next session's EOD close of both contracts",
+    "universe": "stock futures of the lab universe (top-100 2012-23; ~97 names 2023-26)",
+    "sizing": "Rs 1 lakh of the near leg, same quantity both legs"
+   },
+   "eras": [
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)",
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity, Technical Analysis (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/moving-averages/",
+   "name": "Varsity price vs 50 EMA",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "unspecified (comments suggest EOD)",
+    "direction": "long-only",
+    "entry": "Close turns above 50 EMA",
+    "exit": "Close turns below 50 EMA",
+    "stop_loss": "unspecified",
+    "target": "none (exit on cross)",
+    "holding": "positional",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_vars_px_ema50"
+   ],
+   "defaults_fixed_before_any_run": {
+    "timeframe": "daily close (author's comments: EOD)",
+    "stop": "none",
+    "instrument": "delivery (CNC), long only",
+    "ema": "SMA-seeded EMA, no signal before 51 sessions"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/moving-averages/",
+   "name": "Varsity EMA crossover (50/100; 9/21, 25/50, 100/200 variants)",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "EOD for the swing pairs; 15x30-min and 5x10-min intraday variants",
+    "direction": "long-only",
+    "entry": "Fast EMA crosses above slow EMA",
+    "exit": "Fast EMA crosses below slow EMA",
+    "stop_loss": "unspecified",
+    "target": "none",
+    "holding": "9/21: a few sessions; 25/50: weeks; 50/100: months; 100/200: a year or more",
+    "notes": "Shorting is mentioned only in comments, without rules."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_ema9_21",
+    "r5_kite_vars_ema25_50",
+    "r5_kite_vars_ema50_100",
+    "r5_kite_vars_ema100_200",
+    "r5_kite_vars_ema15x30_1m",
+    "r5_kite_vars_ema5x10_1m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "swing": "daily EMA crossovers, CNC, exit on the cross back, no stop",
+    "intraday": "'15 x 30 minutes' and '5 x 10-minute' = EMA periods on the 1-minute chart (author's reply: both refer to the same unit), long only, exit on the cross back, 15:15 square-off",
+    "conventions": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (daily pairs only)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/indicators-part-2/",
+   "name": "Varsity MACD(12,26,9) signal-line crossover",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily (implied)",
+    "direction": "long and short",
+    "entry": "Long when the MACD line crosses above the signal line; short when it crosses below",
+    "exit": "Opposite crossover (implied)",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "A centerline variant (MACD crossing 0) is also given. The checklist wording is reversed; the author confirmed MACD must be above the signal line for a buy."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_macd_d"
+   ],
+   "defaults_fixed_before_any_run": {
+    "exit": "opposite crossover (implied), which also reverses",
+    "timeframe": "daily",
+    "instrument": "stock futures"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/indicators-part-2/",
+   "name": "Varsity Bollinger(20,2) mean reversion",
+   "published_rule": {
+    "instrument": "equity/index",
+    "timeframe": "daily (implied)",
+    "direction": "long and short",
+    "entry": "Buy when price touches the lower band; short when price touches the upper band",
+    "exit": "Target is the 20-day SMA (middle band)",
+    "stop_loss": "unspecified (the author floats '3% below lower band' in a comment)",
+    "target": "20 SMA",
+    "holding": "short-term",
+    "notes": "The signal fails on band expansion (not quantified)."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_bb20_d"
+   ],
+   "defaults_fixed_before_any_run": {
+    "touch": "daily low <= lower band (high >= upper band) at the close",
+    "target": "exit at the next open after a daily close at/through the CURRENT 20-day SMA",
+    "stop": "none (unspecified)",
+    "instrument": "stock futures, long and short"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/single-candlestick-patterns-part-1/",
+   "name": "Varsity Bullish Marubozu",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "long",
+    "entry": "Open\u2248Low and Close\u2248High. Risk-taker buys near the close (3:20 PM check) on the pattern day; risk-averse buys at the next day's close if that day is bullish",
+    "exit": "SL or target",
+    "stop_loss": "low of the marubozu",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": "Skip if the candle range (H-L)/C is below 1% or above 10%. Shadow tolerance about 0.2% (comment)."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_bull_marubozu",
+    "r5_kite_vars_cs_bull_marubozu_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/single-candlestick-patterns-part-1/",
+   "name": "Varsity Bearish Marubozu",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "short",
+    "entry": "Open\u2248High and Close\u2248Low; short near the close (risk-taker) or next day by 3:20 PM if that day is red",
+    "exit": "SL or target",
+    "stop_loss": "high of the marubozu",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": "Same 1%-10% range filter."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_bear_marubozu",
+    "r5_kite_vars_cs_bear_marubozu_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/single-candlestick-patterns-part-3/",
+   "name": "Varsity Hammer",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "long",
+    "entry": "After a downtrend: lower shadow \u2265 2x body, open/close within 1-2%; buy at the close (or next day if bullish)",
+    "exit": "SL or target",
+    "stop_loss": "hammer low",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": "The prior-trend definition is not quantified."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_hammer",
+    "r5_kite_vars_cs_hammer_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/single-candlestick-patterns-part-3/",
+   "name": "Varsity Hanging Man",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "short",
+    "entry": "Same shape as the hammer, after an uptrend; short at the close (or next day's close if red)",
+    "exit": "SL or target",
+    "stop_loss": "pattern high",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": "Prior trend not quantified."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_hanging_man",
+    "r5_kite_vars_cs_hanging_man_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/single-candlestick-patterns-part-3/",
+   "name": "Varsity Shooting Star",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "short",
+    "entry": "After an uptrend: upper shadow \u2265 2x body, close\u2248low; short at the close (or next day after a red candle)",
+    "exit": "SL or target",
+    "stop_loss": "pattern high",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": ""
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_shooting_star",
+    "r5_kite_vars_cs_shooting_star_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/multiple-candlestick-patterns-part-1/",
+   "name": "Varsity Bullish Engulfing",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "long",
+    "entry": "Downtrend; P1 red; P2 blue with Open(P2) \u2264 Close(P1) and price at 3:20 PM above Open(P1) (real-body engulf is enough); buy at P2 close (or P3 close if P3 is blue)",
+    "exit": "SL or target",
+    "stop_loss": "lowest low of P1-P2",
+    "target": "unspecified (trailing allowed)",
+    "holding": "until SL or target",
+    "notes": ""
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_bull_engulfing",
+    "r5_kite_vars_cs_bull_engulfing_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/multiple-candlestick-patterns-part-1/",
+   "name": "Varsity Bearish Engulfing",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "short",
+    "entry": "Uptrend; P1 blue; P2 red with Open(P2) > Close(P1) and price at 3:20 PM below Open(P1); short at P2 close (or P3 if red)",
+    "exit": "SL or target",
+    "stop_loss": "highest high of P1-P2",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": ""
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_bear_engulfing",
+    "r5_kite_vars_cs_bear_engulfing_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/multiple-candlestick-patterns-part-1/",
+   "name": "Varsity Piercing Pattern",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "long",
+    "entry": "As bullish engulfing, but P2 body covers \u226550% and <100% of P1 body",
+    "exit": "SL or target",
+    "stop_loss": "pattern low",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": ""
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_piercing",
+    "r5_kite_vars_cs_piercing_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/multiple-candlestick-patterns-part-1/",
+   "name": "Varsity Dark Cloud Cover",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "short",
+    "entry": "As bearish engulfing, but the red P2 covers 50-100% of the P1 body",
+    "exit": "SL or target",
+    "stop_loss": "pattern high",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": ""
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_dark_cloud",
+    "r5_kite_vars_cs_dark_cloud_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/multiple-candlestick-patterns-part-3/",
+   "name": "Varsity Morning Star",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "long",
+    "entry": "P1 long red; P2 doji/spinning top after a gap down; P3 gaps up and is above Open(P1) at 3:20 PM; buy at P3 close",
+    "exit": "SL or target",
+    "stop_loss": "lowest low of P1-P3",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": "Doji/spinning-top thresholds not quantified here."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_morning_star",
+    "r5_kite_vars_cs_morning_star_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Zerodha Varsity (primary)",
+   "source_url": "https://zerodha.com/varsity/chapter/multiple-candlestick-patterns-part-3/",
+   "name": "Varsity Evening Star",
+   "published_rule": {
+    "instrument": "equity",
+    "timeframe": "daily",
+    "direction": "short",
+    "entry": "P1 blue; P2 doji/spinning top after a gap up; P3 red, gaps down and is below Open(P1) at 3:20 PM; short at P3 close",
+    "exit": "SL or target",
+    "stop_loss": "highest high of P1-P3",
+    "target": "unspecified",
+    "holding": "until SL or target",
+    "notes": ""
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_vars_cs_evening_star",
+    "r5_kite_vars_cs_evening_star_nxo"
+   ],
+   "defaults_fixed_before_any_run": {
+    "prior_trend": "close of the session before the pattern's first candle vs the 10-day SMA of closes ending there (below = downtrend, above = uptrend) [task default]",
+    "target": "1.5 R from the fill (Varsity TA checklist 'The minimum RRR should be at least 1.5'; patterns give no target)",
+    "entry": "risk-taker entry: the pattern is checked on the day so far at 15:20 (open, high, low to 15:19, 15:19 close) and filled at the 15:20 bar open; the 2012-23 twin *_nxo uses the full daily candle and fills at the NEXT open (daily data has no 15:20 print)",
+    "instrument": "stock futures (simulated on the cash price, futures costs) for long and short patterns alike",
+    "tolerances": "shadows 'tiny' / 'near' = <= 0.2 % of the close (Varsity author's marubozu tolerance); hammer/hanging man body <= 2 % of the open ('within 1-2 %'); long body = above the mean body of the previous 10 sessions, doji/spinning top = below it (lab candles.py reference); gaps = body gaps",
+    "holding": "until stop or target (or the end of the simulated period)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) (15:20 version)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) (_nxo twin)"
+   ]
+  },
+  {
+   "source": "Sensibull Strategy Builder ready-made (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Long Calendar with Calls",
+   "published_rule": {
+    "instrument": "Nifty/BankNifty options",
+    "timeframe": "n/a",
+    "direction": "bullish",
+    "entry": "Sell CE at the strike nearest spot*1.01 (multiple of 100 Nifty / 500 BankNifty) in the selected expiry; buy the same-strike CE in the monthly expiry \u226510 days out",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "Leg template only. Sensibull is a manual tool, so entry timing and exits are left to the user."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Bull Condor",
+   "published_rule": {
+    "instrument": "index options",
+    "timeframe": "n/a",
+    "direction": "bullish",
+    "entry": "Spacing = 1% of spot rounded to the nearest 200 pts. Buy CE at the ~1%-above-spot strike, sell CE +1 spacing, sell CE +2 spacings, buy CE +3 spacings (e.g. 18800/19000/19200/19400 at spot 18618)",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "Leg template only."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Bull Butterfly",
+   "published_rule": {
+    "instrument": "index options",
+    "timeframe": "n/a",
+    "direction": "bullish",
+    "entry": "Buy 1 CE at the ~1%-above strike, sell 2 CE +1 spacing, buy 1 CE +2 spacings (spacing rule as Bull Condor)",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "The article's example mislabels leg 3 as Sell."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Range Forward",
+   "published_rule": {
+    "instrument": "index/stock options",
+    "timeframe": "n/a",
+    "direction": "bullish",
+    "entry": "Buy CE nearest 1% above ATM; sell PE nearest 1% below ATM",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "Near-zero-cost structure."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Long Calendar with Puts",
+   "published_rule": {
+    "instrument": "Nifty/BankNifty options",
+    "timeframe": "n/a",
+    "direction": "bearish",
+    "entry": "Sell PE at the strike nearest spot*0.99 (multiple of 100/500) in the selected expiry; buy the same-strike PE in the monthly expiry \u226510 days out",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Bear Condor",
+   "published_rule": {
+    "instrument": "index options",
+    "timeframe": "n/a",
+    "direction": "bearish",
+    "entry": "Buy PE at the ~1%-below strike, sell PE -1 spacing, sell PE -2, buy PE -3 (200-pt spacing; e.g. 18450/18250/18050/17850)",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Bear Butterfly",
+   "published_rule": {
+    "instrument": "index options",
+    "timeframe": "n/a",
+    "direction": "bearish",
+    "entry": "Buy 1 PE at the ~1%-below strike, sell 2 PE one spacing lower, buy 1 PE two spacings lower",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Risk Reversal",
+   "published_rule": {
+    "instrument": "index/stock options",
+    "timeframe": "n/a",
+    "direction": "bearish",
+    "entry": "Sell CE nearest 1% above ATM; buy PE nearest 1% below ATM",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Batman",
+   "published_rule": {
+    "instrument": "Nifty options",
+    "timeframe": "n/a",
+    "direction": "neutral",
+    "entry": "Buy 1 CE nearest 1% above spot (multiple of 100), sell 2 CE at the next strike up; buy 1 PE nearest 1% below spot, sell 2 PE at the next strike down",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Double Plateau",
+   "published_rule": {
+    "instrument": "index options",
+    "timeframe": "n/a",
+    "direction": "neutral",
+    "entry": "Bull Condor + Bear Condor combined (legs as above)",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Jade Lizard",
+   "published_rule": {
+    "instrument": "Nifty options",
+    "timeframe": "n/a",
+    "direction": "neutral",
+    "entry": "Same expiry: sell PE 1% below spot, sell CE 2% above spot, buy CE 0.75% above the sold CE strike (multiples of 100 for Nifty)",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Reverse Jade Lizard",
+   "published_rule": {
+    "instrument": "Nifty options",
+    "timeframe": "n/a",
+    "direction": "neutral",
+    "entry": "Sell CE 1% above spot, sell PE 2% below spot, buy PE 0.75% below the sold PE strike",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "The article says '18050 CE', a typo for PE."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Strip",
+   "published_rule": {
+    "instrument": "options",
+    "timeframe": "n/a",
+    "direction": "volatile/bearish tilt",
+    "entry": "Buy 2 ATM PE + 1 ATM CE",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "Expiry unspecified."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "Sensibull (primary)",
+   "source_url": "https://blog.sensibull.com/2022/11/30/new-strategies-in-strategy-builder/",
+   "name": "Sensibull Strap",
+   "published_rule": {
+    "instrument": "options",
+    "timeframe": "n/a",
+    "direction": "volatile/bullish tilt",
+    "entry": "Buy 2 ATM CE + 1 ATM PE",
+    "exit": "unspecified",
+    "stop_loss": "unspecified",
+    "target": "unspecified",
+    "holding": "unspecified",
+    "notes": "Expiry unspecified."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "Sensibull strategy-builder leg template: defines strikes only, no entry time, no exit rule, no instrument timing; nothing to test without inventing the strategy"
+  },
+  {
+   "source": "AlgoTest (primary)",
+   "source_url": "https://algotest.in/blog/the-920-straddle-strategy-defined.md",
+   "name": "AlgoTest 9:20 short straddle",
+   "published_rule": {
+    "instrument": "Nifty weekly options (current week); strikes from spot ('Cash' underlying)",
+    "timeframe": "intraday",
+    "direction": "short volatility",
+    "entry": "09:20 sell 1 lot ATM CE + 1 lot ATM PE",
+    "exit": "time exit 15:10",
+    "stop_loss": "25% per leg (on premium)",
+    "target": "none",
+    "holding": "MIS intraday",
+    "notes": "Re-entry not mentioned. Another AlgoTest article quotes a 15:15 exit. AlgoTest's partial square-off variant uses a 20% SL per leg with SL trailed to cost (https://algotest.in/blog/trail-stop-loss-to-break-even-price-when-backtesting/)."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "needs intraday NIFTY weekly option prices (09:20 entry, 25 % per-leg stop on premium checked intraday, 15:10 exit); the lab has only EOD option bhavcopy and a Black-Scholes model on spot minute bars with a flat VIX vol, which cannot reproduce intraday premium stop hits (no skew, no intraday IV moves): a run would test the model, not the strategy"
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/rsi_strategy/",
+   "name": "AlgoTest RSI 30/70",
+   "published_rule": {
+    "instrument": "unspecified (Signals example: NIFTY spot 5m)",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "Long: RSI(14) crosses above 30; Short: RSI(14) crosses below 70",
+    "exit": "bracket only",
+    "stop_loss": "50 points from average entry",
+    "target": "100 points",
+    "holding": "unspecified",
+    "notes": "The Signals example instead exits longs on RSI crossing above 70, with no SL/TP."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_rsi"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/supertrend_strategy/",
+   "name": "AlgoTest Supertrend(10,3)",
+   "published_rule": {
+    "instrument": "unspecified (Signals: NIFTY spot 5m)",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "Trend flip up (close above lower band hlc3-3*ATR10) = long; flip down = short",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "Bands are not ratcheted (simplified Supertrend). The Signals version: long on close crossing above ST(10,3), exit on cross below."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_supertrend"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)",
+    "as_coded": "non-ratcheting bands; long and short conditions fire on the same bars, the later strategy.entry (short) decides (no zero-length trades)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/ma_crossover_strategy/",
+   "name": "AlgoTest SMA 9/21 crossover",
+   "published_rule": {
+    "instrument": "unspecified",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "SMA9 crosses above SMA21 = long; crosses below = short",
+    "exit": "bracket (an opposite entry reverses the position)",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "The Signals variant is EMA 20/50 on NIFTY 5m: exit on the opposite cross, no SL/TP."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_sma9_21"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/macd_strategy/",
+   "name": "AlgoTest MACD(12,26,9) crossover",
+   "published_rule": {
+    "instrument": "unspecified (Signals: NIFTY spot 5m)",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "MACD crosses above signal = long; below = short",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "The Signals variant exits on the opposite cross."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_macd"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/bb_bands_strategy/",
+   "name": "AlgoTest Bollinger(20,2)",
+   "published_rule": {
+    "instrument": "unspecified",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "Close crosses above the lower band = long; close crosses below the upper band = short",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "The Signals example is the opposite (breakout): long on a close above the upper band, exit below the lower band."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_bollinger"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/adx_strategy/",
+   "name": "AlgoTest ADX/DMI",
+   "published_rule": {
+    "instrument": "unspecified (Signals: NIFTY 5m)",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "ADX(14)>25 AND +DI crosses above -DI = long; ADX>25 AND +DI crosses below -DI = short",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "The code passes 25 as the ADX smoothing length too."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_adx"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)",
+    "as_coded": "ta.dmi(14, 25): ADX smoothing 25"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/parabolic_sar_strategy/",
+   "name": "AlgoTest Parabolic SAR",
+   "published_rule": {
+    "instrument": "unspecified",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "Close crosses above SAR(0.02,0.02,0.2) = long; below = short",
+    "exit": "bracket / reversal",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_psar"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/stochastic_oscillator_strategy/",
+   "name": "AlgoTest Stochastic(14,3) 20/80",
+   "published_rule": {
+    "instrument": "unspecified",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "%K crosses above %D AND %K<20 = long; %K crosses below %D AND %K>80 = short",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_stoch"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/vwap_strategy/",
+   "name": "AlgoTest VWAP crossover",
+   "published_rule": {
+    "instrument": "futures/stocks (needs volume)",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "Close crosses above VWAP = long; below = short",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "Coded as ta.vwap(volume,14), a non-standard call."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "as coded, ta.vwap(volume, 14) passes 14 as the anchor (true on every bar): the 'VWAP' line is the bar's volume, not a price, so 'close crosses VWAP' is meaningless; the intended VWAP needs NIFTY futures intraday volume, and the lab's NIFTY minute bars are the spot index with zero volume"
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/ema_macd_rsi_combined_strategy/",
+   "name": "AlgoTest EMA9/21 + MACD + RSI(7)",
+   "published_rule": {
+    "instrument": "unspecified",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "Long: EMA9 crosses above EMA21 AND MACD signal > MACD line AND RSI(7)>60; Short: EMA9 crosses below EMA21 AND signal < MACD AND RSI<40",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "The Signals version requires MACD line > signal (the opposite) and exits on mirrored conditions."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_ema_macd_rsi"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)",
+    "as_coded": "template version: MACD signal > line for longs (the Signals page has the opposite; the primary Pine template is tested)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/volume_vwap_ema_combined_strategy/",
+   "name": "AlgoTest VWAP + EMA21 + volume intraday",
+   "published_rule": {
+    "instrument": "futures (needs volume)",
+    "timeframe": "chart TF (Signals: NIFTY fut 5m)",
+    "direction": "long and short",
+    "entry": "09:50-14:30 only. Long: close>VWAP(hlc3) AND close>EMA21 AND vol>prev vol AND close>open. Short: mirror",
+    "exit": "Close crosses back under/over VWAP or EMA21, or the 15:15-15:25 time window",
+    "stop_loss": "100 pts",
+    "target": "200 pts",
+    "holding": "MIS intraday",
+    "notes": "Orders process on bar close."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "needs NIFTY futures intraday volume (session VWAP of hlc3 and volume > previous volume); the lab's NIFTY minute bars are the spot index with zero volume"
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/williams_modr_strategy/",
+   "name": "AlgoTest Williams %R(14)",
+   "published_rule": {
+    "instrument": "unspecified",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "%R < -80 = long; %R > -20 = short (level test)",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "The Signals variant uses crossovers and exits on %R crossing below -20."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_williams"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoTest PineScript template (primary)",
+   "source_url": "https://docs.algotest.in/signals/pinescripts/ichimoku_cloud_strategy/",
+   "name": "AlgoTest Ichimoku cloud",
+   "published_rule": {
+    "instrument": "unspecified",
+    "timeframe": "chart TF",
+    "direction": "long and short",
+    "entry": "Close above both Senkou A and B = long; below both = short (9/26/52, displacement 26)",
+    "exit": "bracket",
+    "stop_loss": "50 pts",
+    "target": "100 pts",
+    "holding": "unspecified",
+    "notes": "The template computes lines as an SMA of (H+L)/2, not true midpoints."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_at_ichimoku"
+   ],
+   "defaults_fixed_before_any_run": {
+    "instrument_mapping": "NIFTY index future (underlying NIFTY, 1 lot = 65, spot index as the future), 5-minute candles; 50-pt stop / 100-pt target from the fill; opposite signal reverses (Pine strategy.entry, pyramiding 0); intraday 15:15 square-off (holding unspecified); 1 bps index slippage",
+    "bracket_fill_model": "brackets active from the fill bar (lab rule) instead of from the bar after the fill (TradingView)",
+    "as_coded": "lines = SMA of hl2; spans = values 26 candles earlier"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Tradetron blog (primary)",
+   "source_url": "https://tradetron.tech/blog/150-premium-strangle-strategy-with-re-entry-at-cost-for-sl-and-re-execution-on-target",
+   "name": "Tradetron Rs150-premium strangle with re-entry",
+   "published_rule": {
+    "instrument": "Nifty weekly options",
+    "timeframe": "intraday",
+    "direction": "short volatility",
+    "entry": "09:45 sell CE and PE each nearest Rs150 premium, 1 lot each, legs independent",
+    "exit": "Square off before the close (exact time unspecified)",
+    "stop_loss": "50 points per leg",
+    "target": "50 points per leg",
+    "holding": "MIS intraday",
+    "notes": "After a target: sell a new option nearest Rs150 on that side. After an SL: re-sell the same option when it returns to its entry price. The re-entry cap is unspecified."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "needs intraday NIFTY option premiums (09:45 strike nearest Rs 150 premium, 50-point per-leg stop / target intraday, re-entry at cost); only EOD option prices exist"
+  },
+  {
+   "source": "Tradetron blog (primary)",
+   "source_url": "https://tradetron.tech/blog/how-to-automate-an-options-strategy-without-coding",
+   "name": "Tradetron Nifty weekly iron condor (Wednesday)",
+   "published_rule": {
+    "instrument": "Nifty weekly options (next Tuesday expiry)",
+    "timeframe": "positional within the week",
+    "direction": "short volatility",
+    "entry": "Wednesday 09:20: sell CE ATM+300, buy CE ATM+500, sell PE ATM-300, buy PE ATM-500, 1 lot",
+    "exit": "15:15 on expiry day (Tuesday)",
+    "stop_loss": "Strategy P&L \u2264 -Rs4,000: exit all legs",
+    "target": "none",
+    "holding": "NRML",
+    "notes": "No adjustments; no re-entry until the next Wednesday."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_tt_ic_wed"
+   ],
+   "defaults_fixed_before_any_run": {
+    "approximation": "EOD real option prices: entered at the EOD close of the first session after each weekly expiry (Wednesday under today's Tuesday expiry; Friday under the old Thursday expiry), strikes ATM+-300 / +-500 from the previous session's chain, settled at expiry (the source exits 15:15 on expiry day)",
+    "stop": "-Rs 4,000 on 1 lot checked on EOD marks only, one-session lag (LOOSER than the published intraday stop): label EOD-only",
+    "lots": "options_vrp lot schedule (75, 65 from 2025-12-31)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) via kite_options",
+    "2012-23: not run (NIFTY weeklies start 2019-02: no H1 trade by construction)"
+   ]
+  },
+  {
+   "source": "Tradetron blog (primary)",
+   "source_url": "https://tradetron.tech/blog/short-straddle-the-classic-strategy-to-profit-from-time-decay",
+   "name": "Tradetron short straddle builder example",
+   "published_rule": {
+    "instrument": "Nifty current-week options",
+    "timeframe": "intraday",
+    "direction": "short volatility",
+    "entry": "Time \u2265 09:30 sell ATM CE + ATM PE, 1 lot",
+    "exit": "15:15",
+    "stop_loss": "per leg: LTP \u2265 entry*1.30",
+    "target": "none",
+    "holding": "MIS",
+    "notes": "The text gives ranges (25-40% SL, entry after 15-30 min); the values here are the builder example. The re-entry count is unspecified."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "needs intraday NIFTY option prices (09:30 entry, 30 % per-leg stop on LTP intraday, 15:15 exit)"
+  },
+  {
+   "source": "Tradetron blog (primary)",
+   "source_url": "https://tradetron.tech/blog/a-powerful-trading-strategy-pushkar-raj-thakur-double-supertrend-strategy-build",
+   "name": "Tradetron Double Supertrend (futures)",
+   "published_rule": {
+    "instrument": "Nifty current-month futures",
+    "timeframe": "daily",
+    "direction": "long and short",
+    "entry": "Daily close above both ST(10,3) and ST(20,2): long 2 lots; below both: short 1 lot; entry after 10:00 (the build's choice)",
+    "exit": "As soon as the two Supertrends disagree in colour",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "NRML; roll at monthly expiry if the signal persists",
+    "notes": "Credited to Pushkar Raj Thakur."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_tt_dst_nifty"
+   ],
+   "defaults_fixed_before_any_run": {
+    "execution": "signal on the daily close, filled at the next open (the build enters after 10:00)",
+    "future": "spot index as the future, no roll (lab convention)",
+    "lots": "long 2, short 1 (lot 65)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  {
+   "source": "Tradetron blog (primary)",
+   "source_url": "https://tradetron.tech/blog/a-powerful-trading-strategy-pushkar-raj-thakur-double-supertrend-strategy-build",
+   "name": "Tradetron Double Supertrend (low-risk spreads)",
+   "published_rule": {
+    "instrument": "Nifty options",
+    "timeframe": "daily",
+    "direction": "long and short",
+    "entry": "Both green: bull call spread (buy ~60-delta CE, sell ~30-delta CE). Both red: bear put spread (buy ~60-delta PE, sell ~30-delta PE)",
+    "exit": "unspecified",
+    "stop_loss": "max loss = net debit",
+    "target": "spread width",
+    "holding": "unspecified",
+    "notes": "Exit rule not stated for this variant."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_tt_dst_spreads"
+   ],
+   "defaults_fixed_before_any_run": {
+    "exit": "unspecified -> when the two Supertrends disagree (as the futures build) or at expiry",
+    "expiry": "near MONTHLY expiry >= 10 calendar days away",
+    "deltas": "Black-Scholes delta with each strike's implied vol from its previous-session EOD close (r = 6.5 %), nearest to 0.60 / 0.30",
+    "fills": "EOD close of the session after the signal (EOD option simulator)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on) via kite_options",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json) via kite_options --oos"
+   ]
+  },
+  {
+   "source": "Tradetron blog (primary)",
+   "source_url": "https://tradetron.tech/blog/building-a-robust-trading-strategy-on-nifty50-stock-options-a-step-by-step-guide",
+   "name": "Tradetron Nifty50 stock-options 15-min ORB",
+   "published_rule": {
+    "instrument": "options on Nifty 50 F&O stocks",
+    "timeframe": "intraday; 09:15-09:30 range",
+    "direction": "long calls / long puts",
+    "entry": "After 09:30: stock LTP > range high: buy CE; LTP < range low: buy PE; max 1 call and 1 put per stock per day",
+    "exit": "15:15 square-off",
+    "stop_loss": "opposite edge of the range (on the stock)",
+    "target": "breakout level \u00b1 range size (on the stock)",
+    "holding": "MIS",
+    "notes": "Strike unspecified ('ATM or 1 ITM' is suggested); current-month expiry."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_tt_orb15_stock"
+   ],
+   "defaults_fixed_before_any_run": {
+    "proxy": "the stock itself (intraday equity MIS) stands in for the ATM call / put: intraday option prices are unavailable; label: stock-proxy test of the signal",
+    "ltp": "1-minute close",
+    "limits": "at most one long and one short per stock per day",
+    "conventions": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "Tradetron help/community (primary)",
+   "source_url": "https://tradetron.tech/community/t/30133",
+   "name": "Tradetron list-based ORB (US template)",
+   "published_rule": {
+    "instrument": "US NASDAQ stocks (example)",
+    "timeframe": "intraday; range 09:30-10:00 ET",
+    "direction": "long and short",
+    "entry": "After 10:00: LTP > ORB high = long; LTP < ORB low = short",
+    "exit": "universal exit 15:45",
+    "stop_loss": "opposite ORB edge",
+    "target": "entry \u00b1 2x range",
+    "holding": "intraday",
+    "notes": "Qty = 1000/(ORB high - low). US template; NSE mapping needs your own session times."
+   },
+   "classification": "b",
+   "ids": [
+    "r5_kite_tt_orb30_list"
+   ],
+   "defaults_fixed_before_any_run": {
+    "mapping": "US 09:30-10:00 range -> NSE first 30 minutes (09:15-09:45); universal exit 15 min before the close -> 15:15",
+    "trades": "first breakout only, one trade per stock per day",
+    "sizing": "Rs 1 lakh notional (lab) instead of qty = 1000 / range",
+    "target": "fill +- 2 x range, stop at the opposite edge",
+    "conventions": "intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls pyalgostrategypool (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_ema_regular_order_intraday",
+   "name": "AlgoBulls EMA crossover intraday",
+   "published_rule": {
+    "instrument": "NSE equity (default SBIN)",
+    "timeframe": "60min",
+    "direction": "long and short",
+    "entry": "EMA12 crosses above EMA20 = BUY; below = SELL",
+    "exit": "next EMA crossover",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday (auto square-off)",
+    "notes": "Default params from _config.yaml."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_ema12_20"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_macd_crossover_intraday",
+   "name": "AlgoBulls MACD crossover intraday",
+   "published_rule": {
+    "instrument": "NSE equity (SBIN)",
+    "timeframe": "5min",
+    "direction": "long and short",
+    "entry": "MACD(12,26,9) line crosses signal: up = BUY, down = SELL",
+    "exit": "opposite crossover",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_macd_5m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_aroon_crossover_intraday",
+   "name": "AlgoBulls Aroon crossover intraday",
+   "published_rule": {
+    "instrument": "NSE equity (SBIN)",
+    "timeframe": "15min",
+    "direction": "long and short",
+    "entry": "Aroon(12) Up crosses above Down = BUY; below = SELL",
+    "exit": "next crossover",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_aroon_15m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_bollinger_bands_intraday",
+   "name": "AlgoBulls Bollinger rebound intraday",
+   "published_rule": {
+    "instrument": "NSE equity (ADANIPORTS)",
+    "timeframe": "60min",
+    "direction": "long and short",
+    "entry": "BB(7,2): previous candle O/H/L/C \u2264 lower band AND close > previous close = BUY; previous candle O/H/L/C \u2265 upper band AND close < previous close = SELL",
+    "exit": "opposite signal",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_bollinger_60m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)",
+    "defaults_checked": "code defaults TIME_PERIOD 7, STANDARD_DEVIATIONS 2 (the swapped 2/20 is in strategy_mean_reversion_bollinger_bands, not this strategy)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_reverse_rsi_crossover_intraday",
+   "name": "AlgoBulls Reverse RSI intraday",
+   "published_rule": {
+    "instrument": "NSE equity (HDFCBANK)",
+    "timeframe": "60min",
+    "direction": "long and short",
+    "entry": "RSI(7) crosses above 32 = BUY; RSI crosses below 70 = SELL",
+    "exit": "Long: RSI crosses back below 32; Short: RSI crosses back above 70",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": "Rules as coded; the docstring describes them differently."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_reverse_rsi_60m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_stochastic_crossover_intraday",
+   "name": "AlgoBulls Stochastic crossover intraday",
+   "published_rule": {
+    "instrument": "NSE equity (DLF)",
+    "timeframe": "60min",
+    "direction": "long and short",
+    "entry": "Stoch fastK 7, slowK 2, slowD 2: K/D crossover direction",
+    "exit": "opposite crossover",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": "Logic follows the crossover template (I did not inspect it line by line)."
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_stoch_60m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_vwap_crossover_intraday",
+   "name": "AlgoBulls VWAP crossover intraday",
+   "published_rule": {
+    "instrument": "NSE equity (RELIANCE)",
+    "timeframe": "60min",
+    "direction": "long and short",
+    "entry": "Close crosses above VWAP = BUY; below = SELL",
+    "exit": "next crossover",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_vwap_60m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_volatility_trend_atr_intraday",
+   "name": "AlgoBulls Volatility trend ATR intraday",
+   "published_rule": {
+    "instrument": "NSE equity (TATAPOWER)",
+    "timeframe": "60min",
+    "direction": "long and short",
+    "entry": "ATR(20) now > ATR 40 candles ago = BUY; lower = SELL",
+    "exit": "When that comparison flips",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_atr_trend_60m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)",
+    "state_quirk": "the code's stored-trend quirk on the first candle of a day is not modelled: direction = sign(ATR_now - ATR 39 candles back) at every candle"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_inverse_ema_scalping_regular_order_intraday",
+   "name": "AlgoBulls Inverse EMA scalping intraday",
+   "published_rule": {
+    "instrument": "NSE equity (ICICIBANK)",
+    "timeframe": "60min",
+    "direction": "long and short (contrarian)",
+    "entry": "EMA2 crosses below EMA7 = BUY; above = SELL",
+    "exit": "next crossover",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_inverse_ema_60m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_rsi_macd_crossover_intraday",
+   "name": "AlgoBulls RSI-of-MACD-signal intraday",
+   "published_rule": {
+    "instrument": "NSE equity (HEROMOTOCO)",
+    "timeframe": "60min",
+    "direction": "long and short",
+    "entry": "RSI(3) of the MACD(12,26,9) signal line: crosses above 15 = BUY; crosses below 85 = SELL",
+    "exit": "Long: RSI crosses above 85; Short: RSI crosses below 15",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "intraday",
+    "notes": ""
+   },
+   "classification": "a",
+   "ids": [
+    "r5_kite_ab_rsi_macd_60m"
+   ],
+   "defaults_fixed_before_any_run": {
+    "conventions": "AlgoBulls code defaults (_config.yaml); talib formulas; crossover = last two candles, values rounded to 2 dp (CROSSOVER_ACCURACY_DECIMALS 2); per candle the framework processes exits before entries, so an exit by an opposite crossover is followed by the opposite entry on the same candle (stop-and-reverse); intraday square-off; whole NIFTY-100 universe instead of the single default stock; intraday MIS; decisions at candle close, fill next 1-min open; 15:15 square-off; Rs 1 lakh per trade; NIFTY-100 universe (~97 names); 2 bps slippage (5 bps sensitivity)"
+   },
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  {
+   "source": "AlgoBulls (primary code)",
+   "source_url": "https://github.com/algobulls/pyalgostrategypool/tree/master/pyalgostrategypool/strategy_options_strangle_intraday",
+   "name": "AlgoBulls short strangle intraday",
+   "published_rule": {
+    "instrument": "Nifty 50 options",
+    "timeframe": "60min candles; once per day",
+    "direction": "short volatility",
+    "entry": "At the first candle: sell CE 2 strikes OTM and PE 2 strikes OTM from LTP, 1 lot",
+    "exit": "Intraday auto square-off at stop (session end)",
+    "stop_loss": "none",
+    "target": "none",
+    "holding": "MIS",
+    "notes": "No exit logic in the code beyond the end-of-day square-off."
+   },
+   "classification": "c",
+   "ids": [],
+   "defaults_fixed_before_any_run": {},
+   "eras": [],
+   "why_not_testable": "needs intraday NIFTY option premiums (sell 2-strikes-OTM CE/PE at the first 60m candle, exit at the intraday square-off)"
+  }
+ ],
+ "strategies": {
+  "r5_kite_ab_aroon_15m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 15,
+    "n": 12
+   },
+   "fingerprint": "414c810c62bf",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_atr_trend_60m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60,
+    "atr": 20,
+    "back": 40
+   },
+   "fingerprint": "38539bc22d75",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_bollinger_60m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60,
+    "n": 7,
+    "k": 2.0
+   },
+   "fingerprint": "c64f79291d0b",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_ema12_20": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60,
+    "fast": 12,
+    "slow": 20
+   },
+   "fingerprint": "463ae313c63d",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_inverse_ema_60m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60,
+    "fast": 2,
+    "slow": 7
+   },
+   "fingerprint": "6bf4ec01612f",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_macd_5m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "fast": 12,
+    "slow": 26,
+    "sig": 9
+   },
+   "fingerprint": "df1714c63eb7",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_reverse_rsi_60m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60,
+    "rsi": 7,
+    "os": 32,
+    "ob": 70
+   },
+   "fingerprint": "970e9965b7f1",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_rsi_macd_60m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60,
+    "rsi": 3,
+    "os": 15,
+    "ob": 85
+   },
+   "fingerprint": "a431923064ed",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_stoch_60m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60,
+    "fastk": 7,
+    "slowk": 2,
+    "slowd": 2
+   },
+   "fingerprint": "bdf690be9e10",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_ab_vwap_60m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 60
+   },
+   "fingerprint": "34994225a272",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_adx": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "di": 14,
+    "adx_smooth": 25,
+    "adx_min": 25
+   },
+   "fingerprint": "5ab9d472e60c",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_bollinger": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "n": 20,
+    "k": 2.0
+   },
+   "fingerprint": "7e88acc77373",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_ema_macd_rsi": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "fast": 9,
+    "slow": 21,
+    "rsi": 7,
+    "hi": 60,
+    "lo": 40
+   },
+   "fingerprint": "33ba2c4456a6",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_ichimoku": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "conv": 9,
+    "base": 26,
+    "span_b": 52,
+    "disp": 26
+   },
+   "fingerprint": "35bee797e92d",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_macd": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "fast": 12,
+    "slow": 26,
+    "sig": 9
+   },
+   "fingerprint": "fe0e49f66f66",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_psar": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "start": 0.02,
+    "inc": 0.02,
+    "max": 0.2
+   },
+   "fingerprint": "3f20f5aaa8b0",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_rsi": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "rsi": 14,
+    "os": 30,
+    "ob": 70
+   },
+   "fingerprint": "49125c647b1d",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_sma9_21": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "fast": 9,
+    "slow": 21
+   },
+   "fingerprint": "a6a560eced17",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_stoch": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "k": 14,
+    "d": 3,
+    "os": 20,
+    "ob": 80
+   },
+   "fingerprint": "4014b87abbd5",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_supertrend": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "atr": 10,
+    "mult": 3.0
+   },
+   "fingerprint": "877c5adb8bd9",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_at_williams": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "sl_pts": 50,
+    "tp_pts": 100,
+    "n": 14,
+    "os": -80,
+    "ob": -20
+   },
+   "fingerprint": "9d3d867d63fb",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_streak_4th30m_long": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 30,
+    "nth": 4
+   },
+   "fingerprint": "00c08907cbfb",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_streak_orb5_long": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5
+   },
+   "fingerprint": "ce569da6808c",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_streak_rsi30m_short": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 30,
+    "rsi": 14,
+    "ob": 70,
+    "os": 30,
+    "sl_pct": 1.0,
+    "tp_pct": 2.0
+   },
+   "fingerprint": "1d8b9eb42a26",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_streak_st7_long": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "tf": 5,
+    "atr": 7,
+    "mult": 0.5
+   },
+   "fingerprint": "7faa2202b6a7",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_tt_dst_nifty": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures/NIFTY",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "st1": [
+     10,
+     3.0
+    ],
+    "st2": [
+     20,
+     2.0
+    ],
+    "long_lots": 2,
+    "short_lots": 1
+   },
+   "fingerprint": "35de175ce600",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_tt_orb15_stock": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "minutes": 15
+   },
+   "fingerprint": "2e8a5de94dcd",
+   "max_per_day": 2,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_tt_orb30_list": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "minutes": 30,
+    "target_ranges": 2.0
+   },
+   "fingerprint": "c84488362d45",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_bb20_d": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "n": 20,
+    "k": 2.0
+   },
+   "fingerprint": "9f7b37a2c8d9",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_cs_bear_engulfing": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "bear_engulfing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "80c7aefa72c2",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_bear_engulfing_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "bear_engulfing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "b300aeb60d87",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_bear_marubozu": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "bear_marubozu",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "4740901b0b03",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_bear_marubozu_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "bear_marubozu",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "d9f3a566a4f0",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_bull_engulfing": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "bull_engulfing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "4f649477190f",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_bull_engulfing_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "bull_engulfing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "f53f62601855",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_bull_marubozu": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "bull_marubozu",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "2492277668e4",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_bull_marubozu_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "bull_marubozu",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "3617f75bcf08",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_dark_cloud": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "dark_cloud",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "c4c283c96aac",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_dark_cloud_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "dark_cloud",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "7057303d4d19",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_evening_star": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "evening_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "f8e1e136e6cf",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_evening_star_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "evening_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "aaaed7322f08",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_hammer": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "hammer",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "0288b7e0a08f",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_hammer_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "hammer",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "8366a8e8beb2",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_hanging_man": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "hanging_man",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "81acaeeb0739",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_hanging_man_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "hanging_man",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "68ba9d89a1b7",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_morning_star": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "morning_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "95f7971c6a12",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_morning_star_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "morning_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "78c1fbf0a7b9",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_piercing": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "piercing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "f3a8328d8a35",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_piercing_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "piercing",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "901e05c88868",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_cs_shooting_star": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": 920,
+   "params": {
+    "pattern": "shooting_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10
+   },
+   "fingerprint": "1d15fffeca3b",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_cs_shooting_star_nxo": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "pattern": "shooting_star",
+    "rr": 1.5,
+    "shadow_tol": 0.002,
+    "hammer_body": 0.02,
+    "trend_sma": 10,
+    "fill": "next_open"
+   },
+   "fingerprint": "3ffb4bb0a7b5",
+   "max_per_day": 1,
+   "eras": [
+    "2012-23 OOS only"
+   ]
+  },
+  "r5_kite_vars_ema100_200": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "swing",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "fast": 100,
+    "slow": 200
+   },
+   "fingerprint": "9ddcd7c6f3ee",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_ema15x30_1m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "fast": 15,
+    "slow": 30
+   },
+   "fingerprint": "e9b8a2f8ea32",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_ema25_50": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "swing",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "fast": 25,
+    "slow": 50
+   },
+   "fingerprint": "adb01dbb481f",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_ema50_100": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "swing",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "fast": 50,
+    "slow": 100
+   },
+   "fingerprint": "d2d2aaf58c47",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_ema5x10_1m": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "intraday",
+   "horizon": "intraday",
+   "decision_time": null,
+   "params": {
+    "fast": 5,
+    "slow": 10
+   },
+   "fingerprint": "f1d3f0fc35f4",
+   "max_per_day": 75,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_ema9_21": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "swing",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "fast": 9,
+    "slow": 21
+   },
+   "fingerprint": "c37b7f12a115",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_macd_d": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "futures",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "fast": 12,
+    "slow": 26,
+    "sig": 9
+   },
+   "fingerprint": "b9aa936b357a",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_px_ema50": {
+   "module": "stratlab.catalog.r5_kite",
+   "kind": "swing",
+   "horizon": "positional",
+   "decision_time": null,
+   "params": {
+    "n": 50
+   },
+   "fingerprint": "c9c6da494c8f",
+   "max_per_day": 1,
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_ptm2": {
+   "module": "stratlab.kite_spreads",
+   "kind": "futures spread",
+   "params": {
+    "lookback": 200,
+    "adf_p": 0.05,
+    "entry_z": 2.0,
+    "stop_z": 3.0,
+    "exit_z": 0.0
+   },
+   "fingerprint": "132959314e77",
+   "eras": [
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)",
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_ptm1": {
+   "module": "stratlab.kite_spreads",
+   "kind": "futures spread",
+   "params": {
+    "lookback": 496,
+    "entry_lo": 0.003,
+    "entry_hi": 0.025,
+    "exit": 0.025,
+    "stop": 0.003
+   },
+   "fingerprint": "0c09a047bad9",
+   "eras": [
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)",
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_vars_calendar": {
+   "module": "stratlab.kite_spreads",
+   "kind": "futures spread",
+   "params": {
+    "lookback": 200,
+    "k_sd": 1.0
+   },
+   "fingerprint": "b3830418b6e3",
+   "eras": [
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)",
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_tt_ic_wed": {
+   "module": "stratlab.kite_options",
+   "kind": "options/NIFTY",
+   "params": {
+    "short_otm": 300,
+    "long_otm": 500,
+    "stop_rs": 4000
+   },
+   "fingerprint": "75277d399789",
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)"
+   ]
+  },
+  "r5_kite_tt_dst_spreads": {
+   "module": "stratlab.kite_options",
+   "kind": "options/NIFTY",
+   "params": {
+    "st1": [
+     10,
+     3.0
+    ],
+    "st2": [
+     20,
+     2.0
+    ],
+    "buy_delta": 0.6,
+    "sell_delta": 0.3,
+    "min_days": 10
+   },
+   "fingerprint": "ef505e173bea",
+   "eras": [
+    "2023-26 (bars3y minute data; protocol.py DISCOVERY/FINAL, FINAL only for screen passers, --trials on)",
+    "2012-23 (protocol_oos, one look, oldera_oos_ledger.json)"
+   ]
+  },
+  "r5_kite_vars_momentum12": {
+   "module": "stratlab.kite_momentum",
+   "kind": "portfolio",
+   "params": {
+    "top_n": 12,
+    "lookback": 252,
+    "rebalance": "monthly",
+    "reweight_kept": false,
+    "entrants_share_cash": true,
+    "slippage_bps": 10.0
+   },
+   "fingerprint": "88343751b770",
+   "eras": [
+    "2013-23",
+    "2023-26"
+   ]
+  }
+ },
+ "n_new_variants": 65
+}

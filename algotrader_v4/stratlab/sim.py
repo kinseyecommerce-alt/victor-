@@ -109,9 +109,9 @@ def target_fill(side: int, target: float, o: float, extreme: float, tick: float)
     return float(o) if side * (o - target) >= tick - eps else float(target)
 
 
-def _settle(spec: Spec, symbol, date, side, entry_t, fill, exit_date, exit_t, exit_px, reason) -> tuple:
+def _settle(spec: Spec, symbol, date, side, entry_t, fill, exit_date, exit_t, exit_px, reason, lots=None) -> tuple:
     if getattr(spec, "underlying", None):
-        qty = int(spec.lots) * LOT_SIZES[spec.underlying]
+        qty = int(spec.lots if lots is None else lots) * LOT_SIZES[spec.underlying]
     else:
         qty = max(1, int(NOTIONAL // fill))
     gross = side * (exit_px - fill) * qty
@@ -134,11 +134,19 @@ def fill_intraday(s: Session, e: Entry, slip: float | None = None, tick: float |
     side = e.side
     raw = float(s.o[j])
     fill = raw * (1.0 + side * sl)
-    stop = float(e.stop) if e.stop is not None else np.nan
+    br = getattr(e, "bracket", None)
+    if br is not None:                                  # stop / target at a distance from the FILL (round 5)
+        kind_, d_stop, d_tgt = br
+        f_ = (lambda x: fill * float(x) / 100.0) if kind_ == "pct" else (lambda x: float(x))
+        stop = fill - side * f_(d_stop) if d_stop is not None else (float(e.stop) if e.stop is not None else np.nan)
+        tgt_ = fill + side * f_(d_tgt) if d_tgt is not None else None
+    else:
+        stop = float(e.stop) if e.stop is not None else np.nan
+        tgt_ = e.target
     if not np.isfinite(stop) or side * (raw - stop) <= 0:
         return None                                     # no stop, or already through it at the open
     risk = abs(fill - stop)
-    target = e.target
+    target = tgt_
     if target is None and e.rr:
         target = fill + side * e.rr * risk
     if target is not None:
@@ -153,6 +161,11 @@ def fill_intraday(s: Session, e: Entry, slip: float | None = None, tick: float |
         ts = s.idx(int(s.t[j]) + int(e.time_stop))
         if ts < lim:
             lim, reason = ts, "time"
+    xs = getattr(e, "exit_sig", None)
+    if xs is not None:                                  # exit decided at the close of bar k >= j, filled at open k+1
+        xs = np.asarray(xs, bool)[j:max(j, min(lim - 1, len(xs)))]
+        if xs.size and xs.any():
+            lim, reason = j + int(xs.argmax()) + 1, "signal"
     h, l, o = s.h, s.l, s.o
     if e.trail is None:
         if side > 0:
@@ -206,7 +219,9 @@ def _take(spec: Spec, s: Session, e: Entry, trades: list, slip: float | None = N
         return None
     k, fill, px, reason = r
     trades.append(_settle(spec, s.symbol, s.date, e.side, _hm(s.t[e.i + 1]), fill, s.date, _hm(s.t[k]), px, reason))
-    return k
+    # after an exit at the open of bar k decided at bar k-1 (signal), an entry decided at bar k-1 fills at that
+    # same open (stop-and-reverse); every other exit frees the symbol from bar k on, as before
+    return k - 1 if reason == "signal" else k
 
 
 def sim_session(spec: Spec, s: Session, slip: float | None = None) -> tuple[list, int]:
@@ -252,7 +267,13 @@ def _canon(ents, upto: int) -> list:
     for e in sorted(ents or [], key=lambda x: x.i):
         if e.i <= upto:
             f = lambda x: None if x is None else round(float(x), 6)
-            out.append(repr((int(e.i), int(e.side), f(e.stop), f(e.target), f(e.rr), e.time_stop, e.trail)))
+            key = (int(e.i), int(e.side), f(e.stop), f(e.target), f(e.rr), e.time_stop, e.trail)
+            br, xs = getattr(e, "bracket", None), getattr(e, "exit_sig", None)
+            if br is not None:
+                key = key + (("bracket",) + tuple(br),)
+            if xs is not None:                          # the exit signal up to the cut must not change either
+                key = key + (np.packbits(np.asarray(xs, bool)[:upto + 1]).tobytes(),)
+            out.append(repr(key))
     return out
 
 
@@ -287,6 +308,88 @@ def _aligned(dates: np.ndarray, aux: dict | None):
     pos = np.searchsorted(aux["date"], dates)
     ok = (pos < len(aux["date"])) & (aux["date"][np.minimum(pos, len(aux["date"]) - 1)] == dates)
     return np.where(ok, aux["c"][np.minimum(pos, len(aux["c"]) - 1)], np.nan)
+
+
+def _order_trade(spec: Spec, sd, d: dict, sig: Swing, e_day: int, nd: int, hi_day: int, slip: float,
+                 nifty, vix) -> tuple[list, int, int]:
+    """Round 7: a Swing with a resting entry order (see api.Swing.entry), on daily bars. Returns (trades, skipped,
+    next decision day). Used only when Swing.entry is set; nothing else in the simulator depends on it."""
+    side = int(sig.side)
+    kind, level = str(sig.entry[0]), float(sig.entry[1])
+    arm = float(sig.entry[2]) if len(sig.entry) > 2 and sig.entry[2] is not None else None
+    if kind not in ("stop", "limit"):
+        raise ValueError(f"{spec.id}: Swing.entry kind must be 'stop' or 'limit'")
+    k_fill = fill = None
+    for k in range(e_day, min(e_day + max(1, int(sig.valid)), hi_day + 1)):  # never fills past the period
+        o, h, l = float(d["o"][k]), float(d["h"][k]), float(d["l"][k])
+        if kind == "stop":
+            if arm is not None:                         # active only after trading beyond `arm`: fill at the level
+                hit = ((l < arm) and (h >= level)) if side > 0 else ((h > arm) and (l <= level))
+                raw = level
+            else:
+                hit = (h >= level) if side > 0 else (l <= level)
+                raw = max(o, level) if side > 0 else min(o, level)
+            if hit:
+                k_fill, fill = k, raw * (1.0 + side * slip)
+                break
+        else:
+            px = target_fill(-side, level, o, l if side > 0 else h, _tick(spec, level, d["date"][k]))
+            if px is not None:
+                k_fill, fill = k, float(px)
+                break
+    if k_fill is None:
+        return [], 0, e_day                             # not filled: ask again on the next session
+    stop = sig.stop if sig.stop is not None else (fill * (1 - side * sig.stop_pct / 100.0) if sig.stop_pct else None)
+    target = sig.target if sig.target is not None else (
+        fill * (1 + side * sig.target_pct / 100.0) if sig.target_pct else None)
+    if target is None and sig.rr and stop is not None:
+        target = fill + side * sig.rr * abs(fill - stop)
+    if sig.entry_stop_ticks is not None:                # "one tick under today's low", fixed at the fill session
+        tk = int(sig.entry_stop_ticks) * _tick(spec, fill, d["date"][k_fill])
+        if side > 0:
+            stop = min(np.inf if stop is None else float(stop), float(d["l"][k_fill])) - tk
+        else:
+            stop = max(-np.inf if stop is None else float(stop), float(d["h"][k_fill])) + tk
+    if (stop is not None and side * (fill - stop) <= 0) or (target is not None and side * (target - fill) <= 0) \
+            or sig.max_hold < 1:
+        return [], 1, k_fill
+    natural = k_fill + sig.max_hold - 1
+    last_day = min(natural, nd - 1, hi_day)
+    out = None
+    for k in range(k_fill, last_day + 1):
+        kh, kl, ko = float(d["h"][k]), float(d["l"][k]), float(d["o"][k])
+        if k == k_fill:                                 # fill session: the stop only, taken as after the fill
+            if stop is not None and (kl <= stop if side > 0 else kh >= stop):
+                out = (k, float(stop) * (1.0 - side * slip), "stop")
+                break
+        else:
+            if stop is not None and (kl <= stop if side > 0 else kh >= stop):
+                px = min(stop, ko) if side > 0 else max(stop, ko)
+                out = (k, px * (1.0 - side * slip), "stop")
+                break
+            if target is not None:
+                tp = target_fill(side, float(target), ko, kh if side > 0 else kl,
+                                 _tick(spec, float(target), d["date"][k]))
+                if tp is not None:
+                    out = (k, tp, "target")
+                    break
+        xf = getattr(sig, "exit_fn", None)
+        if xf is not None and k < last_day:
+            xv = DailyView(d["date"][:k + 1], *[d[c][:k + 1] for c in "ohlcv"])
+            xv.symbol = sd.symbol
+            xv.nifty = None if nifty is None else nifty[:k + 1]
+            xv.vix = None if vix is None else vix[:k + 1]
+            if xf(xv):
+                out = (k + 1, float(d["o"][k + 1]) * (1.0 - side * slip), "signal")
+                break
+    if out is None:
+        out = (last_day, float(d["c"][last_day]) * (1.0 - side * slip),
+               "max_hold" if last_day == natural else ("period_end" if last_day < nd - 1 else "data_end"))
+    k, px, reason = out
+    tr = _settle(spec, sd.symbol, d["date"][k_fill], side, "order", fill, d["date"][k],
+                 "15:29" if reason in ("max_hold", "data_end", "period_end") else ("09:15" if reason == "signal" else ""),
+                 px, reason, getattr(sig, "lots", None))
+    return [tr], 0, (k - 1 if reason == "signal" else k)
 
 
 def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = None,
@@ -340,6 +443,14 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
         side = sig.side
         if spec.kind == "swing" and side != 1:
             raise ValueError(f"{spec.id}: swing is delivery (long-only); put shorts under kind='futures'")
+        if getattr(sig, "entry", None) is not None:     # round 7: resting entry order (next-open specs only)
+            if intr:
+                raise ValueError(f"{spec.id}: Swing.entry needs a next-open spec (no decision_time)")
+            tr, sk, nxt = _order_trade(spec, sd, d, sig, e_day, nd, hi_day, slip, nifty, vix)
+            trades.extend(tr)
+            skipped += sk
+            day = max(nxt, day + 1)
+            continue
         raw = float(sd.o[m]) if intr else float(d["o"][e_day])
         fill = raw * (1.0 + side * slip)
         stop = sig.stop if sig.stop is not None else (fill * (1 - side * sig.stop_pct / 100.0) if sig.stop_pct else None)
@@ -374,13 +485,26 @@ def sim_positional(spec: Spec, sd, lo: int, hi: int, nifty_day: dict | None = No
                 if tp is not None:
                     out = (k, tp, "target")
                     break
+            xf = getattr(sig, "exit_fn", None)
+            if xf is not None and k < last_day:         # decided at the close of k, exit at the open of k+1
+                xv = DailyView(d["date"][:k + 1], *[d[c][:k + 1] for c in "ohlcv"])
+                xv.symbol = sd.symbol
+                xv.nifty = None if nifty is None else nifty[:k + 1]
+                xv.vix = None if vix is None else vix[:k + 1]
+                if xf(xv):
+                    out = (k + 1, float(d["o"][k + 1]) * (1.0 - side * slip), "signal")
+                    break
         if out is None:
             out = (last_day, float(d["c"][last_day]) * (1.0 - side * slip),
                    "max_hold" if last_day == natural else ("period_end" if last_day < nd - 1 else "data_end"))
         k, px, reason = out
         et = _hm(sd.t[m]) if intr else "09:15"
         trades.append(_settle(spec, sd.symbol, d["date"][e_day], side, et, fill, d["date"][k],
-                              "15:29" if reason in ("max_hold", "data_end", "period_end") else "", px, reason))
+                              "15:29" if reason in ("max_hold", "data_end", "period_end") else
+                              ("09:15" if reason == "signal" else ""), px, reason, getattr(sig, "lots", None)))
+        if reason == "signal":                          # next-open specs: ask again on the signal day, so a
+            day = max(k if intr else k - 1, day + 1)    # reversal fills at the same open; decision_time: the exit day
+            continue
         day = max(k, day + 1)                           # flat again from the exit day's close
     return trades, skipped
 
