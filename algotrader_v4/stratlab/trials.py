@@ -713,6 +713,8 @@ def count_trials(rows: list, era: str = "2023-26", stages=None) -> int:
     twice. `stages` restricts the stages counted (e.g. {"final"})."""
     var: dict = {}
     for r in rows:
+        if str(r.get("stage", "")).startswith("corrected"):
+            continue                # corrected-data re-runs of the same hypotheses are not trials (prereg rerun_corrected_v1)
         if r.get("era") == era and (stages is None or r.get("stage") in stages):
             s = var.setdefault(r["strategy_id"], set())
             if str(r.get("params_fp", "")).startswith("p:"):
