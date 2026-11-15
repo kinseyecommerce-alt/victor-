@@ -2588,6 +2588,11 @@ from stratlab import tests_web as _twb  # noqa: E402
 for _n, _f in _twb.TESTS:
     run(_n, _f)
 
+section("STRATLAB: data-driven discovery - candidates created from the lab's data, selected on old data (stratlab/datagen_*.py, prereg/datagen_v1.json)")
+from stratlab import tests_datagen as _tdg  # noqa: E402
+for _n, _f in _tdg.TESTS:
+    run(_n, _f)
+
 section("STRATLAB: robustness diagnostics - PBO/CSCV, White RC/Hansen SPA, Monte Carlo, walk-forward, look-ahead (stratlab/robustness.py, report-only)")
 from stratlab import tests_robustness as _trb  # noqa: E402
 for _n, _f in _trb.TESTS:
