@@ -23,6 +23,8 @@ from unittest.mock import patch
 
 os.environ.setdefault("PERFORMANCE_FILE", os.path.join(tempfile.mkdtemp(), "performance.json"))
 _TMP = tempfile.mkdtemp(prefix="builder_test_")
+import atexit  # noqa: E402
+atexit.register(shutil.rmtree, _TMP, True)
 os.environ["BUILDER_CACHE_DIR"] = os.path.join(_TMP, "cache")
 
 import numpy as np  # noqa: E402
