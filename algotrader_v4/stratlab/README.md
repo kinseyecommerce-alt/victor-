@@ -1431,3 +1431,79 @@ Commands: `python -m stratlab.audit_run compare|handcheck|lookahead|shiftcontrol
 screen|modules|tfgrid|final|events|oldera|oldmin|tfgrid_oos|ledger`. Outputs: `<scratchpad>/audit/` (progress.txt,
 refsim/, catalog/, rerun/, corrected/, ledgers/, tfgrid_corrected/, tfgrid_gross/). Tests: `tests_audit.py`, run by
 `test_pipeline.py` (section "STRATLAB: simulator audit + corrected data").
+
+## Web-sourced strategies: low volatility, dividend month, earnings straddles (`web_strategies.py`, `web_run.py`, `prereg/web_v1.json`)
+
+**Plain language.** We searched the published research (academic journals, SSRN / NBER, NSE and IIM work, replication
+studies, practitioner research) for strategies with evidence beyond a backtest: tested in India, still working after
+publication, seen in many countries, with an economic reason, and cheap enough to trade. Of 25 candidates, most were
+already tested by this lab (volatility selling on NIFTY, momentum, reversal, earnings drift, calendar effects, FII /
+delivery data, index inclusion) or could not be tested with our data (value / quality need balance sheets). Four
+variants of three ideas were left and run once. **None is proven.** Low-volatility stocks and the dividend month made
+money in 2012-23, but random stocks / random months from the same pool did as well, and both failed on 2023-26. Buying
+option straddles before results captures the known rise in option prices before announcements, but not enough to pay
+the option spreads and decay, except briefly in 2024.
+
+Shortlist with sources and scores: `<scratchpad>/webstrats/SHORTLIST.md` (sha256 recorded in the prereg). Selection
+rule, fixed before any data look: evidence score >= 5/10, feasible, never tested by the lab, a published rule, able to
+reach the trade minimum on availability counts (`webstrats/data_check.json`: counts only). Pre-registered in
+`prereg/web_v1.json` (sha256 `abfc2e5c704b5265e391affba45138bf858a45666524107faddb20fd34e94308`, byte-identical to
+`<scratchpad>/webstrats/PREREGISTERED_WEB.json`, commit 26b0726, before any result).
+
+    python -m stratlab.web_run --data-check | --preregister | --smoke | --run --trials <ledger>
+
+**Variants** (published rules, no tuning; Rs 1 lakh per stock trade, CNC costs + 2 bps; options 1 lot, real NSE EOD
+prices through nsedata's simulator, haircut max(Rs 0.05, 1 %) per leg per fill + Zerodha fees):
+* `web_lowvol30_nifty100` — NSE's NIFTY100 Low Volatility 30 methodology: point-in-time NIFTY 100 F&O names, 1-year
+  daily log-return std to the end of Feb / May / Aug / Nov, 30 lowest, existing members kept while ranked <= 60; held
+  Apr-Jun / Jul-Sep / Oct-Dec / Jan-Mar (one trade per name-quarter; equal weight instead of 1/vol). Sources: NSE
+  methodology (Nov 2026) and 2018 whitepaper; Frazzini-Pedersen 2014; Joshipura 2020 (India).
+* `web_divm_pred_exmonth` — dividend-month premium (Hartzmark-Solomon, JFE 2013; India +1.01 %/month, t = 8.35, in
+  Hameed-Xie-Zhong 2024): buy every top-500 stock that went ex-dividend in the same calendar month a year earlier,
+  hold that month; dividends received are credited (prices are not dividend-adjusted).
+* `web_ea_straddle_m3_0` / `web_ea_straddle_m1_p1` — Gao-Xing-Zhang (JFQA 2018): long ATM stock straddle (10-60 days
+  to expiry) from the close of day -3 to the close of day 0 / from day -1 to day +1, day 0 = first session on / after
+  the notified results board meeting (notice before 15:00 of the entry day; skipped if results already out). India:
+  Saurav-Agarwalla-Varma (2024) show implied volatility rising into results on Indian stock options.
+
+**Results** (L = Rs 1 lakh; old era = 2012-23 with the point-in-time universe; one look each):
+
+| id | 2023-26 DISCOVERY tr / PF / net (H1 / H2) | verdict | FINAL | 2012-23 tr / PF / net (H1 / H2) | verdict |
+|---|---|---|---|---|---|
+| web_lowvol30_nifty100 | 238 / 1.81 / +6.5 L (+3.3 / +3.2) | PASSED | **120 / 0.76 / -1.6 L REJECTED** | 1,288 / 2.14 / +46.1 L (+24.2 / +21.9) | OOS-CONFIRMED |
+| web_divm_pred_exmonth | 1,151 / 0.85 / -6.9 L (+3.5 / -10.4) | FAILED | – | 5,972 / 1.45 / +96.7 L (+57.8 / +38.9) | OOS-CONFIRMED |
+| web_ea_straddle_m3_0 | 1,362 / 1.16 / +8.5 L (+12.1 / -3.6) | FAILED (H2) | – | 5,186 / 0.83 / -35.5 L (-5.7 / -29.8) | OOS-FAILED |
+| web_ea_straddle_m1_p1 | 1,408 / 0.64 / -35.9 L | FAILED | – | 5,400 / 0.62 / -126.0 L | OOS-FAILED |
+
+**Proven on past unseen data: 0 of 4.** DSR = 0.000 for every variant at N = 2,542 (all 2023-26 trials); with the fair
+N = 4 the best is 0.031 (m3_0; PSR(0) 0.91). Why the two OOS passes are not edges:
+* Excess return per trade (month-clustered 95 % CI, dividends included, vs a PRICE index — which flatters a total-return
+  strategy by ~0.1 %/month): low-vol vs NIFTY 100 +0.77 % per quarter [-0.07, +1.63] in 2012-23, +0.20 % [-1.00, +1.50]
+  in 2023-26; price-only +0.00 % in 2012-23. Random 30 NIFTY 100 names each quarter (placebo) did as well: PF 1.94 on
+  2023-26 DISCOVERY and 1.69 in 2012-23 (excess +0.52 % [-0.57, +1.62]). It is NIFTY-100 beta plus dividends.
+* Dividend month vs NIFTY 500: +0.96 % per month [+0.38, +1.47] in 2012-23 (H1 +1.56 %, H2 +0.45 % with CI over 0),
+  but dividends credited are Rs 69 L of the Rs 97 L net (without them PF 1.11, excess -0.21 %), and the placebo (same
+  stocks, random months, real dividends) earned +0.79 % [+0.30, +1.29]: the predicted month adds ~0.2 %/month, not
+  Hameed et al.'s 1 %. In 2023-26 it lost (-0.55 % [-1.54, +0.42]; price-only -1.09 % [-2.07, -0.14]).
+* Straddles: random-date straddles (placebo) lose PF 0.56-0.60, so the pre-results window is better than random (m3_0
+  PF 0.83 in 2012-23, 1.16 in 2023-26 DISCOVERY) — the implied-volatility run-up is real — but at a 2.5x haircut m3_0
+  loses on 2023-26 too (PF 0.78) and H2 of DISCOVERY already lost. Holding through the announcement (m1_p1) is the
+  volatility crush: PF 0.62-0.64 in both eras. Average straddle premium Rs 54,000; 72 entries skipped (untraded strike).
+* Controls: planted edges are found (low-vol selected by next quarter's return PF 19.6; dividends planted before each
+  stock's best months PF inf vs PF 1.28 one month later; meetings planted before the largest 3-day moves PF 20.8 vs
+  0.48 delayed 25 sessions). All verdicts hold at 5 bps (stocks) or are worse at the 2.5x option haircut.
+
+Rs 10 lakh account (capital.py, report-only; the stock variants are sized as a 20 % stop = Rs 50,000 a position, so
+the swing agent's slots take few signals): low-vol +0.15 L on 2023-26 DISCOVERY (0.7 %/yr), +2.0 L over 2012-23
+(1.75 %/yr, max DD 3.5 %); dividend month +0.18 L (0.9 %/yr) / +1.1 L (1.0 %/yr); m3_0 +1.7 L (8.3 %/yr, max DD 12 %)
+on 2023-26 DISCOVERY but -4.7 L over 2012-23 (max DD 71 %); m1_p1 -1.4 L / -39.5 L. NIFTY buy-and-hold made more than
+the stock variants on the same capital.
+
+New trials: 2023-26 +4 variants (N 2,538 -> 2,542; 5 rows incl. one FINAL), 2012-23 +4 (269 -> 273); ledger backed up
+first (`trials_v2.csv.bak_web_20261115_042035`). No variant reads minute bars, so the 2016-23 minute era and the
+corrected-data overlay do not apply. sim.py unchanged. Caveats: equal weights instead of NSE's 1/vol weights; quarter
+entry approximates NSE's effective dates; the low-vol index's live record (2016-) overlaps our eras; dividends credited
+gross (taxed at the investor's slab rate from April 2020); stock-option EOD closes are last trades and the 1 % haircut
+may be optimistic for illiquid strikes. Do not re-tune any of these on these results. Outputs: `<scratchpad>/webstrats/`
+(SHORTLIST.md, data_check.json, run1/report.json, run1/trades, progress.txt). Tests: `tests_web.py` (9 synthetic), run
+by `test_pipeline.py`.
