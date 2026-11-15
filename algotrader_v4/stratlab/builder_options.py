@@ -9,7 +9,9 @@ What differs from nsedata's own loader is only WHERE the tables come from: load_
 tables (_S) from the F&O bhavcopy parts (fo_parts/optidx + fo_parts/fut) of one or more nsedata-layout directories
 (the sandbox: nse_old_view 2012-2023 + nse 2023 ->; the server: the builder data layer's nse/), keeping NIFTY /
 BANKNIFTY options with strikes within +-15 % of the underlying and expiries <= 75 days away (every structure here
-uses strikes within 7 % and expiries within ~40 days), plus the index futures (final settlement). nsedata's on-disk
+uses strikes within 7 % and expiries within ~40 days), plus the index futures (final settlement). A zero option
+`settle` on an expiry day (old-format files, weekly expiries) is treated as missing (fix of 2026-11-15, after batch
+0001: see the registry's erratum record). nsedata's on-disk
 cache (~2 GB for 2012 ->) is not built; the compact tables are cached as one compressed npz.
 
 Entry: the signal of the evening of t (index daily grid) -> decide() on the next session D = t+1 (chain of t, filled at
@@ -77,7 +79,7 @@ def _spot_series(bars_dir: str) -> dict:
 
 
 def signature(dirs: list) -> str:
-    h = hashlib.sha256(b"bo1")
+    h = hashlib.sha256(b"bo2")
     for d, b, lo, hi in dirs:
         h.update(f"{d}|{b}|{lo}|{hi}".encode())
         p = os.path.join(d, "fo_parts", "status.csv")
@@ -134,7 +136,12 @@ def build_tables(dirs: list, log=None) -> dict:
                 part = {"date": g["dint"].to_numpy(np.int64), "expiry": g["eint"].to_numpy(np.int64),
                         "strike": g["strike"].to_numpy(float), "ce": (g["type"] == "CE").to_numpy(bool)}
                 for k in CHAIN_FIELDS:
-                    part[k] = pd.to_numeric(g[k], errors="coerce").to_numpy(float)
+                    part[k] = pd.to_numeric(g[k], errors="coerce").to_numpy(float, copy=True)
+                # the old-format bhavcopy (nse_old_view) carries settle = 0 on WEEKLY expiry days (monthly expiries
+                # carry the underlying's settlement price): a zero settle is a missing value, never a price, so
+                # nsedata.final_settlement falls back to the official index close (NSE's weekly settlement price)
+                bad = (part["date"] == part["expiry"]) & ~(part["settle"] > 0)
+                part["settle"][bad] = np.nan
                 chains[s].append(part)
             del df
             if log and i % 500 == 0:

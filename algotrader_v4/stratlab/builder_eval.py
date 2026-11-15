@@ -317,7 +317,10 @@ class Batch:
                      "placebo": actual > p95,
                      "shuffle": not disc[cid]["shuffle"]["passed"],
                      "planted": bool(planted.get(f"gate_{c.agent}"))}
+            from . import trials as TR
+            ref = TR.daily_pnl(BE.R._tdicts(tr_u), [int(x) for x in cal], v0, T)
             out[cid] = {"dsr": d, "sr_daily_full": st_full["sr_daily"], "n_days_full": st_full["n_days"],
+                        "reference_daily": [round(x, 2) for x in ref],
                         "placebo": {"n": n, "long_share": round(ls, 3), "p95": p95, "median": float(np.median(nets))
                                     if nets else None, "actual": actual}, "gates": gates,
                         "proven": all(gates.values())}

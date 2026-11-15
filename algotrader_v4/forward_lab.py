@@ -762,7 +762,19 @@ def daily_job(now: Optional[datetime] = None, kite=None, root=None, lab: Optiona
         _jsave(root / "job_state.json", js)
         write_status(lab, status)
         out["status"] = status
+        out["builder_family"] = builder_family_step()
         return out
+
+
+def builder_family_step() -> dict:
+    """The SECOND forward family, builder/v1 (builder_forward.py, its own frozen rule and ledgers): processed after
+    this family's session. A no-op unless BUILDER_ENABLED is on and a builder strategy is registered; never raises."""
+    try:
+        import builder_forward
+        return builder_forward.run_pending()
+    except Exception as exc:
+        logger.error("[forward-lab] builder/v1 family step failed: {}", exc)
+        return {"status": "error", "error": str(exc)[:200]}
 
 
 def write_status(lab: ForwardLab, last_run: dict) -> dict:

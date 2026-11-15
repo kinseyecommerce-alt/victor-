@@ -135,12 +135,30 @@ def _jload(path: Path, default=None):
 # ══════════════════════════════════════════════════════════════════════════
 # the builder (registry + batches)
 # ══════════════════════════════════════════════════════════════════════════
+def fresh_chain(path):
+    """forward_lab.Chain whose tail is re-read on every append under an exclusive file lock: the registry has two
+    writers (the app process and the evaluation process), so a cached tail would fork the chain."""
+    import fcntl
+    from forward_lab import Chain
+
+    class FreshChain(Chain):
+        def append_many(self, items, ts=None):
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with open(str(self.path) + ".lock", "w") as lk:
+                fcntl.flock(lk, fcntl.LOCK_EX)
+                self._tail = None
+                try:
+                    return super().append_many(items, ts)
+                finally:
+                    self._tail = None
+    return FreshChain(path)
+
+
 class Builder:
     def __init__(self, root=None, rule: Optional[dict] = None):
-        from forward_lab import Chain
         self.root = Path(root) if root is not None else default_root()
         self.rule = rule if rule is not None else load_rule()
-        self.registry = Chain(self.root / "registry.jsonl")
+        self.registry = fresh_chain(self.root / "registry.jsonl")
 
     # ── paths ──
     def batch_dir(self, bid: str) -> Path:
@@ -175,6 +193,8 @@ class Builder:
                 st["n_used"] = max(st["n_used"], int(d["n_used"]))
             elif k == "promoted":
                 st["promoted"].append({**d, "ts": rec["ts"], "hash": rec["hash"]})
+            elif k == "erratum":
+                st.setdefault("errata", {}).setdefault(d["batch"], []).append({**d, "ts": rec["ts"]})
         st["final_looks"] = sum(len(v) for v in st["final_open"].values())
         return st
 
@@ -269,6 +289,13 @@ class Builder:
             raise NotFrozen(f"batch {bid}: data snapshot changed since the freeze")
         return json.loads(p.read_text())
 
+    def erratum(self, bid: str, note: dict) -> dict:
+        """A recorded defect of an evaluated batch. Results are never recomputed (that would be a second look):
+        the batch's candidates keep counting in N and are never re-drawn; the note says what the defect affected."""
+        if bid not in self.state()["batches"]:
+            raise NotFrozen(bid)
+        return self.registry.append("erratum", {"batch": bid, **note})
+
     def open_final(self, bid: str, ids: list) -> None:
         st = self.state()
         have = set(st["final_open"].get(bid, []))
@@ -316,7 +343,7 @@ class Builder:
         st = self.state()
         if any(p["id"] == cid for p in st["promoted"]):
             return {"id": cid, "already": True}
-        ref = reference_series(self, bid, cid)
+        ref = reference_series(self, bid, cid, res)
         rec = {"id": cid, "batch": bid, "key": row["key"], "cand": row["cand"], "text": row["text"],
                "frozen_hash": st["batches"][bid]["frozen_hash"], "dsr": res["proof"]["dsr"]["dsr"],
                "reference": ref}
@@ -332,8 +359,13 @@ class Builder:
         return rec
 
 
-def reference_series(b: Builder, bid: str, cid: str) -> dict:
-    """The builder's own reference for the forward family: VALIDATION + FINAL daily nets (trades files of the run)."""
+def reference_series(b: Builder, bid: str, cid: str, row: Optional[dict] = None) -> dict:
+    """The builder's own reference for the forward family: VALIDATION + FINAL daily nets (zeros on sessions without
+    an exit, from the proof; else the exit days of the run's trade files)."""
+    import forward_lab as FL
+    daily = ((row or {}).get("proof") or {}).get("reference_daily")
+    if daily:
+        return {"daily": daily, "net": round(sum(daily), 2), "max_dd": FL.max_drawdown(daily), "sessions": len(daily)}
     from stratlab import builder_eval as EV
     work = b.batch_dir(bid) / "work"
     tr = EV.read_trades(str(work / "trades" / f"val_{cid}.csv.gz")) + \
@@ -500,6 +532,24 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
     return status
 
 
+def weekly_job_locked(**kw) -> dict:
+    """weekly_job holding the builder data layer's lock (its NSE / Kite jobs never write while a batch freezes or is
+    evaluated). Off -> returns at once without waiting for the lock."""
+    if not enabled():
+        return {"skipped": "BUILDER_ENABLED is off or not PAPER"}
+    try:
+        import builder_data
+        lock = builder_data._LOCK
+    except Exception:
+        lock = threading.Lock()
+    got = lock.acquire(timeout=7200)
+    try:
+        return weekly_job(**kw)
+    finally:
+        if got:
+            lock.release()
+
+
 def data_snapshot(source: str = "server", data_root: Optional[str] = None) -> dict:
     from stratlab.builder_source import make_source
     return make_source(source, data_root).snapshot()
@@ -553,6 +603,7 @@ def api_status(root=None) -> dict:
             row.update({k: r[k] for k in ("discovery_passers", "shuffle_passers", "validation_tested",
                                           "validation_passers", "final_confirmed", "n_used", "best_discovery_dsr")})
             row["proven"] = len(r["proven"])
+            row["errata"] = len((st.get("errata") or {}).get(bid, []))
             row["shuffle_expected"] = r["shuffle_passers"]
         out["batches"].append(row)
     fw = {}
@@ -616,7 +667,8 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
     out = {"id": bid, "created": fb["created"], "hash": fb["frozen_hash"],
            "candidates_sha256": fb["candidates_sha256"], "snapshot_sha256": fb["snapshot_sha256"],
            "snapshot_end": fb.get("snapshot_end"), "generator": fb["generator"], "n_before": fb.get("n_before"),
-           "status": "evaluated" if res else "frozen", "candidates": rows}
+           "status": "evaluated" if res else "frozen", "candidates": rows,
+           "errata": (st.get("errata") or {}).get(str(bid), [])}
     if res:
         out.update({k: res.get(k) for k in ("windows", "discovery_passers", "shuffle_passers", "validation_tested",
                                             "validation_passers", "final_confirmed", "proven", "n_disc", "n_proof",

@@ -189,24 +189,30 @@ class Engine:
 
     # ── signals ──
     def raw_signal(self, c: G.Candidate):
-        """(trig, side, rank, hold) on the candidate's grid, before the market-type filter (cached per block)."""
+        """Sparse trigger cells (S, T, side, rank, hold) of the candidate's block on its own grid, before the
+        market-type filter (cached per block + parameters, sparse: the dense arrays are dropped at once)."""
         b = G.BLOCK[c.block]
         key = (b.fn, c.params)
         if key not in self._sig:
             kw = dict(c.params)
             if b.name == "expiry" and kw.get("side") == 0:
                 kw["side"] = 1
-            self._sig[key] = block_fn(b.fn)(self.ctx, **kw)
+            trig, side, rank, hold = block_fn(b.fn)(self.ctx, **kw)
+            S, T_ = np.nonzero(trig)
+            HD = np.asarray(hold)[S, T_].astype(np.int64) if hold is not None else np.zeros(len(S), np.int64)
+            self._sig[key] = (S.astype(np.int64), T_.astype(np.int64), np.asarray(side)[S, T_].astype(np.int64),
+                              np.asarray(rank, float)[S, T_], HD)
+            del trig, side, rank, hold
         return self._sig[key]
 
     def signals(self, c: G.Candidate, mtype: str | None = "own") -> dict:
         """Sparse trigger cells {s, t, side, rank, hold} sorted by (t, -rank, symbol) on the candidate's EXECUTION
         grid (prev_eod -> minute grid), filtered to the candidate's market type (mtype=None: no filter)."""
-        trig, side, rank, hold = self.raw_signal(c)
+        S0, T0, SD0, RK0, HD0 = self.raw_signal(c)
         code = MT_CODE[c.mtype] if mtype == "own" else (None if mtype is None else MT_CODE[mtype])
         g = c.grid
         if g == "prev_eod":
-            s_d, t_d = np.nonzero(trig)
+            s_d, t_d = S0, T0
             M = self.ctx.minute
             msix = M.six
             dnames = self.ctx.daily.syms
@@ -216,24 +222,18 @@ class Engine:
             ok &= self.mcal[np.minimum(tm, len(self.mcal) - 1)] == nxt
             sm = np.array([msix.get(dnames[i], -1) for i in s_d], np.int64) if len(s_d) else np.zeros(0, np.int64)
             ok &= sm >= 0
-            S, T_, SD, RK = sm[ok], tm[ok], side[s_d, t_d][ok], rank[s_d, t_d][ok]
+            S, T_, SD, RK = sm[ok], tm[ok], SD0[ok], RK0[ok]
             HD = np.zeros(len(S), np.int64)
             if code is not None:
                 k = self.regime_m[T_] == code
                 S, T_, SD, RK, HD = S[k], T_[k], SD[k], RK[k], HD[k]
         else:
+            S, T_, SD, RK, HD = S0, T0, SD0, RK0, HD0
             if g == "idx_minute":
                 M = self.ctx.minute
                 row = M.six["_NIFTY50_min" if c.instrument == "NIFTY" else "_NIFTYBANK_min"]
-                keep = np.zeros(M.shape, bool)
-                keep[row] = True
-                trig = np.asarray(trig, bool) & keep
-            S, T_ = np.nonzero(trig)
-            SD, RK = side[S, T_], rank[S, T_]
-            if hold is not None:
-                HD = np.asarray(hold)[S, T_].astype(np.int64)
-            else:
-                HD = np.zeros(len(S), np.int64)
+                k = S == row
+                S, T_, SD, RK, HD = S[k], T_[k], SD[k], RK[k], HD[k]
             if code is not None:
                 reg = self.regime_m if g in ("minute", "idx_minute") else self.regime_d
                 k = reg[T_] == code

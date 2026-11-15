@@ -106,6 +106,14 @@ class Settings(BaseSettings):
     builder_data_max_mb: float = 1800.0
     builder_kite_max_calls_per_run: int = 1500     # Kite historical_data calls per minute-backfill run
     builder_nse_max_requests_per_run: int = 2500   # NSE requests per archive run (one at a time, >= 1.5 s apart)
+    # Automatic strategy builder (builder.py, builder_rule.json): one frozen batch of 400 candidates a week from our own
+    # data (Saturday 06:00 IST), evaluated in its own process; PAPER research only, OFF by default (no job scheduled).
+    # Measured on the lab machine (4 vCPU): one real batch 82 s with 2 workers, ~1.6 GB peak RSS per process.
+    builder_enabled: bool = False
+    builder_max_mb: float = 400.0              # disk cap of the builder directory (stop writing, never delete)
+    builder_jobs: int = 2                      # evaluation worker processes (capped at 2)
+    builder_time_limit_s: int = 7200           # wall-clock limit of one batch evaluation (resumable)
+    builder_mem_mb: int = 4096                 # address-space limit per evaluation process
 
     # ── Engine: risk budget, trading states, approvals, drift, execution (see REBUILD.md) ──
     # Risk budget (risk_budget.py). RISK_BUDGET_DAILY_VOL = the book's daily P&L standard deviation budget in ₹, split

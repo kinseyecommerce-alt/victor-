@@ -22,6 +22,7 @@ Jobs (IST):
   19:35-22:35, 08:20      PEAD evening / morning input refresh (VALIDATED_PEAD_ENABLED)
   23:05, 05:30 (+10:05, 15:05 Sat-Sun)  builder NSE archives; 18:40, 06:10 (+11:40, 14:40 Sat-Sun)  builder Kite
                           minute backfill (BUILDER_DATA_ENABLED)
+  Sat 06:00               automatic strategy builder: one frozen batch of 400 candidates (BUILDER_ENABLED)
   every minute            portfolio drawdown brake (risk_budget.py)
 
 Validated jobs run every day of the week and gate on ist_clock.is_trading_day (weekend Budget sessions included).
@@ -119,6 +120,11 @@ class PlatformScheduler:
                                       ("builder_minute_wkend", "11,14", 40, "sat,sun")):
                 self._sched.add_job(self._builder_minute, "cron", hour=_h, minute=_m, day_of_week=_dow, id=_id,
                                     misfire_grace_time=1800, max_instances=1, coalesce=True)
+        if self._builder_on():
+            # automatic strategy builder: one batch a week, Saturday 06:00 IST (outside market hours; the job re-checks
+            # the flag and PAPER and holds the builder data layer's lock while it freezes / evaluates)
+            self._sched.add_job(self._builder_weekly, "cron", day_of_week="sat", hour=6, minute=0, id="builder_weekly",
+                                misfire_grace_time=6 * 3600, max_instances=1, coalesce=True)
         # engine upgrades: drawdown brake (every minute), drift monitor (after the last settlement retry)
         self._sched.add_job(self._risk_brake, "interval", minutes=1, id="risk_brake", misfire_grace_time=60)
         self._sched.add_job(self._drift_monitor, "cron", hour=17, minute=15, day_of_week=VALIDATED_DOW,
@@ -435,6 +441,23 @@ class PlatformScheduler:
             await asyncio.to_thread(builder_data.minute_job)
         except Exception as exc:
             logger.error("[platform] builder minute job failed: {}", exc)
+
+    @staticmethod
+    def _builder_on() -> bool:
+        try:
+            import builder
+            return builder.enabled()
+        except Exception:
+            return False
+
+    async def _builder_weekly(self) -> None:
+        """Strategy builder weekly batch (builder.weekly_job re-checks the flag, PAPER and market hours; the evaluation
+        runs in its own process). Never touches orders, agents or risk."""
+        try:
+            import builder
+            await asyncio.to_thread(builder.weekly_job_locked)
+        except Exception as exc:
+            logger.error("[platform] builder weekly job failed: {}", exc)
 
     async def _kite_login_at_startup(self) -> None:
         """Server (re)started on a trading day without a working token → log in now."""

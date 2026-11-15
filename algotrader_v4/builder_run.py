@@ -89,13 +89,33 @@ def evaluate(root: str, bid: str, source: str = "lab", data_root: str | None = N
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
-    ap.add_argument("--batch", required=True)
+    ap.add_argument("--batch", default=None)
+    ap.add_argument("--forward", action="store_true", help="builder/v1 forward family: trades up to --day")
+    ap.add_argument("--day", type=int, default=None)
     ap.add_argument("--source", default="server")
     ap.add_argument("--data-root", default=None)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--mem-mb", type=int, default=3584)
     a = ap.parse_args(argv)
     _limit(a.mem_mb)
+    if a.forward:
+        import builder_forward
+        work = os.path.join(a.root, "work")
+        os.makedirs(work, exist_ok=True)
+        try:
+            res = builder_forward.forward_trades(a.root, a.data_root, int(a.day), a.source)
+            tmp = os.path.join(work, f"forward_{a.day}.json.gz.tmp")
+            with gzip.open(tmp, "wt") as fh:
+                json.dump(res, fh, default=str)
+            os.replace(tmp, os.path.join(work, f"forward_{a.day}.json.gz"))
+            return 0
+        except Exception as exc:
+            with open(os.path.join(work, "error.txt"), "w") as fh:
+                fh.write(f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+            print(f"ERROR {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+    if not a.batch:
+        ap.error("--batch is required")
     work = os.path.join(a.root, "batches", a.batch, "work")
     os.makedirs(work, exist_ok=True)
 

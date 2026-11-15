@@ -1,0 +1,26 @@
+{
+ "version": "builder-forward/v1",
+ "family": "builder/v1",
+ "written": "2026-11-15",
+ "statement": "Written before any builder strategy was promoted. A SEPARATE forward family next to forward-lab/v1 (forward_lab_rule.json, family 1,276, unchanged). Do not tune on results: a changed rule is a new version. Nothing here switches trading on: QUALIFIED / CONSISTENT / ready are recorded findings; paper trading a builder strategy is a human decision taken only after its qualification; LIVE stays impossible.",
+ "members": "every builder strategy ever promoted by builder.py (builder_rule.json 'proven'), registered on the snapshot end T of its batch; the forward sample starts with the first session AFTER T",
+ "family_rule": "family_size = every builder strategy ever registered under this rule (demoted ones included); it never decreases; strategies added later raise it for later looks only",
+ "daily_pnl": "per processed forward session since registration: net (the builder's costs and slippage) of the strategy's trades that EXIT that session, zero when none; trades still open at the data end (window_end / period_end) are never booked",
+ "computation": "each run recomputes the strategy over [registration, session] on the builder data layer cut at the session (stratlab.builder_source ServerSource upto=session; the data are anchored, so earlier sessions never change) through the same engine as its evaluation, in a separate process; a session is processed only when both the minute store and the NSE archive contain it",
+ "looks": {"every_sessions": 20, "max_looks": 12, "rule": "look k at the 20k-th forward session (k = 1..12); the sample is exactly the first 20k sessions; each look is evaluated once, written to the registry chain and never recomputed"},
+ "qualification": {
+  "alpha_family": 0.05,
+  "alpha_per_test": "alpha_family / (family_size x max_looks) (Bonferroni over every builder strategy ever promoted and the looks)",
+  "test": "forward_lab.qualification_test: H0 mean daily net <= 0, stationary block bootstrap of the centred daily series (mean block 5, 10,000 resamples, seed sha256('<id>|look<k>')), z = mean / sd(bootstrap means); QUALIFIED iff mean > 0 and z >= z_required with >= 50 closed trades and >= 40 sessions in the look sample; looks short of either are 'insufficient'",
+  "min_trades": 50, "min_days": 40, "bootstrap": {"kind": "stationary", "mean_block": 5, "resamples": 10000},
+  "permanence": "QUALIFIED is permanent unless the strategy is later demoted"
+ },
+ "consistency": {
+  "reference": "the strategy's own VALIDATION + FINAL daily net series from its builder evaluation (zeros on sessions without an exit)",
+  "test": "at each look with >= 30 closed trades: band = 1 % quantile of the means of n-session stationary-bootstrap samples (mean block 5, 10,000 resamples, seed sha256('<id>|consistency<k>')) of the reference; INCONSISTENT iff the forward mean < band; latched",
+  "min_trades": 30, "quantile": 0.01
+ },
+ "demotion": {"dd_multiple": 1.5, "rule": "forward max drawdown of the daily series > 1.5 x the reference's max drawdown -> DEMOTED, permanently"},
+ "ready": "ready = QUALIFIED and not INCONSISTENT and not DEMOTED. It is a flag for a human; nothing reads it to trade",
+ "schedule": "runs at the end of forward_lab.daily_job (16:45 IST, FORWARD_LAB_ENABLED and BUILDER_ENABLED, PAPER) and processes every complete pending session (at most 10 per run); with no builder strategy registered it does nothing"
+}
