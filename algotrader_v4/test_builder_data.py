@@ -561,7 +561,8 @@ def test_backfill_is_resumable_and_idempotent():
 
 
 def _fake_kite(scale=lambda sym: 1.0):
-    """historical_data stand-in: two sessions (the window's first two weekdays) of full minute bars."""
+    """historical_data stand-in: two sessions (the window's first two weekdays) of full minute bars; a short request
+    (the corporate-action overlap re-read) gets every weekday."""
     calls = []
 
     def fetch(token, frm, to, interval):
@@ -576,7 +577,8 @@ def _fake_kite(scale=lambda sym: 1.0):
             return out
         out, d, n = [], frm, 0
         sym = {v: k for k, v in TOKENS.items()}[token]
-        while d <= to and n < 2:
+        short = (to - frm).days <= BM.OVERLAP_DAYS        # the corporate-action overlap re-read: every weekday
+        while d <= to and (n < 2 or short):
             if d.weekday() < 5:
                 for i in range(375):
                     t = datetime.combine(d, datetime.min.time()).replace(hour=9, minute=15) + timedelta(minutes=i)
@@ -608,8 +610,10 @@ def test_kite_minute_backfill_budget_resume_and_corporate_action_refetch():
         if r["stopped"] is None:
             break
         assert r["stopped"] == "call budget"
-    minute_calls = [c for c in calls if c[3] == "minute"]
+    minute_calls = [c for c in calls if c[3] == "minute" and (c[2] - c[1]).days > BM.OVERLAP_DAYS]
+    overlap_calls = [c for c in calls if c[3] == "minute" and (c[2] - c[1]).days <= BM.OVERLAP_DAYS]
     assert len(minute_calls) == nwin * len(MSYMS) and runs >= 4, (len(minute_calls), runs)
+    assert 0 < len(overlap_calls) <= runs * len(MSYMS)    # a resumed instrument re-reads one overlapping session
     assert all((c[2] - c[1]).days <= 59 for c in minute_calls)          # never more than 60 days per request
     p = mb.progress(mb.state(), now.date(), MSYMS, now=now)
     assert p["windows_final"] == p["windows_total"] == nwin * len(MSYMS) and p["progress_pct"] == 100.0
@@ -632,6 +636,140 @@ def test_kite_minute_backfill_budget_resume_and_corporate_action_refetch():
     assert len(rel) == nwin                           # the detecting (newest) window, then every older one again
     sd = mb.store.load_symbol("RELIANCE")
     assert abs(float(sd.c[0]) - 500.0) < 1.0           # the whole stored window is adjusted
+
+
+def test_corporate_action_at_the_start_of_a_new_window_is_detected():
+    """Regression (review of PR #25): a split goes ex on the first session of a NEW 60-day window. The newest fetch
+    then has no session in common with the stored bars; the check must still compare an OVERLAPPING stored session
+    (one extra short request) and refetch the whole instrument on Kite's new basis — never leave the older (final)
+    windows on the old price basis. Without any overlap it must not write the new window (retried next run)."""
+    root = _tmp()
+    mb = BM.MinuteBackfill(root / "minute")
+    tok = {"INFY": 1}
+    ws = BM.windows(date(2026, 11, 14))
+    w_new = ws[-1][0]                                   # the start of the newest grid window
+    split_day = w_new
+    while split_day.weekday() >= 5:
+        split_day += timedelta(days=1)
+    state = {"adjusted": False}
+
+    def fetch(token, frm, to, interval):
+        out, d = [], frm
+        while d <= to:
+            if d.weekday() < 5:
+                f = 0.5 if state["adjusted"] or d >= split_day else 1.0       # Kite back-adjusts after the ex-date
+                for i in range(20):
+                    t = datetime.combine(d, datetime.min.time()).replace(hour=9, minute=15) + timedelta(minutes=i)
+                    px = round(1000.0 * f + i * 0.05, 2)
+                    out.append({"date": t, "open": px, "high": px + 0.5, "low": px - 0.5, "close": px, "volume": 10})
+            d += timedelta(days=1)
+        return out
+    before = w_new - timedelta(days=3)                 # the evening before the newest window starts
+    r1 = mb.run(datetime.combine(before, datetime.min.time()).replace(hour=22), fetch=fetch, tokens=tok,
+                max_calls=10000, symbols=["INFY"], log=lambda *a: None)
+    assert r1["stopped"] is None and r1["ca_refetch"] == []
+    old = mb.store.raw("INFY", upto=_ymd(before))
+    assert abs(float(old["c"][0]) - 1000.0) < 1.0
+    state["adjusted"] = True                            # the split went ex on split_day: Kite's whole history halves
+    after = datetime.combine(split_day, datetime.min.time()).replace(hour=18, minute=40)
+    r2 = mb.run(after, fetch=fetch, tokens=tok, max_calls=10000, symbols=["INFY"], log=lambda *a: None)
+    assert r2["ca_refetch"] == ["INFY"], r2
+    z = mb.store.raw("INFY")
+    assert float(np.max(z["c"])) < 600.0, "older windows left on the pre-split price basis"
+    # no overlapping session obtainable (Kite returns nothing for it): the new window is NOT written, retried later
+    root2 = _tmp()
+    mb2 = BM.MinuteBackfill(root2 / "minute")
+    state["adjusted"] = False
+    mb2.run(datetime.combine(before, datetime.min.time()).replace(hour=22), fetch=fetch, tokens=tok,
+            max_calls=10000, symbols=["INFY"], log=lambda *a: None)
+    state["adjusted"] = True
+    last = int(mb2.state()["symbols"]["INFY"]["last"])
+
+    def fetch_no_overlap(token, frm, to, interval):
+        return [] if frm <= _d(last) <= to and to < w_new else fetch(token, frm, to, interval)
+    r3 = mb2.run(after, fetch=fetch_no_overlap, tokens=tok, max_calls=10000, symbols=["INFY"], log=lambda *a: None)
+    assert r3["ca_refetch"] == [] and int(mb2.state()["symbols"]["INFY"]["last"]) == last, r3
+    assert str(_ymd(w_new)) not in mb2.state()["symbols"]["INFY"]["windows"]
+    r4 = mb2.run(after + timedelta(hours=12), fetch=fetch, tokens=tok, max_calls=10000, symbols=["INFY"],
+                 log=lambda *a: None)
+    assert r4["ca_refetch"] == ["INFY"], r4
+
+
+class _Resp:
+    def __init__(self, url, status=200, body=b"{}"):
+        self.url, self.status_code, self.content = url, status, body
+
+
+class _FakeSession:
+    """requests.Session stand-in under pead_data._Client: every IFR page is full (1,000 rows), so the client keeps
+    paging (up to 30 pages) unless the builder's guard stops it."""
+
+    def __init__(self, status=200):
+        self.calls, self.status = [], status
+        self.headers = {}
+
+    def get(self, url, **kw):
+        self.calls.append(url)
+        if "/api/" not in url:
+            return _Resp(url)
+        if self.status != 200:
+            return _Resp(url, self.status, b"")
+        import stratlab.events_fetch as EF
+        return _Resp(url, 200, json.dumps({"data": [{"x": i} for i in range(EF.IFR_PAGE)]}).encode())
+
+
+def _guarded_ifr(budget=6, stop=None, status=200):
+    import pead_data
+    cl = pead_data._Client(0.0)
+    sess = _FakeSession(status)
+    cl.cl.s = sess
+    get = sess.get
+    cl.cl.s.get = lambda url, **kw: get(url, **{**kw, "timeout": 30})
+    http = BD.Http(budget, get=lambda u: ("missing", b""), pause=0.0, sleep=lambda s: None, stop=stop)
+    b = BD.Builder(_tmp())
+    st = b.state()
+    return b, st, cl, sess, http
+
+
+def test_filing_feed_pagination_obeys_the_request_budget_and_time_guard():
+    """Regression (review of PR #25): pead_data._Client.fetch pages the IFR feed up to 30 times and events_fetch's
+    client adds warm-up / retry requests. EVERY underlying request must go through the run's budget, time-window
+    and refusal checks; a guard that trips stops mid-pagination and the window stays pending (resumable)."""
+    today = date(2026, 11, 16)
+    with patch.object(BD, "FEEDS", ("ifr",)):
+        b, st, cl, sess, http = _guarded_ifr(budget=6)
+        try:
+            b.fetch_events(http, st, today, newest_only=True, client=cl)
+            raise AssertionError(f"budget not enforced: {len(sess.calls)} requests made")
+        except BD.BudgetReached:
+            pass
+        assert len(sess.calls) <= 6 and http.n == len(sess.calls), (len(sess.calls), http.n)
+        assert not any(k.startswith("ev:ifr") and v.get("status") == "ok" for k, v in st["windows"].items())
+        # the PEAD window opens mid-pagination: no request after it
+        n = {"k": 0}
+
+        def stop():
+            n["k"] += 1
+            return "PEAD window" if n["k"] > 3 else None
+        b, st, cl, sess, http = _guarded_ifr(budget=1000, stop=stop)
+        try:
+            b.fetch_events(http, st, today, newest_only=True, client=cl)
+            raise AssertionError(f"time guard not enforced: {len(sess.calls)} requests made")
+        except BD.StopRun:
+            pass
+        assert len(sess.calls) == 3, len(sess.calls)
+        # refusals inside the client count too: three in a row end the run
+        b, st, cl, sess, http = _guarded_ifr(budget=1000, status=403)
+        try:
+            b.fetch_events(http, st, today, newest_only=False, client=cl)
+            raise AssertionError("refusals not counted")
+        except BD.NSERefused:
+            pass
+        assert sum(1 for u in sess.calls if "/api/" in u) == BD.REFUSAL_STRIKES
+    # the live PEAD agent's client is untouched (the guard is injected per builder run only)
+    import pead_data
+    fresh = pead_data._Client(0.0)
+    assert not getattr(fresh.cl.s, "_builder_guarded", False)
 
 
 def test_market_hours_guard():

@@ -23,7 +23,11 @@ Per symbol the windows are fetched newest first; a window is FINAL once it was f
                           for an instrument in a run is its newest one; its overlap with the stored bars is compared
                           with forward_lab_store.ca_changed (median close ratio > 0.05 %): a difference means Kite
                           back-adjusted (a capital change went ex) and EVERY window of that instrument is re-fetched
-                          (newest first), exactly the forward lab's corporate-action convention
+                          (newest first), exactly the forward lab's corporate-action convention. When that fetch
+                          shares no session with the store (a new window began, possibly on the ex-date, or a
+                          resumed backfill), one short request (OVERLAP_DAYS) ending at the last stored session is
+                          compared instead; with no overlap at all nothing is written and the instrument is retried
+                          next run (never ruled clean without a comparison)
   disk cap                BUILDER_DATA_MAX_MB for the whole builder directory: at the cap nothing more is written
                           (the run reports "disk_cap"); nothing is ever deleted
 Read-only towards trading: the only Kite calls are get_instrument_tokens and historical_data.
@@ -43,6 +47,7 @@ import forward_lab_store as FS
 
 START = date(2016, 1, 1)
 WINDOW_DAYS = 60
+OVERLAP_DAYS = 6                        # the short re-read ending at the last stored session (CA check)
 DAILY_FROM = date(2015, 6, 1)           # day candles: a little before the minute history (warm-up of daily features)
 _LOCK = threading.RLock()
 
@@ -211,16 +216,45 @@ class MinuteBackfill:
                         if z is not None and len(z["date"]):
                             keep = z["date"] <= _ymd(today)
                             z = {k: v[keep] for k, v in z.items()}
-                        if first_in_run and z is not None and len(z["date"]):
+                        if first_in_run and s.get("last") and z is not None and len(z["date"]):
+                            # corporate-action check against an OVERLAPPING stored session (forward lab's rule)
                             stored = self.store.raw(sym, lo=_ymd(w0), upto=_ymd(min(w1, end)))
                             sdays = sorted(set(int(x) for x in stored["date"]) & set(int(x) for x in z["date"]))
-                            if sdays and FS.ca_changed(stored, z, sdays[-1]):
+                            ref_z = z
+                            if not sdays:
+                                # the newest fetch shares no session with the store (e.g. a new window just began,
+                                # possibly on an ex-date): re-read a short window ending at the last stored session
+                                if out["calls"] >= int(max_calls):
+                                    out["stopped"] = "call budget"
+                                    break
+                                last = _d(s["last"])
+                                lo = last - timedelta(days=OVERLAP_DAYS)
+                                out["calls"] += 1
+                                try:
+                                    ref_z = FS.clean_minute_rows(FS.kite_rows_to_lab(fetch(tok, lo, last, "minute")))
+                                except Exception as exc:
+                                    ref_z = None
+                                    out["errors"].append(f"{sym} overlap {lo}..{last}: {type(exc).__name__}: "
+                                                         f"{str(exc)[:120]}")
+                                stored = self.store.raw(sym, lo=_ymd(lo), upto=_ymd(last))
+                                sdays = sorted(set(int(x) for x in stored["date"]) &
+                                               set(int(x) for x in (ref_z["date"] if ref_z is not None else [])))
+                            if not sdays:
+                                # no overlap obtainable: the instrument is NOT ruled clean; nothing is written (a new
+                                # window on another price basis would hide the adjustment) — retried next run
+                                msg = f"{sym}: no overlapping session for the corporate-action check; retried next run"
+                                out["errors"].append(msg)
+                                s["last_error"] = msg
+                                break
+                            if FS.ca_changed(stored, ref_z, sdays[-1]):
                                 out["ca_refetch"].append(sym)
                                 s["windows"] = {}
                                 s.setdefault("ca_refetch", []).append(_ymd(today))
                                 pend = self.pending(st, sym, end, now)  # everything again, newest first
                                 i = 0
-                        first_in_run = False
+                            first_in_run = False
+                        elif not s.get("last"):
+                            first_in_run = False            # nothing stored yet: nothing to compare with
                         n = 0
                         if z is not None and len(z["date"]):
                             out["bytes"] += self.store.write_sessions(sym, z)

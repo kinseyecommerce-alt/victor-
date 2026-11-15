@@ -39,7 +39,9 @@ AVAILABILITY: unchanged — the files carry the trade date / broadcast time and 
 `before` rule (an EOD value dated D is usable from the next session's open).
 
 NETWORK ETIQUETTE: one request at a time, >= 1.5 s apart, a generic browser User-Agent (stratlab.events_fetch.UA), no
-credentials, exponential backoff on errors. A 401 / 403 from NSE is a REFUSAL: three in a row stop the run, the
+credentials, exponential backoff on errors. Every request counts against the run's budget and time window — including
+each page warm-up, retry and IFR page the filing-feed client makes (guard_client wraps that client's session for the
+builder only; a guard that trips mid-pagination saves nothing and the window stays pending). A 401 / 403 is a REFUSAL: three in a row stop the run, the
 refusal is recorded (status "refused") and nothing is retried for 24 h; bot protection is never evaded. With NSE
 refusing, the builder simply has no new data.
 
@@ -263,6 +265,26 @@ class Http:
         self.n += 1
         return self._get(url)
 
+    def before_request(self) -> None:
+        """The budget and time-window check of ONE request (also used for requests made by other clients)."""
+        if self.n >= self.budget:
+            raise BudgetReached(f"request budget {self.budget} reached")
+        why = self.stop()
+        if why:
+            raise StopRun(why)
+        self.n += 1
+
+    def after_status(self, code: int, resets: bool = True) -> None:
+        """Refusal accounting of ONE answer: three 401 / 403 in a row raise NSERefused (an ordinary page load that
+        answers 200 — a client's page warm-up — does not count as a success: resets=False)."""
+        self.statuses[f"http_{code}"] = self.statuses.get(f"http_{code}", 0) + 1
+        if code in (401, 403):
+            self.refusals += 1
+            if self.refusals >= REFUSAL_STRIKES:
+                raise NSERefused(f"NSE refused {self.refusals} requests in a row (HTTP {code})")
+        elif code == 200 and resets:
+            self.refusals = 0
+
     def get(self, url: str, retries: int = 2) -> tuple[str, bytes]:
         delay = 5.0
         for attempt in range(retries + 1):
@@ -285,6 +307,31 @@ class Http:
             self.sleep(delay)
             delay *= 2
         return "error", b""
+
+
+def guard_client(client, http: Http) -> bool:
+    """Route EVERY request a filing-feed client makes (events_fetch.Client's page warm-ups, retries and
+    pead_data._Client's IFR pages) through the builder run's budget, time-window and refusal checks, by wrapping the
+    `get` of that client's own requests session. Only the client object the builder created / was given is changed,
+    so pead_data / events_fetch behave exactly as before for the live PEAD agent. False when no session is found."""
+    inner_client = getattr(client, "cl", client)
+    sess = getattr(inner_client, "s", None)
+    if sess is None or not hasattr(sess, "get"):
+        return False
+    if getattr(sess, "_builder_http", None) is http:
+        return True
+    base = getattr(sess, "_builder_base_get", None) or sess.get
+
+    def get(url, **kw):
+        http.before_request()
+        r = base(url, **kw)
+        http.after_status(int(getattr(r, "status_code", 0) or 0), resets="/api/" in str(url))
+        return r
+    sess._builder_base_get = base
+    sess.get = get
+    sess._builder_http = http
+    sess._builder_guarded = True
+    return True
 
 
 # ── symbols (NSE renames; the lab's names) ────────────────────────────────────────────────────────────────────────
@@ -994,23 +1041,18 @@ class Builder:
                 if client is None:
                     import pead_data
                     client = pead_data._Client(PAUSE_S)
-                if http.n >= http.budget:
-                    raise BudgetReached("request budget reached")
-                why = http.stop()
-                if why:
-                    raise StopRun(why)
-                http.n += 1
+                guarded = guard_client(client, http)
+                if not guarded:                 # a client without a requests session (tests): one request per fetch
+                    http.before_request()
                 try:
                     status, bodies = client.fetch(feed, s, min(e, today))
+                except (BudgetReached, StopRun, NSERefused):
+                    raise                       # a guard tripped mid-pagination: nothing saved, the window stays pending
                 except Exception as exc:
                     status, bodies = f"error:{str(exc)[:60]}", []
                 did = True
-                if status == "refused":
-                    http.refusals += 1
-                    if http.refusals >= REFUSAL_STRIKES:
-                        raise NSERefused("NSE refused the filing feeds three times in a row")
-                else:
-                    http.refusals = 0
+                if not guarded:
+                    http.after_status(403 if status == "refused" else 200)
                 if status != "ok":
                     st["windows"][key] = {"status": status, "at": ymd(today)}
                     continue
