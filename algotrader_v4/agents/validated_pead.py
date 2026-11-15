@@ -427,6 +427,11 @@ class PeadCandidateAgent(ValidatedAgent):
             feeds = PD.fetch_feeds(today)
         elif held:
             feeds = PD.fetch_feeds(today, ("ca",))
+        if feeds is not None:
+            # fetch_feeds loads and saves the state file itself: carry its backfill markers into this snapshot so the
+            # final save below does not wipe them (otherwise every evening would repeat the full 120-day backfill)
+            st["feeds_backfilled"] = {**(st.get("feeds_backfilled") or {}),
+                                      **(PD.load_state().get("feeds_backfilled") or {})}
         out["status"]["feeds"] = feeds
         nd = set(cal[-3:]) | set(todo) | set(held.values())
         out["nifty"] = PD.ensure_nifty(st, nd)
@@ -597,9 +602,12 @@ class PeadCandidateAgent(ValidatedAgent):
             if status == "applied" and f is not None and f < 1.0 and s > ed:
                 self._apply_split(pos, float(f), s)
             elif status is not None and s > ed and (status.startswith("applied") or status == "not_applied_scheme"):
-                px = r["close"] / float(f) if f else r["close"]
+                # book the actual (unadjusted) close: a back-adjustment factor is not an executable price; any
+                # entitlement (demerged shares, rights) is NOT booked, so the paper ledger stays conservative
+                px = r["close"]
                 self._exit(pos, px, s, "corporate_action_exit", nifty, kind="corporate_action_exit",
-                           note=f"corporate action {status} on {s}: exit at the close (lab drops such trades)")
+                           note=f"corporate action {status} on {s} (factor {f}): exit at the actual close; "
+                                f"entitlement not booked (lab drops such trades)")
                 continue
             elif gap is not None and not (0.6 <= gap <= 1.67) and s > ed:
                 self._deviation("unexplained_gap", pos.symbol, f"{s} open/prev close {gap:.3f}")

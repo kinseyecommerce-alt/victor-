@@ -528,6 +528,17 @@ def test_fail_safe_inputs():
         assert gather(fetch_feeds=lambda today, feeds=None: {"ok": True},
                       ensure_bhav=lambda days, **k: {d: ("missing" if d == D else "have") for d in days})["skip"] \
             == "no_bars"
+        # the final save must keep fetch_feeds' backfill markers (fetch_feeds loads/saves the state file itself)
+        disk = {"feeds_backfilled": {}}
+        saved = []
+
+        def fake_fetch(today, feeds=None):
+            disk["feeds_backfilled"] = {"ifr": "2026-11-13", "ann": "2026-11-13"}
+            return {"ok": False}
+        gather(fetch_feeds=fake_fetch, load_state=lambda: {k: (dict(v) if isinstance(v, dict) else v)
+                                                           for k, v in disk.items()},
+               save_state=lambda st: saved.append(dict(st)))
+        assert saved and saved[-1].get("feeds_backfilled") == {"ifr": "2026-11-13", "ann": "2026-11-13"}, saved
         for skip in ("no_event_feed", "no_universe", "no_bars", "no_nifty"):
             a.last_decision = {}
             with mock.patch.object(a, "_gather", return_value=_decision_g(skip=skip)):
@@ -604,7 +615,8 @@ def test_corporate_action_during_hold():
         a._manage_session(20261113, g, late=False)
         assert dem.oid not in a._positions and a.deviations.get("corporate_action_exit") == 1
         row = [t for t in p.trades if t["symbol"] == "DEM"][-1]
-        assert abs(row["exit"] - round(61.0 / 0.6, 2)) < 0.01 and row["exit_kind"] == "corporate_action_exit", row
+        # booked at the ACTUAL close (a back-adjustment factor is not an executable price; entitlement not booked)
+        assert abs(row["exit"] - 61.0) < 0.01 and row["exit_kind"] == "corporate_action_exit", row
 
 
 def test_held_stock_renamed():
