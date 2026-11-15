@@ -14,10 +14,15 @@ scripts in <scratchpad>/databuild/scripts, each data set with a data_check.json 
       face_value, kind, ratio_a, ratio_b, fv_from, fv_to, dividend, rights_premium, factor, record_date,
       first_listed, known_date, subject
   corpactions/bar_adjustment_issues.csv   every ex-date where the lab's bars disagree with the official action
-  index_membership/index_changes.csv  NIFTY 50 / NIFTY 100 / NIFTY NEXT 50 constituent changes from NSE Indices
-      press releases: index, announce_date, effective_date, action (IN|OUT), symbol, lab_symbol, in_lab, company, source
-  index_membership/index_members.csv.gz   point-in-time membership intervals rebuilt from the changes and anchored
-      on NSE's own constituent files: index, symbol (latest NSE symbol), lab_symbol, in_lab, from_date, to_date
+  index_membership/index_changes.csv  NIFTY 50 / NIFTY 100 / NIFTY NEXT 50 constituent changes: index,
+      announce_date, effective_date, action (IN|OUT), symbol, lab_symbol, in_lab, company, source, announce_source
+      ("press" = the NSE Indices release was obtained; "none" = announce_date is only the session before the
+      effective date), effective_precision (day | inferred | month), note
+  index_membership/index_members.csv.gz   point-in-time membership intervals from NSE Indices' month-end constituent
+      files, dated by the press releases: index, symbol (latest NSE symbol), lab_symbol, in_lab, from_date, to_date,
+      from_precision, to_precision (day | inferred | month: see index_changes.csv effective_precision)
+  index_membership/index_weights.csv.gz   month-end index weights of NIFTY 50 and NIFTY Next 50: month,
+      snapshot_date, index, symbol, lab_symbol, in_lab, weight_pct, ff_mcap_cr
   fii_stats/fii_stats.csv.gz          FII derivative statistics, complete: date (ISO), instrument, buy_contracts,
       buy_amt_cr, sell_contracts, sell_amt_cr, oi_contracts, oi_amt_cr
 
@@ -38,7 +43,9 @@ nsedata.cutoff(day) `before` is clipped to `day`.  Pick `before` exactly as for 
   index changes  announce_date = date of the NSE Indices press release (published after market hours)
                                                                            -> visible when announce_date < before
                  index_members(index, before) = the constituents in force on the last day before `before`, built
-                 only from changes whose effective_date < before
+                 only from changes whose effective_date < before; a change whose exact day is unknown is dated at
+                 the month-end file that first shows it (never earlier than true)
+                 index_weights(index, before) = the latest month-end weight file posted before `before`
   fii stats      published in the evening of the trade date               -> rows dated < before
 
     cd algotrader_v4
@@ -295,7 +302,8 @@ def index_members(index: str, before: int) -> set:
     """Lab symbols (latest NSE symbols for stocks outside the lab) that were constituents of `index` on the last
     calendar day strictly before `before`.  Built from membership intervals [from_date, to_date]; an interval
     counts when from_date < before and to_date >= before - 1 day, i.e. only changes already in force are used.
-    Empty set when `before` is outside the covered period (see index_coverage())."""
+    Empty set when `before` is at or before the first covered date (see index_coverage(): the unverified early
+    period returns nothing rather than a possibly wrong universe)."""
     _load_index()
     b = _clip(before)
     lo, hi = index_coverage(index)
@@ -313,8 +321,11 @@ def _next_day(d: int) -> int:
 
 
 def index_coverage(index: str) -> tuple:
-    """(first date, last date) for which index_members() is defined: from the earliest interval start to the build
-    date recorded in index_membership/data_check.json (None, None when the index is not on disk)."""
+    """(first date, last date) for which index_members() is defined (None, None when the index is not on disk).
+    The first date is `reliable_from` of index_membership/data_check.json when the build recorded one: the
+    membership is rebuilt backwards from today's constituents and is only trusted down to the latest change that
+    did not fit (a press release that could not be obtained breaks the chain there).  Otherwise the earliest
+    interval start.  The last date is the build date."""
     _load_index()
     iv = _S["idx_members"].get(index)
     if not iv:
@@ -324,7 +335,11 @@ def index_coverage(index: str) -> tuple:
     p = os.path.join(FLOW_DIR, "index_membership", "data_check.json")
     if os.path.exists(p):
         try:
-            hi = json.load(open(p)).get("built_through")
+            d = json.load(open(p))
+            hi = d.get("built_through")
+            rf = (d.get(index) or {}).get("reliable_from")
+            if rf:
+                lo = max(lo, int(rf))
         except Exception:
             hi = None
     return lo, hi
@@ -332,6 +347,44 @@ def index_coverage(index: str) -> tuple:
 
 def was_member(index: str, sym: str, before: int) -> bool:
     return sym in index_members(index, before)
+
+
+WEIGHT_LAG_DAYS = 10        # calendar days between a month-end and the publication of its weight file (assumed)
+
+
+def _load_weights():
+    if "idx_w" in _S:
+        return
+    out: dict = {}
+    for r in _read(os.path.join("index_membership", "index_weights.csv.gz")):
+        out.setdefault(r["index"], {}).setdefault(int(r["snapshot_date"]), []).append(
+            (r["lab_symbol"], _f(r["weight_pct"]), _f(r["ff_mcap_cr"]), r["symbol"]))
+    _S["idx_w"] = {ix: sorted(d.items()) for ix, d in out.items()}
+
+
+def index_weights(index: str, before: int) -> Rows:
+    """The latest month-end weight file of NIFTY50 / NIFTYNEXT50 that was public before `before`: NSE Indices posts
+    the file of a month early in the next one, so a snapshot dated D counts once D + WEIGHT_LAG_DAYS calendar days
+    < before.  Columns: lab (lab symbol), symbol (as published), weight (% of the index), ff_mcap_cr (free-float
+    market cap, Rs crore), date (the snapshot date, repeated).  Empty when none qualifies."""
+    _load_weights()
+    b = _clip(before)
+    best = None
+    for d, rows in _S["idx_w"].get(index, ()):
+        x = d
+        for _ in range(WEIGHT_LAG_DAYS):
+            x = _next_day(x)
+        if x < b:
+            best = (d, rows)
+        else:
+            break
+    if best is None:
+        return Rows({"date": np.array([]), "lab": np.array([]), "symbol": np.array([]), "weight": np.array([]),
+                     "ff_mcap_cr": np.array([])})
+    d, rows = best
+    return Rows({"date": np.full(len(rows), d, np.int64), "lab": np.array([r[0] for r in rows], dtype=object),
+                 "symbol": np.array([r[3] for r in rows], dtype=object), "weight": np.array([r[1] for r in rows], float),
+                 "ff_mcap_cr": np.array([r[2] for r in rows], float)})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -395,6 +448,9 @@ class Asof:
 
     def index_members(self, index="NIFTY50"):
         return index_members(index, self.before)
+
+    def index_weights(self, index="NIFTY50"):
+        return index_weights(index, self.before)
 
     def fii_stats(self, n=1, instrument="INDEX FUTURES"):
         return fii_stats(self.before, n, instrument)

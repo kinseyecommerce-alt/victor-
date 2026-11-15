@@ -59,8 +59,14 @@ def _flow_dir(td):
     _gz(os.path.join(td, "index_membership", "index_members.csv.gz"),
         ["index", "symbol", "lab_symbol", "in_lab", "from_date", "to_date"],
         [["NIFTY50", "AAA", "AAA", 1, 20120102, 20240929], ["NIFTY50", "BBB", "BBB", 1, 20240930, ""],
-         ["NIFTY50", "KEEP", "KEEP", 1, 20120102, ""], ["NIFTY100", "CCC", "CCC", 0, 20240930, ""]])
-    json.dump({"built_through": 20261113}, open(os.path.join(td, "index_membership", "data_check.json"), "w"))
+         ["NIFTY50", "KEEP", "KEEP", 1, 20120102, ""], ["NIFTY100", "CCC", "CCC", 0, 20240930, ""],
+         ["NIFTYNEXT50", "DDD", "DDD", 0, 20120102, ""]])
+    json.dump({"built_through": 20261113, "NIFTYNEXT50": {"reliable_from": 20210401}},
+              open(os.path.join(td, "index_membership", "data_check.json"), "w"))
+    _gz(os.path.join(td, "index_membership", "index_weights.csv.gz"),
+        ["month", "snapshot_date", "index", "symbol", "lab_symbol", "in_lab", "weight_pct", "ff_mcap_cr"],
+        [[202408, 20240830, "NIFTY50", "AAA", "AAA", 1, 60.0, 600.0], [202408, 20240830, "NIFTY50", "KEEP", "KEEP", 1, 40.0, 400.0],
+         [202409, 20240930, "NIFTY50", "BBB", "BBB", 1, 55.0, 550.0], [202409, 20240930, "NIFTY50", "KEEP", "KEEP", 1, 45.0, 450.0]])
     _gz(os.path.join(td, "fii_stats", "fii_stats.csv.gz"),
         ["date", "instrument", "buy_contracts", "buy_amt_cr", "sell_contracts", "sell_amt_cr", "oi_contracts", "oi_amt_cr"],
         [[f"2024-01-0{d}", ins, 100 * d, 1.0 * d, 50 * d, 0.5 * d, 1000 + d, 10.0]
@@ -147,11 +153,24 @@ def t_index_membership_point_in_time():
         assert F.was_member("NIFTY50", "AAA", 20240101) and not F.was_member("NIFTY50", "BBB", 20240101)
         assert F.index_members("NIFTY100", 20241001) == {"CCC"} and F.index_members("NIFTY100", 20240930) == set()
         assert F.index_coverage("NIFTY50") == (20120102, 20261113) and F.index_coverage("NOPE") == (None, None)
+        # an index whose chain of releases is broken is served only from its verified date on
+        assert F.index_coverage("NIFTYNEXT50") == (20210401, 20261113)
+        assert F.index_members("NIFTYNEXT50", 20210401) == set() and F.index_members("NIFTYNEXT50", 20150101) == set()
+        assert F.index_members("NIFTYNEXT50", 20210402) == {"DDD"}
         with N.cutoff(20240829):                                           # the future composition stays hidden
             assert F.index_members("NIFTY50", 20991231) == {"AAA", "KEEP"}
             assert len(F.index_changes("NIFTY50", 20991231)) == 2
         with N.cutoff(20240828):
             assert len(F.index_changes("NIFTY50", 20991231)) == 0
+        # month-end weights become visible WEIGHT_LAG_DAYS calendar days after the snapshot date
+        assert len(F.index_weights("NIFTY50", 20240909)) == 0                         # 08-30 + 10 days = 09-09
+        w = F.index_weights("NIFTY50", 20240910)
+        assert set(w.lab) == {"AAA", "KEEP"} and abs(w.weight.sum() - 100.0) < 1e-9 and set(w.date) == {20240830}
+        assert set(F.index_weights("NIFTY50", 20241010).lab) == {"AAA", "KEEP"}     # 09-30 file not yet posted
+        assert set(F.index_weights("NIFTY50", 20241011).lab) == {"BBB", "KEEP"}
+        with N.cutoff(20240915):
+            assert set(F.index_weights("NIFTY50", 20991231).date) == {20240830}
+        assert len(F.index_weights("NIFTY100", 20991231)) == 0
 
 
 def t_fii_stats_and_asof():

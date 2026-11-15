@@ -1064,3 +1064,57 @@ Caveats:
 
 Outputs: `<scratchpad>/events/` (run1/report.json, run1/trades, tables.md, data_check.json, progress.txt).
 Tests: `tests_events.py` (18 synthetic), run by `test_pipeline.py`.
+
+## Event / flow data and contract minute bars (`flowdata.py`, `optmin.py`) — data only
+
+Built on 2026-11-14 to close the lab's data gaps; **no strategy has been run on any of it** (strategies on these
+data must be pre-registered first). Files live in `<scratchpad>/databuild` (env `STRATLAB_FLOW_DIR`,
+`STRATLAB_OPTMIN_DIR`), each data set with a `data_check.json` (rows per year, calendar gaps, duplicates, a second
+source, hand spot checks). The fetch / build scripts are in `stratlab/databuild_scripts/` (copies of
+`<scratchpad>/databuild/scripts`; raw downloads in `<scratchpad>/databuild/raw`).
+
+| data set | file | source | period |
+|---|---|---|---|
+| bulk and block deals | `deals/deals.csv.gz` | NSE historical report | 2012-01-02 .. 2026-11-13 |
+| corporate actions | `corpactions/corpactions.csv.gz` | NSE corporate-actions feed + daily PR-zip `Bc` files (first-listed date) | ex-dates 2012 .. 2026 |
+| bar adjustment issues | `corpactions/bar_adjustment_issues.csv` | the lab's minute / daily bars vs the official actions | 2012 .. 2026 |
+| index membership | `index_membership/index_members.csv.gz`, `index_changes.csv`, `index_weights.csv.gz` | NSE Indices month-end constituent files + press releases (Wikipedia as second source) | 2012-01-02 .. 2026-11-13 |
+| FII derivative statistics | `fii_stats/fii_stats.csv.gz` | NSE archives | 2014-12-01 .. 2026-11-13 |
+| option / futures minute bars | `optmin/contracts.csv`, `optmin/bars/*.csv.gz` | Kite history of the contracts listed on 2026-11-14 | 2026-08-26 .. 2026-11-13 |
+
+`flowdata.py` follows `nsedata.py`: every accessor takes `before` (int yyyymmdd) and returns only rows **known**
+strictly before it, and `nsedata.cutoff()` clips all of them. `asof_session(s)`, `asof_swing(d)` and
+`asof_swing_intraday(d)` pick `before` as in nsedata.
+
+* `deals(sym, before, since=None, kind=None)` — a deal dated D is published after D's close, so it is visible from
+  the next session. Prices are unadjusted. Block-window trades print outside the normal market's range and are not
+  in the EQ volume.
+* `corp_actions(sym, before, kinds=None, since=None, upcoming=True)` — visible from `known_date` (the first session
+  whose NSE `Bc` file lists the action, at the latest the session before the ex-date), so upcoming ex-dates are
+  returned too. `factor` is the theoretical price factor (bonus, split, consolidation, rights); dividends carry the
+  rupee amount; demergers have no official ratio. NSE's feed reports old events under the company's current symbol
+  (`symbol_then` is the symbol on the ex-date). `adj_factor(sym, day, before)` multiplies the factors already ex.
+* `index_changes(index, before)` / `index_members(index, before)` / `index_weights(index, before)` for `NIFTY50`,
+  `NIFTYNEXT50`, `NIFTY100` (= the union). Membership comes from NSE Indices' month-end files; the day of a change
+  comes from the press release (`effective_precision` day), else from the same review's known date (inferred), else
+  it is the month-end file date (month: the latest the change can have happened). `announce_source` says whether
+  the announcement date is the real press-release date or only "the session before the effective date".
+* `fii_stats(before, n, instrument)` — the completed file (nsedata's own copy stops at 2025-11-18).
+* `bar_adjustment_issues(sym)` — how the bar files on disk treat each ex-date (unadjusted demergers, wrong
+  factors, volume not adjusted, bars adjusted for dividends, additive offsets). A data-quality list: read it before
+  trusting a return computed across an ex-date. The bar files themselves were not changed.
+
+`optmin.py` serves 1-minute bars of **contracts** (not continuous series): NIFTY / BANKNIFTY options within ±8 % of
+the spot of the fetch date for every listed expiry, the index futures and the current-month stock futures. Kite
+keeps history only for listed contracts, so coverage starts at each contract's listing (the oldest is 2026-08-26)
+and nothing expired before the fetch exists; `option_bar_archiver.py` (flag off) is what would accumulate history
+from now on. The one rule: a bar that starts at minute m is complete at m+1, so a decision at `(date, minute)` sees
+bars that start strictly before `minute`: `bars()`, `session()`, `last()` (with `age`, illiquid strikes go stale),
+`chain()`. `fill(sym, date, minute)` returns the bar starting at that minute for next-open fills and raises
+`LookAheadError` inside `optmin.cutoff(date, minute)` or `nsedata.cutoff(day)`. No open interest; volume is in
+units. Kite's minute series omits a few trades that its daily candle (= the NSE bhavcopy) counts.
+
+    python -m stratlab.flowdata --check
+    python -m stratlab.optmin --check
+
+Tests: `stratlab/tests_flowdata.py` (synthetic files; section "STRATLAB: flow data" of `test_pipeline.py`).
