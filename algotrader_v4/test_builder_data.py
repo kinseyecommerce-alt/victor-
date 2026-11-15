@@ -765,14 +765,14 @@ def test_forward_lab_unchanged():
     root = _tmp()
     assert BD.engine_env(root) == {} or os.getenv("STRATLAB_NSE_DIR")
     import test_forward_lab as TFL
-    assert len(TFL.TESTS) == 21
+    assert len(TFL.TESTS) >= 21                        # (22 with the corporate-action review fix)
     fl_root = _tmp()
     with patch.object(FS, "default_root", lambda: fl_root):
         days = sessions(date(2026, 3, 2), 3)
         _run_syn(root, days)
         assert not any(fl_root.rglob("*"))
     assert BD.Builder(root).minute != FS.default_root() / "bars"
-    if __name__ == "__main__":                           # standalone: run the forward lab's own 21 tests too
+    if __name__ == "__main__":                           # standalone: run the forward lab's own tests too
         failed = 0
         for n, f in TFL.TESTS:
             try:
@@ -872,7 +872,9 @@ def test_forward_lab_nse_ids_match_the_lab_on_real_sessions():
     assert not bad, json.dumps(bad, default=str)[:1500]
     traded = {k: v["fwd_closed"] + v["fwd_open"] for k, v in r["strategies"].items() if v["fwd_closed"] + v["fwd_open"]}
     assert r["matched"] == 85 and traded
-    mods = {k.split("_")[1] for k in traded}
+    import forward_lab_engine as E
+    mods = {E.native_specs()[k].fn.__module__.rsplit(".", 1)[-1] for k in traded}
+    assert mods == {"r4_delivery", "r4_mechanics", "r4_participant", "r4_futoi"}, mods
     print(f"      85/85 NSE-file ids identical to the lab on 5 real sessions; {len(traded)} ids traded "
           f"({sum(traded.values())} trades/positions; modules {sorted(mods)})")
 

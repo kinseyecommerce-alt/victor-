@@ -269,6 +269,10 @@ on disk), `last_update` / `last_error`, `progress_pct` (share of the 2012 → (2
 final), `source`. `disk.cap_mb` = `BUILDER_DATA_MAX_MB` (default 1,800) for the whole builder directory; at the cap
 nothing more is written (`cap_reached: true`, runs stop with `disk_cap`), nothing is deleted. `refused_until` is set
 for 24 h after NSE refused three requests in a row (no new data meanwhile; never worked around).
+Server paths / env vars for the lab readers (nsedata, flowdata, events_data, the forward-lab minute store): REBUILD.md
+section 6 — `<root>/nse` = `STRATLAB_NSE_DIR` (+ `STRATLAB_BARS_DIR=<root>/nse/bars`), `<root>/nse_view` = its last 400
+sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root>/events` = `STRATLAB_EVENTS_DIR`,
+`<root>/minute` = a `forward_lab_store.Store` (`load_symbol` → `SymbolData`).
 ```json
 {"enabled": false, "root": "/data/app/builder_data",
  "schedule": {"nse": "23:05 and 05:30 IST daily, 10:05 / 15:05 Sat-Sun",
