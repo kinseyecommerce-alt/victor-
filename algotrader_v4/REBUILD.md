@@ -163,7 +163,7 @@ this rebuild, and LIVE remains impossible for these strategies (their guards ref
   the better of quote and stream touch. Auction-fade entries (official open) and settlements are unaffected.
 * An operator Stop now persists until `/bot/start` (the old 09:16 auto-start of the tick agents silently cleared it).
 * The 15:15 square-off runs every trading day in PAPER (before: only when the old master had been started).
-* The dashboard (`frontend/`) was rebuilt on the v2 API (mobile-first; Overview, Strategies, Positions & trades, Risk & controls, Forward lab, Shadow registry, System). It polls instead of using the removed `/ws`; see TESTING.md.
+* The dashboard (`frontend/`) was rebuilt on the v2 API (mobile-first; Overview, Strategies, Positions & trades, Risk & controls, Forward lab, Builder, Shadow registry, System). It polls instead of using the removed `/ws`; see TESTING.md.
 
 ## 6. Strategy-builder data layer (Part 1, `builder_data.py` + `builder_minute.py`) — server paths for the builder engine
 
@@ -187,3 +187,15 @@ lab's 3-year file. F&O `lot` is NaN before 2024 (the old bhavcopy has none). Ind
 before the server's first daily list (no press-release dates: `announce_source = "none"`). Corporate-action
 `known_date` = the session before the ex-date unless the server saw the action earlier. Status:
 `GET /api/v2/builder/data` (API_V2.md).
+
+## 7. Automatic strategy builder (Part 2, `builder.py` + `builder_run.py` + `builder_forward.py` + `stratlab/builder_*.py`)
+
+Flag `BUILDER_ENABLED` (default false: no job). Saturday 06:00 IST: freeze 400 candidates (registry
+`<volume>/builder/registry.jsonl`), evaluate them in `python -m builder_run` (nice 10, `BUILDER_JOBS` <= 2,
+`BUILDER_MEM_MB` 4096 address space per process, `BUILDER_TIME_LIMIT_S` 7200, resumable), ingest; proven strategies go
+to the forward lab's separate family builder/v1 (processed at the end of `forward_lab.daily_job`). Reads the data layer
+of section 6 through `stratlab/builder_server_panels.ServerSource` (`BUILDER_DATA_DIR`); its derived panels and the
+compact option tables are cached on ephemeral disk (`BUILDER_CACHE_DIR`, default `/tmp/builder_cache`), never on the
+volume; the builder directory is capped at `BUILDER_MAX_MB` (400). The weekly job holds the data layer's lock while it
+freezes / evaluates. Rules: `builder_rule.json` (pinned in `builder.RULE_SHA256`), `builder_forward_rule.json`
+(pinned in `builder_forward.RULE_SHA256`). Results / design: `stratlab/README.md` (last section), API: API_V2.md.

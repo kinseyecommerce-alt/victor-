@@ -12,6 +12,7 @@ import { StrategyDetail } from './pages/StrategyDetail'
 import { Trades } from './pages/Trades'
 import { Risk } from './pages/Risk'
 import { ForwardDetail, ForwardLab } from './pages/ForwardLab'
+import { Builder, BuilderBatch } from './pages/Builder'
 import { Shadows } from './pages/Shadows'
 import { More, System } from './pages/System'
 
@@ -47,6 +48,7 @@ function Shell({ onAuth }: { onAuth: () => void }) {
     case 'trades': page = <Trades />; break
     case 'risk': page = <Risk />; break
     case 'forward': page = route[1] ? <ForwardDetail id={route[1]} /> : <ForwardLab />; break
+    case 'builder': page = route[1] ? <BuilderBatch id={route[1]} /> : <Builder />; break
     case 'shadows': page = <Shadows />; break
     case 'system': page = <System overview={overview} />; break
     case 'more': page = <More />; break

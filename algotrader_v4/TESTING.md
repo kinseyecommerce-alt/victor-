@@ -57,7 +57,8 @@ BASE_URL=http://127.0.0.1:8010 API_KEY=... ADMIN_USER=admin ADMIN_PASS=... OUT=/
 The e2e script loads every page at iPhone 13 and 1440 px desktop size, fails on any uncaught error or page wider than
 the screen, signs in both ways, clicks every write control (strategy state switch with Cancel / confirm, dashboard
 on/off switch, whole-app state, approvals mode, approve / reject, brake reset when tripped) and checks the result
-through the API; the forward lab is checked as served and with a mocked response.
+through the API; the forward lab is checked as served and with a mocked response; the builder page as served (batch
+`BUILDER_BATCH`, default 0001, when the server has it) and with a mocked response that has a proven cell.
 
 ## 3. Real-price paper trading
 

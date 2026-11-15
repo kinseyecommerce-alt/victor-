@@ -166,7 +166,7 @@ export function More() {
       <PageHeader title="More" />
       <Card>
         <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-          {NAV.filter((n) => ['forward', 'shadows', 'system'].includes(n.id)).map((n) => (
+          {NAV.filter((n) => ['forward', 'builder', 'shadows', 'system'].includes(n.id)).map((n) => (
             <li key={n.id}><a href={href(n.id)} className="flex items-center gap-3 py-3 text-sm font-medium" data-testid={`more-${n.id}`}><n.icon size={18} /> <span className="flex-1">{n.label}</span><ChevronRight size={16} className="text-slate-400" /></a></li>
           ))}
         </ul>
