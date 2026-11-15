@@ -45,7 +45,7 @@ def authenticate(username: str, password: str) -> bool:
         return verify_password(password, settings.admin_password_hash)
     if not settings.admin_password:
         return False
-    return hmac.compare_digest(password, settings.admin_password)
+    return hmac.compare_digest(password.encode("utf-8"), settings.admin_password.encode("utf-8"))
 
 
 # ── JWT ───────────────────────────────────────────────────────────

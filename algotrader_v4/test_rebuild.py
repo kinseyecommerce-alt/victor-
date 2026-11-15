@@ -699,6 +699,11 @@ def test_login_fails_closed_without_a_configured_password():
         settings.admin_password = "s3cret-plain"
         assert auth.authenticate("admin", "s3cret-plain") and not auth.authenticate("admin", "")
         assert not auth.authenticate("other", "s3cret-plain")
+        settings.admin_password = "pässwörd-₹"                    # non-ASCII: no TypeError, still constant time
+        assert auth.authenticate("admin", "pässwörd-₹") and not auth.authenticate("admin", "passwoerd")
+        assert not auth.authenticate("admin", "ünïcode-wrong")
+        settings.admin_password = "s3cret-plain"
+        assert not auth.authenticate("admin", "ünïcode-wrong")
         settings.admin_password_hash = auth.hash_password("from-hash") if hasattr(auth, "hash_password") else \
             __import__("bcrypt").hashpw(b"from-hash", __import__("bcrypt").gensalt()).decode()
         assert auth.authenticate("admin", "from-hash") and not auth.authenticate("admin", "s3cret-plain")
