@@ -16,6 +16,7 @@ Jobs (IST):
   15:35                   daily scoreboard (ledger snapshot vs NIFTY 50, Telegram)
   15:40                   session-store refresh + parity audits
   16:10                   option-bar archive (OPTION_BAR_ARCHIVER_ENABLED)
+  16:45                   forward lab: every lab strategy on today's bars, no orders (FORWARD_LAB_ENABLED)
   17:05                   shadow registry (SHADOW_REGISTRY_ENABLED)
   17:15                   drift & fill-quality monitor (warnings only)
   19:35-22:35, 08:20      PEAD evening / morning input refresh (VALIDATED_PEAD_ENABLED)
@@ -102,6 +103,9 @@ class PlatformScheduler:
         if self._option_archiver_on():
             self._sched.add_job(self._option_bar_archive, "cron", hour=16, minute=10, day_of_week=VALIDATED_DOW,
                                 id="option_bar_archive", misfire_grace_time=3 * 3600)
+        if self._forward_lab_on():
+            self._sched.add_job(self._forward_lab, "cron", hour=16, minute=45, day_of_week=VALIDATED_DOW,
+                                id="forward_lab", misfire_grace_time=3 * 3600, max_instances=1, coalesce=True)
         # engine upgrades: drawdown brake (every minute), drift monitor (after the last settlement retry)
         self._sched.add_job(self._risk_brake, "interval", minutes=1, id="risk_brake", misfire_grace_time=60)
         self._sched.add_job(self._drift_monitor, "cron", hour=17, minute=15, day_of_week=VALIDATED_DOW,
@@ -373,6 +377,27 @@ class PlatformScheduler:
             await asyncio.to_thread(option_bar_archiver.daily_job)
         except Exception as exc:
             logger.error("[platform] option bar archive job failed: {}", exc)
+
+    @staticmethod
+    def _forward_lab_on() -> bool:
+        try:
+            import forward_lab
+            return forward_lab.enabled()
+        except Exception:
+            return False
+
+    async def _forward_lab(self) -> None:
+        """Forward lab (forward_lab.daily_job re-checks the flag and PAPER; the engine runs in its own process).
+        At most one Telegram summary per day, only with FORWARD_LAB_TELEGRAM=true."""
+        try:
+            import forward_lab
+            await asyncio.to_thread(forward_lab.daily_job)
+            if getattr(settings, "forward_lab_telegram", False):
+                text = await asyncio.to_thread(forward_lab.telegram_once)
+                if text:
+                    await send_telegram(text)
+        except Exception as exc:
+            logger.error("[platform] forward lab job failed: {}", exc)
 
     async def _kite_login_at_startup(self) -> None:
         """Server (re)started on a trading day without a working token → log in now."""

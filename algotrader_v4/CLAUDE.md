@@ -9,6 +9,8 @@ pip install -r algotrader_v4/requirements.txt
 cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port 8000 --reload     # dev server
 cd algotrader_v4 && python test_pipeline.py                                   # full suite (includes test_rebuild.py, test_validated_pead.py)
 cd algotrader_v4 && python test_shadow_registry.py && python test_option_bar_archiver.py && python test_rebuild.py
+cd algotrader_v4 && python test_forward_lab.py                                # forward lab (parity part needs the lab scratch)
+cd algotrader_v4 && python forward_lab_build.py baseline|parity|bench|warmup --scratch <lab scratch>   # offline tools
 cd algotrader_v4 && python lab_risk_build.py --scratch <lab scratch dir> --auc AUC-FADE-2PCT   # rebuild lab_risk.json
 ```
 
@@ -46,6 +48,7 @@ tick_engine: price feed only (newest Kite tick per symbol; the paper broker's to
 | `performance.py` | ledger after costs, per-strategy stats, daily scoreboard vs NIFTY 50 |
 | `sebi_compliance.py` | pre-order checks, kill switch / pause, audit log |
 | `forward_test.py`, `shadow_registry.py`, `option_bar_archiver.py` | observers (no orders) |
+| `forward_lab.py` (+ `forward_lab_store.py`, `forward_lab_engine.py`, `forward_lab_build.py`) | forward lab: every lab strategy (608 catalogue + 668 tfgrid + the 4 live rules) on each new session after the close, engine in its own process, hash-chained ledgers, frozen rule `forward_lab_rule.json` (sha256 pinned in `forward_lab.RULE_SHA256`), lab references `forward_lab_baseline.json`; `FORWARD_LAB_ENABLED` default false; `GET /api/v2/forward-lab` |
 | `bot_state.py` | per-agent enable toggles and the persisted operator Stop |
 
 ### Rules that keep paper comparable with the lab

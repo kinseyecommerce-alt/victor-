@@ -21,6 +21,8 @@ python3 test_shadow_registry.py
 python3 test_validated_pead.py
 python3 test_option_bar_archiver.py
 python3 test_rebuild.py             # old state files load; trading states, approvals, risk budget, drift, v2 API
+python3 test_forward_lab.py         # forward lab: frozen rule, Bonferroni / bootstrap, looks, demotion, store,
+                                    # engine process + time limit, no look-ahead, lab parity (needs the lab scratch)
 ```
 Every run must end with zero failures. The agents' lab-parity tests are the acceptance gate for any change to an
 agent, `validated_base.py`, `validated_data.py`, `pead_data.py` or the paper broker.

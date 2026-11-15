@@ -5288,6 +5288,26 @@ for _n, _f in _TRB.TESTS:
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# FORWARD LAB — every lab strategy after the close, pre-registered rule (test_forward_lab.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("FORWARD LAB — store, engine (separate process), parity with the lab, ledgers, frozen rule, v2 API")
+import test_forward_lab as _TFL
+
+
+def _flab_case(fn):
+    def go():
+        try:
+            fn()
+        except _TFL.Skip as exc:                      # the lab's scratch data set is absent: fixture tests still run
+            print(f"      (skipped: {exc})")
+    return go
+
+
+for _n, _f in _TFL.TESTS:
+    run("forward lab: " + _n[len("test_"):].replace("_", " "), _flab_case(_f))
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ══════════════════════════════════════════════════════════════════════════
 failed = summary()

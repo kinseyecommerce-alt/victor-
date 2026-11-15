@@ -247,6 +247,21 @@ def v2_shadow_registry():
                       "shadows": st.get("shadows", {})})
 
 
+@router.get("/forward-lab")
+def v2_forward_lab():
+    import forward_lab
+    return json_safe(forward_lab.api_status())
+
+
+@router.get("/forward-lab/{sid}")
+def v2_forward_lab_strategy(sid: str):
+    import forward_lab
+    out = forward_lab.api_strategy(sid)
+    if out is None:
+        raise HTTPException(404, f"unknown forward-lab strategy {sid!r}")
+    return json_safe(out)
+
+
 @router.get("/archiver")
 def v2_archiver():
     import option_bar_archiver

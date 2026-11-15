@@ -209,6 +209,58 @@ Ticket `status`: `pending` | `approved` | `rejected` | `expired` | `cancelled`.
              "status_reason": null, "looks": [], "trades": 12, "net": 2310.5}}}
 ```
 
+### GET /api/v2/forward-lab
+The forward lab (`forward_lab.py`, rule `forward_lab_rule.json`): every lab strategy run on each new session after
+the close (PAPER research, no orders), judged by the pre-registered rule. Read-only; reads the status file the
+daily job writes (cheap to poll, suggested 60 s).
+```json
+{"enabled": false, "as_of": "2026-11-16",
+ "rule": {"version": "forward-lab/v1", "family_size": 1276, "alpha": 0.05, "z_required": 4.5084,
+          "min_trades": 50, "min_days": 40},
+ "last_run": {"date": "2026-11-16", "status": "complete", "strategies_run": 1280, "errors": 0},
+ "summary": {"n_strategies": 1280, "qualified": 0, "demoted": 3, "consistency_fail": 0},
+ "strategies": [
+   {"id": "AUC-FADE-2PCT", "family": "opening_auction_fade", "group": "proven", "trades": 14, "days": 6,
+    "net": 3120.5, "pf": 1.41, "z": null, "status": "consistent"},
+   {"id": "EV-PEAD-LONG-H60", "family": "post_earnings_drift", "group": "candidate", "trades": 0, "days": 6,
+    "net": 0.0, "pf": null, "z": null, "status": "consistent"},
+   {"id": "tfg_ema_9_21@5m:stocks", "family": "ma_cross", "group": "forward", "trades": 41, "days": 6,
+    "net": -8812.0, "pf": 0.74, "z": null, "status": "watching"}]}
+```
+| Field | Meaning |
+|---|---|
+| `enabled` | `FORWARD_LAB_ENABLED` (and PAPER) |
+| `as_of` | the last session that was run COMPLETE (`null` before the first) |
+| `rule.family_size` | the forward group's Bonferroni family: every forward strategy ever registered (never decreases); the rule file's initial size before the first run |
+| `rule.alpha` | the family-wise level (0.05); the per-test level is `alpha / (family_size × 12 looks)` |
+| `rule.z_required` | the bootstrap z a forward strategy needs at a look (`Φ⁻¹(1 − alpha/(family_size × 12))`) |
+| `rule.min_trades`, `rule.min_days` | a qualification look needs ≥ 50 closed trades and ≥ 40 forward sessions |
+| `last_run.status` | `never`, `complete`, `pending` (incomplete data, retried at the next session), `incomplete` (skipped for every strategy), `error` (engine failed twice; skipped), `disk_cap`, `tamper` (a ledger / registry chain or trade file failed verification), `rule_changed` (the rule file's sha256 differs from the pinned one: nothing runs) |
+| `strategies[]` | one row per registered strategy: proven (AUC-FADE-2PCT, SWING-ATTN-ON-3X, VRP-STRANGLE-016-WINGED), candidate (EV-PEAD-LONG-H60), then the forward group (608 catalogue ids + 668 tfgrid combos), sorted by id |
+| `trades`, `days`, `net`, `pf` | closed virtual trades, COMPLETE forward sessions since registration, net ₹ after the lab's costs and slippage at lab size, profit factor (`null` without a losing trade) |
+| `z` | the z of the strategy's latest TESTED look (`null` before one) |
+| `status` | forward group: `watching` · `qualified` (a look passed z ≥ z_required) · `demoted` (forward max drawdown > 1.5 × the lab's 2023-26 max drawdown; permanent). Proven / candidate: `consistent` · `inconsistent` (live daily mean below the lab's 1 % block-bootstrap band at a look with ≥ 30 trades; latched) · `demoted`. None of these switches anything on. |
+
+### GET /api/v2/forward-lab/{id}
+`404` for an unregistered id. `daily` lists every COMPLETE forward session since the strategy's registration
+(zero-trade days included).
+```json
+{"id": "tfg_ema_9_21@5m:stocks",
+ "daily": [{"date": "2026-11-16", "trades": 7, "net": -1290.4}],
+ "rule_status": {"group": "forward", "family": "ma_cross", "kind": "tfgrid:5m:stocks:scalping",
+                 "registered_on": "2026-11-16", "status": "watching", "status_reason": null,
+                 "looks": [{"look": 1, "day": 20261211, "days": 20, "trades": 133, "net": -5120.0,
+                            "mean_daily": -256.0, "tested": false, "verdict": "insufficient", "family_size": 1276,
+                            "alpha": 3.27e-06, "z_required": 4.5084}],
+                 "next_look_at_days": 40, "days": 21, "trades": 140, "net": -5410.2, "forward_max_dd": 9120.0,
+                 "lab": {"trades": 9120, "net": -310220.0, "mean_daily": -427.3, "max_dd": 351000.0, "pf": 0.82},
+                 "demotion_limit": 526500.0, "family_size": 1276, "z_required": 4.5084,
+                 "chain_ok": true, "chain_error": null, "config_hash": "…", "rule_sha256": "…"}}
+```
+A tested forward look adds `z`, `p`, `p_boot`, `sd_boot` and `verdict` `qualified` / `not_qualified`; a consistency
+look adds `band`, `lab_mean_daily` and `verdict` `consistent` / `inconsistent`. `chain_ok` = this strategy's ledger
+verifies against its registry checkpoint.
+
 ### GET /api/v2/archiver
 ```json
 {"enabled": false, "root": "/data/app/option_bars", "archive_mb": 0.0, "max_mb": 1500.0, "estimate_mb_per_week": 25}

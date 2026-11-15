@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     validated_pead_dd_kill: float = 1_680_000.0
     # Shadow-incubation registry (shadow_registry.py): observation only, off by default
     shadow_registry_enabled: bool = False
+    # Forward lab (forward_lab.py): every lab strategy on each new session after the close, PAPER research only,
+    # off by default (no job scheduled, no Kite call). Engine runs in its own process with these limits.
+    forward_lab_enabled: bool = False
+    forward_lab_max_mb: float = 300.0          # disk cap of the forward-lab directory (stop writing, never delete)
+    forward_lab_jobs: int = 1                  # engine worker processes
+    forward_lab_time_limit_s: int = 2700       # engine wall-clock limit per session
+    forward_lab_mem_mb: int = 3072             # engine address-space limit per process
+    forward_lab_telegram: bool = False         # at most one summary per day
 
     # ── Engine: risk budget, trading states, approvals, drift, execution (see REBUILD.md) ──
     # Risk budget (risk_budget.py). RISK_BUDGET_DAILY_VOL = the book's daily P&L standard deviation budget in ₹, split
