@@ -9637,6 +9637,11 @@ from stratlab import tests_flows as _tfl  # noqa: E402
 for _n, _f in _tfl.TESTS:
     run(_n, _f)
 
+section("STRATLAB: web-sourced strategies - low volatility, dividend month, earnings straddles (stratlab/web_*.py, prereg/web_v1.json)")
+from stratlab import tests_web as _twb  # noqa: E402
+for _n, _f in _twb.TESTS:
+    run(_n, _f)
+
 section("STRATLAB: robustness diagnostics - PBO/CSCV, White RC/Hansen SPA, Monte Carlo, walk-forward, look-ahead (stratlab/robustness.py, report-only)")
 from stratlab import tests_robustness as _trb  # noqa: E402
 for _n, _f in _trb.TESTS:
