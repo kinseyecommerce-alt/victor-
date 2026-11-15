@@ -104,14 +104,22 @@ def set_mode(on: bool, by: str = "operator") -> dict:
 
 def _deadline(strategy: str, day: str, deadline: Optional[str] = None) -> str:
     if deadline:
-        return datetime.fromisoformat(deadline).isoformat(timespec="seconds")
+        dt = datetime.fromisoformat(deadline)
+        if dt.tzinfo is None:                     # a deadline without a timezone is IST (the exchange clock)
+            dt = dt.replace(tzinfo=now_ist().tzinfo)
+        return dt.isoformat(timespec="seconds")
     t = DEADLINES.get(strategy, DEFAULT_DEADLINE)
     return datetime.combine(datetime.fromisoformat(day).date(), t, tzinfo=now_ist().tzinfo).isoformat(timespec="seconds")
 
 
+def _aware(dt: datetime, ref: datetime) -> datetime:
+    """A stored deadline without a timezone (written before this fix) is read as IST, like new ones."""
+    return dt.replace(tzinfo=ref.tzinfo or now_ist().tzinfo) if dt.tzinfo is None else dt
+
+
 def _expire(d: dict, now: datetime) -> None:
     for t in d["tickets"].values():
-        if t["status"] == "pending" and datetime.fromisoformat(t["deadline"]) < now:
+        if t["status"] == "pending" and _aware(datetime.fromisoformat(t["deadline"]), now) < now:
             t["status"], t["decided_at"], t["decided_by"] = "expired", now.isoformat(timespec="seconds"), "deadline"
 
 

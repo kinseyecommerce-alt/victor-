@@ -521,18 +521,28 @@ def fetch_session(store: Store, kite, day: date, tokens: dict, ca_actions: Optio
     store.check_cap()
     # corporate actions first: the symbol's whole window from Kite (adjusted), then today's bars on top
     first = store.sessions()[0] if store.sessions() else dk
+    # every required refetch must succeed (non-empty) BEFORE anything is written: appending today's adjusted bars
+    # to an unadjusted history would book trades across an artificial price gap. Any failure -> INCOMPLETE day.
+    fetched = []
     for sym, why in refetch:
         try:
             z = fetch_minute(kite, tokens[sym], _d(first), day)
         except Exception as exc:
-            log(f"[forward-lab] {sym}: corporate-action refetch failed: {exc}")
-            continue
-        if z is not None and len(z["date"]):
-            z = {k: v[z["date"] >= first] for k, v in z.items()}
-            res["bytes"] += store.replace_symbol(sym, z)
-            res["refetch"].append({"symbol": sym, "reason": why, "day": dk})
-            store.note("refetch", {"symbol": sym, "reason": why, "day": dk})
-            log(f"[forward-lab] {sym}: corporate action ({why}) — window refetched from Kite")
+            z, err = None, f"{type(exc).__name__}: {exc}"
+        else:
+            err = None if (z is not None and len(z["date"])) else "no bars returned"
+        if err:
+            log(f"[forward-lab] {sym}: corporate-action refetch failed: {err} — session not stored")
+            res["complete"] = False
+            res["reasons"] = (res["reasons"] + [f"{sym}: corporate-action refetch failed ({err})"])[:50]
+            res["n_reasons"] = res.get("n_reasons", 0) + 1
+            return res
+        fetched.append((sym, why, {k: v[z["date"] >= first] for k, v in z.items()}))
+    for sym, why, z in fetched:
+        res["bytes"] += store.replace_symbol(sym, z)
+        res["refetch"].append({"symbol": sym, "reason": why, "day": dk})
+        store.note("refetch", {"symbol": sym, "reason": why, "day": dk})
+        log(f"[forward-lab] {sym}: corporate action ({why}) — window refetched from Kite")
     for sym, z in minute.items():
         if z is None:
             continue

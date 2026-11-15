@@ -3,6 +3,8 @@ auth.py — JWT app login + Kite OAuth helpers
 """
 from __future__ import annotations
 
+import hmac
+
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -35,11 +37,15 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 def authenticate(username: str, password: str) -> bool:
-    if username != settings.admin_username:
+    """Fail closed: an empty password never logs in, and with neither ADMIN_PASSWORD_HASH nor ADMIN_PASSWORD
+    configured password login is disabled (use the API key)."""
+    if not password or username != settings.admin_username:
         return False
     if settings.admin_password_hash:
         return verify_password(password, settings.admin_password_hash)
-    return password == settings.admin_password
+    if not settings.admin_password:
+        return False
+    return hmac.compare_digest(password.encode("utf-8"), settings.admin_password.encode("utf-8"))
 
 
 # ── JWT ───────────────────────────────────────────────────────────

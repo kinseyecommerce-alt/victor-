@@ -418,6 +418,8 @@ def v2_enable(name: str, req: EnableRequest, request: Request):
     bot_state.set_agent_enabled(name, req.enabled)
     if not req.enabled and a.state.running:
         a.stop()
+    elif req.enabled and not a.state.running:
+        a.auto_start()          # trading day and no operator-wide Stop -> running again; otherwise 08:55 preflight
     from loguru import logger
     logger.warning("[v2] {} {} by {}", name, "enabled" if req.enabled else "disabled", _who(request))
     return {"name": name, "enabled": bot_state.is_agent_enabled(name), "setting": a.enabled_by_setting(),
