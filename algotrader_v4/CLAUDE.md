@@ -10,6 +10,7 @@ cd algotrader_v4 && uvicorn main:app --host 0.0.0.0 --port 8000 --reload     # d
 cd algotrader_v4 && python test_pipeline.py                                   # full suite (includes test_rebuild.py, test_validated_pead.py)
 cd algotrader_v4 && python test_shadow_registry.py && python test_option_bar_archiver.py && python test_rebuild.py
 cd algotrader_v4 && python test_forward_lab.py                                # forward lab (parity part needs the lab scratch)
+cd algotrader_v4 && python test_builder_data.py                               # builder data layer (layout / parity parts need the lab scratch)
 cd algotrader_v4 && python forward_lab_build.py baseline|parity|bench|warmup --scratch <lab scratch>   # offline tools
 cd algotrader_v4 && python lab_risk_build.py --scratch <lab scratch dir> --auc AUC-FADE-2PCT   # rebuild lab_risk.json
 ```
@@ -50,6 +51,7 @@ tick_engine: price feed only (newest Kite tick per symbol; the paper broker's to
 | `forward_test.py`, `shadow_registry.py`, `option_bar_archiver.py` | observers (no orders) |
 | `forward_lab.py` (+ `forward_lab_store.py`, `forward_lab_engine.py`, `forward_lab_build.py`) | forward lab: every lab strategy (608 catalogue + 668 tfgrid + the 4 live rules) on each new session after the close, engine in its own process, hash-chained ledgers, frozen rule `forward_lab_rule.json` (sha256 pinned in `forward_lab.RULE_SHA256`), lab references `forward_lab_baseline.json`; `FORWARD_LAB_ENABLED` default false; `GET /api/v2/forward-lab` |
 | `bot_state.py` | per-agent enable toggles and the persisted operator Stop |
+| `builder_data.py` (+ `builder_minute.py`) | strategy-builder DATA layer, PAPER research only, `BUILDER_DATA_ENABLED` default false: NSE end-of-day archives 2012 → in `stratlab/nsedata.py`'s layout (`<volume>/builder_data/nse`; delivery, F&O parts, participant OI / volume, ban, FII stats, index closes) + flowdata / events layouts (deals, corporate actions, index membership, results, board meetings), Kite 1-minute bars 2016 → for the forward lab's universe (a sibling `forward_lab_store.Store`), hard cap `BUILDER_DATA_MAX_MB` (1,800), per-run budgets, market-hours / PEAD-window guards, NSE refusal fail-safe; `nse_view` (last 400 sessions) is what the forward lab's engine reads (`builder_data.engine_env()` → `STRATLAB_NSE_DIR`); `GET /api/v2/builder/data` |
 
 ### Rules that keep paper comparable with the lab
 - The agents' parity tests (`test_pipeline.py`, `test_validated_pead.py`) are the proof that a live decision equals
