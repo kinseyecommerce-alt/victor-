@@ -1,0 +1,80 @@
+{
+ "code_sha256": {
+  "attention.py": "7334f7e61a00a8eae53e766618c56bc15420162b281580b77f82f634342f9e9c",
+  "auction.py": "f0a7e1def771fb0540f042462c9ab212c74a1e5db0089364b9415ccdd8ba640e",
+  "auction_r2.py": "06af402170622ef5f456975d4fa5007a7a762c8992fb4180e733532916adeab0",
+  "audit_run.py": "68fb40f9ebd8fab508450391ddcfdd3f84af49971865f15cd218d95bdae57f6f",
+  "capital.py": "382986bba85b4229c3adabcd94b81e1f54825e05a2f7501d4257135f5d99903d",
+  "corrected.py": "2d630e9bc7ffd322e7b6e87e1d7697a7e317788474aca620938e3a639dd1f8a6",
+  "data.py": "d950421d9a8a16d6f7abe2ce19af99e9687df43f7b7ce98c584e41bdd47229aa",
+  "data_daily.py": "0d07ace83d42d712960a434423c1e6cddf3a5aedc59c94b4d3228804c54999c6",
+  "events_run.py": "a9937144da233f5cafe2f5926bf37ad97afe65bcfc5eef1186f6f698d0729c31",
+  "protocol.py": "6929839143dbca9dc0bb6d8d0a5fb7b2941d20ea8c1b6a0ced969bd8ad16af9a",
+  "protocol_min_oos.py": "5473ce1f23157132fe494e84039ad58d26ebb848fc7706d7ca8cfaf2dc4c80af",
+  "protocol_oos.py": "86cd23799bcf492a734ccb257cfe3cac1c3f2e2614932356649d0a7a2c8e817a",
+  "refsim.py": "41c21f4180424ff0741eb89388da4a0235c56f40cb17d22fc8500dde0af08521",
+  "rerun_corrected.py": "efbc7b932c345248422b3d8e2a235cd3144c870de5a358c8be9e79feb432c90c",
+  "sim.py": "315a8448f69fa220aa88bd8a9363fef1cac9ec89c177b323359fb90daaf8ee72",
+  "tfgrid.py": "b20ac961a96e52845b40c6dfed740bf8c574b51a7250ad6e7ba22c8cd52827e7",
+  "trials.py": "8c657c138bc285b78fe0d2fd218459865833bd274be22a5261540cb76d5ce802"
+ },
+ "costs_sha256": "3df145f25fdfe71b5e8d3a43c901b5958929958a0a298b58e38ae10c598d6b03",
+ "data": {
+  "definition": "stratlab/corrected.py (see its docstring): minute bars of both eras mapped per session onto official NSE prints x F(d) (splits / bonuses / consolidations / rights / demergers; dividends NOT back-adjusted = as-traded prices); affine repair of rupee-subtracted dividends; Kite's stale 09:15 bar on special pre-open days dropped; sessions whose shape disagrees with the official prints (> 1.5 % off, o/h/l ratios > 0.5 % apart) EXCLUDED; unadjusted-volume windows rescaled and flagged; the 10 daily-file (nse_old) issues repaired by official_factor / applied_factor. Index bars (NIFTY 50, NIFTY BANK, VIX) unchanged.",
+  "maps_sha256": {
+   "maps_3y.pkl": "7a5078cdff14e795e7d675d825b1f89d1df159d371ec08d0e8710ed33aedf7c0",
+   "maps_old.pkl": "031d35fd3415189a1ef4818a63cb5d48e2def7eb5c1e956525794e2112776d8c"
+  },
+  "universe_daily_2012_23": "point-in-time NIFTY 100 membership from flowdata index_members (index_membership/index_members.csv.gz, reliable from 2012-01-02): a stock strategy may open a position on decision day D only if the stock is a NIFTY 100 constituent in force on D (replaces the turnover top-100 of the original 2012-23 round); event strategies keep their point-in-time top-500 universe",
+  "universe_minute": "today's 97 NIFTY-100 names (minute data exists only for them): the minute re-run remains SURVIVORSHIP-BIASED, as before",
+  "validation": "all 119 minute-era rows of bar_adjustment_issues.csv pass corrected.validate() (overnight ratio = official gap / official factor; additive offsets < 0.2 % of price; seam 2023-11-09/10 for IOC / ONGC / PETRONET within 0.5 % of the official gap)",
+  "version": "corr1"
+ },
+ "hypotheses": {
+  "catalogue_fingerprints_sha256": "310fb561bc00f07516717b1fa72b7d34c3cb1375dbf70d7d9e7ffb2ebe5f9d80",
+  "catalogue_ids": 608,
+  "modules": [
+   "AUC-FADE-2PCT",
+   "AUC-FADE-3PCT",
+   "SCALP-AUC-FADE-1TO3-0925",
+   "SWING-ATTN-ON-3X"
+  ],
+  "not_rerun": {
+   "option / VRP strategies": "they read only index bars and NSE option files, which the correction does not change: their results are unchanged by construction (VRP-STRANGLE-016-WINGED reported as before)"
+  },
+  "rule": "the SAME strategies with the SAME code, parameters and gates; nothing is added, dropped or tuned. They are NOT new trials: ledger rows get stage 'corrected_rerun' / 'corrected_final' / 'corrected_oos' and the same params fingerprint, and are NOT added to N for the DSR.",
+  "special": {
+   "event": [
+    "ev_pead_long_h60"
+   ],
+   "live_paper": [
+    "AUC-FADE-3PCT",
+    "SWING-ATTN-ON-3X",
+    "VRP-STRANGLE-016-WINGED"
+   ],
+   "proven": [
+    "SWING-ATTN-ON-3X",
+    "AUC-FADE-2PCT"
+   ]
+  },
+  "tfgrid": "all 668 grid combos (38 rules x 8 timeframes x universes) + 608 natives with the 1:3 bracket and Rs 10 lakh accounts exactly as prereg/tfgrid_v1.json",
+  "tfgrid_prereg_sha256": "a75a31f998066b02c09a9cca61b5805963d4433ffde080aa91ee9af65ce1652a"
+ },
+ "judgement": {
+  "bug_rule": "if Part 1 finds a simulator bug, the corrected ENGINE's result stands for every affected strategy and the report says so explicitly",
+  "dsr": "deflated Sharpe with the SAME N as before the re-run (variants 2023-26 in trials_v2.csv, which the re-run does not increase)",
+  "final_one_look": "a strategy that passes the corrected DISCOVERY screen opens its FINAL (2025-12-17..2026-11-09) ONLY if its FINAL was never opened before on the 3-year data under any cost model, in any ledger (stratlab_cache/*/final_ledger.json, tfgrid/final_ledger.json, events_daily ledger); the look is written once to audit/ledgers/final_corrected.json. CONFIRMED = net > 0 and PF >= 1.05.",
+  "old_era": "for every strategy that passed the 2023-26 screen before (original verdict PASSED SCREEN / CONFIRMED / REJECTED ON FINAL on bars3y, any tfgrid stage-1 passer) or passes now, plus SPECIAL: 2012-23 daily (protocol_oos.judge gates unchanged, corrected daily file, PIT NIFTY 100) where eligible, and 2016-23 minute (protocol_min_oos gates unchanged, corrected old minute view; its dirty-link exclusion = the original dirty set plus the session after every excluded session). One judgement each, written to audit/ledgers/oldera_*_corrected.json; the original one-look ledgers are not touched and their verdicts are reported next to it.",
+  "opened_finals": "a FINAL that was already opened is recomputed on corrected data and reported side by side; the ORIGINAL look stands (it is not a fresh look) unless bug_rule applies",
+  "proven": "FINAL-CONFIRMED on 2023-26 AND OOS-CONFIRMED on 2016-23 (tfgrid: also DSR >= 0.95), as before",
+  "result_of_record": "the corrected-data result is the result of record for every strategy",
+  "screen_2023_26": "protocol.screen unchanged: DISCOVERY 2023-11-10..2025-12-16 (first 70 % of the 726-session calendar; H1 to 2024-11-29, H2 from 2024-12-02); net > 0 in H1 and H2, PF >= 1.15, >= 150 (intraday) / 60 (positional) trades, top symbol <= 35 % of net (not for one-instrument strategies); 2 bps (index 1 bps) slippage, costs.py 2026; tfgrid: its own account screen unchanged"
+ },
+ "status_at_writing": {
+  "corrected_results_seen": "none (no strategy has been simulated on the corrected view)",
+  "simulator_audit": "refsim (independent engine) vs sim.py on 22 strategies x 97 symbols, DISCOVERY 2023-11-10..2025-12-16: every trade identical (fills, exits, qty, gross, cost) wherever both engines read a strategy's rule the same way; all differences traced to ambiguous one-line descriptions or undocumented hygiene filters, none to the engine. 30/30 hand-checked trades match the raw JSON rows and a manual Zerodha computation. Gross/mirror/look-ahead/benchmark checks are still running when this was written: if any of them finds a simulator BUG, the clause 'bug_rule' below applies."
+ },
+ "title": "Corrected-data re-run of every lab strategy (same hypotheses, not new trials)",
+ "why": "User: 'Test all strategies with corrected data - this much of strategies won't fail, simulation trade may be mistaken.' Part 1 of the work audits the simulator independently; this file freezes how the re-run on CORRECTED data is done and judged, before any strategy is simulated on corrected data.",
+ "written": "2026-11-15 01:54:33 UTC"
+}
