@@ -689,6 +689,29 @@ def test_v2_write_endpoints_need_auth_and_act():
             bot_state.set_agent_enabled("vrp_winged", saved[2])
 
 
+def test_login_fails_closed_without_a_configured_password():
+    import auth
+    saved = (settings.admin_username, settings.admin_password, settings.admin_password_hash)
+    try:
+        settings.admin_username, settings.admin_password, settings.admin_password_hash = "admin", "", ""
+        assert not auth.authenticate("admin", ""), "empty password with nothing configured must not log in"
+        assert not auth.authenticate("admin", "anything"), "no password configured: password login disabled"
+        settings.admin_password = "s3cret-plain"
+        assert auth.authenticate("admin", "s3cret-plain") and not auth.authenticate("admin", "")
+        assert not auth.authenticate("other", "s3cret-plain")
+        settings.admin_password = "pässwörd-₹"                    # non-ASCII: no TypeError, still constant time
+        assert auth.authenticate("admin", "pässwörd-₹") and not auth.authenticate("admin", "passwoerd")
+        assert not auth.authenticate("admin", "ünïcode-wrong")
+        settings.admin_password = "s3cret-plain"
+        assert not auth.authenticate("admin", "ünïcode-wrong")
+        settings.admin_password_hash = auth.hash_password("from-hash") if hasattr(auth, "hash_password") else \
+            __import__("bcrypt").hashpw(b"from-hash", __import__("bcrypt").gensalt()).decode()
+        assert auth.authenticate("admin", "from-hash") and not auth.authenticate("admin", "s3cret-plain")
+        assert not auth.authenticate("admin", "")
+    finally:
+        settings.admin_username, settings.admin_password, settings.admin_password_hash = saved
+
+
 TESTS = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
 
 
