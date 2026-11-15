@@ -254,10 +254,14 @@ class PlatformScheduler:
             await event_calendar.refresh_calendar()
         except Exception as exc:
             logger.error("[validated] corporate-action calendar refresh failed: {}", exc)
+        import approvals
         for name, a in self._validated_agents().items():
             a.auto_start()                       # not after an operator Stop (persisted until the next Start)
-            logger.info("[validated] {} preflight: entries {}", name,
-                        a.entry_block_reason_readonly() or "allowed")
+            block = a.entry_block_reason_readonly()
+            if approvals.mode_on() and block in (None, "awaiting_approval") and a.enabled_by_setting():
+                approvals.request(name, by="preflight")       # semi-auto mode: today's ticket, pending
+                block = a.entry_block_reason_readonly()
+            logger.info("[validated] {} preflight: entries {}", name, block or "allowed")
 
     async def _validated_open(self) -> None:
         """09:15:05: one quote of the universe; attention exits at the open, then the auction fade enters."""
