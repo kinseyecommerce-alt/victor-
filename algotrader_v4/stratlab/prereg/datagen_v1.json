@@ -1,0 +1,2612 @@
+{
+ "study": "datagen_v1 - data-driven discovery: strategies created from the lab's own data, selected on old data",
+ "written": "2026-11-15 07:35",
+ "written_before_any_return": true,
+ "n_declared": 99,
+ "n_search": 79,
+ "families": {
+  "A": 15,
+  "B": 13,
+  "C": 4,
+  "D": 3,
+  "E": 9,
+  "F": 1,
+  "G": 6,
+  "H": 12,
+  "I": 6,
+  "J": 5,
+  "K": 2,
+  "M": 3
+ },
+ "splits": {
+  "discovery_minute": [
+   20160101,
+   20231109
+  ],
+  "discovery_minute_halves": [
+   [
+    20160101,
+    20191231
+   ],
+   [
+    20200101,
+    20231109
+   ]
+  ],
+  "discovery_daily": [
+   20120101,
+   20231109
+  ],
+  "discovery_daily_halves": [
+   [
+    20120101,
+    20171231
+   ],
+   [
+    20180101,
+    20231109
+   ]
+  ],
+  "validation": [
+   20231110,
+   20251216
+  ],
+  "validation_halves": [
+   [
+    20231110,
+    20241129
+   ],
+   [
+    20241202,
+    20251216
+   ]
+  ],
+  "final": [
+   20251217,
+   20261109
+  ],
+  "calendar_3y_sessions": 726
+ },
+ "engine": {
+  "fill_model": "dg1",
+  "cost_model": "2026-11/f2/dg1",
+  "notional_rs": 100000.0,
+  "slippage_bps": 2.0,
+  "stress_bps": 5.0,
+  "index_slippage_bps": 1.0,
+  "index_stress_bps": 2.5,
+  "max_per_day": 10,
+  "lots": {
+   "NIFTY": 65,
+   "BANKNIFTY": 30
+  },
+  "costs": "costs.round_trip_cost: mis=equity_mis, cnc=equity_cnc, fut=future (2026 Zerodha)",
+  "doc": "(fill model \"dg1\", part of the cost-model key): every rule is an event rule with a FIXED exit, no stop, no\ntarget, no optimisation. Rs 1 lakh per stock trade (whole shares at the entry price), index futures 1 lot (2026 lots,\nsim.LOT_SIZES), slippage 2 bps per side for stocks / 1 bps for index futures against us on both fills (5 / 2.5 bps\nstress), costs = costs.round_trip_cost (2026 Zerodha schedule): equity_mis intraday, equity_cnc delivery longs,\nfuture for stock / index futures (stock futures simulated on the cash price, like attention.py). At most 10 entries\nper candidate per day (largest rank first, ties by symbol), one open position per symbol and candidate.\n  m_intra(a, b)  minute: enter at field a's bar open, exit at field b's bar open of the same session\n  m_on           minute: enter at the 15:21 bar open, exit at the next session's 09:15 auction print\n  m_hold(h)      minute: enter at the 15:21 open, exit at the 15:21 open h sessions later\n  d_hold(h)      daily: decided in the evening of t, enter at the open of t+1, exit at the close of t+h (h = 1: the\n                 same session's close); a hold that would pass the period end exits at the period's last close\n  i_hold(h)      NIFTY 50 official daily bars as the index future, as d_hold\n  i_on           index minute bars: 15:21 open -> next 09:15 open\nExclusions: daily = events_daily's corporate-action / unexplained-gap list (events_data.ca_excluded rule) and the\npoint-in-time universe gate (member on the decision day; product \"fut\" also needs a listed stock future that day);\nminute = protocol_min_oos's dirty-link rule (old era) and ltr.CA_GAPS (2023-26), special sessions (median bar count\n< 300) on the entry / exit day, a session whose previous calendar session is missing for gap rules, an overnight\nexit beyond the period."
+ },
+ "selection": {
+  "gates": "DISCOVERY: net > 0 in H1 and H2; PF >= 1.15; trades >= 150 intraday / 60 positional in EACH half; top symbol <= 35 % of net (not index); at 5 bps (index 2.5) net > 0 in H1 and H2",
+  "rank": "passers by DSR of the DISCOVERY daily net P&L, N = n_search + 2542, V = max(robust (1.4826 MAD)^2 of the n_search DISCOVERY daily Sharpes, median 1/(T-1))",
+  "K": 10,
+  "family_cap": 3,
+  "full_table": "every candidate's DISCOVERY row is reported and appended to trials_v2.csv"
+ },
+ "validation": "protocol.evaluate(screen_only=True) on calendar_3y: protocol.screen on 2023-11-10..2025-12-16, once (validation.json is never recomputed)",
+ "final": "protocol.evaluate one-look FINAL for validation passers (ledger <datagen>/final_ledger.json); CONFIRMED = net > 0 and PF >= 1.05",
+ "proof": {
+  "definition": "PROVEN = VALIDATION screen passed AND FINAL CONFIRMED AND DSR >= 0.95 of the full-history daily net P&L (DISCOVERY start .. FINAL end) at N_full = (2023-26 variants in trials_v2.csv before this study, 2542) + n_search and the selection V AND, for long-biased rules (>= 70 % longs), the 95 % date-clustered bootstrap CI of the mean per-trade excess over NIFTY 50 on VALIDATION + FINAL above 0 AND the candidate's VALIDATION + FINAL net above the 95th percentile of 50 placebos AND every planted-edge control (p >= 0.6) detected by the DISCOVERY gates",
+  "report_only": "DSR with the ledger's robust V and the 1/(T-1) floor; DSR on VALIDATION + FINAL only; 5 bps; Rs 10 lakh account (capital.py, Rs 1 lakh per position)"
+ },
+ "controls": {
+  "shuffle": "5 seeds: every candidate's trigger cells permuted across dates within symbol in DISCOVERY, the selection gates re-applied: expected vs observed passers",
+  "placebo": "50 seeds per carried candidate and period: same count, random eligible cells, same long share",
+  "planted": [
+   [
+    "ctl_planted_min_intra_p60",
+    "minute",
+    [
+     "m_intra",
+     "o0920",
+     "o1515"
+    ],
+    "mis",
+    0.02,
+    0.6
+   ],
+   [
+    "ctl_planted_min_on_p60",
+    "minute",
+    [
+     "m_on"
+    ],
+    "fut",
+    0.02,
+    0.6
+   ],
+   [
+    "ctl_planted_daily_h5_p60",
+    "daily",
+    [
+     "d_hold",
+     5
+    ],
+    "fut",
+    0.01,
+    0.6
+   ],
+   [
+    "ctl_planted_nifty_h5_p60",
+    "idx_daily",
+    [
+     "i_hold",
+     5
+    ],
+    "fut",
+    0.3,
+    0.6
+   ],
+   [
+    "ctl_planted_daily_h5_p100",
+    "daily",
+    [
+     "d_hold",
+     5
+    ],
+    "fut",
+    0.01,
+    1.0
+   ],
+   [
+    "ctl_random_daily_h5_p50",
+    "daily",
+    [
+     "d_hold",
+     5
+    ],
+    "fut",
+    0.01,
+    0.5
+   ],
+   [
+    "ctl_random_min_intra_p50",
+    "minute",
+    [
+     "m_intra",
+     "o0920",
+     "o1515"
+    ],
+    "mis",
+    0.02,
+    0.5
+   ]
+  ]
+ },
+ "seed": 20261115,
+ "excluded_by_design": {
+  "auction fade with entry and exit inside 09:15-09:30": "neighbours of the proven AUC-FADE-2PCT / 3PCT (not new)",
+  "high-volume UP-day overnight long": "the proven SWING-ATTN-ON-3X and its threshold neighbours (not new)",
+  "index-weight changes": "NIFTY 50 / 100 reviews give < 60 events in VALIDATION (flows study: 37): cannot pass",
+  "expiry-day intraday index trades": "< 150 index expiry sessions in VALIDATION: the intraday minimum cannot be met",
+  "MWPL proximity": "no per-stock market-wide-position-limit series in the lab's data (only the ban list)",
+  "VIX term structure": "no India VIX futures data in the lab",
+  "options": "no candidate trades options; nothing uses VIX-modelled option prices"
+ },
+ "candidates": [
+  {
+   "id": "dg_a_gapgo_1",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.01, mode=go) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.01,
+    "mode": "go"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "5be7abaafce4",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 2903,
+    "disc_h2": 3987,
+    "validation": 1656,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gaprev_1",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.01, mode=revfollow) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.01,
+    "mode": "revfollow"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "1413afbd51f6",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 4471,
+    "disc_h2": 5305,
+    "validation": 2411,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gapfadeday_1",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.01, mode=fade_day) -> m_intra/o0915/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.01,
+    "mode": "fade_day"
+   },
+   "exec": [
+    "m_intra",
+    "o0915",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "ffa048a70a8f",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 6305,
+    "disc_h2": 6831,
+    "validation": 3227,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gapgo_2",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.02, mode=go) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.02,
+    "mode": "go"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "2448e9f221c8",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 665,
+    "disc_h2": 1235,
+    "validation": 512,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gaprev_2",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.02, mode=revfollow) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.02,
+    "mode": "revfollow"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "4ab4d592467e",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 1052,
+    "disc_h2": 1666,
+    "validation": 736,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gapfadeday_2",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.02, mode=fade_day) -> m_intra/o0915/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.02,
+    "mode": "fade_day"
+   },
+   "exec": [
+    "m_intra",
+    "o0915",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "2ec81cd0d80d",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 1650,
+    "disc_h2": 2515,
+    "validation": 1112,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gapgo_3",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.03, mode=go) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.03,
+    "mode": "go"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "a59d79120c11",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 271,
+    "disc_h2": 559,
+    "validation": 192,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gaprev_3",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.03, mode=revfollow) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.03,
+    "mode": "revfollow"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "d52256c51042",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 376,
+    "disc_h2": 763,
+    "validation": 345,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_gapfadeday_3",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_gap_path(g=0.03, mode=fade_day) -> m_intra/o0915/o1515 [mis]",
+   "rule_doc": "A: opening-auction gap and the 09:15-09:20 path. go = the first five minutes confirm the gap (same sign as the\ngap): trade with the gap; revfollow = they moved against it: trade against it; fade_day = fade from the auction.",
+   "params": {
+    "g": 0.03,
+    "mode": "fade_day"
+   },
+   "exec": [
+    "m_intra",
+    "o0915",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "edffd0eeec11",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 630,
+    "disc_h2": 1227,
+    "validation": 520,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_open5_1_cont",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_open5_shock(r=0.01, mode=cont) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: no real gap (|gap| < 0.5 %) but the first five minutes move >= r: continue / fade from 09:20.",
+   "params": {
+    "r": 0.01,
+    "mode": "cont"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "a5e0d5db434e",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 3771,
+    "disc_h2": 4421,
+    "validation": 2395,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_open5_1_fade",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_open5_shock(r=0.01, mode=fade) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: no real gap (|gap| < 0.5 %) but the first five minutes move >= r: continue / fade from 09:20.",
+   "params": {
+    "r": 0.01,
+    "mode": "fade"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "a6707052a352",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 3771,
+    "disc_h2": 4421,
+    "validation": 2395,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_open5_2_cont",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_open5_shock(r=0.02, mode=cont) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: no real gap (|gap| < 0.5 %) but the first five minutes move >= r: continue / fade from 09:20.",
+   "params": {
+    "r": 0.02,
+    "mode": "cont"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "6185fc34df7b",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 338,
+    "disc_h2": 602,
+    "validation": 333,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_open5_2_fade",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_open5_shock(r=0.02, mode=fade) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: no real gap (|gap| < 0.5 %) but the first five minutes move >= r: continue / fade from 09:20.",
+   "params": {
+    "r": 0.02,
+    "mode": "fade"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Opening call-auction imbalances overshoot; whether the first five minutes confirm or reverse the gap tells information (continues) from imbalance (reverts).",
+   "fingerprint": "6c10558e6bc3",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 338,
+    "disc_h2": 602,
+    "validation": 333,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_idiogap_1",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_idio_gap(g=0.01) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: the stock gaps >= g against NIFTY 50's own opening gap (idiosyncratic auction imbalance): fade from 09:20.",
+   "params": {
+    "g": 0.01
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "A gap against the index's own gap is a stock-specific auction imbalance, not market news.",
+   "fingerprint": "6e420ce4caaa",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 1494,
+    "disc_h2": 1434,
+    "validation": 881,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_a_idiogap_2",
+   "family": "A",
+   "grid": "minute",
+   "rule": "r_idio_gap(g=0.02) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "A: the stock gaps >= g against NIFTY 50's own opening gap (idiosyncratic auction imbalance): fade from 09:20.",
+   "params": {
+    "g": 0.02
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "A gap against the index's own gap is a stock-specific auction imbalance, not market news.",
+   "fingerprint": "8e8c87601569",
+   "counts": {
+    "family": "A",
+    "horizon": "intraday",
+    "disc_h1": 384,
+    "disc_h2": 510,
+    "validation": 279,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_earlyvol_3_cont",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_early_vol(k=3.0, mode=cont) -> m_intra/o0945/o1515 [mis]",
+   "rule_doc": "B: volume 09:15-09:44 >= k x its 20-session mean and |move 09:15 open -> 09:44 close| >= 0.5 %: with (cont) /\nagainst (fade) the move from 09:45.",
+   "params": {
+    "k": 3.0,
+    "mode": "cont"
+   },
+   "exec": [
+    "m_intra",
+    "o0945",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "09513f89fe2b",
+   "counts": {
+    "family": "B",
+    "horizon": "intraday",
+    "disc_h1": 2690,
+    "disc_h2": 2815,
+    "validation": 1708,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_earlyvol_3_fade",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_early_vol(k=3.0, mode=fade) -> m_intra/o0945/o1515 [mis]",
+   "rule_doc": "B: volume 09:15-09:44 >= k x its 20-session mean and |move 09:15 open -> 09:44 close| >= 0.5 %: with (cont) /\nagainst (fade) the move from 09:45.",
+   "params": {
+    "k": 3.0,
+    "mode": "fade"
+   },
+   "exec": [
+    "m_intra",
+    "o0945",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "77fd22216ff3",
+   "counts": {
+    "family": "B",
+    "horizon": "intraday",
+    "disc_h1": 2690,
+    "disc_h2": 2815,
+    "validation": 1708,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_earlyvol_5_cont",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_early_vol(k=5.0, mode=cont) -> m_intra/o0945/o1515 [mis]",
+   "rule_doc": "B: volume 09:15-09:44 >= k x its 20-session mean and |move 09:15 open -> 09:44 close| >= 0.5 %: with (cont) /\nagainst (fade) the move from 09:45.",
+   "params": {
+    "k": 5.0,
+    "mode": "cont"
+   },
+   "exec": [
+    "m_intra",
+    "o0945",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "35fadff3080d",
+   "counts": {
+    "family": "B",
+    "horizon": "intraday",
+    "disc_h1": 1119,
+    "disc_h2": 1070,
+    "validation": 751,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_earlyvol_5_fade",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_early_vol(k=5.0, mode=fade) -> m_intra/o0945/o1515 [mis]",
+   "rule_doc": "B: volume 09:15-09:44 >= k x its 20-session mean and |move 09:15 open -> 09:44 close| >= 0.5 %: with (cont) /\nagainst (fade) the move from 09:45.",
+   "params": {
+    "k": 5.0,
+    "mode": "fade"
+   },
+   "exec": [
+    "m_intra",
+    "o0945",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "b009e622eb0a",
+   "counts": {
+    "family": "B",
+    "horizon": "intraday",
+    "disc_h1": 1119,
+    "disc_h2": 1070,
+    "validation": 751,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_downattn_on_rev",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_down_attention(mode=rev) -> m_on [fut]",
+   "rule_doc": "B: volume 09:15-15:20 >= 3 x the mean full-day volume of the previous 20 sessions on a DOWN day (15:20 close <\nprevious close): overnight long (rev) / short (cont). The proven SWING-ATTN-ON-3X is the UP-day long.",
+   "params": {
+    "mode": "rev"
+   },
+   "exec": [
+    "m_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "d81aa3a4ccae",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 679,
+    "disc_h2": 580,
+    "validation": 375,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_downattn_on_cont",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_down_attention(mode=cont) -> m_on [fut]",
+   "rule_doc": "B: volume 09:15-15:20 >= 3 x the mean full-day volume of the previous 20 sessions on a DOWN day (15:20 close <\nprevious close): overnight long (rev) / short (cont). The proven SWING-ATTN-ON-3X is the UP-day long.",
+   "params": {
+    "mode": "cont"
+   },
+   "exec": [
+    "m_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "b8cf4cdcbe75",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 679,
+    "disc_h2": 580,
+    "validation": 375,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_lasthour_3_cont",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_lasthour_vol(k=3.0, mode=cont) -> m_on [fut]",
+   "rule_doc": "B: last-hour volume (14:30-15:20) >= k x its 20-session mean with |14:30 open -> 15:20 close| >= 0.5 %:\novernight with (cont) / against (fade) that move.",
+   "params": {
+    "k": 3.0,
+    "mode": "cont"
+   },
+   "exec": [
+    "m_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "9ab552920c17",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 1652,
+    "disc_h2": 1502,
+    "validation": 631,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_lasthour_3_fade",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_lasthour_vol(k=3.0, mode=fade) -> m_on [fut]",
+   "rule_doc": "B: last-hour volume (14:30-15:20) >= k x its 20-session mean with |14:30 open -> 15:20 close| >= 0.5 %:\novernight with (cont) / against (fade) that move.",
+   "params": {
+    "k": 3.0,
+    "mode": "fade"
+   },
+   "exec": [
+    "m_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "355efae1378e",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 1652,
+    "disc_h2": 1502,
+    "validation": 631,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_lasthour_5_cont",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_lasthour_vol(k=5.0, mode=cont) -> m_on [fut]",
+   "rule_doc": "B: last-hour volume (14:30-15:20) >= k x its 20-session mean with |14:30 open -> 15:20 close| >= 0.5 %:\novernight with (cont) / against (fade) that move.",
+   "params": {
+    "k": 5.0,
+    "mode": "cont"
+   },
+   "exec": [
+    "m_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "ec070116a5d9",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 686,
+    "disc_h2": 583,
+    "validation": 280,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_lasthour_5_fade",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_lasthour_vol(k=5.0, mode=fade) -> m_on [fut]",
+   "rule_doc": "B: last-hour volume (14:30-15:20) >= k x its 20-session mean with |14:30 open -> 15:20 close| >= 0.5 %:\novernight with (cont) / against (fade) that move.",
+   "params": {
+    "k": 5.0,
+    "mode": "fade"
+   },
+   "exec": [
+    "m_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "48cf7869512a",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 686,
+    "disc_h2": 583,
+    "validation": 280,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_attnswing_up_h5",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_attention_swing(day=up) -> m_hold/5 [fut]",
+   "rule_doc": "B: volume 09:15-15:20 >= 3 x the 20-session full-day mean on an up / down day: long for 5 sessions.",
+   "params": {
+    "day": "up"
+   },
+   "exec": [
+    "m_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "3a9c5526a168",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 941,
+    "disc_h2": 1010,
+    "validation": 537,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_attnswing_down_h5",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_attention_swing(day=down) -> m_hold/5 [fut]",
+   "rule_doc": "B: volume 09:15-15:20 >= 3 x the 20-session full-day mean on an up / down day: long for 5 sessions.",
+   "params": {
+    "day": "down"
+   },
+   "exec": [
+    "m_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "b18247def5f6",
+   "counts": {
+    "family": "B",
+    "horizon": "positional",
+    "disc_h1": 615,
+    "disc_h2": 508,
+    "validation": 354,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_b_gapvol_hivol_go",
+   "family": "B",
+   "grid": "minute",
+   "rule": "r_gap_volume(mode=hivol_go) -> m_intra/o0930/o1515 [mis]",
+   "rule_doc": "B: |gap| >= 2 % with first-15-minute volume <= 0.5 x normal (no news: fade) or >= 3 x normal (news: follow),\nfrom 09:30.",
+   "params": {
+    "mode": "hivol_go"
+   },
+   "exec": [
+    "m_intra",
+    "o0930",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Abnormal volume = attention / news; attention-driven buying pressure and liquidity demand move prices and partly revert.",
+   "fingerprint": "87a7a76c7f4e",
+   "counts": {
+    "family": "B",
+    "horizon": "intraday",
+    "disc_h1": 739,
+    "disc_h2": 867,
+    "validation": 581,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_c_expiry_on_long",
+   "family": "C",
+   "grid": "idx_minute",
+   "rule": "r_expiry(when=on, side=1) -> i_on [fut]",
+   "rule_doc": "C: index weekly / monthly expiry. on = the index's own expiry session, overnight to the next open; pre = the\nsession before the index's expiry session, overnight into it.",
+   "params": {
+    "when": "on",
+    "side": 1
+   },
+   "exec": [
+    "i_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Option writers' delta hedging and the unwinding of hedges around index expiries move the index overnight.",
+   "fingerprint": "e37070a7c535",
+   "counts": {
+    "family": "C",
+    "horizon": "positional",
+    "disc_h1": 258,
+    "disc_h2": 375,
+    "validation": 173,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_c_expiry_on_short",
+   "family": "C",
+   "grid": "idx_minute",
+   "rule": "r_expiry(when=on, side=-1) -> i_on [fut]",
+   "rule_doc": "C: index weekly / monthly expiry. on = the index's own expiry session, overnight to the next open; pre = the\nsession before the index's expiry session, overnight into it.",
+   "params": {
+    "when": "on",
+    "side": -1
+   },
+   "exec": [
+    "i_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Option writers' delta hedging and the unwinding of hedges around index expiries move the index overnight.",
+   "fingerprint": "7d7cb644e4e9",
+   "counts": {
+    "family": "C",
+    "horizon": "positional",
+    "disc_h1": 258,
+    "disc_h2": 375,
+    "validation": 173,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_c_expiry_pre_long",
+   "family": "C",
+   "grid": "idx_minute",
+   "rule": "r_expiry(when=pre, side=1) -> i_on [fut]",
+   "rule_doc": "C: index weekly / monthly expiry. on = the index's own expiry session, overnight to the next open; pre = the\nsession before the index's expiry session, overnight into it.",
+   "params": {
+    "when": "pre",
+    "side": 1
+   },
+   "exec": [
+    "i_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Option writers' delta hedging and the unwinding of hedges around index expiries move the index overnight.",
+   "fingerprint": "effd7641e664",
+   "counts": {
+    "family": "C",
+    "horizon": "positional",
+    "disc_h1": 259,
+    "disc_h2": 374,
+    "validation": 174,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_c_expiry_pre_short",
+   "family": "C",
+   "grid": "idx_minute",
+   "rule": "r_expiry(when=pre, side=-1) -> i_on [fut]",
+   "rule_doc": "C: index weekly / monthly expiry. on = the index's own expiry session, overnight to the next open; pre = the\nsession before the index's expiry session, overnight into it.",
+   "params": {
+    "when": "pre",
+    "side": -1
+   },
+   "exec": [
+    "i_on"
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Option writers' delta hedging and the unwinding of hedges around index expiries move the index overnight.",
+   "fingerprint": "cb27abd2152b",
+   "counts": {
+    "family": "C",
+    "horizon": "positional",
+    "disc_h1": 259,
+    "disc_h2": 374,
+    "validation": 174,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_d_vixspike_10_h1",
+   "family": "D",
+   "grid": "daily",
+   "rule": "r_vix_spike_losers(x=0.1) -> d_hold/1 [fut]",
+   "rule_doc": "D: India VIX up >= x close to close: buy the stocks that fell most that day (forced de-risking).",
+   "params": {
+    "x": 0.1
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "A VIX spike is forced de-risking (margin calls, risk limits); the fear premium is paid to liquidity providers.",
+   "fingerprint": "4764dabe6d56",
+   "counts": {
+    "family": "D",
+    "horizon": "positional",
+    "disc_h1": 440,
+    "disc_h2": 520,
+    "validation": 130,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_d_vixspike_10_h5",
+   "family": "D",
+   "grid": "daily",
+   "rule": "r_vix_spike_losers(x=0.1) -> d_hold/5 [fut]",
+   "rule_doc": "D: India VIX up >= x close to close: buy the stocks that fell most that day (forced de-risking).",
+   "params": {
+    "x": 0.1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "A VIX spike is forced de-risking (margin calls, risk limits); the fear premium is paid to liquidity providers.",
+   "fingerprint": "ddaaba06e7be",
+   "counts": {
+    "family": "D",
+    "horizon": "positional",
+    "disc_h1": 440,
+    "disc_h2": 520,
+    "validation": 130,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_d_vixhigh_losers_h5",
+   "family": "D",
+   "grid": "daily",
+   "rule": "r_vix_high_losers() -> d_hold/5 [fut]",
+   "rule_doc": "D: India VIX in the top decile of its previous 252 sessions: buy the stocks whose 5-session fall is >= 5 %.",
+   "params": {},
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "A VIX spike is forced de-risking (margin calls, risk limits); the fear premium is paid to liquidity providers.",
+   "fingerprint": "a54ee6c08672",
+   "counts": {
+    "family": "D",
+    "horizon": "positional",
+    "disc_h1": 808,
+    "disc_h2": 1340,
+    "validation": 449,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_delivup_15_h5",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_delivery_shock(pp=15.0, day=up) -> d_hold/5 [cnc]",
+   "rule_doc": "E: delivery % >= its 20-session mean + pp points on >= 2 x volume with a >= 2 % move: up -> long (genuine\naccumulation), down -> short (genuine distribution).",
+   "params": {
+    "pp": 15.0,
+    "day": "up"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "45ed5804a93b",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 1041,
+    "disc_h2": 645,
+    "validation": 313,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_delivdn_15_h5",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_delivery_shock(pp=15.0, day=down) -> d_hold/5 [fut]",
+   "rule_doc": "E: delivery % >= its 20-session mean + pp points on >= 2 x volume with a >= 2 % move: up -> long (genuine\naccumulation), down -> short (genuine distribution).",
+   "params": {
+    "pp": 15.0,
+    "day": "down"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "da89bcda7bb8",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 512,
+    "disc_h2": 382,
+    "validation": 140,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_delivup_15_h20",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_delivery_shock(pp=15.0, day=up) -> d_hold/20 [cnc]",
+   "rule_doc": "E: delivery % >= its 20-session mean + pp points on >= 2 x volume with a >= 2 % move: up -> long (genuine\naccumulation), down -> short (genuine distribution).",
+   "params": {
+    "pp": 15.0,
+    "day": "up"
+   },
+   "exec": [
+    "d_hold",
+    20
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "9893413790e7",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 970,
+    "disc_h2": 614,
+    "validation": 305,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_delivdn_15_h20",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_delivery_shock(pp=15.0, day=down) -> d_hold/20 [fut]",
+   "rule_doc": "E: delivery % >= its 20-session mean + pp points on >= 2 x volume with a >= 2 % move: up -> long (genuine\naccumulation), down -> short (genuine distribution).",
+   "params": {
+    "pp": 15.0,
+    "day": "down"
+   },
+   "exec": [
+    "d_hold",
+    20
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "9f6aca33afdb",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 487,
+    "disc_h2": 371,
+    "validation": 137,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_delivup_25_h5",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_delivery_shock(pp=25.0, day=up) -> d_hold/5 [cnc]",
+   "rule_doc": "E: delivery % >= its 20-session mean + pp points on >= 2 x volume with a >= 2 % move: up -> long (genuine\naccumulation), down -> short (genuine distribution).",
+   "params": {
+    "pp": 25.0,
+    "day": "up"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "1e9bb1825cdb",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 330,
+    "disc_h2": 220,
+    "validation": 98,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_delivup_25_h20",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_delivery_shock(pp=25.0, day=up) -> d_hold/20 [cnc]",
+   "rule_doc": "E: delivery % >= its 20-session mean + pp points on >= 2 x volume with a >= 2 % move: up -> long (genuine\naccumulation), down -> short (genuine distribution).",
+   "params": {
+    "pp": 25.0,
+    "day": "up"
+   },
+   "exec": [
+    "d_hold",
+    20
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "84c585ee8cca",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 319,
+    "disc_h2": 217,
+    "validation": 97,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_lowdeliv_fade_h1",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_low_delivery_spike() -> d_hold/1 [fut]",
+   "rule_doc": "E: delivery % <= its 20-session mean - 15 points on >= 3 x volume with |move| >= 3 % (speculative churn):\nfade the move.",
+   "params": {},
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "df020668e200",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 728,
+    "disc_h2": 930,
+    "validation": 620,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_lowdeliv_fade_h5",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_low_delivery_spike() -> d_hold/5 [fut]",
+   "rule_doc": "E: delivery % <= its 20-session mean - 15 points on >= 3 x volume with |move| >= 3 % (speculative churn):\nfade the move.",
+   "params": {},
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "f27bec09f044",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 660,
+    "disc_h2": 846,
+    "validation": 562,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_e_delivtrend_h20",
+   "family": "E",
+   "grid": "daily",
+   "rule": "r_delivery_trend() -> d_hold/20 [cnc]",
+   "rule_doc": "E: 5-session mean delivery % >= the previous 60-session mean + 10 points with a positive 20-session return\n(steady accumulation): long.",
+   "params": {},
+   "exec": [
+    "d_hold",
+    20
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Delivery % separates investors who take shares home from intraday speculators: a delivery-heavy move is informed and drifts; a delivery-light spike is churn and fades.",
+   "fingerprint": "93d3b899efda",
+   "counts": {
+    "family": "E",
+    "horizon": "positional",
+    "disc_h1": 3281,
+    "disc_h2": 2969,
+    "validation": 1782,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_f_fiiflow_z10_h1",
+   "family": "F",
+   "grid": "idx_daily",
+   "rule": "r_fii_flow(z=1.0) -> i_hold/1 [fut]",
+   "rule_doc": "F: FII net index-futures position (long - short contracts) changes by >= z standard deviations (previous 250\ndaily changes) in a day: follow the FIIs on NIFTY.",
+   "params": {
+    "z": 1.0
+   },
+   "exec": [
+    "i_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "FIIs are the large, informed index-futures players; retail (Client) positioning is the contrarian side.",
+   "fingerprint": "f125a0b75867",
+   "counts": {
+    "family": "F",
+    "horizon": "positional",
+    "disc_h1": 209,
+    "disc_h2": 349,
+    "validation": 85,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_g_banentry_long_h5",
+   "family": "G",
+   "grid": "daily",
+   "rule": "r_ban(event=entry, side=1) -> d_hold/5 [cnc]",
+   "rule_doc": "G: F&O ban list. entry = the first trade date in the ban (the file of t+1 lists it, t's did not); exit = the\nfirst trade date out of it. Decided in the evening of t (t+1's ban file is published after t's close), entered at\nt+1's open.",
+   "params": {
+    "event": "entry",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "The F&O ban forbids new positions until OI falls below 80 % of the market-wide limit: entry forces unwinding of a crowded trade; exit re-opens speculation.",
+   "fingerprint": "9ebeb7a7449a",
+   "counts": {
+    "family": "G",
+    "horizon": "positional",
+    "disc_h1": 684,
+    "disc_h2": 783,
+    "validation": 399,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_g_banentry_long_h20",
+   "family": "G",
+   "grid": "daily",
+   "rule": "r_ban(event=entry, side=1) -> d_hold/20 [cnc]",
+   "rule_doc": "G: F&O ban list. entry = the first trade date in the ban (the file of t+1 lists it, t's did not); exit = the\nfirst trade date out of it. Decided in the evening of t (t+1's ban file is published after t's close), entered at\nt+1's open.",
+   "params": {
+    "event": "entry",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    20
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "The F&O ban forbids new positions until OI falls below 80 % of the market-wide limit: entry forces unwinding of a crowded trade; exit re-opens speculation.",
+   "fingerprint": "a694faac76ca",
+   "counts": {
+    "family": "G",
+    "horizon": "positional",
+    "disc_h1": 428,
+    "disc_h2": 502,
+    "validation": 264,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_g_banentry_short_id",
+   "family": "G",
+   "grid": "daily",
+   "rule": "r_ban(event=entry, side=-1) -> d_hold/1 [mis]",
+   "rule_doc": "G: F&O ban list. entry = the first trade date in the ban (the file of t+1 lists it, t's did not); exit = the\nfirst trade date out of it. Decided in the evening of t (t+1's ban file is published after t's close), entered at\nt+1's open.",
+   "params": {
+    "event": "entry",
+    "side": -1
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "The F&O ban forbids new positions until OI falls below 80 % of the market-wide limit: entry forces unwinding of a crowded trade; exit re-opens speculation.",
+   "fingerprint": "77c22eb9dca1",
+   "counts": {
+    "family": "G",
+    "horizon": "intraday",
+    "disc_h1": 718,
+    "disc_h2": 836,
+    "validation": 426,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_g_banexit_long_h5",
+   "family": "G",
+   "grid": "daily",
+   "rule": "r_ban(event=exit, side=1) -> d_hold/5 [cnc]",
+   "rule_doc": "G: F&O ban list. entry = the first trade date in the ban (the file of t+1 lists it, t's did not); exit = the\nfirst trade date out of it. Decided in the evening of t (t+1's ban file is published after t's close), entered at\nt+1's open.",
+   "params": {
+    "event": "exit",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "The F&O ban forbids new positions until OI falls below 80 % of the market-wide limit: entry forces unwinding of a crowded trade; exit re-opens speculation.",
+   "fingerprint": "4e572ed0893f",
+   "counts": {
+    "family": "G",
+    "horizon": "positional",
+    "disc_h1": 661,
+    "disc_h2": 770,
+    "validation": 390,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_g_banexit_long_h20",
+   "family": "G",
+   "grid": "daily",
+   "rule": "r_ban(event=exit, side=1) -> d_hold/20 [cnc]",
+   "rule_doc": "G: F&O ban list. entry = the first trade date in the ban (the file of t+1 lists it, t's did not); exit = the\nfirst trade date out of it. Decided in the evening of t (t+1's ban file is published after t's close), entered at\nt+1's open.",
+   "params": {
+    "event": "exit",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    20
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "The F&O ban forbids new positions until OI falls below 80 % of the market-wide limit: entry forces unwinding of a crowded trade; exit re-opens speculation.",
+   "fingerprint": "3cf782227cb4",
+   "counts": {
+    "family": "G",
+    "horizon": "positional",
+    "disc_h1": 428,
+    "disc_h2": 522,
+    "validation": 266,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_g_banexit_short_h5",
+   "family": "G",
+   "grid": "daily",
+   "rule": "r_ban(event=exit, side=-1) -> d_hold/5 [fut]",
+   "rule_doc": "G: F&O ban list. entry = the first trade date in the ban (the file of t+1 lists it, t's did not); exit = the\nfirst trade date out of it. Decided in the evening of t (t+1's ban file is published after t's close), entered at\nt+1's open.",
+   "params": {
+    "event": "exit",
+    "side": -1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "The F&O ban forbids new positions until OI falls below 80 % of the market-wide limit: entry forces unwinding of a crowded trade; exit re-opens speculation.",
+   "fingerprint": "6000a3597153",
+   "counts": {
+    "family": "G",
+    "horizon": "positional",
+    "disc_h1": 660,
+    "disc_h2": 770,
+    "validation": 390,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_long_buildup_10_h1",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=long_buildup, thr=0.1) -> d_hold/1 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "long_buildup",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "d4d41ea493ca",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 4146,
+    "disc_h2": 3570,
+    "validation": 974,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_long_buildup_10_h5",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=long_buildup, thr=0.1) -> d_hold/5 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "long_buildup",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "600db1e63cad",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 3661,
+    "disc_h2": 3174,
+    "validation": 884,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_long_buildup_20_h1",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=long_buildup, thr=0.2) -> d_hold/1 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "long_buildup",
+    "thr": 0.2
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "226037bcb420",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 1690,
+    "disc_h2": 1392,
+    "validation": 400,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_long_buildup_20_h5",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=long_buildup, thr=0.2) -> d_hold/5 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "long_buildup",
+    "thr": 0.2
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "96f2f36ea7f4",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 1595,
+    "disc_h2": 1310,
+    "validation": 374,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_short_buildup_10_h1",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=short_buildup, thr=0.1) -> d_hold/1 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "short_buildup",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "e5993beda8a6",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 3172,
+    "disc_h2": 2899,
+    "validation": 918,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_short_buildup_10_h5",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=short_buildup, thr=0.1) -> d_hold/5 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "short_buildup",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "e6295dd3afbf",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 2780,
+    "disc_h2": 2605,
+    "validation": 828,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_short_buildup_20_h1",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=short_buildup, thr=0.2) -> d_hold/1 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "short_buildup",
+    "thr": 0.2
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "728e64d9e26d",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 1184,
+    "disc_h2": 1113,
+    "validation": 349,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_short_buildup_20_h5",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=short_buildup, thr=0.2) -> d_hold/5 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "short_buildup",
+    "thr": 0.2
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "ce180cc19083",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 1103,
+    "disc_h2": 1046,
+    "validation": 332,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_short_covering_10_h1",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=short_covering, thr=0.1) -> d_hold/1 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "short_covering",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "66370364efef",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 759,
+    "disc_h2": 863,
+    "validation": 239,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_short_covering_10_h5",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=short_covering, thr=0.1) -> d_hold/5 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "short_covering",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "959bb8d76cf2",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 713,
+    "disc_h2": 803,
+    "validation": 228,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_long_unwinding_10_h1",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=long_unwinding, thr=0.1) -> d_hold/1 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "long_unwinding",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "1cdc3e532901",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 597,
+    "disc_h2": 605,
+    "validation": 128,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_h_long_unwinding_10_h5",
+   "family": "H",
+   "grid": "daily",
+   "rule": "r_oi_quadrant(quad=long_unwinding, thr=0.1) -> d_hold/5 [fut]",
+   "rule_doc": "H: stock-futures OI change vs price change on the day (|move| >= 2 %, |OI change| >= thr): long build-up\n(price up, OI up) -> long; short build-up (down, up) -> short; short covering (up, OI down) -> short (a forced move\nfades); long unwinding (down, down) -> long.",
+   "params": {
+    "quad": "long_unwinding",
+    "thr": 0.1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Futures OI tells new positions from closed ones: build-ups are new informed money (continue), short covering / long unwinding are forced closes (revert).",
+   "fingerprint": "d40b4824dafe",
+   "counts": {
+    "family": "H",
+    "horizon": "positional",
+    "disc_h1": 571,
+    "disc_h2": 560,
+    "validation": 124,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_i_instbuy_h1",
+   "family": "I",
+   "grid": "daily",
+   "rule": "r_deals(cls=inst, flow=buy, side=1) -> d_hold/1 [fut]",
+   "rule_doc": "I: net bulk / block deals of the client class on the day >= Rs 10 crore (buy) or <= -Rs 10 crore (sell).",
+   "params": {
+    "cls": "inst",
+    "flow": "buy",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Large negotiated / bulk trades by a client class reveal who is accumulating; price pressure from big blocks partly reverts.",
+   "fingerprint": "c0a6137b1af2",
+   "counts": {
+    "family": "I",
+    "horizon": "positional",
+    "disc_h1": 80,
+    "disc_h2": 118,
+    "validation": 71,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_i_instbuy_h5",
+   "family": "I",
+   "grid": "daily",
+   "rule": "r_deals(cls=inst, flow=buy, side=1) -> d_hold/5 [cnc]",
+   "rule_doc": "I: net bulk / block deals of the client class on the day >= Rs 10 crore (buy) or <= -Rs 10 crore (sell).",
+   "params": {
+    "cls": "inst",
+    "flow": "buy",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Large negotiated / bulk trades by a client class reveal who is accumulating; price pressure from big blocks partly reverts.",
+   "fingerprint": "b9733b146570",
+   "counts": {
+    "family": "I",
+    "horizon": "positional",
+    "disc_h1": 220,
+    "disc_h2": 344,
+    "validation": 177,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_i_instsell_rev_h5",
+   "family": "I",
+   "grid": "daily",
+   "rule": "r_deals(cls=inst, flow=sell, side=1) -> d_hold/5 [cnc]",
+   "rule_doc": "I: net bulk / block deals of the client class on the day >= Rs 10 crore (buy) or <= -Rs 10 crore (sell).",
+   "params": {
+    "cls": "inst",
+    "flow": "sell",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Large negotiated / bulk trades by a client class reveal who is accumulating; price pressure from big blocks partly reverts.",
+   "fingerprint": "65ab0f978010",
+   "counts": {
+    "family": "I",
+    "horizon": "positional",
+    "disc_h1": 167,
+    "disc_h2": 196,
+    "validation": 114,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_i_otherbuy_h5",
+   "family": "I",
+   "grid": "daily",
+   "rule": "r_deals(cls=other, flow=buy, side=1) -> d_hold/5 [cnc]",
+   "rule_doc": "I: net bulk / block deals of the client class on the day >= Rs 10 crore (buy) or <= -Rs 10 crore (sell).",
+   "params": {
+    "cls": "other",
+    "flow": "buy",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Large negotiated / bulk trades by a client class reveal who is accumulating; price pressure from big blocks partly reverts.",
+   "fingerprint": "aea67100a7ee",
+   "counts": {
+    "family": "I",
+    "horizon": "positional",
+    "disc_h1": 284,
+    "disc_h2": 245,
+    "validation": 227,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_i_otherbuy_h20",
+   "family": "I",
+   "grid": "daily",
+   "rule": "r_deals(cls=other, flow=buy, side=1) -> d_hold/20 [cnc]",
+   "rule_doc": "I: net bulk / block deals of the client class on the day >= Rs 10 crore (buy) or <= -Rs 10 crore (sell).",
+   "params": {
+    "cls": "other",
+    "flow": "buy",
+    "side": 1
+   },
+   "exec": [
+    "d_hold",
+    20
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Large negotiated / bulk trades by a client class reveal who is accumulating; price pressure from big blocks partly reverts.",
+   "fingerprint": "5903959d2025",
+   "counts": {
+    "family": "I",
+    "horizon": "positional",
+    "disc_h1": 261,
+    "disc_h2": 231,
+    "validation": 204,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_i_othersell_short_h5",
+   "family": "I",
+   "grid": "daily",
+   "rule": "r_deals(cls=other, flow=sell, side=-1) -> d_hold/5 [fut]",
+   "rule_doc": "I: net bulk / block deals of the client class on the day >= Rs 10 crore (buy) or <= -Rs 10 crore (sell).",
+   "params": {
+    "cls": "other",
+    "flow": "sell",
+    "side": -1
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Large negotiated / bulk trades by a client class reveal who is accumulating; price pressure from big blocks partly reverts.",
+   "fingerprint": "d827b98257a6",
+   "counts": {
+    "family": "I",
+    "horizon": "positional",
+    "disc_h1": 184,
+    "disc_h2": 176,
+    "validation": 98,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_j_resgap_2_cont",
+   "family": "J",
+   "grid": "minute",
+   "rule": "r_results_gap(g=0.02, mode=cont) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "J: results published out of market hours (after the previous close, before 09:15) and the stock gaps >= g:\nwith (cont) / against (fade) the gap from 09:20.",
+   "params": {
+    "g": 0.02,
+    "mode": "cont"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Results released outside market hours are absorbed by the next auction; under-reaction drifts, over-reaction reverts.",
+   "fingerprint": "deec9aa8557e",
+   "counts": {
+    "family": "J",
+    "horizon": "intraday",
+    "disc_h1": 260,
+    "disc_h2": 305,
+    "validation": 179,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_j_resgap_2_fade",
+   "family": "J",
+   "grid": "minute",
+   "rule": "r_results_gap(g=0.02, mode=fade) -> m_intra/o0920/o1515 [mis]",
+   "rule_doc": "J: results published out of market hours (after the previous close, before 09:15) and the stock gaps >= g:\nwith (cont) / against (fade) the gap from 09:20.",
+   "params": {
+    "g": 0.02,
+    "mode": "fade"
+   },
+   "exec": [
+    "m_intra",
+    "o0920",
+    "o1515"
+   ],
+   "product": "mis",
+   "horizon": "intraday",
+   "story": "Results released outside market hours are absorbed by the next auction; under-reaction drifts, over-reaction reverts.",
+   "fingerprint": "970a67d48667",
+   "counts": {
+    "family": "J",
+    "horizon": "intraday",
+    "disc_h1": 260,
+    "disc_h2": 305,
+    "validation": 179,
+    "need": 150,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_j_react_up_h5",
+   "family": "J",
+   "grid": "daily",
+   "rule": "r_results_reaction(a=0.04, mode=up) -> d_hold/5 [cnc]",
+   "rule_doc": "J: on the results reaction day the stock beats (up) / lags (down) NIFTY by >= a close to close: up -> long,\ndown -> short; fade = against the move either way.",
+   "params": {
+    "a": 0.04,
+    "mode": "up"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Results released outside market hours are absorbed by the next auction; under-reaction drifts, over-reaction reverts.",
+   "fingerprint": "809b456af00a",
+   "counts": {
+    "family": "J",
+    "horizon": "positional",
+    "disc_h1": 1462,
+    "disc_h2": 1527,
+    "validation": 564,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_j_react_down_h5",
+   "family": "J",
+   "grid": "daily",
+   "rule": "r_results_reaction(a=0.04, mode=down) -> d_hold/5 [fut]",
+   "rule_doc": "J: on the results reaction day the stock beats (up) / lags (down) NIFTY by >= a close to close: up -> long,\ndown -> short; fade = against the move either way.",
+   "params": {
+    "a": 0.04,
+    "mode": "down"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Results released outside market hours are absorbed by the next auction; under-reaction drifts, over-reaction reverts.",
+   "fingerprint": "db6b603e8b64",
+   "counts": {
+    "family": "J",
+    "horizon": "positional",
+    "disc_h1": 547,
+    "disc_h2": 647,
+    "validation": 215,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_j_react_fade8_h1",
+   "family": "J",
+   "grid": "daily",
+   "rule": "r_results_reaction(a=0.08, mode=fade) -> d_hold/1 [fut]",
+   "rule_doc": "J: on the results reaction day the stock beats (up) / lags (down) NIFTY by >= a close to close: up -> long,\ndown -> short; fade = against the move either way.",
+   "params": {
+    "a": 0.08,
+    "mode": "fade"
+   },
+   "exec": [
+    "d_hold",
+    1
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "Results released outside market hours are absorbed by the next auction; under-reaction drifts, over-reaction reverts.",
+   "fingerprint": "09fc13dea31e",
+   "counts": {
+    "family": "J",
+    "horizon": "positional",
+    "disc_h1": 233,
+    "disc_h2": 276,
+    "validation": 78,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_k_splitbonus_runup",
+   "family": "K",
+   "grid": "daily",
+   "rule": "r_split_bonus(mode=runup) -> d_hold/None [cnc]",
+   "rule_doc": "K: split / bonus. runup = buy at the open after the session the action became known, sell at the close before\nthe ex-date (1..40 sessions); post = buy at the ex-date open (known before), hold 20 sessions.",
+   "params": {
+    "mode": "runup"
+   },
+   "exec": [
+    "d_hold",
+    null
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Splits / bonuses draw retail attention to 'cheaper' shares; dividend-capture demand lifts cum-dividend prices.",
+   "fingerprint": "c730b25deec7",
+   "counts": {
+    "family": "K",
+    "horizon": "positional",
+    "disc_h1": 167,
+    "disc_h2": 121,
+    "validation": 69,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_k_splitbonus_post_h20",
+   "family": "K",
+   "grid": "daily",
+   "rule": "r_split_bonus(mode=post) -> d_hold/None [cnc]",
+   "rule_doc": "K: split / bonus. runup = buy at the open after the session the action became known, sell at the close before\nthe ex-date (1..40 sessions); post = buy at the ex-date open (known before), hold 20 sessions.",
+   "params": {
+    "mode": "post"
+   },
+   "exec": [
+    "d_hold",
+    null
+   ],
+   "product": "cnc",
+   "horizon": "positional",
+   "story": "Splits / bonuses draw retail attention to 'cheaper' shares; dividend-capture demand lifts cum-dividend prices.",
+   "fingerprint": "6a462f996f54",
+   "counts": {
+    "family": "K",
+    "horizon": "positional",
+    "disc_h1": 179,
+    "disc_h2": 126,
+    "validation": 69,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_m_ml_long_h5",
+   "family": "M",
+   "grid": "daily",
+   "rule": "r_ml(mode=long) -> d_hold/5 [fut]",
+   "rule_doc": "M: rank F&O universe members by the model's probability; long = P > 0.5 (highest first), short = P < 0.5\n(lowest first), ls = both (strongest |P - 0.5| first).",
+   "params": {
+    "mode": "long"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "One pre-declared model (L2 logistic, C = 1, fixed features, walk-forward inside DISCOVERY, frozen after it) combining the price / volume / delivery / OI features; it counts as three candidates.",
+   "fingerprint": "a3991cae1a9f",
+   "counts": {
+    "family": "M",
+    "horizon": "positional",
+    "disc_h1": 5734,
+    "disc_h2": 7189,
+    "validation": 2792,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_m_ml_short_h5",
+   "family": "M",
+   "grid": "daily",
+   "rule": "r_ml(mode=short) -> d_hold/5 [fut]",
+   "rule_doc": "M: rank F&O universe members by the model's probability; long = P > 0.5 (highest first), short = P < 0.5\n(lowest first), ls = both (strongest |P - 0.5| first).",
+   "params": {
+    "mode": "short"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "One pre-declared model (L2 logistic, C = 1, fixed features, walk-forward inside DISCOVERY, frozen after it) combining the price / volume / delivery / OI features; it counts as three candidates.",
+   "fingerprint": "15edffc6f4f4",
+   "counts": {
+    "family": "M",
+    "horizon": "positional",
+    "disc_h1": 9800,
+    "disc_h2": 14460,
+    "validation": 5170,
+    "need": 60,
+    "keep": true
+   }
+  },
+  {
+   "id": "dg_m_ml_ls_h5",
+   "family": "M",
+   "grid": "daily",
+   "rule": "r_ml(mode=ls) -> d_hold/5 [fut]",
+   "rule_doc": "M: rank F&O universe members by the model's probability; long = P > 0.5 (highest first), short = P < 0.5\n(lowest first), ls = both (strongest |P - 0.5| first).",
+   "params": {
+    "mode": "ls"
+   },
+   "exec": [
+    "d_hold",
+    5
+   ],
+   "product": "fut",
+   "horizon": "positional",
+   "story": "One pre-declared model (L2 logistic, C = 1, fixed features, walk-forward inside DISCOVERY, frozen after it) combining the price / volume / delivery / OI features; it counts as three candidates.",
+   "fingerprint": "9603e6795015",
+   "counts": {
+    "family": "M",
+    "horizon": "positional",
+    "disc_h1": 9800,
+    "disc_h2": 14460,
+    "validation": 5170,
+    "need": 60,
+    "keep": true
+   }
+  }
+ ],
+ "dropped_on_availability": {
+  "dg_b_gapvol_lowvol_fade": {
+   "family": "B",
+   "horizon": "intraday",
+   "disc_h1": 108,
+   "disc_h2": 321,
+   "validation": 64,
+   "need": 150,
+   "keep": false
+  },
+  "dg_d_vixspike_15_h1": {
+   "family": "D",
+   "horizon": "positional",
+   "disc_h1": 170,
+   "disc_h2": 230,
+   "validation": 40,
+   "need": 60,
+   "keep": false
+  },
+  "dg_d_vixspike_15_h5": {
+   "family": "D",
+   "horizon": "positional",
+   "disc_h1": 170,
+   "disc_h2": 230,
+   "validation": 40,
+   "need": 60,
+   "keep": false
+  },
+  "dg_d_vixhigh_nifty_h5": {
+   "family": "D",
+   "horizon": "positional",
+   "disc_h1": 32,
+   "disc_h2": 41,
+   "validation": 20,
+   "need": 60,
+   "keep": false
+  },
+  "dg_d_vixhigh_nifty_h20": {
+   "family": "D",
+   "horizon": "positional",
+   "disc_h1": 14,
+   "disc_h2": 15,
+   "validation": 10,
+   "need": 60,
+   "keep": false
+  },
+  "dg_e_delivdn_25_h5": {
+   "family": "E",
+   "horizon": "positional",
+   "disc_h1": 171,
+   "disc_h2": 138,
+   "validation": 29,
+   "need": 60,
+   "keep": false
+  },
+  "dg_e_delivdn_25_h20": {
+   "family": "E",
+   "horizon": "positional",
+   "disc_h1": 169,
+   "disc_h2": 137,
+   "validation": 28,
+   "need": 60,
+   "keep": false
+  },
+  "dg_f_fiiflow_z10_h5": {
+   "family": "F",
+   "horizon": "positional",
+   "disc_h1": 113,
+   "disc_h2": 165,
+   "validation": 39,
+   "need": 60,
+   "keep": false
+  },
+  "dg_f_fiiflow_z15_h1": {
+   "family": "F",
+   "horizon": "positional",
+   "disc_h1": 109,
+   "disc_h2": 159,
+   "validation": 47,
+   "need": 60,
+   "keep": false
+  },
+  "dg_f_fiiflow_z15_h5": {
+   "family": "F",
+   "horizon": "positional",
+   "disc_h1": 78,
+   "disc_h2": 107,
+   "validation": 23,
+   "need": 60,
+   "keep": false
+  },
+  "dg_f_clientcontra_h5": {
+   "family": "F",
+   "horizon": "positional",
+   "disc_h1": 78,
+   "disc_h2": 127,
+   "validation": 42,
+   "need": 60,
+   "keep": false
+  },
+  "dg_f_clientcontra_h20": {
+   "family": "F",
+   "horizon": "positional",
+   "disc_h1": 29,
+   "disc_h2": 47,
+   "validation": 15,
+   "need": 60,
+   "keep": false
+  },
+  "dg_h_short_covering_20_h1": {
+   "family": "H",
+   "horizon": "positional",
+   "disc_h1": 73,
+   "disc_h2": 103,
+   "validation": 23,
+   "need": 60,
+   "keep": false
+  },
+  "dg_h_short_covering_20_h5": {
+   "family": "H",
+   "horizon": "positional",
+   "disc_h1": 70,
+   "disc_h2": 97,
+   "validation": 22,
+   "need": 60,
+   "keep": false
+  },
+  "dg_h_long_unwinding_20_h1": {
+   "family": "H",
+   "horizon": "positional",
+   "disc_h1": 62,
+   "disc_h2": 76,
+   "validation": 14,
+   "need": 60,
+   "keep": false
+  },
+  "dg_h_long_unwinding_20_h5": {
+   "family": "H",
+   "horizon": "positional",
+   "disc_h1": 62,
+   "disc_h2": 71,
+   "validation": 13,
+   "need": 60,
+   "keep": false
+  },
+  "dg_j_resgap_4_cont": {
+   "family": "J",
+   "horizon": "intraday",
+   "disc_h1": 69,
+   "disc_h2": 79,
+   "validation": 56,
+   "need": 150,
+   "keep": false
+  },
+  "dg_j_resgap_4_fade": {
+   "family": "J",
+   "horizon": "intraday",
+   "disc_h1": 69,
+   "disc_h2": 79,
+   "validation": 56,
+   "need": 150,
+   "keep": false
+  },
+  "dg_k_divrunup_1": {
+   "family": "K",
+   "horizon": "positional",
+   "disc_h1": 1564,
+   "disc_h2": 892,
+   "validation": 27,
+   "need": 60,
+   "keep": false
+  },
+  "dg_k_divrunup_2": {
+   "family": "K",
+   "horizon": "positional",
+   "disc_h1": 950,
+   "disc_h2": 476,
+   "validation": 12,
+   "need": 60,
+   "keep": false
+  }
+ },
+ "ml": {
+  "features": [
+   "ret1",
+   "ret5",
+   "ret20",
+   "logvr",
+   "dp_shock",
+   "doi",
+   "gap",
+   "range"
+  ],
+  "C": 1.0,
+  "horizon": 5,
+  "walk_forward": "yearly from 2014, fitted on decision days whose label window closed before the year; frozen model (fitted through 2023-11-09) for every later day"
+ },
+ "data_check_sha256": "95cf20d20bcb2baa102b326efe15170c26651f4b8e3f1839be4631dfdf54fdff",
+ "code_sha256": {
+  "datagen_features.py": "48e9283926a5f9afffff6444776a3680ba145b43c249f96a78fa3afd2f4741bd",
+  "datagen_run.py": "404c7860a2b16a29ce58733677ef8d0c9186a4d0f6be01a37bce11a7a2315a69",
+  "protocol.py": "6929839143dbca9dc0bb6d8d0a5fb7b2941d20ea8c1b6a0ced969bd8ad16af9a",
+  "protocol_oos.py": "86cd23799bcf492a734ccb257cfe3cac1c3f2e2614932356649d0a7a2c8e817a",
+  "protocol_min_oos.py": "5473ce1f23157132fe494e84039ad58d26ebb848fc7706d7ca8cfaf2dc4c80af",
+  "trials.py": "4685dc564f0312f63f4657f8861c20f9a2b01dac815b54fc027d62771f7086fc",
+  "sim.py": "315a8448f69fa220aa88bd8a9363fef1cac9ec89c177b323359fb90daaf8ee72",
+  "corrected.py": "2d630e9bc7ffd322e7b6e87e1d7697a7e317788474aca620938e3a639dd1f8a6",
+  "data.py": "d950421d9a8a16d6f7abe2ce19af99e9687df43f7b7ce98c584e41bdd47229aa",
+  "data_daily.py": "0d07ace83d42d712960a434423c1e6cddf3a5aedc59c94b4d3228804c54999c6",
+  "events_daily.py": "7986b283b2f23a3edf58ed1784ecee325fc09b3ab2971ccce88675e9abe23b1d",
+  "flows_strategies.py": "204a6c829fb8d0fc352a5411db485b9b0b2f4fae5b4ec08195b52e242509d5a9",
+  "events_parse.py": "bbc9bb6b49a06880df445436c056e06b0426cd6319d03ea9fa7d0381220886fc",
+  "costs.py": "3df145f25fdfe71b5e8d3a43c901b5958929958a0a298b58e38ae10c598d6b03"
+ }
+}
