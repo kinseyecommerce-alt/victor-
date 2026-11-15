@@ -1507,3 +1507,210 @@ gross (taxed at the investor's slab rate from April 2020); stock-option EOD clos
 may be optimistic for illiquid strikes. Do not re-tune any of these on these results. Outputs: `<scratchpad>/webstrats/`
 (SHORTLIST.md, data_check.json, run1/report.json, run1/trades, progress.txt). Tests: `tests_web.py` (9 synthetic), run
 by `test_pipeline.py`.
+
+## Data-driven discovery: strategies created from the lab's own data (`datagen_features.py`, `datagen_run.py`, `prereg/datagen_v1.json`)
+
+**Plain language.** Instead of testing published strategies, we let the data propose them. 99 simple rules were written
+down from India-specific effects with an economic story (opening-auction gaps, volume shocks, expiry, VIX, delivery %,
+participant OI, the F&O ban list, futures OI build-up / unwinding, bulk / block deals, results timing, splits, one
+machine-learning model), each with a few round thresholds and fixed exits. 79 had enough events to be judged. They
+were ranked on OLD data only (2012/2016 .. 2023-11-09), the best 10 were tested once on 2023-11 .. 2025-12, and the
+survivors had one look at 2025-12 .. 2026-11. **Nothing is proven.** Two rules passed every stage: fade a >= 2 % /
+>= 3 % opening-auction gap from the 09:15 auction to 15:15. That is the lab's already-proven auction fade
+(AUC-FADE, which exits at 09:20) held for the whole day, so it is a re-discovery of a known effect, not a new one. Its
+Deflated Sharpe Ratio at the honest trial count is 0.001 / 0.000 (needs 0.95), and one pre-registered planted-edge
+control was not detected, which by itself fails the proof standard for every candidate.
+
+Pre-registered before any return was computed: `prereg/datagen_v1.json` (sha256
+`ca9bedd3ac5fad7b21f99229bc12c014b32e59dcbe855a4d274294d6cf9e81bd`, byte-identical to
+`<scratchpad>/datagen/PREREGISTERED_DATAGEN.json`, commit fea78dc). Every stage refuses to run if that file, its repo
+copy, the code (`datagen_features.py`, `datagen_run.py`) or a candidate fingerprint changed, and DISCOVERY / VALIDATION /
+FINAL each run once (their JSON is returned, never recomputed; FINAL through `protocol.evaluate`'s one-look ledger
+`<scratchpad>/datagen/final_ledger.json`).
+
+    python -m stratlab.datagen_run --data-check      # (a) signal counts only
+    python -m stratlab.datagen_run --preregister     # (b)
+    python -m stratlab.datagen_run --discovery --controls    # (c) once
+    python -m stratlab.datagen_run --validate        # (d) once
+    python -m stratlab.datagen_run --final           # (e) one look
+    python -m stratlab.datagen_run --proof --trials <ledger>
+
+* **Splits** (by time, fixed in the prereg): DISCOVERY = minute rules 2016-01-01..2023-11-09 (halves 2016-19 / 2020-23,
+  Kite old-era cache + corrected overlay, dirty-link rule), daily rules 2012-01-01..2023-11-09 (halves 2012-17 /
+  2018-23, events_daily point-in-time top-500 universe, delisted kept); VALIDATION = protocol.py's 2023-26 DISCOVERY
+  (2023-11-10..2025-12-16), protocol.screen once; FINAL = 2025-12-17..2026-11-09, one look for validation passers.
+* **Hypothesis space**: 99 declared, 20 dropped on availability counts before any return (fewer events than the
+  protocol minimum in a DISCOVERY half or in VALIDATION: e.g. VIX +15 % days, NIFTY on high-VIX days, client-OI
+  extremes, 20 % OI short covering / long unwinding, 4 % results gaps, dividend run-ups — NSE's record-date regime
+  leaves < 6 sessions between announcement and ex-date after 2023), **N_search = 79**: A auction gap / 09:15-09:20 path
+  15, B intraday / last-hour volume shocks 13, C index expiry overnight 4, D VIX shocks 3, E delivery % 9, F FII
+  index-futures flow 1, G ban entry / exit 6, H futures OI quadrants 12, I deals by client class 6, J results timing 5,
+  K splits / bonuses 2, M one L2-logistic model (C = 1, 8 fixed features, walk-forward yearly inside DISCOVERY, frozen
+  from 2023-11-10) 3. Excluded by design: neighbours of the two proven rules (auction fades inside 09:15-09:30,
+  high-volume up-day overnight longs), index-weight changes and expiry-day intraday trades (cannot reach the trade
+  minimum), MWPL proximity and VIX term structure (no data), options (none; nothing uses VIX-modelled prices).
+* **Engine** (fill model `dg1`): fixed exits, no stops, no optimisation; Rs 1 lakh per stock trade, index futures 1 lot
+  (2026 lots); 2 bps per side (index 1 bps), stress 5 / 2.5 bps; costs.round_trip_cost (MIS intraday, CNC delivery
+  longs, futures for stock / index futures on the cash / spot price); <= 10 entries a day per rule (strongest first),
+  one position per symbol. EOD files dated D are used from D+1's open; the ban file of D+1 from D's evening.
+* **Selection**: both DISCOVERY halves net > 0, PF >= 1.15, >= 150 intraday / 60 positional trades in EACH half, top
+  symbol <= 35 % (not index), still net > 0 in both halves at 5 bps; passers ranked by DSR at N = 79 + 2,542 = 2,621
+  with V = the robust variance of the 79 DISCOVERY daily Sharpes (0.00215); K = 10, at most 3 per family.
+* **Proven** = VALIDATION screen AND FINAL CONFIRMED AND DSR >= 0.95 (full-history daily P&L, N 2,621) AND, if >= 70 %
+  long, the 95 % date-clustered CI of the per-trade excess over NIFTY 50 on VALIDATION + FINAL above 0 AND VALIDATION +
+  FINAL net above the 95th percentile of 50 placebos AND every planted control with p >= 0.6 detected.
+
+**DISCOVERY: 15 of 79 passed the gates.** The shuffle-the-feature control (each rule's trigger dates permuted within
+symbol, 5 seeds) passed 5, 4, 8, 6, 6 = **5.8 expected by chance**. The shuffled passers are almost all long-only
+multi-week rules (delivery up / trend h20 in 5 of 5 seeds, other-client buys h20 4, attention swing up 3, split post
+3): on the 2012-23 universe random dates in the same stocks pass too, i.e. those rules are market exposure. The
+excess over chance comes from the auction-gap family (6 passers, never in a shuffle), the ban-entry intraday short,
+long unwinding, results-day losers short, split run-up and the FII-flow NIFTY rule.
+
+Full DISCOVERY table (L = Rs 1 lakh; gross includes slippage; every row is in `trials_v2.csv`):
+
+| id (dg_…) | fam | rule -> exit, product | DISC trades | PF | net L | H1 / H2 net L | gross / cost per trade Rs | DSR | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| a_gapgo_1 | A | g=0.01, mode=go -> m_intra/o0920/o1515 mis | 6,890 | 0.75 | -19.8 | -9.7 / -10.1 | -205 / 83 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| a_gaprev_1 | A | g=0.01, mode=revfollow -> m_intra/o0920/o1515 mis | 9,776 | 1.11 | +8.3 | +3.5 / +4.8 | +167 / 83 | 0.000 | fail: PF 1.108 < 1.15 |
+| a_gapfadeday_1 | A | g=0.01, mode=fade_day -> m_intra/o0915/o1515 mis | 13,136 | 1.36 | +40.4 | +19.8 / +20.6 | +390 / 83 | 0.802 | CARRIED |
+| a_gapgo_2 | A | g=0.02, mode=go -> m_intra/o0920/o1515 mis | 1,900 | 0.80 | -5.4 | -2.9 / -2.5 | -204 / 83 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| a_gaprev_2 | A | g=0.02, mode=revfollow -> m_intra/o0920/o1515 mis | 2,718 | 1.24 | +6.1 | +2.4 / +3.7 | +308 / 83 | 0.000 | passed (not carried) |
+| a_gapfadeday_2 | A | g=0.02, mode=fade_day -> m_intra/o0915/o1515 mis | 4,165 | 1.41 | +18.6 | +6.7 / +11.9 | +530 / 83 | 0.003 | CARRIED |
+| a_gapgo_3 | A | g=0.03, mode=go -> m_intra/o0920/o1515 mis | 830 | 0.77 | -3.4 | -2.2 / -1.2 | -327 / 83 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| a_gaprev_3 | A | g=0.03, mode=revfollow -> m_intra/o0920/o1515 mis | 1,139 | 1.22 | +2.9 | +0.9 / +2.0 | +339 / 83 | 0.000 | passed (not carried) |
+| a_gapfadeday_3 | A | g=0.03, mode=fade_day -> m_intra/o0915/o1515 mis | 1,857 | 1.51 | +11.5 | +2.9 / +8.6 | +702 / 83 | 0.000 | CARRIED |
+| a_open5_1_cont | A | r=0.01, mode=cont -> m_intra/o0920/o1515 mis | 8,192 | 0.78 | -16.5 | -10.0 / -6.5 | -119 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| a_open5_1_fade | A | r=0.01, mode=fade -> m_intra/o0920/o1515 mis | 8,192 | 0.95 | -3.5 | +0.8 / -4.3 | +39 / 82 | 0.000 | fail: H2 net <= 0; PF 0.947 < 1.15 |
+| a_open5_2_cont | A | r=0.02, mode=cont -> m_intra/o0920/o1515 mis | 940 | 0.80 | -2.4 | -0.3 / -2.0 | -169 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| a_open5_2_fade | A | r=0.02, mode=fade -> m_intra/o0920/o1515 mis | 940 | 1.01 | +0.1 | -0.5 / +0.5 | +89 / 82 | 0.000 | fail: H1 net <= 0; PF 1.006 < 1.15 |
+| a_idiogap_1 | A | g=0.01 -> m_intra/o0920/o1515 mis | 2,928 | 1.19 | +4.6 | +2.6 / +2.0 | +240 / 83 | 0.000 | passed (not carried) |
+| a_idiogap_2 | A | g=0.02 -> m_intra/o0920/o1515 mis | 894 | 1.26 | +2.2 | +1.0 / +1.2 | +325 / 83 | 0.000 | fail: ADANIPOWER is 45% of net |
+| b_earlyvol_3_cont | B | k=3.0, mode=cont -> m_intra/o0945/o1515 mis | 5,505 | 0.85 | -7.8 | -5.2 / -2.5 | -59 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_earlyvol_3_fade | B | k=3.0, mode=fade -> m_intra/o0945/o1515 mis | 5,505 | 0.89 | -5.7 | -1.3 / -4.3 | -20 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_earlyvol_5_cont | B | k=5.0, mode=cont -> m_intra/o0945/o1515 mis | 2,189 | 0.91 | -2.0 | -0.9 / -1.1 | -8 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_earlyvol_5_fade | B | k=5.0, mode=fade -> m_intra/o0945/o1515 mis | 2,189 | 0.84 | -3.4 | -1.9 / -1.5 | -71 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_downattn_on_rev | B | mode=rev -> m_on fut | 1,259 | 1.11 | +0.6 | -0.3 / +0.9 | +151 / 103 | 0.000 | fail: H1 net <= 0; PF 1.107 < 1.15 |
+| b_downattn_on_cont | B | mode=cont -> m_on fut | 1,259 | 0.51 | -4.2 | -1.7 / -2.5 | -231 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_lasthour_3_cont | B | k=3.0, mode=cont -> m_on fut | 3,154 | 0.65 | -6.3 | -3.5 / -2.8 | -97 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_lasthour_3_fade | B | k=3.0, mode=fade -> m_on fut | 3,154 | 0.83 | -2.7 | -1.2 / -1.5 | +17 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_lasthour_5_cont | B | k=5.0, mode=cont -> m_on fut | 1,269 | 0.63 | -3.0 | -1.7 / -1.2 | -130 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_lasthour_5_fade | B | k=5.0, mode=fade -> m_on fut | 1,269 | 0.90 | -0.7 | -0.2 / -0.4 | +51 / 104 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| b_attnswing_up_h5 | B | day=up -> m_hold/5 fut | 1,952 | 1.15 | +5.3 | +2.5 / +2.8 | +374 / 104 | 0.000 | fail: PF 1.147 < 1.15 |
+| b_attnswing_down_h5 | B | day=down -> m_hold/5 fut | 1,124 | 1.00 | -0.1 | +2.4 / -2.5 | +97 / 103 | 0.000 | fail: H2 net <= 0; PF 0.997 < 1.15 |
+| b_gapvol_hivol_go | B | mode=hivol_go -> m_intra/o0930/o1515 mis | 1,606 | 0.75 | -5.0 | -2.6 / -2.4 | -230 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| c_expiry_on_long | C | when=on, side=1 -> i_on fut | 633 | 0.95 | -0.7 | +0.4 / -1.1 | +451 / 560 | 0.000 | fail: H2 net <= 0; PF 0.952 < 1.15 |
+| c_expiry_on_short | C | when=on, side=-1 -> i_on fut | 633 | 0.56 | -8.7 | -3.5 / -5.2 | -814 / 560 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| c_expiry_pre_long | C | when=pre, side=1 -> i_on fut | 633 | 1.04 | +0.5 | +0.5 / +0.0 | +641 / 559 | 0.000 | fail: PF 1.041 < 1.15; 5 bps |
+| c_expiry_pre_short | C | when=pre, side=-1 -> i_on fut | 633 | 0.48 | -9.9 | -3.6 / -6.3 | -1003 / 559 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| d_vixspike_10_h1 | D | x=0.1 -> d_hold/1 fut | 960 | 1.07 | +0.9 | +0.5 / +0.4 | +201 / 104 | 0.000 | fail: PF 1.072 < 1.15; EMBDL is 39% of net |
+| d_vixspike_10_h5 | D | x=0.1 -> d_hold/5 fut | 960 | 0.91 | -2.8 | +3.6 / -6.4 | -183 / 103 | 0.000 | fail: H2 net <= 0; PF 0.912 < 1.15 |
+| d_vixhigh_losers_h5 | D |  -> d_hold/5 fut | 2,148 | 1.03 | +2.4 | +11.7 / -9.3 | +216 / 104 | 0.000 | fail: H2 net <= 0; PF 1.035 < 1.15 |
+| e_delivup_15_h5 | E | pp=15.0, day=up -> d_hold/5 cnc | 1,686 | 1.16 | +5.6 | +4.1 / +1.5 | +571 / 238 | 0.000 | passed (not carried) |
+| e_delivdn_15_h5 | E | pp=15.0, day=down -> d_hold/5 fut | 894 | 0.80 | -4.3 | -2.6 / -1.7 | -376 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| e_delivup_15_h20 | E | pp=15.0, day=up -> d_hold/20 cnc | 1,583 | 1.50 | +26.8 | +20.4 / +6.4 | +1931 / 239 | 0.000 | CARRIED |
+| e_delivdn_15_h20 | E | pp=15.0, day=down -> d_hold/20 fut | 858 | 0.71 | -11.8 | -9.7 / -2.1 | -1277 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| e_delivup_25_h5 | E | pp=25.0, day=up -> d_hold/5 cnc | 550 | 1.02 | +0.3 | -0.7 / +1.0 | +286 / 237 | 0.000 | fail: H1 net <= 0; PF 1.023 < 1.15 |
+| e_delivup_25_h20 | E | pp=25.0, day=up -> d_hold/20 cnc | 536 | 1.68 | +11.1 | +7.7 / +3.4 | +2317 / 239 | 0.000 | CARRIED |
+| e_lowdeliv_fade_h1 | E |  -> d_hold/1 fut | 1,658 | 1.01 | +0.2 | +0.6 / -0.3 | +116 / 103 | 0.000 | fail: H2 net <= 0; PF 1.012 < 1.15 |
+| e_lowdeliv_fade_h5 | E |  -> d_hold/5 fut | 1,506 | 0.92 | -2.6 | -2.1 / -0.5 | -69 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| e_delivtrend_h20 | E |  -> d_hold/20 cnc | 6,245 | 1.48 | +98.7 | +68.6 / +30.1 | +1819 / 239 | 0.362 | CARRIED |
+| f_fiiflow_z10_h1 | F | z=1.0 -> i_hold/1 fut | 558 | 1.16 | +2.1 | +0.8 / +1.3 | +852 / 480 | 0.000 | passed (not carried) |
+| g_banentry_long_h5 | G | event=entry, side=1 -> d_hold/5 cnc | 1,466 | 0.77 | -11.4 | -5.0 / -6.4 | -539 / 237 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| g_banentry_long_h20 | G | event=entry, side=1 -> d_hold/20 cnc | 926 | 1.04 | +2.3 | -1.5 / +3.8 | +487 / 238 | 0.000 | fail: H1 net <= 0; PF 1.044 < 1.15 |
+| g_banentry_short_id | G | event=entry, side=-1 -> d_hold/1 mis | 1,554 | 1.73 | +11.6 | +6.9 / +4.7 | +830 / 83 | 0.006 | CARRIED |
+| g_banexit_long_h5 | G | event=exit, side=1 -> d_hold/5 cnc | 1,431 | 1.01 | +0.3 | +2.7 / -2.3 | +261 / 238 | 0.000 | fail: H2 net <= 0; PF 1.008 < 1.15 |
+| g_banexit_long_h20 | G | event=exit, side=1 -> d_hold/20 cnc | 945 | 1.15 | +7.5 | +3.4 / +4.1 | +1031 / 239 | 0.000 | fail: PF 1.147 < 1.15 |
+| g_banexit_short_h5 | G | event=exit, side=-1 -> d_hold/5 fut | 1,430 | 0.87 | -6.3 | -5.4 / -0.9 | -339 / 104 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| h_long_buildup_10_h1 | H | quad=long_buildup, thr=0.1 -> d_hold/1 fut | 7,716 | 0.59 | -43.4 | -24.1 / -19.3 | -460 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| h_long_buildup_10_h5 | H | quad=long_buildup, thr=0.1 -> d_hold/5 fut | 6,832 | 0.91 | -14.8 | -13.9 / -0.9 | -113 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| h_long_buildup_20_h1 | H | quad=long_buildup, thr=0.2 -> d_hold/1 fut | 3,082 | 0.66 | -14.4 | -7.5 / -6.9 | -362 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| h_long_buildup_20_h5 | H | quad=long_buildup, thr=0.2 -> d_hold/5 fut | 2,902 | 0.93 | -4.9 | -5.0 / +0.1 | -65 / 103 | 0.000 | fail: H1 net <= 0; PF 0.928 < 1.15 |
+| h_short_buildup_10_h1 | H | quad=short_buildup, thr=0.1 -> d_hold/1 fut | 6,071 | 1.05 | +3.4 | +0.9 / +2.5 | +159 / 103 | 0.000 | fail: PF 1.052 < 1.15; 5 bps |
+| h_short_buildup_10_h5 | H | quad=short_buildup, thr=0.1 -> d_hold/5 fut | 5,385 | 0.97 | -3.7 | -4.5 / +0.8 | +35 / 103 | 0.000 | fail: H1 net <= 0; PF 0.970 < 1.15 |
+| h_short_buildup_20_h1 | H | quad=short_buildup, thr=0.2 -> d_hold/1 fut | 2,297 | 0.99 | -0.3 | -1.2 / +0.9 | +92 / 103 | 0.000 | fail: H1 net <= 0; PF 0.990 < 1.15 |
+| h_short_buildup_20_h5 | H | quad=short_buildup, thr=0.2 -> d_hold/5 fut | 2,149 | 0.93 | -3.7 | -2.1 / -1.6 | -68 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| h_short_covering_10_h1 | H | quad=short_covering, thr=0.1 -> d_hold/1 fut | 1,622 | 0.95 | -1.0 | -0.2 / -0.8 | +39 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| h_short_covering_10_h5 | H | quad=short_covering, thr=0.1 -> d_hold/5 fut | 1,516 | 0.91 | -3.4 | -2.2 / -1.3 | -123 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| h_long_unwinding_10_h1 | H | quad=long_unwinding, thr=0.1 -> d_hold/1 fut | 1,202 | 1.21 | +3.4 | -0.0 / +3.4 | +385 / 104 | 0.000 | fail: H1 net <= 0; JETAIRWAYS is 46% of net |
+| h_long_unwinding_10_h5 | H | quad=long_unwinding, thr=0.1 -> d_hold/5 fut | 1,131 | 1.37 | +9.8 | +6.9 / +2.9 | +968 / 104 | 0.000 | CARRIED |
+| i_instbuy_h1 | I | cls=inst, flow=buy, side=1 -> d_hold/1 fut | 198 | 0.65 | -1.0 | -0.2 / -0.8 | -399 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| i_instbuy_h5 | I | cls=inst, flow=buy, side=1 -> d_hold/5 cnc | 564 | 0.67 | -5.2 | -1.4 / -3.8 | -678 / 236 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| i_instsell_rev_h5 | I | cls=inst, flow=sell, side=1 -> d_hold/5 cnc | 363 | 1.16 | +1.6 | +1.3 / +0.3 | +689 / 238 | 0.000 | fail: YESBANK is 54% of net |
+| i_otherbuy_h5 | I | cls=other, flow=buy, side=1 -> d_hold/5 cnc | 529 | 0.87 | -2.3 | -0.5 / -1.7 | -192 / 237 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| i_otherbuy_h20 | I | cls=other, flow=buy, side=1 -> d_hold/20 cnc | 492 | 0.91 | -2.7 | +0.0 / -2.7 | -306 / 237 | 0.000 | fail: H2 net <= 0; PF 0.906 < 1.15 |
+| i_othersell_short_h5 | I | cls=other, flow=sell, side=-1 -> d_hold/5 fut | 360 | 0.96 | -0.4 | +0.2 / -0.6 | -12 / 104 | 0.000 | fail: H2 net <= 0; PF 0.958 < 1.15 |
+| j_resgap_2_cont | J | g=0.02, mode=cont -> m_intra/o0920/o1515 mis | 565 | 0.92 | -0.5 | -0.4 / -0.1 | -15 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| j_resgap_2_fade | J | g=0.02, mode=fade -> m_intra/o0920/o1515 mis | 565 | 0.88 | -0.8 | -0.2 / -0.6 | -65 / 82 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| j_react_up_h5 | J | a=0.04, mode=up -> d_hold/5 cnc | 2,989 | 1.04 | +3.5 | +0.9 / +2.6 | +354 / 238 | 0.000 | fail: PF 1.041 < 1.15; 5 bps |
+| j_react_down_h5 | J | a=0.04, mode=down -> d_hold/5 fut | 1,194 | 1.19 | +4.6 | +2.9 / +1.7 | +489 / 103 | 0.000 | CARRIED |
+| j_react_fade8_h1 | J | a=0.08, mode=fade -> d_hold/1 fut | 509 | 0.84 | -1.3 | -0.2 / -1.2 | -158 / 103 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| k_splitbonus_runup | K | mode=runup -> d_hold/None cnc | 288 | 1.78 | +4.1 | +2.9 / +1.2 | +1668 / 239 | 0.000 | CARRIED |
+| k_splitbonus_post_h20 | K | mode=post -> d_hold/None cnc | 305 | 0.48 | -10.2 | -3.7 / -6.5 | -3116 / 234 | 0.000 | fail: H1 net <= 0; H2 net <= 0 |
+| m_ml_long_h5 | M | mode=long -> d_hold/5 fut | 12,923 | 1.09 | +17.1 | +13.1 / +4.0 | +236 / 103 | 0.000 | fail: PF 1.086 < 1.15; 5 bps |
+| m_ml_short_h5 | M | mode=short -> d_hold/5 fut | 24,260 | 1.00 | -1.6 | -7.3 / +5.6 | +97 / 103 | 0.000 | fail: H1 net <= 0; PF 0.997 < 1.15 |
+| m_ml_ls_h5 | M | mode=ls -> d_hold/5 fut | 24,260 | 1.00 | -1.6 | -7.2 / +5.6 | +97 / 103 | 0.000 | fail: H1 net <= 0; PF 0.997 < 1.15 |
+
+**The 10 carried, in plain English, and their one VALIDATION look** (2023-11-10..2025-12-16, protocol.screen):
+
+| id | rule | VALIDATION trades / PF / net (H1 / H2) | verdict | 5 bps |
+|---|---|---|---|---|
+| a_gapfadeday_1 | stock opens >= 1 % away from yesterday's close: fade it from the 09:15 auction to 15:15 (MIS) | 3,227 / 1.41 / +9.9 L (+5.1 / +4.8) | PASSED | pass |
+| e_delivtrend_h20 | 5-day delivery % >= 60-day mean + 10 points and 20-day return > 0: buy, hold 20 sessions (CNC) | 1,782 / 1.25 / +15.4 L (+14.8 / +0.6) | PASSED | pass |
+| g_banentry_short_id | first day a stock is in the F&O ban: short it in cash from the open to the close (MIS) | 426 / 1.86 / +2.7 L (+2.7 / +0.04) | PASSED | fail (H2) |
+| a_gapfadeday_2 | as gapfadeday_1 with a >= 2 % gap (subset of _1) | 1,112 / 1.50 / +4.9 L (+1.7 / +3.2) | PASSED | pass |
+| a_gapfadeday_3 | as gapfadeday_1 with a >= 3 % gap (subset of _2) | 520 / 1.64 / +3.0 L (+1.2 / +1.8) | PASSED | pass |
+| e_delivup_15_h20 | delivery % >= 20-day mean + 15 points on >= 2x volume and a >= 2 % up day: buy, hold 20 | 305 / 1.08 / +0.9 L (+3.7 / -2.8) | FAILED (H2, PF, BDL 49 %) | – |
+| e_delivup_25_h20 | as above with + 25 points | 97 / 1.21 / +0.7 L (+1.5 / -0.8) | FAILED (H2, AMBER 48 %) | – |
+| h_long_unwinding_10_h5 | price down >= 2 % and stock-futures OI down >= 10 % (longs bailing out): buy the future, 5 sessions | 124 / 2.65 / +2.4 L (+2.2 / +0.2) | PASSED | pass |
+| k_splitbonus_runup | buy the session after a split / bonus is announced, sell the day before the ex-date (CNC) | 69 / 1.04 / +0.05 L | FAILED (H2, PF) | – |
+| j_react_down_h5 | results-day return >= 4 % below NIFTY: short the future for 5 sessions | 215 / 1.00 / +0.01 L | FAILED (H2, PF) | – |
+
+**FINAL (one look, 2025-12-17..2026-11-09) and the proof gates** (DSR at N = 2,621 on the full-history daily P&L,
+selection V; excess = per-trade net minus the same notional's NIFTY 50 move, VALIDATION + FINAL, 95 % date-clustered
+bootstrap; placebo = 50 random eligible draws with the same count and long share):
+
+| id | FINAL trades / PF / net | verdict | DSR full (floor V / ledger V) | excess per trade, unseen [CI] | net vs placebo p95, unseen | proven |
+|---|---|---|---|---|---|---|
+| a_gapfadeday_1 | 1,106 / 1.02 / +0.18 L | REJECTED (PF < 1.05) | 0.72 (1.00 / 0.00) | +0.18 % [+0.09, +0.27] | +10.1 L vs -3.1 L | no |
+| e_delivtrend_h20 | 504 / 0.90 / -2.07 L | REJECTED | 0.06 (1.00 / 0.00) | -0.03 % [-0.48, +0.42] | +13.7 L vs +15.2 L | no |
+| g_banentry_short_id | 35 / 0.71 / -0.09 L | REJECTED | 0.003 (1.00 / 0.00) | +0.54 % [+0.25, +0.82] | +2.6 L vs +1.0 L | no |
+| **a_gapfadeday_2** | 407 / 1.06 / +0.26 L | **CONFIRMED** | **0.001** (0.99 / 0.00) | +0.27 % [+0.10, +0.44] | +5.1 L vs -0.8 L | **no** (DSR, planted) |
+| **a_gapfadeday_3** | 198 / 1.63 / +1.14 L | **CONFIRMED** | **0.000** (0.91 / 0.00) | +0.48 % [+0.25, +0.71] | +4.2 L vs -0.1 L | **no** (DSR, planted) |
+| h_long_unwinding_10_h5 | 30 / 0.61 / -0.27 L | REJECTED | 0.000 (0.23 / 0.00) | +0.40 % [-0.52, +1.24] | +2.1 L vs +0.9 L | no |
+
+**Proven on past unseen data: 0 of 79.**
+* The two FINAL confirmations are one effect (3 % is a subset of 2 %) and that effect is the proven opening-auction
+  fade: the same signal held to 15:15 instead of 09:20. The DISCOVERY table shows where the rest-of-day part comes
+  from: after 09:20 fading the gap still pays when the first five minutes already reversed (gaprev_2 / _3 passed), and
+  following a confirmed gap loses (gapgo PF 0.75-0.80). Their full-history daily Sharpe (0.11 / 0.09 per day, 1.7 / 1.4
+  a year) is below the best-of-2,621-trials luck level (SR0 0.163 per day), so DSR is 0.001 / 0.000; only the noise-only
+  floor V would pass them (0.99 / 0.91). Excess and placebo gates pass (they are not long-biased: 46 % / 45 % longs on unseen data).
+* Planted-edge controls (DISCOVERY, identical pipeline): detected = minute intraday p 0.6 (PF 1.24), daily 5-day p 0.6
+  (PF 1.44), NIFTY 5-day p 0.6 (PF 2.23), daily p 1.0 (PF 1855); **not detected = overnight stock p 0.6 (PF 0.89: a
+  60 %-right overnight call earns Rs 70 gross per trade against Rs 103 of futures costs)**. Random controls (p 0.5)
+  failed as they should (PF 1.00 / 0.77). The pre-registered rule requires every p >= 0.6 control to be detected, so
+  the planted gate fails for every candidate; it changes no verdict here (no candidate met the DSR gate either). The
+  failure is a cost fact, not an engine fault: weak overnight edges cannot pay the round trip.
+* Long-only multi-week rules that looked strongest in DISCOVERY (delivery trend +98.7 L, PF 1.48) are market exposure:
+  they pass every shuffle seed, their placebo (random eligible dates and stocks) earns a median +41 L (95th
+  percentile +57 L) in DISCOVERY and as much as the rule on unseen data, and their excess over NIFTY is about 0 after 2023.
+* The model family (ML) has a DISCOVERY PF of 1.09 long / 1.00 short and fails; its long-short book is nearly the short
+  book (the most extreme probabilities are the low ones). OI build-ups (long or short) lose before costs; expiry
+  overnight, deals, VIX and results-gap rules fail in DISCOVERY.
+
+Rs 10 lakh account (capital.py, Rs 1 lakh per position within the agent's slots; report only): a_gapfadeday_3 +8.3 L
+over 2016-23 (10.9 %/yr, max DD Rs 66,002), +2.1 L on VALIDATION (10.4 %/yr), +0.39 L on FINAL (4.4 %/yr);
+a_gapfadeday_2 +12.7 L / +3.1 L / -0.28 L (the account's 5 intraday slots take 311 of the 407 FINAL signals);
+a_gapfadeday_1 +25.2 L / +5.9 L / +0.04 L.
+
+New trials: 95 rows appended to `trials_v2.csv` (backup `trials_v2.csv.bak_datagen_20261115_074010`): 79 DISCOVERY rows
+(era 2016-23 for minute rules, 2012-23 for daily rules; stage `datagen-discovery`), 10 VALIDATION screens and 6 FINAL
+looks (era 2023-26). Variants: 2023-26 2,542 -> 2,552, 2012-23 273 -> 318, 2016-23 429 -> 463; the DSR above uses the
+pre-registered N = 2,542 + 79 (every candidate examined). Nothing qualifies for `catalog/r9_datagen.py` (written only
+for a proven rule). sim.py unchanged. Caveats: minute rules use today's NIFTY-100 names (survivorship); stock futures
+are simulated on cash prices; the ban-entry short exits at the daily (last-traded) close, not a 15:15 square-off; 2026
+costs and lot sizes on every year; deals classes are name-based. Do not re-tune any of these rules on these results.
+Outputs: `<scratchpad>/datagen/` (data_check.json, discovery.json, controls_discovery.json, validation.json, final.json,
+proof.json, final_ledger.json, tables.md, trades/, progress.txt). Tests: `tests_datagen.py` (14 synthetic, including an
+end-to-end run of the whole study in a temporary directory), run by `test_pipeline.py`.
