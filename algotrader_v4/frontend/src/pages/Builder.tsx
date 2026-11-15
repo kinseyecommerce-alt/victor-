@@ -202,6 +202,11 @@ export function BuilderBatch({ id }: { id: string }) {
             <Card><Stat label="Final confirmed" value={plain(d?.final_confirmed)} /></Card>
             <Card><Stat label="Proven" value={plain(Array.isArray(d?.proven) ? d.proven.length : d?.proven)} valueClass="text-green-600 dark:text-green-400" sub={`N = ${plain(d?.n_proof)}`} /></Card>
           </div>
+          {d?.seeded && (
+            <Notice tone="blue" title="Imported from the research sandbox">
+              <div className="text-xs">This batch was built and evaluated in the research sandbox on 15 Nov 2026 and imported here so that its {plain(d?.seed?.counts?.candidates)} candidates and {plain(d?.seed?.final_looks?.length)} final looks keep counting against luck (N after it: {plain(d?.seed?.n_used_after)}) and are never tried again. Its candidate rows live in the sandbox.</div>
+            </Notice>
+          )}
           {errata.map((e, i) => (
             <Notice key={i} tone="amber" title={`Erratum (${e?.agent || 'batch'})`}>
               <div className="space-y-1 text-xs"><div>{e?.issue}</div><div><b>Effect:</b> {e?.effect}</div><div><b>Action:</b> {e?.action}</div></div>

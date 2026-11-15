@@ -1767,13 +1767,25 @@ workers, peak 3.4 GB of one forked worker before the sparse-signal fix, 1.2-1.6 
 * Planted controls (gross, p = 0.65 / coin flip): intraday PF 1.86 / 0.92, scalping 1.65 / 0.84, swing 1.91 / 1.01,
   futures 2.01 / 0.95 — all detected, coin flips not. After costs the scalping p = 0.65 control FAILS (PF 1.20 but the
   5 bps stress is negative): a 65 %-right 25-minute call barely pays the round trip.
-* **Erratum (registry record, options)**: the old-era view's bhavcopy carries option `settle` = 0 on WEEKLY expiry days;
-  nsedata.final_settlement took it as the settlement price, so the 80 options candidates' DISCOVERY numbers (weekly
-  expiry settlements 2016/2019-2023) and batch 0001's options planted gate are invalid. Fixed for later batches (a zero
+* **Erratum (two registry records, options)**: `nse_old_view` carries option `settle` = 0 on 244 of its 449 index-option
+  expiry days (every one up to 2020-01-30, none after; the 2023-26 `nse` directory has none). nsedata.final_settlement
+  uses the index future's settle first, so only WEEKLY expiries without a future were valued at S = 0 (BANKNIFTY
+  weeklies 2016-05 .. 2020-01, NIFTY weeklies 2019-02 .. 2020-01): the 80 options candidates' DISCOVERY numbers and
+  batch 0001's options planted gate are invalid. Fixed for later batches (a zero
   expiry-day settle is missing -> official index close); batch 0001 is NOT re-evaluated and its 80 keys are never
   re-drawn; they keep counting in N. With the fix the options planted control is NOT detected (gross PF 1.04: a
   65 %-right 3-session direction call on an ATM weekly does not beat its time decay), so no options candidate can be
-  proven until a batch's planted control is detected. The lab's own nsedata runs over `nse_old_view` share the issue.
+  proven until a batch's planted control is detected. Lab results that read old-era option settlement through
+  nsedata + oldera_fo share the issue (not re-run): the 2012-23 OOS looks of `options_r4`'s NIFTY weekly specs
+  (r4_realopt_nf_wk_*, nf_expwk_*, nf_exp_eve_*) in `protocol_oos.py` and `protocol_min_oos.py` (monthly BANKNIFTY
+  specs settle on the future and are unaffected; nf_event_* never fire in the old era). Not affected: every 2023-26
+  result (nse/), options_vrp / VRP-STRANGLE-016-WINGED incl. its live paper parity (Black-Scholes on minute bars,
+  settlement from the 15:00-15:29 minute closes), options_r3 / options_vrp_vix (minute bars), web_run's earnings
+  straddles (stock options; the old view has no per-strike stock chains).
+* **Seed** (`../builder_seed_0001.json`, sha256 pinned in `builder.SEED_SHA256`): this sandbox batch (400 keys, counts per
+  stage, the 2 FINAL looks, both errata, N after it = 2,970) is imported as the first records of any other registry
+  (the server's) on first use: its N starts at 2,970, the 400 keys are never drawn again and its first batch is 0002.
+  The rule's lab base (2,552) and the 16 development checks are unchanged (counted once).
 * The registry was re-chained once (repair record) after a stale-tail bug with two writers; the data of every record
   is unchanged; the broken file is kept.
 

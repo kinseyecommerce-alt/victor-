@@ -1,0 +1,1676 @@
+{
+ "batch": "0001",
+ "candidates": [
+  {
+   "id": "bld0001_int_ris_00_c47eef",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"fade\"]],\"o0915\",[\"time\",\"o1430\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_01_e68891",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.1]],\"o0915\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_02_e9f2d3",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"idio_gap\",[[\"g\",0.02]],\"o0920\",[\"bracket\",0.015,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_03_c39779",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"o0915\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_04_e3c3bd",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"early_vol\",[[\"k\",3.0],[\"mode\",\"fade\"]],\"o0945\",[\"signal\",\"vwap\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_05_25084a",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"deliv_up\",[[\"pp\",15.0],[\"day\",\"up\"]],\"o0920\",[\"time\",\"o1430\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_06_01c2a3",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"results_up\",[[\"a\",0.04],[\"mode\",\"up\"]],\"o0920\",[\"signal\",\"vwap\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_07_682d38",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"down\"]],\"o0915\",[\"bracket\",0.015,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_08_6fdb18",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"o0915\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_09_646773",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"gap_rev\",[[\"g\",0.03],[\"mode\",\"revfollow\"]],\"o0920\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_10_e7b48c",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"vix_spike_losers\",[[\"x\",0.15]],\"o0920\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_11_3eeb7d",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"open5\",[[\"r\",0.02],[\"mode\",\"fade\"]],\"o0930\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_12_c7c3bd",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"ban_entry_long\",[[\"event\",\"entry\"],[\"side\",1]],\"o0920\",[\"bracket\",0.01,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_13_3548f1",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"other_sell\",[[\"cls\",\"other\"],[\"flow\",\"sell\"],[\"side\",-1]],\"o0915\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_14_37a83a",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"deliv_up\",[[\"pp\",15.0],[\"day\",\"up\"]],\"o0915\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_15_348733",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"inst_buy\",[[\"cls\",\"inst\"],[\"flow\",\"buy\"],[\"side\",1]],\"o0920\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_16_1f833d",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0915\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_17_05f897",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"gap_rev\",[[\"g\",0.03],[\"mode\",\"revfollow\"]],\"o0920\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_18_365c67",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.2]],\"o0915\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_ris_19_eab7df",
+   "key": "[\"bg1\",\"intraday\",\"RISING\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"cont\"]],\"o0945\",[\"bracket\",0.015,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_00_b9a8b3",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"o0915\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_01_867131",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"gap_fade\",[[\"g\",0.03],[\"mode\",\"fade_day\"]],\"o0920\",[\"bracket\",0.005,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_02_c79def",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"oi_long_buildup\",[[\"quad\",\"long_buildup\"],[\"thr\",0.2]],\"o0920\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_03_72aff9",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"results_up\",[[\"a\",0.04],[\"mode\",\"up\"]],\"o0920\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_04_0a0973",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"cont\"]],\"o0920\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_05_d6129e",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"fade\"]],\"o0945\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_06_5f5667",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"deliv_up\",[[\"pp\",25.0],[\"day\",\"up\"]],\"o0920\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_07_c94331",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"o0920\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_08_53dfcd",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"deliv_down\",[[\"pp\",25.0],[\"day\",\"down\"]],\"o0915\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_09_5dcbd3",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"early_vol\",[[\"k\",3.0],[\"mode\",\"cont\"]],\"o0945\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_10_6ed072",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"gap_go\",[[\"g\",0.02],[\"mode\",\"go\"]],\"o0930\",[\"bracket\",0.01,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_11_307ccb",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.2]],\"o0915\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_12_d66f2a",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.1]],\"o0915\",[\"bracket\",0.01,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_13_933ef2",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"early_vol\",[[\"k\",3.0],[\"mode\",\"fade\"]],\"o0945\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_14_ce10fd",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"open5\",[[\"r\",0.02],[\"mode\",\"cont\"]],\"o0930\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_15_020645",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"gap_go\",[[\"g\",0.02],[\"mode\",\"go\"]],\"o0930\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_16_045646",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"early_vol\",[[\"k\",3.0],[\"mode\",\"fade\"]],\"o0945\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_17_051a46",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"o0920\",[\"bracket\",0.01,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_18_dafd4e",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0915\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_fal_19_b8768e",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0920\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_00_f958a7",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0920\",[\"time\",\"o1430\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_01_8e061b",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"gap_go\",[[\"g\",0.01],[\"mode\",\"go\"]],\"o0930\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_02_d75017",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"deliv_up\",[[\"pp\",15.0],[\"day\",\"up\"]],\"o0920\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_03_84c236",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"ban_entry_long\",[[\"event\",\"entry\"],[\"side\",1]],\"o0915\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_04_0b1da5",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"gap_volume\",[[\"mode\",\"lowvol_fade\"]],\"o0945\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_05_9578c5",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"up\"]],\"o0915\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_06_fa6bcf",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"cont\"]],\"o0945\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_07_de5f13",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"oi_long_buildup\",[[\"quad\",\"long_buildup\"],[\"thr\",0.1]],\"o0920\",[\"time\",\"o1430\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_08_5e7906",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"fade\"]],\"o0915\",[\"bracket\",0.01,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_09_5c2b22",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"inst_buy\",[[\"cls\",\"inst\"],[\"flow\",\"buy\"],[\"side\",1]],\"o0920\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_10_cf3d88",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"open5\",[[\"r\",0.01],[\"mode\",\"cont\"]],\"o0930\",[\"bracket\",0.005,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_11_7a3297",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"gap_volume\",[[\"mode\",\"lowvol_fade\"]],\"o0930\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_12_06d2f2",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0920\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_13_3f5e22",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"fade\"]],\"o0920\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_14_2fdb0c",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"vix_spike_losers\",[[\"x\",0.15]],\"o0920\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_15_b2ae59",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"fade\"]],\"o0920\",[\"bracket\",0.015,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_16_1d21b2",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"o0915\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_17_3a6eff",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"o0915\",[\"time\",\"o1430\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_18_dce95d",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"open5\",[[\"r\",0.01],[\"mode\",\"cont\"]],\"o0920\",[\"signal\",\"vwap\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_sid_19_47c4fd",
+   "key": "[\"bg1\",\"intraday\",\"SIDEWAYS\",\"gap_volume\",[[\"mode\",\"hivol_go\"]],\"o0930\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_00_a2e220",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"open5\",[[\"r\",0.02],[\"mode\",\"fade\"]],\"o0930\",[\"time\",\"o1430\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_01_d17b68",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"up\"]],\"o0920\",[\"bracket\",0.01,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_02_289a0d",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"idio_gap\",[[\"g\",0.02]],\"o0920\",[\"bracket\",0.005,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_03_b71d9d",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"fade\"]],\"o0920\",[\"bracket\",0.01,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_04_61115a",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"o0915\",[\"bracket\",0.015,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_05_f60887",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"idio_gap\",[[\"g\",0.02]],\"o0915\",[\"bracket\",0.005,3.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_06_31183e",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"cont\"]],\"o0915\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_07_b26e8a",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"gap_go\",[[\"g\",0.01],[\"mode\",\"go\"]],\"o0920\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_08_16c6fc",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"vix_spike_losers\",[[\"x\",0.1]],\"o0915\",[\"bracket\",0.005,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_09_75a150",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"down\"]],\"o0915\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_10_adea6e",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"inst_buy\",[[\"cls\",\"inst\"],[\"flow\",\"buy\"],[\"side\",1]],\"o0920\",[\"bracket\",0.005,1.5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_11_ad699d",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"o0920\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_12_dbd317",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"fade\"]],\"o0920\",[\"bracket\",0.015,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_13_3d51b2",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.2]],\"o0915\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_14_45eaff",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0930\",[\"time\",\"o1515\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_15_94c19f",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.2]],\"o0915\",[\"bracket\",0.015,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_16_d02baf",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"cont\"]],\"o0945\",[\"bracket\",0.015,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_17_0a55f7",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"fade\"]],\"o0920\",[\"time\",\"o1430\"],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_18_0d83a5",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"deliv_down\",[[\"pp\",15.0],[\"day\",\"down\"]],\"o0915\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_int_hig_19_189720",
+   "key": "[\"bg1\",\"intraday\",\"HIGH_VOL\",\"deliv_up\",[[\"pp\",15.0],[\"day\",\"up\"]],\"o0915\",[\"bracket\",0.005,2.0],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_00_c16d68",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_volume\",[[\"mode\",\"lowvol_fade\"]],\"o0945\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_01_c4b97b",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_volume\",[[\"mode\",\"lowvol_fade\"]],\"o0945\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_02_3e21a1",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"idio_gap\",[[\"g\",0.01]],\"o0915\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_03_c83baf",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"fade\"]],\"o0920\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_04_73b774",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0915\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_05_316b88",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"open5\",[[\"r\",0.02],[\"mode\",\"fade\"]],\"o0920\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_06_603f69",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"open5\",[[\"r\",0.01],[\"mode\",\"cont\"]],\"o0920\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_07_c18563",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_go\",[[\"g\",0.03],[\"mode\",\"go\"]],\"o0930\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_08_673323",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_fade\",[[\"g\",0.03],[\"mode\",\"fade_day\"]],\"o0920\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_09_93a5ff",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_volume\",[[\"mode\",\"hivol_go\"]],\"o0930\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_10_409dc7",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0920\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_11_ebc8aa",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"open5\",[[\"r\",0.01],[\"mode\",\"cont\"]],\"o0920\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_12_d29626",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_rev\",[[\"g\",0.01],[\"mode\",\"revfollow\"]],\"o0920\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_13_446038",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"fade\"]],\"o0915\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_14_bc49e6",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_fade\",[[\"g\",0.01],[\"mode\",\"fade_day\"]],\"o0915\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_15_3ec1c3",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"idio_gap\",[[\"g\",0.02]],\"o0920\",[\"time_min\",25],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_16_ced18d",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"gap_fade\",[[\"g\",0.03],[\"mode\",\"fade_day\"]],\"o0920\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_17_e9ec5a",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"cont\"]],\"o0945\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_18_e63281",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"cont\"]],\"o0915\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_ris_19_67643d",
+   "key": "[\"bg1\",\"scalping\",\"RISING\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"fade\"]],\"o0945\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_00_bba72b",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"open5\",[[\"r\",0.02],[\"mode\",\"cont\"]],\"o0930\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_01_0f368d",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"cont\"]],\"o0920\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_02_825d89",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"open5\",[[\"r\",0.02],[\"mode\",\"cont\"]],\"o0930\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_03_2d4d4f",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_go\",[[\"g\",0.02],[\"mode\",\"go\"]],\"o0920\",[\"bracket_min\",0.003,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_04_c91ece",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_rev\",[[\"g\",0.03],[\"mode\",\"revfollow\"]],\"o0920\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_05_b7ffd2",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"idio_gap\",[[\"g\",0.02]],\"o0915\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_06_92dd35",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_go\",[[\"g\",0.01],[\"mode\",\"go\"]],\"o0930\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_07_68c746",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0920\",[\"bracket_min\",0.003,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_08_caf323",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"cont\"]],\"o0915\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_09_0dbcea",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"idio_gap\",[[\"g\",0.02]],\"o0920\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_10_dc4274",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"open5\",[[\"r\",0.01],[\"mode\",\"cont\"]],\"o0920\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_11_a5c126",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0930\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_12_f23807",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"idio_gap\",[[\"g\",0.02]],\"o0915\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_13_61e65a",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"open5\",[[\"r\",0.01],[\"mode\",\"fade\"]],\"o0920\",[\"time_min\",25],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_14_0a2624",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_go\",[[\"g\",0.02],[\"mode\",\"go\"]],\"o0920\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_15_db0468",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0915\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_16_e27b3b",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"open5\",[[\"r\",0.01],[\"mode\",\"fade\"]],\"o0930\",[\"bracket_min\",0.003,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_17_819843",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"cont\"]],\"o0915\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_18_9e27ed",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"gap_go\",[[\"g\",0.03],[\"mode\",\"go\"]],\"o0930\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_fal_19_3e3434",
+   "key": "[\"bg1\",\"scalping\",\"FALLING\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"fade\"]],\"o0945\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_00_f2a1bb",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"fade\"]],\"o0920\",[\"time_min\",25],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_01_9b9099",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_volume\",[[\"mode\",\"hivol_go\"]],\"o0930\",[\"time_min\",5],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_02_937cd7",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"idio_gap\",[[\"g\",0.01]],\"o0920\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_03_e4ca69",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_go\",[[\"g\",0.03],[\"mode\",\"go\"]],\"o0930\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_04_6c1a90",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"open5\",[[\"r\",0.02],[\"mode\",\"cont\"]],\"o0930\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_05_5e6afe",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0920\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_06_cb5b8c",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"cont\"]],\"o0920\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_07_24496e",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_go\",[[\"g\",0.02],[\"mode\",\"go\"]],\"o0920\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_08_ef26e5",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_rev\",[[\"g\",0.03],[\"mode\",\"revfollow\"]],\"o0930\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_09_3948e1",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"open5\",[[\"r\",0.02],[\"mode\",\"fade\"]],\"o0920\",[\"time_min\",25],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_10_ab194a",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_fade\",[[\"g\",0.01],[\"mode\",\"fade_day\"]],\"o0915\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_11_9ff942",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"cont\"]],\"o0920\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_12_aa77cb",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_go\",[[\"g\",0.03],[\"mode\",\"go\"]],\"o0920\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_13_b46d97",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"early_vol\",[[\"k\",5.0],[\"mode\",\"cont\"]],\"o0945\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_14_1275d1",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_rev\",[[\"g\",0.02],[\"mode\",\"revfollow\"]],\"o0920\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_15_1f4eab",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"cont\"]],\"o0915\",[\"bracket_min\",0.003,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_16_2c903b",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"cont\"]],\"o0920\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_17_9fe977",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_go\",[[\"g\",0.03],[\"mode\",\"go\"]],\"o0930\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_18_a6aeb7",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"early_vol\",[[\"k\",3.0],[\"mode\",\"cont\"]],\"o0945\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_sid_19_ba13e5",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"open5\",[[\"r\",0.01],[\"mode\",\"fade\"]],\"o0920\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_00_e2f758",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"results_gap\",[[\"g\",0.04],[\"mode\",\"cont\"]],\"o0915\",[\"bracket_min\",0.005,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_01_e0f480",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"open5\",[[\"r\",0.01],[\"mode\",\"fade\"]],\"o0920\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_02_684d85",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_volume\",[[\"mode\",\"lowvol_fade\"]],\"o0930\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_03_a4fd37",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"open5\",[[\"r\",0.01],[\"mode\",\"cont\"]],\"o0920\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_04_555c07",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"idio_gap\",[[\"g\",0.01]],\"o0920\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_05_fbf6a8",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"open5\",[[\"r\",0.02],[\"mode\",\"cont\"]],\"o0920\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_06_725201",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_rev\",[[\"g\",0.03],[\"mode\",\"revfollow\"]],\"o0930\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_07_0dd24f",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_go\",[[\"g\",0.02],[\"mode\",\"go\"]],\"o0930\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_08_0e806c",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_go\",[[\"g\",0.03],[\"mode\",\"go\"]],\"o0930\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_09_2ba4a2",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_volume\",[[\"mode\",\"hivol_go\"]],\"o0945\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_10_1aeb8b",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_go\",[[\"g\",0.01],[\"mode\",\"go\"]],\"o0930\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_11_9306d1",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_volume\",[[\"mode\",\"lowvol_fade\"]],\"o0930\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_12_12e20c",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"early_vol\",[[\"k\",3.0],[\"mode\",\"fade\"]],\"o0945\",[\"time_min\",15],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_13_fef825",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0920\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_14_bbcad0",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_go\",[[\"g\",0.01],[\"mode\",\"go\"]],\"o0920\",[\"bracket_min\",0.003,2.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_15_1adffc",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"results_gap\",[[\"g\",0.02],[\"mode\",\"cont\"]],\"o0920\",[\"bracket_min\",0.003,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_16_f3a184",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_volume\",[[\"mode\",\"lowvol_fade\"]],\"o0945\",[\"bracket_min\",0.005,3.0,30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_17_57e75e",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"open5\",[[\"r\",0.01],[\"mode\",\"cont\"]],\"o0920\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_18_6671fe",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0920\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_sca_hig_19_0eb909",
+   "key": "[\"bg1\",\"scalping\",\"HIGH_VOL\",\"idio_gap\",[[\"g\",0.01]],\"o0915\",[\"signal_min\",\"vwap\",30],\"STOCKS\",\"mis\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_00_6a534e",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"results_up\",[[\"a\",0.08],[\"mode\",\"up\"]],\"next_open\",[\"bracket_d\",0.05,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_01_bc4437",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"inst_sell_rev\",[[\"cls\",\"inst\"],[\"flow\",\"sell\"],[\"side\",1]],\"next_open\",[\"hold\",20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_02_cb06c4",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"ban_exit_long\",[[\"event\",\"exit\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.05,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_03_da7b33",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.08,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_04_3eee99",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"inst_sell_rev\",[[\"cls\",\"inst\"],[\"flow\",\"sell\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.03,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_05_d9d7d5",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"deliv_down\",[[\"pp\",15.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.03,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_06_c33a9a",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"deliv_up\",[[\"pp\",15.0],[\"day\",\"up\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_07_ddbe65",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"results_up\",[[\"a\",0.08],[\"mode\",\"up\"]],\"next_open\",[\"bracket_d\",0.03,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_08_7f2568",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"ban_exit_short\",[[\"event\",\"exit\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.05,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_09_6cecf4",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"deliv_up\",[[\"pp\",15.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.05,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_10_e2d838",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"next_open\",[\"bracket_d\",0.05,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_11_86a497",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"ban_entry_short\",[[\"event\",\"entry\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.05,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_12_159a95",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"results_down\",[[\"a\",0.08],[\"mode\",\"down\"]],\"next_open\",[\"bracket_d\",0.08,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_13_527a37",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"oi_long_buildup\",[[\"quad\",\"long_buildup\"],[\"thr\",0.1]],\"next_open\",[\"hold\",3],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_14_99ba06",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"oi_long_buildup\",[[\"quad\",\"long_buildup\"],[\"thr\",0.1]],\"next_open\",[\"bracket_d\",0.05,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_15_c9f775",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.05,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_16_02d8af",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"inst_sell_rev\",[[\"cls\",\"inst\"],[\"flow\",\"sell\"],[\"side\",1]],\"next_open\",[\"signal_d\",\"sma10\",60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_17_6afb0a",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"oi_long_buildup\",[[\"quad\",\"long_buildup\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.08,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_18_5debc8",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"results_up\",[[\"a\",0.04],[\"mode\",\"up\"]],\"next_open\",[\"bracket_d\",0.08,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_ris_19_8f025f",
+   "key": "[\"bg1\",\"swing\",\"RISING\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.2]],\"next_open\",[\"signal_d\",\"sma10\",60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_00_d120c5",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"next_open\",[\"bracket_d\",0.05,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_01_7bf33f",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_02_d4ea57",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"ban_entry_short\",[[\"event\",\"entry\"],[\"side\",-1]],\"next_open\",[\"hold\",2],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_03_f9ea22",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"vix_spike_losers\",[[\"x\",0.1]],\"next_open\",[\"hold\",60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_04_809d8a",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"ban_entry_long\",[[\"event\",\"entry\"],[\"side\",1]],\"next_open\",[\"hold\",3],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_05_d09180",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.2]],\"next_open\",[\"hold\",10],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_06_95b18c",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.03,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_07_fde67f",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"deliv_down\",[[\"pp\",25.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.03,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_08_736777",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"inst_buy\",[[\"cls\",\"inst\"],[\"flow\",\"buy\"],[\"side\",1]],\"next_open\",[\"hold\",5],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_09_a9c2d1",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"results_fade\",[[\"a\",0.08],[\"mode\",\"fade\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_10_e82ed4",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"deliv_down\",[[\"pp\",15.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.05,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_11_5d3ec5",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.1]],\"next_open\",[\"bracket_d\",0.03,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_12_c472d5",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"deliv_down\",[[\"pp\",15.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",10],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_13_6244f4",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"ban_entry_long\",[[\"event\",\"entry\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.03,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_14_245714",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"results_up\",[[\"a\",0.04],[\"mode\",\"up\"]],\"next_open\",[\"hold\",60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_15_c7d38f",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"deliv_up\",[[\"pp\",15.0],[\"day\",\"up\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_16_625295",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.03,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_17_a83cf2",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",2],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_18_048c81",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"inst_buy\",[[\"cls\",\"inst\"],[\"flow\",\"buy\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.05,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_fal_19_97aa61",
+   "key": "[\"bg1\",\"swing\",\"FALLING\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.1]],\"next_open\",[\"hold\",40],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_00_3a361c",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"ban_entry_short\",[[\"event\",\"entry\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.08,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_01_6e4f88",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"vix_spike_losers\",[[\"x\",0.15]],\"next_open\",[\"signal_d\",\"sma10\",60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_02_c7a958",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.1]],\"next_open\",[\"bracket_d\",0.03,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_03_fb5b08",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"ban_entry_long\",[[\"event\",\"entry\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.03,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_04_a50ad5",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.1]],\"next_open\",[\"bracket_d\",0.05,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_05_b04805",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"ban_exit_long\",[[\"event\",\"exit\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.08,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_06_594cc4",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"ban_entry_short\",[[\"event\",\"entry\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.03,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_07_df235c",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.2]],\"next_open\",[\"hold\",60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_08_97279b",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"oi_long_buildup\",[[\"quad\",\"long_buildup\"],[\"thr\",0.1]],\"next_open\",[\"bracket_d\",0.05,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_09_fd05b5",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.05,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_10_3a2478",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"inst_sell_rev\",[[\"cls\",\"inst\"],[\"flow\",\"sell\"],[\"side\",1]],\"next_open\",[\"hold\",40],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_11_1acf59",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.03,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_12_ae2536",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"oi_long_buildup\",[[\"quad\",\"long_buildup\"],[\"thr\",0.1]],\"next_open\",[\"hold\",10],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_13_f481ae",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"ban_entry_long\",[[\"event\",\"entry\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.03,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_14_b32f63",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.08,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_15_5f5bc9",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"results_up\",[[\"a\",0.04],[\"mode\",\"up\"]],\"next_open\",[\"bracket_d\",0.08,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_16_a8b7f7",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.05,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_17_744193",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"next_open\",[\"hold\",40],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_18_3b73b8",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"deliv_up\",[[\"pp\",25.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.03,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_sid_19_198702",
+   "key": "[\"bg1\",\"swing\",\"SIDEWAYS\",\"inst_sell_rev\",[[\"cls\",\"inst\"],[\"flow\",\"sell\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.03,2.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_00_569765",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"results_up\",[[\"a\",0.04],[\"mode\",\"up\"]],\"next_open\",[\"hold\",2],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_01_37eef2",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"inst_sell_rev\",[[\"cls\",\"inst\"],[\"flow\",\"sell\"],[\"side\",1]],\"next_open\",[\"hold\",5],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_02_36a266",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"vix_high_losers\",[],\"next_open\",[\"hold\",20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_03_b74a2f",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"results_fade\",[[\"a\",0.08],[\"mode\",\"fade\"]],\"next_open\",[\"bracket_d\",0.03,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_04_05760f",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"deliv_up\",[[\"pp\",25.0],[\"day\",\"up\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_05_47b4df",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.03,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_06_51a34b",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"results_fade\",[[\"a\",0.08],[\"mode\",\"fade\"]],\"next_open\",[\"hold\",20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_07_8a76fd",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"ban_exit_short\",[[\"event\",\"exit\"],[\"side\",-1]],\"next_open\",[\"hold\",3],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_08_04de0d",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_09_f29010",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.08,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_10_0fcdcb",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"results_down\",[[\"a\",0.08],[\"mode\",\"down\"]],\"next_open\",[\"bracket_d\",0.03,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_11_108aeb",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"ban_exit_long\",[[\"event\",\"exit\"],[\"side\",1]],\"next_open\",[\"hold\",2],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_12_479edc",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.08,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_13_7d6878",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"ban_entry_long\",[[\"event\",\"entry\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.05,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_14_270f80",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"deliv_down\",[[\"pp\",15.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.03,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_15_fcb15a",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"oi_long_unwinding\",[[\"quad\",\"long_unwinding\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.05,2.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_16_5580f1",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"vix_spike_losers\",[[\"x\",0.1]],\"next_open\",[\"hold\",3],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_17_295308",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"vix_spike_losers\",[[\"x\",0.1]],\"next_open\",[\"bracket_d\",0.03,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_18_4d000a",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"deliv_down\",[[\"pp\",25.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.05,3.0,60],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_swi_hig_19_29319e",
+   "key": "[\"bg1\",\"swing\",\"HIGH_VOL\",\"inst_sell_rev\",[[\"cls\",\"inst\"],[\"flow\",\"sell\"],[\"side\",1]],\"next_open\",[\"bracket_d\",0.05,3.0,20],\"STOCKS\",\"cnc/fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_00_b9c13a",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_01_7df2ab",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_signal\",\"vix_pct50\"],\"BANKNIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_02_c51831",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"expiry\",[[\"when\",\"pre\"],[\"side\",0]],\"close\",[\"opt_signal\",\"vix_pct50\"],\"BANKNIFTY\",\"opt\",\"short_strangle:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_03_8e82a3",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"short_strangle:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_04_f1fd3a",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"fii_flow\",[[\"z\",1.5]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_05_c65427",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"close\",[\"opt_bracket\",\"1:3\"],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_06_222a5b",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_07_f4a195",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_signal\",\"sma10\"],\"NIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_08_e62453",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"expiry\",[[\"when\",\"pre\"],[\"side\",0]],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"short_strangle:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_09_a1c0d4",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_hold\",3],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_10_3c2c5b",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"fii_flow\",[[\"z\",1.0]],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_11_44828a",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"fii_flow\",[[\"z\",1.0]],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_12_dd281b",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_hold\",1],\"NIFTY\",\"opt\",\"short_strangle:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_13_c2a25c",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_hold\",3],\"NIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_14_268a72",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"iron_condor:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_15_79a5ea",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_16_d49f61",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_hold\",3],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_17_85f647",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_18_ab3f81",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"close\",[\"opt_hold\",3],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_ris_19_4b64be",
+   "key": "[\"bg1\",\"options\",\"RISING\",\"vix_high_index\",[],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_00_76d3b6",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"expiry\",[[\"when\",\"pre\"],[\"side\",0]],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"iron_condor:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_01_f413d8",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_high_index\",[],\"close\",[\"opt_expiry\"],\"NIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_02_966ba9",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"fii_flow\",[[\"z\",1.0]],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_03_88f0f2",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_high_index\",[],\"close\",[\"opt_hold\",3],\"NIFTY\",\"opt\",\"iron_condor:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_04_bcbfa1",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"client_contra\",[],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_05_487641",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_06_8c1943",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_high_index\",[],\"close\",[\"opt_signal\",\"sma10\"],\"NIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_07_2498fa",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_signal\",\"sma10\"],\"NIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_08_fd593d",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_signal\",\"vix_pct50\"],\"NIFTY\",\"opt\",\"short_strangle:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_09_e44c41",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"client_contra\",[],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_10_f2f51b",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_11_8c05c5",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_bracket\",\"1:3\"],\"NIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_12_0b701e",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",5],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_13_80bdb2",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_14_a34ecd",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_15_f1d23f",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_16_e3f9da",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_signal\",\"sma10\"],\"NIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_17_cbc12e",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_signal\",\"vix_pct50\"],\"NIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_18_69589e",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"client_contra\",[],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_fal_19_e0b513",
+   "key": "[\"bg1\",\"options\",\"FALLING\",\"fii_flow\",[[\"z\",1.0]],\"close\",[\"opt_signal\",\"sma10\"],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_00_9a8b82",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"client_contra\",[],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_01_1f346f",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_02_c28c38",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_expiry\"],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_03_f8d381",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_hold\",5],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_04_868aa7",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"close\",[\"opt_expiry\"],\"NIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_05_909fe1",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_06_5940ef",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"iron_condor:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_07_b295b6",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_high_index\",[],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"iron_condor:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_08_8fcc5a",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_signal\",\"sma10\"],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_09_713d67",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",3],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_10_88e54a",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",1],\"NIFTY\",\"opt\",\"iron_condor:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_11_85c915",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",5],\"NIFTY\",\"opt\",\"iron_condor:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_12_2c5fb7",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_13_d22ef2",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_hold\",5],\"NIFTY\",\"opt\",\"iron_condor:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_14_91d522",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"client_contra\",[],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_15_a81a52",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_bracket\",\"1:3\"],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_16_042d58",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_high_index\",[],\"close\",[\"opt_signal\",\"vix_pct50\"],\"NIFTY\",\"opt\",\"iron_condor:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_17_ab36fc",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_18_c50b16",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"client_contra\",[],\"close\",[\"opt_hold\",1],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_sid_19_192b9f",
+   "key": "[\"bg1\",\"options\",\"SIDEWAYS\",\"vix_high_index\",[],\"close\",[\"opt_expiry\"],\"NIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_00_b215e4",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_signal\",\"vix_pct50\"],\"BANKNIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_01_23c80f",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_expiry\"],\"NIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_02_0a7ec9",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"fii_flow\",[[\"z\",1.5]],\"close\",[\"opt_bracket\",\"1:3\"],\"NIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_03_7861cd",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"fii_flow\",[[\"z\",1.0]],\"close\",[\"opt_hold\",3],\"NIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_04_1a1eaa",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"short_strangle:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_05_f968f6",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"fii_flow\",[[\"z\",1.5]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_06_1d4791",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_high_index\",[],\"close\",[\"opt_signal\",\"vix_pct50\"],\"BANKNIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_07_fab701",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"close\",[\"opt_expiry\"],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_08_9a5b65",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"close\",[\"opt_hold\",5],\"BANKNIFTY\",\"opt\",\"long_atm:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_09_9abb3d",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"expiry\",[[\"when\",\"pre\"],[\"side\",0]],\"close\",[\"opt_hold\",5],\"NIFTY\",\"opt\",\"iron_condor:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_10_5ed55a",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_high_index\",[],\"close\",[\"opt_hold\",1],\"NIFTY\",\"opt\",\"iron_condor:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_11_3b1c24",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_high_index\",[],\"close\",[\"opt_bracket\",\"1:3\"],\"NIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_12_167e60",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"expiry\",[[\"when\",\"pre\"],[\"side\",0]],\"close\",[\"opt_bracket\",\"1:3\"],\"BANKNIFTY\",\"opt\",\"short_strangle:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_13_6040d2",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_hold\",3],\"BANKNIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_14_746662",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"fii_flow\",[[\"z\",1.5]],\"close\",[\"opt_hold\",3],\"BANKNIFTY\",\"opt\",\"debit_spread:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_15_4ee334",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_hold\",5],\"NIFTY\",\"opt\",\"short_strangle:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_16_97ed96",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"client_contra\",[],\"close\",[\"opt_expiry\"],\"NIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_17_2557de",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.1]],\"close\",[\"opt_signal\",\"sma10\"],\"BANKNIFTY\",\"opt\",\"long_atm:weekly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_18_7349e4",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.15]],\"close\",[\"opt_bracket\",\"1:3\"],\"NIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_opt_hig_19_01af82",
+   "key": "[\"bg1\",\"options\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"close\",[\"opt_expiry\"],\"NIFTY\",\"opt\",\"debit_spread:monthly\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_00_b0bfff",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"client_contra\",[],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_01_f6c867",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"idx_gap\",[[\"g\",0.005],[\"mode\",\"fade\"]],\"o0915\",[\"time\",\"o1515\"],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_02_112bf7",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"idx_gap\",[[\"g\",0.01],[\"mode\",\"fade\"]],\"o0915\",[\"time\",\"o1515\"],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_03_b00354",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"attention_swing\",[[\"day\",\"down\"]],\"o1521\",[\"hold_m\",5],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_04_dd02b3",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_05_7f843a",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"ban_exit_short\",[[\"event\",\"exit\"],[\"side\",-1]],\"next_open\",[\"hold\",2],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_06_5e3bf6",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_07_e4aa1f",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"vix_spike_index\",[[\"x\",0.1]],\"next_open\",[\"hold\",10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_08_98dd25",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"ban_entry_short\",[[\"event\",\"entry\"],[\"side\",-1]],\"next_open\",[\"hold\",2],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_09_b26543",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"vix_spike_index\",[[\"x\",0.15]],\"next_open\",[\"hold\",1],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_10_9314fd",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_11_cdb2eb",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"vix_spike_index\",[[\"x\",0.1]],\"next_open\",[\"bracket_d\",0.015,3.0,10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_12_6b4e6a",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"fii_flow\",[[\"z\",1.5]],\"next_open\",[\"hold\",10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_13_b4f65f",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"vix_spike_index\",[[\"x\",0.15]],\"next_open\",[\"bracket_d\",0.015,2.0,10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_14_4ecdd1",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.1]],\"next_open\",[\"hold\",10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_15_e36aae",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"client_contra\",[],\"next_open\",[\"hold\",10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_16_ddb78c",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.03,2.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_17_a094d1",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"other_sell\",[[\"cls\",\"other\"],[\"flow\",\"sell\"],[\"side\",-1]],\"next_open\",[\"hold\",2],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_18_99689d",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"ban_entry_short\",[[\"event\",\"entry\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.03,2.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_ris_19_3cd779",
+   "key": "[\"bg1\",\"futures\",\"RISING\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"next_open\",[\"bracket_d\",0.015,3.0,10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_00_46a112",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"fii_flow\",[[\"z\",1.0]],\"next_open\",[\"bracket_d\",0.03,2.0,10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_01_e9333a",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"client_contra\",[],\"next_open\",[\"bracket_d\",0.015,2.0,10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_02_a8ae17",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"fii_flow\",[[\"z\",1.5]],\"next_open\",[\"signal_d\",\"sma10\",10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_03_662eab",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"results_fade\",[[\"a\",0.08],[\"mode\",\"fade\"]],\"next_open\",[\"hold\",3],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_04_53e6db",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"next_open\",[\"hold\",2],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_05_9344e3",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"idx_gap\",[[\"g\",0.01],[\"mode\",\"fade\"]],\"o0915\",[\"time\",\"o1515\"],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_06_fa0ef6",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"next_open\",[\"signal_d\",\"sma10\",10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_07_0c56da",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.2]],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_08_814898",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"fii_flow\",[[\"z\",1.5]],\"next_open\",[\"signal_d\",\"sma10\",10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_09_b58d43",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"vol_shock\",[[\"k\",3.0],[\"day\",\"up\"]],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_10_3473d1",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_11_740221",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"results_down\",[[\"a\",0.08],[\"mode\",\"down\"]],\"next_open\",[\"bracket_d\",0.015,2.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_12_7b51fb",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"fii_flow\",[[\"z\",1.0]],\"next_open\",[\"bracket_d\",0.015,2.0,10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_13_ed611b",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"expiry\",[[\"when\",\"pre\"],[\"side\",-1]],\"o1521\",[\"overnight\"],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_14_88954f",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"deliv_down\",[[\"pp\",25.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.015,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_15_04bf69",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"next_open\",[\"signal_d\",\"sma10\",10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_16_29175a",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"client_contra\",[],\"next_open\",[\"hold\",1],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_17_af23cb",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"client_contra\",[],\"next_open\",[\"hold\",3],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_18_6c9fb0",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"deliv_down\",[[\"pp\",25.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_fal_19_282ba6",
+   "key": "[\"bg1\",\"futures\",\"FALLING\",\"vix_high_index\",[],\"next_open\",[\"hold\",5],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_00_936378",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"client_contra\",[],\"next_open\",[\"signal_d\",\"sma10\",10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_01_25895c",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"client_contra\",[],\"next_open\",[\"hold\",5],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_02_e333d8",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"other_sell\",[[\"cls\",\"other\"],[\"flow\",\"sell\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_03_7278a4",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"vix_spike_index\",[[\"x\",0.1]],\"next_open\",[\"bracket_d\",0.015,3.0,10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_04_33c5b6",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"idx_gap\",[[\"g\",0.005],[\"mode\",\"go\"]],\"o0920\",[\"signal\",\"vwap\"],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_05_d29895",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"fii_flow\",[[\"z\",1.5]],\"next_open\",[\"hold\",10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_06_4f836d",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"next_open\",[\"signal_d\",\"sma10\",10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_07_9d5138",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"client_contra\",[],\"next_open\",[\"hold\",10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_08_a315a3",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"results_down\",[[\"a\",0.04],[\"mode\",\"down\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_09_656f50",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"idx_gap\",[[\"g\",0.01],[\"mode\",\"fade\"]],\"o0915\",[\"signal\",\"vwap\"],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_10_960603",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",1],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_11_24335c",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"deliv_down\",[[\"pp\",25.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",5],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_12_bdf277",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"vix_high_index\",[],\"next_open\",[\"hold\",5],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_13_59ad3c",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"next_open\",[\"hold\",3],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_14_ab2c20",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"oi_short_covering\",[[\"quad\",\"short_covering\"],[\"thr\",0.1]],\"next_open\",[\"bracket_d\",0.015,2.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_15_127e9e",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"fii_flow\",[[\"z\",1.0]],\"next_open\",[\"bracket_d\",0.015,2.0,10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_16_304500",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.015,2.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_17_3cfb35",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"lasthour_vol\",[[\"k\",5.0],[\"mode\",\"fade\"]],\"o1521\",[\"overnight\"],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_18_f1e0eb",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"next_open\",[\"hold\",2],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_sid_19_5e23cd",
+   "key": "[\"bg1\",\"futures\",\"SIDEWAYS\",\"low_deliv\",[],\"next_open\",[\"hold\",1],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_00_f04845",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"next_open\",[\"hold\",2],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_01_b91d79",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"other_sell\",[[\"cls\",\"other\"],[\"flow\",\"sell\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.03,2.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_02_582973",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.15]],\"next_open\",[\"signal_d\",\"sma10\",10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_03_c0a8c6",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.1]],\"next_open\",[\"signal_d\",\"sma10\",10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_04_692a00",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"oi_short_buildup\",[[\"quad\",\"short_buildup\"],[\"thr\",0.1]],\"next_open\",[\"bracket_d\",0.03,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_05_4218b5",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"next_open\",[\"hold\",2],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_06_c6f89d",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"next_open\",[\"hold\",5],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_07_924a9b",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"ban_exit_short\",[[\"event\",\"exit\"],[\"side\",-1]],\"next_open\",[\"bracket_d\",0.03,2.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_08_964517",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"vix_spike_index\",[[\"x\",0.15]],\"next_open\",[\"signal_d\",\"sma10\",10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_09_3e58fd",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"expiry\",[[\"when\",\"pre\"],[\"side\",1]],\"o1521\",[\"overnight\"],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_10_570fbd",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.025],[\"mode\",\"rebound\"]],\"next_open\",[\"hold\",10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_11_017d31",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"lasthour_vol\",[[\"k\",5.0],[\"mode\",\"cont\"]],\"o1521\",[\"hold_m\",5],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_12_54c90e",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"deliv_down\",[[\"pp\",15.0],[\"day\",\"down\"]],\"next_open\",[\"bracket_d\",0.015,3.0,10],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_13_1973b7",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"idx_gap\",[[\"g\",0.005],[\"mode\",\"go\"]],\"o0920\",[\"time\",\"o1515\"],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_14_43a00e",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"vix_high_index\",[],\"next_open\",[\"signal_d\",\"sma10\",10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_15_38c17c",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"idx_gap\",[[\"g\",0.005],[\"mode\",\"fade\"]],\"o0915\",[\"bracket\",0.005,3.0],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_16_0e9d32",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"fii_flow\",[[\"z\",1.5]],\"next_open\",[\"bracket_d\",0.015,3.0,10],\"BANKNIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_17_084d01",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"nifty_drop\",[[\"x\",0.015],[\"mode\",\"rebound\"]],\"next_open\",[\"bracket_d\",0.015,3.0,10],\"NIFTY\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_18_3f9a56",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"vol_shock\",[[\"k\",5.0],[\"day\",\"down\"]],\"next_open\",[\"hold\",1],\"STOCKS\",\"fut\",\"\"]"
+  },
+  {
+   "id": "bld0001_fut_hig_19_5163c1",
+   "key": "[\"bg1\",\"futures\",\"HIGH_VOL\",\"client_contra\",[],\"next_open\",[\"hold\",3],\"BANKNIFTY\",\"fut\",\"\"]"
+  }
+ ],
+ "candidates_sha256": "a38755635230f678877523561e84526955d7619cdc7fd5e96248068695c9633d",
+ "counts": {
+  "candidates": 400,
+  "discovery_passers": 27,
+  "final_confirmed": 0,
+  "final_looks": 2,
+  "proven": 0,
+  "shuffle_passers": 6,
+  "stages": {
+   "discovery": 373,
+   "discovery_passed": 6,
+   "final_rejected": 2,
+   "validation_failed": 19
+  },
+  "validation_passers": 2,
+  "validation_tested": 21
+ },
+ "development_evaluations": {
+  "count": 16,
+  "note": "16 DISCOVERY-only engine checks on real data (draw id 'try') while the engine was written; already counted by builder_rule.json dsr.development_evaluations (listed here for the record, never added twice)"
+ },
+ "errata": [
+  {
+   "action": "fixed in stratlab/builder_options.py (a zero expiry-day settle is missing -> official index close) for every later batch; batch 0001's candidates are NOT re-evaluated (a second look) and keep counting in N; their keys are never re-drawn",
+   "agent": "options",
+   "effect": "the 80 options candidates' DISCOVERY numbers of batch 0001 are invalid (0 passed; none reached VALIDATION or FINAL); the options planted / coin-flip gate of batch 0001 was invalid (coin flip PF 4.9)",
+   "issue": "nse_old_view's old-format bhavcopy has option settle = 0 on WEEKLY expiry days; nsedata.final_settlement took that 0 as the settlement price, so expiry-settled weekly positions 2016-2023 (BANKNIFTY) / 2019-2023 (NIFTY) were valued at S = 0 (puts = strike, calls = 0) in DISCOVERY",
+   "planted_gate_options_with_fix": false
+  },
+  {
+   "action": "unchanged: fixed for later batches; batch 0001 not re-evaluated, its keys never re-drawn, counted in N",
+   "agent": "options",
+   "corrects": "the erratum above (its affected window)",
+   "effect": "unchanged: batch 0001's options DISCOVERY numbers and options planted gate are invalid",
+   "issue": "measured on the files: nse_old_view carries option settle = 0 on 244 of its 449 index-option expiry days, every one up to 2020-01-30 and none after; nsedata.final_settlement uses the index future's settle first, so only WEEKLY expiries without a future were valued at S = 0: BANKNIFTY weeklies 2016-05 .. 2020-01 and NIFTY weeklies 2019-02 .. 2020-01; the 2023-26 nse directory has no zero settles"
+  }
+ ],
+ "final_looks": [
+  {
+   "confirmed": false,
+   "id": "bld0001_int_fal_18_dafd4e",
+   "key": "[\"bg1\",\"intraday\",\"FALLING\",\"gap_fade\",[[\"g\",0.02],[\"mode\",\"fade_day\"]],\"o0915\",[\"bracket\",0.01,2.0],\"STOCKS\",\"mis\",\"\"]",
+   "net": -3742.57,
+   "pf": 0.955,
+   "text": "Intraday in a FALLING market (NIFTY below a falling 50-day average): when the stock opens >= 2% away from yesterday's close (call auction), trade the stock against the move at 09:15 (MIS); stop 1.00% / target 2.00% from entry (1:2), else exit at 15:15.",
+   "trades": 127
+  },
+  {
+   "confirmed": false,
+   "id": "bld0001_sca_sid_10_ab194a",
+   "key": "[\"bg1\",\"scalping\",\"SIDEWAYS\",\"gap_fade\",[[\"g\",0.01],[\"mode\",\"fade_day\"]],\"o0915\",[\"time_min\",10],\"STOCKS\",\"mis\",\"\"]",
+   "net": -7590.51,
+   "pf": 0.947,
+   "text": "Scalping in a SIDEWAYS market (neither rising nor falling): when the stock opens >= 1% away from yesterday's close (call auction), trade the stock against the move at 09:15 (MIS); exit 10 minutes after entry.",
+   "trades": 288
+  }
+ ],
+ "frozen_hash": "f506bc1888f728216adec6286ddd5a5b843afd9775c1ac1e9c60c1275d66310d",
+ "grammar_sha256": "2084ade2c07de51ab95700e54c200e3d60c76f97d0ee38eba0ce464f899589ea",
+ "grammar_version": "bg1",
+ "lab_trials_count": 2552,
+ "n_candidates": 400,
+ "n_used_after": 2970,
+ "purpose": "Every strategy the builder ever makes counts: the server registry imports this file as its first record on first use, so its N starts at the sandbox's N after batch 0001, the 400 keys below are never drawn again, and the server's own first batch is 0002. Bookkeeping only: the rule's gates, splits and lab base (2,552) are unchanged.",
+ "result_sha256": "cdf561fdccf3e6215578302083e72cc4ef7df28e27f9a39fff14a5eaac172d72",
+ "rule_sha256": "a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06",
+ "rule_version": "builder/v1",
+ "seed": "builder/v1 sandbox batch 0001",
+ "snapshot_end": 20261109,
+ "snapshot_sha256": "9074646b2345387af46bcf398ce563e7b2ecf5563750badaaa01d68896601e0c",
+ "source": "sandbox (lab scratchpad data), evaluated 2026-11-15 through the frozen pipeline"
+}

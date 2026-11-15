@@ -42,6 +42,7 @@ from stratlab import trials as TR  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 _SYN: dict = {}
+SEED_N = 2552 + 16 + 400 + 2          # N after the sandbox batch 0001 the server registry is seeded with
 
 
 def syn_root() -> str:
@@ -282,27 +283,27 @@ def test_freeze_before_evaluate():
         pass
     snap = {"source": "test", "end": 20261109, "inputs": {"x": 1}}
     rec = b.freeze(snap, per_cell=1)
-    assert rec["batch"] == "0001" and rec["n_candidates"] == 20
+    assert rec["batch"] == "0002" and rec["n_candidates"] == 20
     kinds = [r["kind"] for r in b.registry.records()]
-    assert kinds == ["genesis", "batch_frozen"]
-    b.verify_frozen("0001", snap)
+    assert kinds == ["genesis", "seed", "batch_frozen"]
+    b.verify_frozen("0002", snap)
     try:
-        b.verify_frozen("0001", {**snap, "end": 20261110})
+        b.verify_frozen("0002", {**snap, "end": 20261110})
         raise AssertionError("a changed data snapshot must be refused")
     except B.NotFrozen:
         pass
-    p = b.candidates_path("0001")
+    p = b.candidates_path("0002")
     doc = json.loads(p.read_text())
     doc["candidates"][0]["text"] += " "
     p.write_text(json.dumps(doc))
     try:
-        b.verify_frozen("0001", snap)
+        b.verify_frozen("0002", snap)
         raise AssertionError("an edited candidate file must be refused")
     except B.NotFrozen:
         pass
-    assert b.freeze(snap, "0001")["frozen_hash"] == rec["frozen_hash"]      # idempotent per id
+    assert b.freeze(snap, "0002")["frozen_hash"] == rec["frozen_hash"]      # idempotent per id
     rec2 = b.freeze(snap, per_cell=1)
-    assert rec2["batch"] == "0002"
+    assert rec2["batch"] == "0003"
 
 
 def test_evaluation_process_refuses_unfrozen():
@@ -331,15 +332,15 @@ def test_batch_end_to_end_and_n_accounting():
     for k in ("candidates", "discovery_passers", "shuffle_passers", "validation_tested", "validation_passers",
               "final_confirmed", "proven", "n_disc", "n_proof", "cells", "rows", "planted", "windows"):
         assert k in s, k
-    lab = 2552 + 16
+    lab = SEED_N
     assert rec["n_before"] == lab
     assert s["n_disc"] == lab + 20 and s["n_proof"] == s["n_disc"] + s["final_looks"]
     for a in G.AGENTS:
         assert f"gate_{a}" in s["planted"]
     out = b.ingest(rec["batch"], s)
     st = b.state()
-    assert st["evaluated"] == 20 and st["n_used"] == s["n_proof"]
-    assert b.n_base(st) == lab + 20 + st["final_looks"]
+    assert st["evaluated"] == 420 and st["n_used"] == s["n_proof"]
+    assert b.n_base(st) == 2552 + 16 + 420 + st["final_looks"]
     # resumable: a re-run returns the stored units (no recompute)
     work = b.batch_dir(rec["batch"]) / "work"
     m0 = {p.name: p.stat().st_mtime for p in work.glob("*.json")}
@@ -360,9 +361,9 @@ def test_n_never_shrinks_and_counts_final_looks():
             "n_proof": 5002, "v": 0.001, "best_discovery_dsr": {}, "planted": {}, "rows": [], "windows": {}}
     b.ingest(r1["batch"], summ)
     st = b.state()
-    assert st["final_looks"] == 2 and st["n_used"] == 5002
+    assert st["final_looks"] == 4 and st["n_used"] == 5002          # the seed's 2 FINAL looks + this batch's 2
     r2 = b.freeze(snap, per_cell=1)
-    assert r2["n_before"] == 2552 + 16 + 20 + 2
+    assert r2["n_before"] == SEED_N + 20 + 2
     b.ingest(r2["batch"], {**summ, "n_proof": 10})               # a smaller N can never lower N_used
     assert b.state()["n_used"] == 5002
     assert B.api_status(b.root)["n_used"] >= 5002
@@ -527,11 +528,11 @@ def test_weekly_job_end_to_end_with_runner():
     sat = datetime(2026, 11, 21, 6, 0)
     with patch.object(settings, "builder_enabled", True):
         s = B.weekly_job(now=sat, root=root, runner=runner, snapshot_fn=lambda: {"source": "test", "end": 1})
-        assert s["status"] == "complete" and s["batch"] == "0001", s
+        assert s["status"] == "complete" and s["batch"] == "0002", s
         s = B.weekly_job(now=sat, root=root, runner=runner, snapshot_fn=lambda: {"source": "test", "end": 1})
-        assert s["batch"] == "0002"
+        assert s["batch"] == "0003"
         st = B.Builder(root).state()
-        assert st["evaluated"] == 800 and calls == ["0001", "0002"]
+        assert st["evaluated"] == 1200 and calls == ["0002", "0003"]
 
 
 def test_disk_cap():
@@ -545,7 +546,7 @@ def test_disk_cap():
             raise AssertionError("the disk cap must stop the freeze")
         except B.DiskCapReached:
             pass
-        assert not b.state()["batches"]
+        assert list(b.state()["batches"]) == ["0001"] and b.state()["batches"]["0001"]["seeded"]   # only the seed
         with patch.object(settings, "builder_enabled", True):
             from datetime import datetime
             s = B.weekly_job(now=datetime(2026, 11, 21, 6, 0), root=root, runner=lambda r, b_: {},
@@ -586,7 +587,7 @@ def test_api_shape():
     for k in ("enabled", "rule_version", "rule_sha256", "agents", "market_types", "grid", "batches", "n_used",
               "lab_trials_count", "grammar_sizes"):
         assert k in empty, k
-    assert len(empty["grid"]) == 20 and empty["batches"] == [] and empty["n_used"] == 2552
+    assert len(empty["grid"]) == 20 and empty["batches"] == [] and empty["n_used"] == SEED_N
     b = new_builder("api")
     rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
     s = _fake_proven_summary(b, rec["batch"])
@@ -626,7 +627,103 @@ def test_registry_two_writers():
     other.registry.records()
     a.registry.append("note", {"x": 1})            # another process appends ...
     other.registry.append("note", {"x": 2})        # ... a stale writer must not fork the chain
-    assert a.registry.verify()["ok"] and [r["seq"] for r in a.registry.records()] == [0, 1, 2]
+    seqs = [r["seq"] for r in a.registry.records()]
+    assert a.registry.verify()["ok"] and seqs == list(range(len(seqs))) and seqs[-2:] == [len(seqs) - 2, len(seqs) - 1]
+    assert [r["kind"] for r in a.registry.records()][-2:] == ["note", "note"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# the sandbox seed (batch 0001 of the lab sandbox counts on the server)
+# ══════════════════════════════════════════════════════════════════════════
+def test_seed_file_pinned_and_consistent():
+    sd = B.load_seed()
+    assert sd["_sha256"] == B.SEED_SHA256 == hashlib.sha256(B.SEED_FILE.read_bytes()).hexdigest()
+    assert sd["batch"] == "0001" and sd["n_candidates"] == 400 == len(sd["candidates"])
+    assert sd["frozen_hash"].startswith("f506bc18") and sd["rule_sha256"] == B.RULE_SHA256
+    assert sd["grammar_sha256"] == G.grammar_sha256()
+    assert sd["n_used_after"] == SEED_N == 2970
+    assert len(sd["final_looks"]) == 2 and not any(f["confirmed"] for f in sd["final_looks"])
+    assert sd["development_evaluations"]["count"] == B.load_rule()["dsr"]["development_evaluations"] == 16
+    # the 400 keys are exactly batch 0001's draw (deterministic grammar)
+    assert [c["key"] for c in sd["candidates"]] == [c.key for c in G.draw_batch("0001", set())]
+
+
+def test_seed_import_idempotent():
+    b = new_builder("seed_idem")
+    b.ensure_genesis()
+    b.ensure_genesis()
+    b.ensure_seed()
+    kinds = [r["kind"] for r in b.registry.records()]
+    assert kinds == ["genesis", "seed"], kinds
+    assert b.registry.verify()["ok"]
+    st = b.state()
+    assert st["batches"]["0001"]["seeded"] and st["evaluated"] == 400 and st["final_looks"] == 2
+    assert st["n_used"] == SEED_N and b.n_base(st) == SEED_N
+    # a fresh object on the same registry imports nothing again
+    B.Builder(b.root).ensure_genesis()
+    assert [r["kind"] for r in b.registry.records()] == ["genesis", "seed"]
+    st_api = B.api_status(b.root)
+    assert st_api["n_used"] == SEED_N and st_api["batches"][0]["status"] == "seeded"
+    assert st_api["seed"]["imported"] is True
+    assert B.api_batch("0001", b.root)["candidates"] == []          # the seed carries keys, not the sandbox's rows
+
+
+def test_seed_tampered_refused():
+    tmp = Path(_TMP) / "seed_tampered.json"
+    txt = B.SEED_FILE.read_text().replace('"n_used_after": 2970', '"n_used_after": 2000')
+    tmp.write_text(txt)
+    try:
+        B.load_seed(tmp)
+        raise AssertionError("an edited seed must be refused")
+    except B.SeedChanged:
+        pass
+    b = new_builder("seed_tampered")
+    with patch.object(B, "SEED_FILE", tmp):
+        try:
+            b.ensure_genesis()
+            raise AssertionError("a registry must not start on an edited seed")
+        except B.SeedChanged:
+            pass
+        assert [r["kind"] for r in b.registry.records()] == ["genesis"]       # no seed record written
+        with patch.object(settings, "builder_enabled", True):
+            from datetime import datetime
+            s = B.weekly_job(now=datetime(2026, 11, 21, 6, 0), root=b.root, runner=lambda r, x: {},
+                             snapshot_fn=lambda: {"source": "test", "end": 1})
+        assert s["status"] == "seed_changed", s
+        assert not B.Builder(b.root).state()["batches"]
+
+
+def test_seed_counts_in_n_and_keys_never_redrawn():
+    b = new_builder("seed_n")
+    rec = b.freeze({"source": "test", "end": 20261109})
+    assert rec["batch"] == "0002" and rec["n_before"] == SEED_N
+    seeded = {c["key"] for c in B.load_seed()["candidates"]}
+    assert seeded <= b.drawn_keys()
+    doc = json.loads(b.candidates_path("0002").read_text())
+    assert not ({c["key"] for c in doc["candidates"]} & seeded)
+    assert len(doc["candidates"]) == 400
+    assert B.Builder(b.root).next_batch_id() == "0003"
+
+
+def test_seed_skipped_in_its_source_registry():
+    b = new_builder("seed_source")
+    st0 = b.state()
+    sd = B.load_seed()
+    # a registry whose batch 0001 IS the seed's batch (the sandbox) imports nothing
+    b.registry.append("genesis", {"rule_version": b.rule["version"], "rule_sha256": b.rule["_sha256"],
+                                  "grammar_version": G.GRAMMAR_VERSION, "grammar_sha256": G.grammar_sha256(),
+                                  "lab_trials_count": 2552})
+    b.registry.append("batch_frozen", {"batch": "0001", "candidates_sha256": sd["candidates_sha256"],
+                                       "n_candidates": 400, "cells": {}, "generator": {}, "rule_sha256": "x",
+                                       "snapshot_sha256": sd["snapshot_sha256"], "snapshot_end": sd["snapshot_end"],
+                                       "source": "lab", "n_before": 2568})
+    with patch.object(b, "state") as fake:
+        real = B.Builder.state(b)
+        real["batches"]["0001"]["frozen_hash"] = sd["frozen_hash"]
+        fake.return_value = real
+        assert b.ensure_seed() is None
+    assert "seed" not in [r["kind"] for r in b.registry.records()]
+    del st0
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]

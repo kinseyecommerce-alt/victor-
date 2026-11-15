@@ -310,7 +310,10 @@ it never decreases). Batch rows: `discovery_passers` vs `shuffle_expected` (pass
 signal dates shuffled), `validation_passers`, `final_confirmed`, `proven`, `errata` (recorded defects; a batch is never
 re-evaluated). `grid`: one entry per agent × market type with `proven`, `in_forward_lab`, `qualified` (builder/v1
 qualification) and `ready` (qualified, consistent, not demoted — a flag for a human; nothing trades on it).
-`chain_ok: false` = the registry chain failed verification.
+`chain_ok: false` = the registry chain failed verification. `seed`: the sandbox's batch 0001
+(`builder_seed_0001.json`, sha256 pinned in `builder.SEED_SHA256`) imported as the registry's first records on first
+use (`imported: false` before that; `n_used` is then already the seed's 2,970): its 400 keys are never drawn again, it
+is listed as batch 0001 with `status: "seeded"` (no candidate rows on the server), the server's first batch is 0002.
 ```json
 {"enabled": false, "rule_version": "builder/v1", "rule_sha256": "a455009021b9…", "rule_error": null,
  "agents": ["intraday", "scalping", "swing", "options", "futures"],
