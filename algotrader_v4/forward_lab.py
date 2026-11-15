@@ -533,6 +533,11 @@ def run_engine_process(store_root: Path, state_dir: Path, day: int, since: int, 
     if ids:
         cmd += ["--ids", ",".join(ids)]
     env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
+    try:        # the strategy builder's server NSE archive (last 400 sessions) for the nsedata-based catalogue ids
+        import builder_data
+        env.update(builder_data.engine_env())
+    except Exception:
+        pass
     t0 = time.time()
     # own process group: on the time limit the engine AND its worker processes are killed
     p = subprocess.Popen(cmd, cwd=str(HERE), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,

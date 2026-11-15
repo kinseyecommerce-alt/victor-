@@ -253,6 +253,12 @@ def v2_forward_lab():
     return json_safe(forward_lab.api_status())
 
 
+@router.get("/builder/data")
+def v2_builder_data():
+    import builder_data
+    return json_safe(builder_data.api_status())
+
+
 @router.get("/forward-lab/{sid}")
 def v2_forward_lab_strategy(sid: str):
     import forward_lab

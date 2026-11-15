@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     forward_lab_time_limit_s: int = 2700       # engine wall-clock limit per session
     forward_lab_mem_mb: int = 3072             # engine address-space limit per process
     forward_lab_telegram: bool = False         # at most one summary per day
+    # Strategy-builder data layer (builder_data.py, builder_minute.py): deep 1-minute history from Kite (2016 ->) and
+    # NSE end-of-day archives (2012 ->) on the volume, PAPER research only, read-only towards trading. OFF by default
+    # (no job scheduled, no network call). Hard disk cap for the whole builder directory (stop writing, never delete).
+    builder_data_enabled: bool = False
+    builder_data_max_mb: float = 1800.0
+    builder_kite_max_calls_per_run: int = 1500     # Kite historical_data calls per minute-backfill run
+    builder_nse_max_requests_per_run: int = 2500   # NSE requests per archive run (one at a time, >= 1.5 s apart)
 
     # ── Engine: risk budget, trading states, approvals, drift, execution (see REBUILD.md) ──
     # Risk budget (risk_budget.py). RISK_BUDGET_DAILY_VOL = the book's daily P&L standard deviation budget in ₹, split

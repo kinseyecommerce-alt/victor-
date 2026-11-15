@@ -20,6 +20,8 @@ Jobs (IST):
   17:05                   shadow registry (SHADOW_REGISTRY_ENABLED)
   17:15                   drift & fill-quality monitor (warnings only)
   19:35-22:35, 08:20      PEAD evening / morning input refresh (VALIDATED_PEAD_ENABLED)
+  23:05, 05:30 (+10:05, 15:05 Sat-Sun)  builder NSE archives; 18:40, 06:10 (+11:40, 14:40 Sat-Sun)  builder Kite
+                          minute backfill (BUILDER_DATA_ENABLED)
   every minute            portfolio drawdown brake (risk_budget.py)
 
 Validated jobs run every day of the week and gate on ist_clock.is_trading_day (weekend Budget sessions included).
@@ -106,6 +108,17 @@ class PlatformScheduler:
         if self._forward_lab_on():
             self._sched.add_job(self._forward_lab, "cron", hour=16, minute=45, day_of_week=VALIDATED_DOW,
                                 id="forward_lab", misfire_grace_time=3 * 3600, max_instances=1, coalesce=True)
+        if self._builder_data_on():
+            # strategy-builder data layer: NSE archives outside the PEAD fetch windows, Kite minute backfill outside
+            # market hours (both jobs re-check the flag and their time guards)
+            for _id, _h, _m, _dow in (("builder_nse", 23, 5, "*"), ("builder_nse_early", 5, 30, "*"),
+                                      ("builder_nse_wkend", "10,15", 5, "sat,sun")):
+                self._sched.add_job(self._builder_nse, "cron", hour=_h, minute=_m, day_of_week=_dow, id=_id,
+                                    misfire_grace_time=1800, max_instances=1, coalesce=True)
+            for _id, _h, _m, _dow in (("builder_minute", 18, 40, "*"), ("builder_minute_early", 6, 10, "*"),
+                                      ("builder_minute_wkend", "11,14", 40, "sat,sun")):
+                self._sched.add_job(self._builder_minute, "cron", hour=_h, minute=_m, day_of_week=_dow, id=_id,
+                                    misfire_grace_time=1800, max_instances=1, coalesce=True)
         # engine upgrades: drawdown brake (every minute), drift monitor (after the last settlement retry)
         self._sched.add_job(self._risk_brake, "interval", minutes=1, id="risk_brake", misfire_grace_time=60)
         self._sched.add_job(self._drift_monitor, "cron", hour=17, minute=15, day_of_week=VALIDATED_DOW,
@@ -398,6 +411,30 @@ class PlatformScheduler:
                     await send_telegram(text)
         except Exception as exc:
             logger.error("[platform] forward lab job failed: {}", exc)
+
+    @staticmethod
+    def _builder_data_on() -> bool:
+        try:
+            import builder_data
+            return builder_data.enabled()
+        except Exception:
+            return False
+
+    async def _builder_nse(self) -> None:
+        """Strategy-builder NSE archives (builder_data.nse_job re-checks the flag, PAPER and the PEAD window)."""
+        try:
+            import builder_data
+            await asyncio.to_thread(builder_data.nse_job)
+        except Exception as exc:
+            logger.error("[platform] builder NSE job failed: {}", exc)
+
+    async def _builder_minute(self) -> None:
+        """Strategy-builder Kite minute backfill (builder_data.minute_job re-checks the flag and market hours)."""
+        try:
+            import builder_data
+            await asyncio.to_thread(builder_data.minute_job)
+        except Exception as exc:
+            logger.error("[platform] builder minute job failed: {}", exc)
 
     async def _kite_login_at_startup(self) -> None:
         """Server (re)started on a trading day without a working token → log in now."""

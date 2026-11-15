@@ -261,6 +261,43 @@ A tested forward look adds `z`, `p`, `p_boot`, `sd_boot` and `verdict` `qualifie
 look adds `band`, `lab_mean_daily` and `verdict` `consistent` / `inconsistent`. `chain_ok` = this strategy's ledger
 verifies against its registry checkpoint.
 
+### GET /api/v2/builder/data
+The strategy builder's data layer (`builder_data.py`, `builder_minute.py`; `BUILDER_DATA_ENABLED`, default false →
+nothing scheduled, no network call; the endpoint still reports what is on disk). One entry per dataset: `from` / `to`
+(yyyymmdd, or the window tag `2024Q3` / `202410` for windowed feeds), `rows` (when known), `files`, `mb` (allocated
+on disk), `last_update` / `last_error`, `progress_pct` (share of the 2012 → (2016 → for minute bars) backfill that is
+final), `source`. `disk.cap_mb` = `BUILDER_DATA_MAX_MB` (default 1,800) for the whole builder directory; at the cap
+nothing more is written (`cap_reached: true`, runs stop with `disk_cap`), nothing is deleted. `refused_until` is set
+for 24 h after NSE refused three requests in a row (no new data meanwhile; never worked around).
+Server paths / env vars for the lab readers (nsedata, flowdata, events_data, the forward-lab minute store): REBUILD.md
+section 6 — `<root>/nse` = `STRATLAB_NSE_DIR` (+ `STRATLAB_BARS_DIR=<root>/nse/bars`), `<root>/nse_view` = its last 400
+sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root>/events` = `STRATLAB_EVENTS_DIR`,
+`<root>/minute` = a `forward_lab_store.Store` (`load_symbol` → `SymbolData`).
+```json
+{"enabled": false, "root": "/data/app/builder_data",
+ "schedule": {"nse": "23:05 and 05:30 IST daily, 10:05 / 15:05 Sat-Sun",
+              "minute": "18:40 and 06:10 IST daily, 11:40 / 14:40 Sat-Sun"},
+ "budgets": {"kite_calls_per_run": 1500, "nse_requests_per_run": 2500},
+ "disk": {"used_mb": 412.6, "cap_mb": 1800.0, "cap_reached": false},
+ "refused_until": null, "refused_at": null,
+ "datasets": {
+   "delivery": {"from": 20120102, "to": 20261113, "rows": 6012345, "files": 3690, "mb": 236.1, "progress_pct": 100.0,
+                "source": "nsearchives sec_bhavdata_full (2020 ->), CM bhavcopy + MTO (2012-2019)",
+                "last_update": "2026-11-14T00:07:12", "last_error": null},
+   "fo_parts": {"from": 20120102, "to": 20261113, "rows": null, "files": 3690, "mb": 262.0, "progress_pct": 100.0,
+                "sessions_expected": 3690, "source": "…", "last_update": "…", "last_error": null},
+   "participant_oi": {…}, "participant_vol": {…}, "ban": {…}, "fii_stats": {…}, "index_spot": {…},
+   "deals": {"from": "2012Q1", "to": "2026Q4", "files": 120, "mb": 4.6, "progress_pct": 100.0, …},
+   "corpactions": {…}, "index_membership": {…}, "events": {…},
+   "minute": {"from": 20160101, "to": 20261113, "files": 12969, "mb": 655.0, "progress_pct": 100.0,
+              "windows_final": 6633, "windows_total": 6633, "missing_symbols": [], "source": "Kite historical_data …",
+              "last_update": "2026-11-14T06:21:40", "last_error": null},
+   "nse_view": {"from": 20250402, "to": 20261113, "files": 1625, "mb": 210.4, "progress_pct": null, …}},
+ "last_run": {"started": "…", "requests": 2500, "days": 301, "stopped": "budget: request budget 2500 reached",
+              "http": {"ok": 2210, "missing": 290}, "view": {"sessions": 400, "from": 20250402, "to": 20261113}},
+ "minute_last_run": {"calls": 1500, "windows": 1500, "sessions": 61000, "stopped": "call budget", …}}
+```
+
 ### GET /api/v2/archiver
 ```json
 {"enabled": false, "root": "/data/app/option_bars", "archive_mb": 0.0, "max_mb": 1500.0, "estimate_mb_per_week": 25}

@@ -2588,6 +2588,11 @@ from stratlab import tests_web as _twb  # noqa: E402
 for _n, _f in _twb.TESTS:
     run(_n, _f)
 
+section("STRATLAB: data-driven discovery - candidates created from the lab's data, selected on old data (stratlab/datagen_*.py, prereg/datagen_v1.json)")
+from stratlab import tests_datagen as _tdg  # noqa: E402
+for _n, _f in _tdg.TESTS:
+    run(_n, _f)
+
 section("STRATLAB: robustness diagnostics - PBO/CSCV, White RC/Hansen SPA, Monte Carlo, walk-forward, look-ahead (stratlab/robustness.py, report-only)")
 from stratlab import tests_robustness as _trb  # noqa: E402
 for _n, _f in _trb.TESTS:
@@ -5305,6 +5310,26 @@ def _flab_case(fn):
 
 for _n, _f in _TFL.TESTS:
     run("forward lab: " + _n[len("test_"):].replace("_", " "), _flab_case(_f))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# STRATEGY-BUILDER DATA LAYER — deep minute store, NSE archives, forward-lab NSE ids (test_builder_data.py)
+# ══════════════════════════════════════════════════════════════════════════
+section("BUILDER DATA — Kite minute backfill, NSE archives in nsedata's layout, guards, disk cap, forward-lab NSE ids")
+import test_builder_data as _TBD
+
+
+def _bdata_case(fn):
+    def go():
+        try:
+            fn()
+        except _TBD.Skip as exc:                      # the lab's scratch data set is absent: fixture tests still run
+            print(f"      (skipped: {exc})")
+    return go
+
+
+for _n, _f in _TBD.TESTS:
+    run("builder data: " + _n[len("test_"):].replace("_", " "), _bdata_case(_f))
 
 
 # ══════════════════════════════════════════════════════════════════════════

@@ -19,6 +19,7 @@ cryptography>=42.0      # secret_store.py (Fernet vault); formerly pulled in by 
 # ── Data ──────────────────────────────────────────────────────────
 pandas==2.2.2
 numpy==1.26.4
+xlrd==2.0.1             # builder_data: NSE's FII derivative statistics are .xls sheets (pandas.read_excel)
 
 # ── Scheduling ────────────────────────────────────────────────────
 apscheduler==3.11.2

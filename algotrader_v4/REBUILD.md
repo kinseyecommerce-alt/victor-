@@ -164,3 +164,26 @@ this rebuild, and LIVE remains impossible for these strategies (their guards ref
 * An operator Stop now persists until `/bot/start` (the old 09:16 auto-start of the tick agents silently cleared it).
 * The 15:15 square-off runs every trading day in PAPER (before: only when the old master had been started).
 * The dashboard (`frontend/`) was rebuilt on the v2 API (mobile-first; Overview, Strategies, Positions & trades, Risk & controls, Forward lab, Shadow registry, System). It polls instead of using the removed `/ws`; see TESTING.md.
+
+## 6. Strategy-builder data layer (Part 1, `builder_data.py` + `builder_minute.py`) — server paths for the builder engine
+
+Flag `BUILDER_DATA_ENABLED` (default false: no job, no network). PAPER only, read-only towards trading. Root
+`<root>` = `BUILDER_DATA_DIR`, else `<dir of PERFORMANCE_FILE>/builder_data` (the Railway volume). Everything is read
+through the lab's EXISTING readers — no new format:
+
+| Data | Server path | How lab code reads it |
+|---|---|---|
+| NSE EOD archives 2012 → (delivery, F&O parts fut / optidx / optstk aggregates, expiry-eve `optstk_full`, participant OI / volume, ban, FII stats, index closes) | `<root>/nse` | `STRATLAB_NSE_DIR=<root>/nse STRATLAB_BARS_DIR=<root>/nse/bars` → `stratlab.nsedata` unchanged (or `stratlab.oldera_fo.use(<root>/nse)`) |
+| the last 400 sessions of the same (what the forward lab's engine reads) | `<root>/nse_view` | `builder_data.engine_env()` sets `STRATLAB_NSE_DIR` / `STRATLAB_BARS_DIR` for the engine process unless the operator set them |
+| deals, corporate actions, index membership (NIFTY 50 / NEXT 50 / 100), FII stats | `<root>/flow` | `STRATLAB_FLOW_DIR=<root>/flow` → `stratlab.flowdata` (or `flowdata.use(path)`) |
+| results / board-meeting calendars | `<root>/events` | `STRATLAB_EVENTS_DIR=<root>/events` → `stratlab.events_data` (or `events_data.use(path)`) |
+| 1-minute bars 2016 → of `forward_test.UNIVERSE` + `_NIFTY50_min`, `_NIFTYBANK_min`; daily `_NIFTY50_day`, `_VIX_day` | `<root>/minute` | `forward_lab_store.Store(<root>/minute).load_symbol(sym, upto=day)` → the lab's `SymbolData`; `load_aux(name)`; `write_lab_cache(dir, upto)` for the daily series |
+
+Caveats a reader must know: nsedata builds an uncompressed `.npz` cache inside the NSE dir it reads (`_cache/`); for the
+whole 2012 → archive that would be ~2 GB, so on the server read `<root>/nse_view` (cache ~0.2 GB) or build the cache of
+a copy on ephemeral disk. Per-strike stock-option chains exist only on the 1-4 calendar days before a stock expiry
+(nearest expiry). Delivery `bars_symbol` maps the 97 lab names (+ ZOMATO / MCDOWELL-N / MACROTECH) exactly like the
+lab's 3-year file. F&O `lot` is NaN before 2024 (the old bhavcopy has none). Index membership has month-end precision
+before the server's first daily list (no press-release dates: `announce_source = "none"`). Corporate-action
+`known_date` = the session before the ex-date unless the server saw the action earlier. Status:
+`GET /api/v2/builder/data` (API_V2.md).
