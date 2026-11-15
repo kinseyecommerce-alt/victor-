@@ -93,12 +93,21 @@ class Settings(BaseSettings):
     shadow_registry_enabled: bool = False
 
     # ── Engine: risk budget, trading states, approvals, drift, execution (see REBUILD.md) ──
-    # Portfolio drawdown brake on the paper account (total_capital): at reduce_pct % drawdown of the realised net
-    # P&L of the kept strategies from its peak → every strategy REDUCE_ONLY; at halt_pct % → HALTED.
-    risk_brake_reduce_pct: float = 8.0
-    risk_brake_halt_pct: float = 12.0
+    # Risk budget (risk_budget.py). RISK_BUDGET_DAILY_VOL = the book's daily P&L standard deviation budget in ₹, split
+    # equally (equal risk) over the enabled kept strategies and divided by each one's lab daily P&L std; 0 (default)
+    # = every strategy at its lab sizing (scale 1.0, paper stays comparable with the lab).
+    risk_budget_daily_vol: float = 0.0
     risk_budget_allow_upscale: bool = False     # the allocator may only scale DOWN unless this is true
     risk_budget_max_scale: float = 1.0          # ceiling of the per-strategy scale when upscaling is allowed
+    # Portfolio drawdown brake: realised net P&L of the kept strategies (since the last brake reset) falls from its
+    # running peak by reduce_pct % of RISK_CAPITAL → every strategy REDUCE_ONLY; by halt_pct % → HALTED. Latches until
+    # reset through the v2 API. Defaults: ₹25 L ≈ capital in use of the three active strategies at lab size (attention
+    # ₹10 L CNC gross, auction fade ₹10 L MIS gross, strangle ≈ ₹1.3 L margin, plus buffer); 16 % = ₹4 L and
+    # 24 % = ₹6 L are above the lab's combined block-bootstrap p99 drawdown (₹3.25 L, lab_risk.json), so a lab-like
+    # path never trips it: it is a "something is broken" brake.
+    risk_capital: float = 2_500_000.0
+    risk_brake_reduce_pct: float = 16.0
+    risk_brake_halt_pct: float = 24.0
     # Semi-auto approval mode: each strategy's entries of the day need an approval via the API (default OFF)
     approval_mode: bool = False
     # Drift / fill-quality monitor: warnings only; at most one Telegram message per strategy per day when on
