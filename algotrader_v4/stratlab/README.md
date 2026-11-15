@@ -1212,3 +1212,62 @@ Caveats:
 
 Outputs: `<scratchpad>/flows/` (data_check.json, run1/report.json, run1/trades, tables.md, progress.txt). Tests:
 `tests_flows.py` (11 synthetic), run by `test_pipeline.py`.
+
+## How established backtesting projects test strategies, and what that says about this lab (`robustness.py`, `<scratchpad>/ghtest/`)
+
+**Plain language.** We compared the lab with the well-known open-source backtesters (QuantConnect LEAN, backtrader,
+zipline-reloaded, vectorbt, backtesting.py, NautilusTrader, freqtrade, bt, Jesse) and the standard overfitting tests
+(López de Prado, Bailey et al., White, Hansen, Harvey-Liu-Zhu), replayed 13 of our strategies through two of those
+engines, and ran the tests we did not have. The lab's simulator is correct: backtrader reproduces it trade for trade and
+to the rupee where the two engines' rules coincide, and every other difference is a rule on which the lab is the
+cautious side. One real bug was found (below); it changes no verdict. The lab is much stricter than common practice —
+full Zerodha costs and 2 bps slippage where engines default to zero, next-open fills, one-tick-through targets, a
+one-look hold-out, two eras — and that is why so much fails: the same lab decisions for four intraday rules lose
+Rs 9.9 lakh in the lab but show +Rs 5.6 lakh, profit factor 1.10-1.25, under backtrader's or backtesting.py's default
+settings. Nothing in the new diagnostics changes a verdict or adds a trial; they are reports.
+
+* **Methods** (`<scratchpad>/ghtest/METHODS.md`): practice -> which projects do it -> what the lab does -> gap. Lab
+  STRICTER: costs, slippage, fills (next open, stop first, gaps at the open, one-tick targets, entry-bar stops vs
+  backtrader's bracket), pre-registration, one-look FINAL, H1 AND H2, two eras, trials ledger + DSR. Lab WEAKER: the
+  look-ahead audit slices precomputed indicator arrays on 1 in 29 sessions (cannot catch an indicator bug); no volume /
+  partial-fill model; survivorship and unadjusted corporate actions in the minute eras, dividends ignored; verdicts on
+  net > 0, not net > NIFTY; trade-level statistics ignore same-day clustering; no PBO / SPA / Monte Carlo / warm-up
+  check (now added as reports).
+* **Engine cross-check** (`<scratchpad>/ghtest/CROSSCHECK.md`, scripts in `ghtest/scripts/`): backtrader 1.9.78.123 and
+  backtesting.py 0.6.6 (vectorbt skipped: 800 MB venv > budget) on the SAME bars3y bars and the SAME decisions of 13
+  strategies (2 daily, 1 15:20-decision swing, 2 weekly, 3 intraday 5m/15m, 1 scalping, 1 candlestick, AUC-FADE-2PCT,
+  SWING-ATTN-ON-3X, 1 Kite rule), DISCOVERY, matched settings (next open, 2 bps, costs.py as a per-leg engine commission,
+  stop first). backtrader matches AUC-FADE-2PCT 1,090 / 1,090, SWING-ATTN-ON-3X 580 / 580, r3_tf15m_fh_break 3,263 and
+  the daily / Kite rules exactly; remaining differences are classified with 0 unexplained: engines fill targets on a
+  touch (304 trades, +Rs 31 k), backtrader slips gapped limit fills, backtesting.py validates sl/tp against the last
+  close and never calls `next()` on the first bar (adapter fixed), cost rounding, knock-on.
+  **Bug:** `sim_positional` resumes decisions on the exit day (`day = max(k, day + 1)`); for `decision_time` specs the
+  09:16 / 15:20 decision can come BEFORE that day's exit (15:29 max-hold close, late stop), so the lab holds two
+  positions in one symbol and books both. 15 trades in the compared runs (r3_swing_close_down4 695 -> 684 trades,
+  +11.31 L -> +10.91 L; r3_tfweekly_wk_loser_rev 72 -> 71, PF 1.34 -> 1.32, screen still passes); certain overlaps in
+  18 of 43 decision_time positional strategies' 3-year trade files (heaviest: r3_futures_*_ibs_ls, ~45 % of trades; all
+  FAILED SCREEN). No verdict changes. Fix in a future round (continue at k + 1 when the exit is at/after the decision
+  minute, bump FILL_MODEL_VERSION); sim.py is unchanged here.
+* **Robustness reports** (`stratlab/robustness.py`, `<scratchpad>/ghtest/ROBUSTNESS.md`; tests `tests_robustness.py`,
+  section "STRATLAB: robustness diagnostics" of `test_pipeline.py`):
+
+      python -m stratlab.robustness --scratch <scratchpad> --out <scratch dir> [--parts pbo,spa,mc,wf,lookahead]
+
+  - PBO by CSCV (S = 16, 12,870 halves) over 681 variants with 3-year trade files, 23 families with >= 8 variants. Low
+    PBO in all-losing families only means the least-bad variant stays least bad; overfit selection in r3_tfweekly (PBO
+    0.84), nb 0.68, r4_participant 0.59, r4_mechanics 0.55. OOS-on-IS slope negative in every family with a spread.
+  - White RC / Hansen SPA (stationary bootstrap): over all 681 variants the best beats zero (SPA_c p 0.001) but **none
+    beats NIFTY buy-and-hold on the same capital (p 0.38)**; within-family, AUC-FADE (0.004 vs 0 / 0.009 vs NIFTY) and
+    the winged strangle family beat NIFTY; SWING-ATTN beats zero (0.002) but not NIFTY at 5 % (0.077). DISCOVERY only.
+  - Monte Carlo (10,000 shuffles / bootstraps + daily block bootstrap): 2023-26 drawdowns of AUC / ATTN / VRP are inside
+    the shuffled range; the 2016-23 drawdowns of the three stock books are beyond the shuffled 99th percentile (losses
+    cluster in time). Daily-block 95th-percentile drawdowns per 3 years at Rs 1 lakh/trade: AUC-2PCT 0.68 L, AUC-3PCT
+    0.47 L, ATTN 0.22 L, VRP-WINGED 3.46 L. VRP-WINGED 2023-26 t = 1.03, trade-bootstrap P(net <= 0) 15 %. Daily t > 3
+    (Harvey-Liu-Zhu) on 2023-26 only for ATTN (3.55) and AUC-3PCT (3.41).
+  - Walk-forward view (rolling 12 months, monthly step, old era + 2023-26): ATTN positive in 97 % of windows, VRP 92 %,
+    AUC-2PCT 83 %, AUC-3PCT 71 %, ev_pead_long_h60 83 %, fl_inst_buy_h60 62 % (7 losing years of 15).
+  - freqtrade-style look-ahead (data truncated at every signal bar, all indicators recomputed) and recursive (warm-up)
+    checks on 14 strategies: 0 decision and 0 indicator differences (3,474 intraday cuts, 1,103 positional days). Hazard:
+    `build_sessions` treats the last 5-minute block of its input as complete, so on streaming data it would use a
+    half-built 5-minute candle (the lab itself is not affected). Warm-up: with only 120 sessions of history 6-15 % of
+    EMA-rule decisions change, so bars3y H1 decisions of daily EMA rules were made on short history.

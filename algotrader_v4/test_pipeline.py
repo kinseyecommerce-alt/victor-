@@ -9636,6 +9636,11 @@ from stratlab import tests_flows as _tfl  # noqa: E402
 for _n, _f in _tfl.TESTS:
     run(_n, _f)
 
+section("STRATLAB: robustness diagnostics - PBO/CSCV, White RC/Hansen SPA, Monte Carlo, walk-forward, look-ahead (stratlab/robustness.py, report-only)")
+from stratlab import tests_robustness as _trb  # noqa: E402
+for _n, _f in _trb.TESTS:
+    run(_n, _f)
+
 section("OPTION BAR ARCHIVER (option_bar_archiver.py, OPTION_BAR_ARCHIVER_ENABLED default off)")
 import test_option_bar_archiver as _toba  # noqa: E402
 for _n, _f in _toba.TESTS:
