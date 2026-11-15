@@ -92,12 +92,22 @@ def main(argv=None) -> int:
     ap.add_argument("--batch", default=None)
     ap.add_argument("--forward", action="store_true", help="builder/v1 forward family: trades up to --day")
     ap.add_argument("--day", type=int, default=None)
+    ap.add_argument("--snapshot", action="store_true", help="write the data snapshot ids to <root>/snapshot.json")
     ap.add_argument("--source", default="server")
     ap.add_argument("--data-root", default=None)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--mem-mb", type=int, default=3584)
     a = ap.parse_args(argv)
     _limit(a.mem_mb)
+    if a.snapshot:
+        import builder
+        snap = builder.data_snapshot(a.source, a.data_root)
+        os.makedirs(a.root, exist_ok=True)
+        tmp = os.path.join(a.root, "snapshot.json.tmp")
+        with open(tmp, "w") as fh:
+            json.dump(snap, fh, default=str)
+        os.replace(tmp, os.path.join(a.root, "snapshot.json"))
+        return 0
     if a.forward:
         import builder_forward
         work = os.path.join(a.root, "work")

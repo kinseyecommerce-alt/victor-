@@ -570,6 +570,15 @@ def test_subprocess_limits():
     assert rec["batch"] not in b.state()["results"]
 
 
+def test_snapshot_in_its_own_process():
+    root = os.path.join(_TMP, "snapproc")
+    shutil.rmtree(root, ignore_errors=True)
+    snap = B.snapshot_process(Path(root), "synthetic", data_root=syn_root(), mem_mb=0)
+    assert snap["end"] == syn_source().end and snap["inputs"]["delivery"]["sha256"]
+    from stratlab.builder_source import snapshot_sha
+    assert snapshot_sha(snap) == snapshot_sha(syn_source().snapshot())
+
+
 def test_api_shape():
     empty = B.api_status(os.path.join(_TMP, "api_empty"))
     for k in ("enabled", "rule_version", "rule_sha256", "agents", "market_types", "grid", "batches", "n_used",

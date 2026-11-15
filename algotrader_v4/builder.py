@@ -505,7 +505,7 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
         if pending:
             bid = sorted(pending)[0]                      # resume an unfinished batch before a new one
         else:
-            snap = snapshot_fn() if snapshot_fn else data_snapshot(source)
+            snap = snapshot_fn() if snapshot_fn else snapshot_process(root, source)
             bid = b.freeze(snap)["batch"]
         status["batch"] = bid
         s = _settings()
@@ -551,8 +551,25 @@ def weekly_job_locked(**kw) -> dict:
 
 
 def data_snapshot(source: str = "server", data_root: Optional[str] = None) -> dict:
+    """The data snapshot ids (in THIS process: building the panels takes a minute and ~1 GB)."""
     from stratlab.builder_source import make_source
     return make_source(source, data_root).snapshot()
+
+
+def snapshot_process(root: Path, source: str = "server", data_root: Optional[str] = None, time_limit_s: int = 3600,
+                     mem_mb: int = 4096) -> dict:
+    """data_snapshot in a separate process (python -m builder_run --snapshot): the API process never builds panels."""
+    out = Path(root) / "snapshot.json"
+    if out.exists():
+        out.unlink()
+    cmd = [sys.executable, "-m", "builder_run", "--snapshot", "--root", str(root), "--source", source,
+           "--mem-mb", str(int(mem_mb))] + (["--data-root", str(data_root)] if data_root else [])
+    env = dict(os.environ, BUILDER_CACHE_DIR=str(cache_dir()))
+    p = subprocess.run(cmd, cwd=str(HERE), env=env, capture_output=True, text=True, timeout=int(time_limit_s),
+                       start_new_session=True)
+    if p.returncode != 0 or not out.exists():
+        raise RunFailed(f"snapshot process exit {p.returncode}: {(p.stderr or '')[-400:]}")
+    return json.loads(out.read_text())
 
 
 # ══════════════════════════════════════════════════════════════════════════
