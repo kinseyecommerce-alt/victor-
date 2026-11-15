@@ -337,7 +337,10 @@ class ValidatedAgent(BaseAgent):
             self._dd_since = self._now().isoformat(timespec="seconds")
         if not enabled:
             return "disabled"
-        if not self.state.running:
+        if not self.state.running and (approval or bot_state.operator_stopped()):
+            # a planning step (approval=False) places no order: it may run before the 08:55 auto-start (e.g. the
+            # PEAD 08:20 retry after a weekend restart); the order stage still requires a running agent, and an
+            # operator Stop blocks planning too
             return "stopped"
         lim = self.dd_limit()
         if lim > 0 and self.drawdown() >= lim:
