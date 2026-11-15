@@ -1,17 +1,18 @@
 ---
 name: trade-review
 description: >
-  Review the day's AlgoTrader Pro trading (paper or live): rebuild every
-  round-trip trade from the order book, compute P&L, win rate and profit factor
-  per agent, show how each trade exited (stop-loss, trailing SL, target,
-  strategy rule), summarise Claude gate approvals and skips, and flag risk or
-  compliance problems. Read-only. Use when the user asks "how did we do today",
-  "review trades", "P&L by strategy", or at the end of /paper-session.
+  Review AlgoTrader Pro paper trading (core rebuild, v2 API): today's or a period's
+  closed trades from the ledger per strategy (auc_fade, attn_on, vrp_winged,
+  pead_h60), net P&L after costs, win rate, profit factor, paper result vs the lab
+  expectation, fill quality vs the lab fill model, drift warnings, live-readiness
+  progress, trading-state / approval / brake events, and flags. Read-only. Use when
+  the user asks "how did we do today", "review trades", "P&L by strategy", or at the
+  end of /paper-session.
 ---
 
-# Trade Review — AlgoTrader Pro
+# Trade Review — AlgoTrader Pro (v2 API)
 
-Read-only analysis. Never place or cancel orders or change settings.
+Read-only analysis. Never place or cancel orders or change settings. API reference: `algotrader_v4/API_V2.md`.
 
 ## Setup
 
@@ -25,60 +26,34 @@ j() { curl -sS -m 15 -H "$H" "$ALGO_URL$1"; }
 ## 1. Collect
 
 ```bash
-j /config/validate        # trading_mode + paper_data_source — say which in the report
-j /portfolio/orders       # source of truth for trades
-j /portfolio/positions    # anything still open
-j /risk/status            # daily_pnl, trades_today, is_halted
-j /bot/status             # per-agent trades_today / pnl_today / last_signal
-j /gate/log?n=200         # Claude gate decisions
-j /sebi/status            # kill-switch state, order-to-trade ratio
+j /api/v2/overview                         # mode, paper_data_source, portfolio, brake
+j "/api/v2/trades?since=<YYYY-MM-DD>&n=2000"   # ledger rows after costs (+ all-time stats per strategy)
+j /api/v2/strategies                       # per strategy: performance.live vs lab_expectation / lab_reference, readiness
+j /api/v2/drift                            # frequency, fill quality, last-20 mean vs lab band, drawdown vs lab
+j "/api/v2/fills?n=500"                    # quote vs fill per order (slip_bps, kind)
+j /api/v2/positions                        # still open (overnight holds are normal for attn_on / vrp_winged / pead_h60)
+j /api/v2/trading-state                    # history: who changed what and why
+j /api/v2/approvals                        # recent tickets (if the semi-auto mode was used)
 ```
+Save the JSON to the scratchpad and analyse with a short `python3 -I script.py file.json`, not by eye.
 
-Also read `algotrader_v4/logs/trade_memory.jsonl` if it exists (one JSON object
-per closed strategy-exit trade, with Claude Haiku's lesson). It does not cover
-every exit, so use it for lessons only, not for P&L.
+The ledger (`/api/v2/trades`) is the source of truth for P&L: every row is one closed trade with `gross`, `cost`,
+`net` (after costs), `exit_kind`, `note`, `slip_bps`, `lab_id`. A strangle books one row per leg — group its legs by
+`oid` / `group` / expiry into one structure. `stats` rows with `kept: false` belong to strategies removed in the
+rebuild: show them separately, never mix them into the kept totals.
 
-Write the JSON to files in the scratchpad and analyse them with a short Python
-script (`python3 -I script.py file.json`) rather than by eye.
+## 2. Report
 
-## 2. Rebuild round trips from `/portfolio/orders`
+1. **Header:** period, mode (PAPER with KITE or SIM prices), net P&L after costs, trades, win rate, profit factor.
+2. **Per strategy:** trades, wins, net, average per trade vs the lab's `lab_reference.net_mean_per_trade`, win % vs
+   lab, drawdown vs `lab_reference.observed_max_dd`, readiness `trades / target_trades`.
+3. **Fill quality:** mean entry slippage (bps) vs `lab_slippage_bps` per strategy; any fill kind other than the usual
+   (`RECONCILE`, `CORPORATE_ACTION`).
+4. **Drift:** each strategy's `status` and its warnings / alerts verbatim.
+5. **Controls used:** trading-state changes, approvals (approved / rejected / expired), brake level changes.
+6. **Flags** (only if present): open position past its scheduled exit, `orphan_rows`, strategy `errors`,
+   `deviations`, `entry_block` codes that stopped entries (`daily_loss_stop`, `drawdown_kill`, `no_data:store_stale`).
+7. **Reading the result:** a handful of trades says almost nothing — compare with the lab band
+   (`drift.expectancy.lab_band` p5…p95) and say plainly when the sample is too small to judge.
 
-Order `tag` (Kite truncates it to 20 characters, so match on prefixes) identifies the leg:
-
-| Tag prefix | Meaning |
-|------------|---------|
-| `Agent-<agent>` (exact) | entry |
-| `Agent-<agent>-SL` | protective SL-M (rests until cancelled; `CANCELLED` after a normal exit) |
-| `Agent-<agent>-EXIT` | strategy-rule exit (`should_exit_position`) |
-| `Agent-<agent>-NOSL…` | entry flattened because its SL-M was rejected — **always flag** |
-| `TSL-HIT-<agent>` | trailing stop-loss exit |
-| `TSL-T2-<agent>` | final target exit |
-| `TSL-<agent>` | replacement SL-M after a trail move |
-| `BRK-…` | manual bracket orders |
-| `SquareOff` | end-of-day square-off |
-
-Pair each entry with the next opposite-side `COMPLETE` order on the same
-`tradingsymbol` (F&O legs are NFO option symbols). P&L = (exit − entry) × qty
-for a long, mirrored for a short. Use `average_price`, falling back to `price`.
-
-## 3. Report
-
-1. **Header:** date, mode (PAPER-SIM / PAPER-KITE / LIVE), net P&L, trades, win rate,
-   profit factor (gross win / gross loss), max single loss, `risk/status.daily_pnl`
-   (and the gap to your rebuilt P&L, if any).
-2. **Per agent table:** trades, wins, losses, win rate, net P&L, average win, average loss.
-3. **Exit mix:** count by exit type (TSL-HIT, TSL-T2, EXIT, SquareOff, NOSL).
-4. **Pattern view:** for entries whose pattern is known (`/bot/status`
-   `last_signal.trigger` holds it as `[PATTERN]` for the latest signal; the gate log
-   holds symbol + strategy + confidence), group by pattern where you can. Say
-   plainly when a pattern can't be attributed.
-5. **Claude gate:** ENTER vs SKIP counts, average confidence, the top 3 SKIP reasons.
-6. **Flags** (only if present): any `NOSL` exit; a position still open; an SL-M still
-   `TRIGGER PENDING` for a symbol that is flat (leftover stop); a reversed position;
-   `is_halted`; SEBI state not `ACTIVE`.
-7. **Lessons:** 2-4 bullets from the data (and `trade_memory.jsonl`) — e.g. an agent
-   losing on most trades, exits concentrated in TSL-HIT within minutes (stops too
-   tight), or the gate skipping one agent's signals repeatedly.
-
-If the mode is PAPER-SIM, end with: "Prices were simulated — these results do
-not reflect real market behaviour."
+If prices were simulated (`paper_data_source` = `SIM`) say so: the agents take no entries without Kite data.

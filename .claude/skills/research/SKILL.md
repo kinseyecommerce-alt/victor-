@@ -1,13 +1,16 @@
 ---
 name: research
 description: >
-  Run or review AlgoTrader Pro's weekly research loop: show the evidence Claude is given
-  (per-strategy results after costs, slippage, scoreboard vs NIFTY, pruning, trade lessons,
-  optimiser report), run a cycle (one proposed parameter change, A/B replay-backtested,
-  adopted only if it wins), read the research log, or run the walk-forward optimiser.
-  Use when the user asks "what should we change", "run research", "did anything get
-  adopted this week", "optimise the parameters", or "/research".
+  RETIRED (core rebuild, Nov 2026) — do not use. The weekly AI research loop, the walk-forward optimiser and
+  their endpoints (/research/*, /optimize/*, /backtest/replay) were removed together with the LLM
+  integrations; the lab rules may not be tuned from live results. Kept for history only.
 ---
+
+> **RETIRED in the core rebuild (Nov 2026, `algotrader_v4/REBUILD.md`).** Do not use. The weekly AI research loop, the walk-forward optimiser and their endpoints (/research/*, /optimize/*, /backtest/replay) were removed together with the LLM integrations; the lab rules may not be tuned from live results. Kept for history only.
+>
+> Instead: live-vs-lab monitoring is `GET /api/v2/drift` (warnings only) and the shadow registry (`GET /api/v2/shadow-registry`, fixed pre-registered promotion rule); new ideas go through stratlab's pre-registered protocol, not through parameter changes on the running app.
+>
+> Everything below is the original text, kept for history; its commands no longer work.
 
 # Research loop — AlgoTrader Pro
 

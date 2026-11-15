@@ -1,20 +1,25 @@
 ---
 name: preflight
 description: >
-  Read-only GO / NO-GO check of AlgoTrader Pro before a trading session — and
-  mandatory before switching TRADING_MODE to LIVE. Verifies server health, Kite
-  session and data feed, SEBI kill-switch state, risk limits, capital
-  allocation, enabled agents, backtest approvals and the test suite, then
-  reports a table with a single verdict. Changes nothing. Use when the user
-  asks "are we ready", "preflight", "can I go live", or before /paper-session.
+  Read-only GO / NO-GO check of AlgoTrader Pro (core rebuild, PAPER only) before a
+  trading day: server health, PAPER mode, Kite session and price feed, SEBI kill
+  switch, global / per-strategy trading states and the drawdown brake, approval
+  mode and pending tickets, the four strategies' entry blocks, drift warnings,
+  scheduled jobs, the LIVE-readiness report and the test suite (API_V2.md).
+  Changes nothing. Use when the user asks "are we ready", "preflight", "can I go
+  live", or before /paper-session.
 ---
 
 # Preflight — AlgoTrader Pro GO / NO-GO
 
-You are checking whether AlgoTrader Pro is safe to trade **today**. This skill is
-**read-only**: never start the bot, place or cancel orders, change settings,
-reset the kill switch or edit `.env`. If something fails, report it and say how
-to fix it — the user decides.
+Checks whether the app is ready for **today's paper session**. Read-only: never start / stop the bot, change a
+trading state, approve a ticket, reset the brake, touch the kill switch or edit `.env`. Report problems and how to
+fix them — the user decides (the dashboard's Risk and System pages have the controls).
+
+Since the core rebuild (Nov 2026, `algotrader_v4/REBUILD.md`) the app runs four lab-validated **PAPER-only**
+strategies driven by the scheduler: `auc_fade` (AUC-FADE), `attn_on` (SWING-ATTN-ON-3X), `vrp_winged`
+(VRP-STRANGLE-016-WINGED) and the candidate `pead_h60` (EV-PEAD-LONG-H60). There are no tick agents, no AI trader,
+no backtest gate. API reference: `algotrader_v4/API_V2.md`.
 
 ## Setup
 
@@ -22,49 +27,41 @@ to fix it — the user decides.
 ALGO_URL="${ALGO_URL:-http://127.0.0.1:8000}"
 # ALGO_API_KEY must be set in the environment. Never echo, log or paste it.
 H="X-API-Key: ${ALGO_API_KEY}"
-j() { curl -sS -m 10 -H "$H" "$ALGO_URL$1"; }
+j() { curl -sS -m 15 -H "$H" "$ALGO_URL$1"; }
 ```
-
-If `ALGO_API_KEY` is unset, say so and run only the public checks (1, 2).
+If `ALGO_API_KEY` is unset, say so and run only the public checks (1, 2). Save JSON to the scratchpad and read fields
+with a short `python3 -I` script rather than by eye.
 
 ## Checks — run all, collect results, then report
 
 | # | Check | Command | PASS when |
 |---|-------|---------|-----------|
-| 1 | Server up | `j /health` | `"status":"ok"`, `tick_engine` = `running` |
-| 2 | Credentials & feed | `j /config/validate` | see rules below |
-| 3 | Kite session | `j /auth/kite/status` | `connected: true` (needed for LIVE and `PAPER_DATA_SOURCE=KITE`) |
-| 4 | SEBI state | `j /sebi/status` | `state` = `ACTIVE` (not `KILLED`/`PAUSED`) |
-| 5 | Risk limits | `j /risk/status` | `is_halted` false; `max_daily_loss` > 0 and ≤ 5% of capital |
-| 6 | Capital split | `j /settings/capital-allocation` | percentages sum ≤ 100 |
-| 7 | Agents | `j /settings/agent-enables` | at least one enabled; list which |
-| 8 | Market | `j /market/status` | report open/closed (closed is a WARN, not a FAIL) |
-| 9 | Backtest approvals | `j /backtest/approved/<s>` for each enabled agent (`intraday`, `scalping`, `swing`, `fno`) | ≥ 1 approved symbol per enabled agent, else WARN |
-| 10 | Tests | `cd algotrader_v4 && python3 test_pipeline.py 2>&1 \| tail -3` | `0 failed` |
+| 1 | Server up | `j /api/v2/health` | `status` = `ok`, `mode` = `PAPER` (anything else → FAIL: the strategies refuse LIVE) |
+| 2 | Config | `j /config/validate` | `api_key_set` true; `paper_data_source` = `KITE` (with `SIM` the agents take no entries → WARN) |
+| 3 | Kite + market | `j /api/v2/overview` → `kite`, `market` | `kite.connected` true on a trading day (else FAIL: every agent shows `no_kite_data`); market closed / holiday = INFO |
+| 4 | Engine running | overview `bot_running` | true (false = operator Stop, persists until `POST /bot/start` → WARN) |
+| 5 | Trading states | `j /api/v2/trading-state` | `global.state` and `brake.state` `ACTIVE`; list any strategy not `ACTIVE` with its reason / by / at (WARN) |
+| 6 | Drawdown brake | `j /api/v2/risk-budget` → `brake` | `state` `ACTIVE`; report `drawdown`, `drawdown_pct` vs `reduce_pct` / `halt_pct` |
+| 7 | Approvals | `j /api/v2/approvals` | `mode` false, or (mode on) a pending ticket per enabled strategy before its deadline — list them |
+| 8 | Strategies | `j /api/v2/strategies` | per card: `enabled.setting` / `enabled.toggle`, `trading_state.effective`, `entry_block` (null = ready). Explain each block with the codes in API_V2.md (`no_kite_data`, `kill_switch`, `drawdown_kill`, `disabled`, `stopped`, `daily_loss_stop`, `awaiting_approval`, `no_data:store_stale` …). `pead_h60` off by default is INFO |
+| 9 | SEBI | `j /sebi/status` | `state` = `ACTIVE` (not `KILLED` / `PAUSED`) |
+| 10 | Drift | `j /api/v2/drift` | every `status` `ok`; quote `warnings` / `alerts` (warnings only — they never change anything) |
+| 11 | Jobs | `j /api/v2/system` → `jobs` | today's entry / exit jobs present (`validated_open`, `validated_auc_exit`, `validated_vrp_entry`, `validated_attn_entry`, `squareoff`) |
+| 12 | Leftovers | `j /api/v2/positions` → `orphan_rows` | empty (orphans = rows of the removed engine → WARN) |
+| 13 | Tests | `cd algotrader_v4 && python3 test_pipeline.py 2>&1 \| tail -3` | 0 failures (includes the lab-parity tests and `test_rebuild.py`) |
 
-**Check 2 rules** (`/config/validate`):
-- `trading_mode` = `PAPER`: PASS. Note `paper_data_source` (`SIM` = simulated prices, `KITE` = real prices). If `KITE`, `kite_access_token`/`kite_initialised` must be true.
-- `trading_mode` = `LIVE`: FAIL unless `ready_to_trade` is true **and** `ticker_source` is `KITE_WS` or `KITE_REST`.
-- `api_key_set` false → FAIL (all mutating endpoints would be open).
-- `anthropic_api_key` false → WARN: the Claude trade gate is off and every signal is auto-approved at confidence 70.
+The test suite takes minutes: run it in the background while doing the HTTP checks.
 
-The test suite takes a few minutes; run it in the background while doing the
-HTTP checks. Test section 13 needs a live Anthropic key — if only that section
-fails, report WARN, not FAIL.
+## "Can I go LIVE?"
 
-## Going LIVE
-
-If the user is preparing to go LIVE, also confirm — and list as explicit items:
-- They have run at least one full real-price paper session (`TRADING_MODE=PAPER`,
-  `PAPER_DATA_SOURCE=KITE`) since the last code change, and reviewed it with `/trade-review`.
-- `KILL_SWITCH_RESET_SECRET` is set and differs from `API_KEY`.
-- The server's public IP is whitelisted with Zerodha (static IP rule for algos).
-
-Never edit `TRADING_MODE` yourself. Switching to LIVE is the user's action.
+No. `j /api/v2/readiness` always reports `ready_for_live: false` for the kept strategies — every validated agent
+refuses LIVE (`live_mode_refused`). List its `blockers` and failing `checks` (static outbound IP in `KITE_STATIC_IP`
+registered with Kite — required for API orders since 1 April 2026 —, kill-switch reset secret, Kite keys …) as the
+road map, and say clearly that LIVE is not possible in this build. Never edit `TRADING_MODE`.
 
 ## Report format
 
-A table `# | Check | Result (PASS/WARN/FAIL) | Detail`, then one line:
+A table `# | Check | Result (PASS/WARN/FAIL/INFO) | Detail`, then one line:
 
 - **GO** — no FAIL.
 - **GO with warnings** — WARNs only; list them.
