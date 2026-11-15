@@ -1,21 +1,22 @@
 ---
 name: paper-session
 description: >
-  Run and monitor an AlgoTrader Pro paper-trading session: confirm the server is
-  in PAPER mode (refuses LIVE), start the chosen strategy agents, poll
-  positions, orders, risk, the Claude gate and open brackets, flag anything
-  abnormal, then stop the bot and summarise. Best with PAPER_DATA_SOURCE=KITE
-  (real prices, simulated orders). Use when the user says "start a paper
-  session", "paper trade today", "run the bot in paper", or "/paper-session
-  intraday,scalping".
+  Monitor an AlgoTrader Pro paper-trading day (core rebuild): confirm PAPER mode and a
+  Kite session, check that the four scheduled lab strategies (auc_fade, attn_on,
+  vrp_winged, pead_h60) are ready, then follow the day's scheduled stages through the
+  v2 API — plans, entries, positions, exits, trading states, drawdown brake,
+  approvals, drift — flag anything abnormal and summarise at the end. The strategies
+  run by themselves on the scheduler; this skill never places orders. Use when the
+  user says "start a paper session", "watch today's paper trading", or "/paper-session".
 ---
 
-# Paper Session — AlgoTrader Pro
+# Paper Session — AlgoTrader Pro (v2 API)
 
-Drive one paper-trading session end to end. Arguments (optional): a
-comma-separated strategy list (`intraday`, `scalping`, `swing`, `fno`) and/or a
-comma-separated watchlist. Default strategies: every enabled agent. Default
-watchlist: none (the symbol scanner picks).
+The strategies are **scheduler-driven** (IST): `auc_fade` enters at the 09:15 auction and exits 09:20; `attn_on`
+buys at 15:21 and sells at the next 09:15 auction; `vrp_winged` opens a NIFTY winged strangle at 10:20 and settles
+on expiry day; `pead_h60` (candidate, off by default) enters at 09:15 after results and holds ~60 sessions. There is
+nothing to "start" per strategy — the 08:55 preflight sets them running unless the operator stopped the bot.
+API reference: `algotrader_v4/API_V2.md`. Optional argument: strategies to focus on.
 
 ## Setup
 
@@ -24,80 +25,57 @@ ALGO_URL="${ALGO_URL:-http://127.0.0.1:8000}"
 # ALGO_API_KEY must be set. Never echo, log or paste it.
 H="X-API-Key: ${ALGO_API_KEY}"
 j()    { curl -sS -m 15 -H "$H" "$ALGO_URL$1"; }
-post() { curl -sS -m 120 -H "$H" -H "Content-Type: application/json" -X POST "$ALGO_URL$1" -d "${2:-{\}}"; }
+post() { curl -sS -m 60 -H "$H" -H "Content-Type: application/json" -X POST "$ALGO_URL$1" -d "${2:-{\}}"; }
 ```
 
 ## 1. Safety gate — do not skip
 
 ```bash
-j /config/validate
+j /api/v2/health          # mode must be PAPER — anything else: stop and tell the user
+j /api/v2/overview        # kite, market, bot_running, trading_state, approval_mode, strategies.*.entry_block
 ```
+- `paper_data_source` must be `KITE` with `kite.connected` true; otherwise every agent shows `no_kite_data` and
+  takes no entries. Ask the user to log in (dashboard → System → Connect Kite, or the 08:45 automatic login).
+- `bot_running` false → the operator Stop persists; only the user decides to `post /bot/start`.
+- Market closed / holiday → say so; nothing will trade today.
 
-- If `trading_mode` is **not** `PAPER`: **stop**. Tell the user the server is in
-  LIVE mode and this skill only runs paper sessions. Do not start the bot.
-- Report `paper_data_source`:
-  - `KITE` → real prices. Also require `kite_initialised` true, or `j /auth/kite/status`
-    returns `connected: true`. If not, ask the user to log in to Kite through the app
-    (`/auth/kite/callback` flow) before continuing.
-  - `SIM` → tell the user prices are **simulated** (random walk) and results say
-    nothing about real market behaviour. Ask whether to continue or switch the
-    server to `PAPER_DATA_SOURCE=KITE` first.
-- `j /market/status` — if the market is closed, say so: with Kite data the bot idles
-  outside market hours.
+Run `/preflight` first if the user hasn't today.
 
-Optionally run `/preflight` first if the user hasn't today.
+## 2. Follow the day
 
-## 2. Start
+Poll at the scheduled stages (use the session's scheduling tools; never a tight loop — the API suggests 10–15 s
+for the dashboard, 5–15 min is plenty here):
 
 ```bash
-post /bot/start '{"strategies": ["intraday","scalping"]}'
-# with a fixed watchlist:
-post /bot/start '{"strategies": ["intraday"], "watchlist": [{"symbol":"RELIANCE","exchange":"NSE"}]}'
+j /api/v2/strategies              # per strategy: today.plan, today.positions, today.trades, entry_block, drift.status
+j /api/v2/strategies/<name>       # adds day_log (every skip / decision of the day)
+j /api/v2/positions               # all open positions, broker rows, orphan rows
+j /api/v2/trades?since=<YYYY-MM-DD>
+j /api/v2/fills?n=50              # quote vs fill, slip_bps
+j /api/v2/trading-state ; j /api/v2/risk-budget ; j /api/v2/approvals ; j /api/v2/drift
 ```
+Useful times: 09:16 (auction entries), 09:21 (auction exits), 10:21 (strangle), 15:16 (square-off),
+15:22 (attention entries), 15:41 (store refresh), 17:16 (drift check).
 
-`400 Already running` → the bot is already on; just monitor. Report the returned
-`watchlist` and, per strategy, how many symbols were approved
-(`report.<strategy>.approved / total`). If an agent has 0 approved symbols, it
-will not trade — say so.
-
-## 3. Monitor
-
-Poll every ~5 minutes (use the session's scheduling tools if available; never a
-tight loop):
-
-```bash
-j /bot/status            # agents running, trades_today, pnl_today, last_signal
-j /portfolio/positions   # open paper positions (quantity ≠ 0)
-j /portfolio/orders      # every paper order — tags show agent and exit type
-j /risk/status           # daily_pnl, open_positions, is_halted
-j /gate/log?n=20         # Claude gate ENTER/SKIP decisions with reasons
-j /brackets              # active brackets
-j /sebi/status           # kill switch state
-```
-
-On each poll report only what changed: new entries (symbol, side, qty, price,
-pattern from `last_signal.trigger`), exits (reason, P&L), and any alert below.
+On each poll report only what changed: new plans / entries (symbol, side, qty, price), exits (net P&L), skips from
+`day_log`, state changes.
 
 **Raise immediately:**
-- `risk/status.is_halted` true (daily loss limit hit) or `sebi/status.state` not `ACTIVE`.
-- An open position with no matching `TRIGGER PENDING` SL-M order in `/portfolio/orders`.
-- A position whose quantity sign is opposite to its entry (an unintended reverse position).
-- No ticks: `/market/live` empty or unchanged for 2 polls while the market is open.
-- Several consecutive gate SKIPs with the same reason — summarise the reason.
+- `trading_state.global` or `brake` not `ACTIVE`, or a strategy's effective state changed.
+- `approval_mode` on with a **pending** ticket close to its deadline (`/api/v2/approvals` → `deadlines`).
+- An `entry_block` that is not expected (`daily_loss_stop`, `drawdown_kill`, `no_data:store_stale`, `stopped`).
+- `orphan_rows` non-empty; a position still open after its scheduled exit; `errors` in a strategy card.
+- Drift `status` `warn` / `alert` (quote the message — warnings never change anything by themselves).
+- SEBI `j /sebi/status` not `ACTIVE`.
 
-Never place, modify or cancel orders yourself during the session. If something
-looks wrong, tell the user and offer `POST /bot/stop` or `POST /orders/squareoff`;
-run them only when the user says so.
+Never place, modify or cancel orders, change trading states, approve tickets or reset the brake yourself. If something
+looks wrong, tell the user and offer the control (`POST /api/v2/trading-state`, `POST /api/v2/approvals/{id}/approve`,
+`POST /bot/stop`, `POST /orders/squareoff`); run it only when the user says so.
 
-## 4. End
-
-When the user asks, or at their requested end time (the bot also auto-squares-off
-at `SQUAREOFF_TIME`, default 15:10 IST):
+## 3. End of day
 
 ```bash
-post /bot/stop
-j /portfolio/positions    # confirm everything is flat
+j /api/v2/positions        # only overnight holds should remain (attn_on CNC, vrp_winged NRML legs, pead_h60)
+j /api/v2/trades?since=<today>
 ```
-
-Then run `/trade-review` for the summary, or give a short one: trades, win rate,
-net P&L, best/worst trade, P&L per agent.
+Then run `/trade-review` for the summary.

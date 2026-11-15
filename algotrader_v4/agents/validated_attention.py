@@ -215,7 +215,7 @@ class AttentionOvernightAgent(ValidatedAgent):
             self._log("entry", "*", "flag", "ca_calendar_unavailable")
         excluded = attention_exclusions(today, nxt, VD.special_sessions(), VD.price_adjusting_actions,
                                         [x.symbol for x in inputs])
-        notional = T.NOTIONAL * self._scale()
+        notional = T.NOTIONAL * self._scale() * self.alloc_scale()
         planned, skips = plan_attention(inputs, excluded, notional=notional)
         for sym, why in skips.items():
             self._skip(sym, why, log=why != "no_signal")
@@ -336,7 +336,7 @@ class AttentionOvernightAgent(ValidatedAgent):
         nxt = next_trading_day(today)
         excluded = attention_exclusions(today, nxt, VD.special_sessions(), VD.price_adjusting_actions,
                                         [x.symbol for x in inputs])
-        planned, _ = plan_attention(inputs, excluded, notional=T.NOTIONAL * self._scale())
+        planned, _ = plan_attention(inputs, excluded, notional=T.NOTIONAL * self._scale() * self.alloc_scale())
         bars_set, live_set = {p.symbol for p in planned}, set(self.last_decision.get("symbols") or [])
         res = {"audited": True, "bars_only": sorted(bars_set - live_set), "quotes_only": sorted(live_set - bars_set)}
         if res["bars_only"] or res["quotes_only"]:

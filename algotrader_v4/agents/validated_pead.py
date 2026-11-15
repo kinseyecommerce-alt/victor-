@@ -668,7 +668,7 @@ class PeadCandidateAgent(ValidatedAgent):
         self._save_book(force=True)
 
     def _decide(self, last: int, dec: dict, now: datetime) -> None:
-        why = self.entry_block_reason()
+        why = self.entry_block_reason(approval=False)
         if why:
             self._skip("*", why, stage="decision")
             return
@@ -735,7 +735,7 @@ class PeadCandidateAgent(ValidatedAgent):
             await asyncio.sleep(ENTRY_RETRY_S)
         gross = sum(p.entry_px * p.qty for p in self.positions())
         take, skips = apply_caps(plan, opens, len(self.positions()), gross, self.max_positions(), self.max_gross(),
-                                 NOTIONAL * self._scale())
+                                 NOTIONAL * self._scale() * self.alloc_scale())
         from sebi_compliance import sebi_compliance
         for e, qty, px in take:
             ok, _algo, reason = sebi_compliance.pre_order_check(
@@ -803,7 +803,7 @@ class PeadCandidateAgent(ValidatedAgent):
         st.update({"candidate": True, "proven": False, "pending": self.pending, "last_decision": self.last_decision,
                    "processed_through": self.processed_through, "inputs": self.inputs,
                    "caps": {"max_positions": self.max_positions(), "max_gross": self.max_gross(),
-                            "notional": NOTIONAL * self._scale()},
+                            "notional": NOTIONAL * self._scale() * self.alloc_scale()},
                    "open_value": round(sum(p.entry_px * p.qty for p in self.positions()), 2),
                    "flag": "VALIDATED_PEAD_ENABLED", "flag_on": self.enabled_by_setting(),
                    "next_jobs": {"evening": "19:35/20:35/21:35/22:35", "morning_retry": "08:20",

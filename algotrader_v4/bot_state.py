@@ -1,6 +1,6 @@
 """
 bot_state.py — shared mutable runtime state (no circular imports).
-Both main.py and master_agent_v5.py import from here.
+Imported by main.py, the scheduler and the agents.
 
 Agent enables are persisted (AGENT_ENABLES_FILE, default next to the performance ledger) so a
 strategy switched off from the dashboard stays off across restarts and redeploys.
@@ -11,8 +11,8 @@ import json
 import os
 from pathlib import Path
 
-_DEFAULTS = {"intraday": True, "fno": True, "swing": True, "scalping": True,
-             "auc_fade": True, "attn_on": True, "vrp_winged": True, "pead_h60": True}
+_DEFAULTS = {"auc_fade": True, "attn_on": True, "vrp_winged": True, "pead_h60": True}
+# removed in the core rebuild; their keys in an existing agent_enables.json are kept on disk untouched but ignored
 LEGACY_AGENTS = ("intraday", "scalping", "swing", "fno")
 # lab-protocol agents (pre-registered DISCOVERY H1/H2 screen + one FINAL look), driven by platform_scheduler jobs
 VALIDATED_AGENTS = ("auc_fade", "attn_on", "vrp_winged", "pead_h60")   # pead_h60: candidate, VALIDATED_PEAD_ENABLED
@@ -21,9 +21,16 @@ _FILE = Path(os.getenv("AGENT_ENABLES_FILE")
              .with_name("agent_enables.json"))
 
 
+_extra_saved: dict = {}          # keys of removed agents found in the file: written back unchanged
+
+
 def _load() -> dict[str, bool]:
+    global _extra_saved
     try:
         saved = json.loads(_FILE.read_text())
+        if not isinstance(saved, dict):
+            return dict(_DEFAULTS)
+        _extra_saved = {k: v for k, v in saved.items() if k not in _DEFAULTS}
         return {k: bool(saved.get(k, v)) for k, v in _DEFAULTS.items()}
     except Exception:
         return dict(_DEFAULTS)
@@ -36,7 +43,7 @@ def _save() -> None:
     try:
         _FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(_agent_enabled, indent=1))
+        tmp.write_text(json.dumps({**_extra_saved, **_agent_enabled}, indent=1))
         os.replace(tmp, _FILE)
     except Exception:
         pass                                   # in-memory state still applies for this process

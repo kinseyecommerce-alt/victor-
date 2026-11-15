@@ -1,14 +1,17 @@
 ---
 name: backtest
 description: >
-  Run AlgoTrader Pro backtests through its API and explain the results: one
-  symbol across all strategies (ranked by Sharpe), a batch of symbols for one
-  strategy against the live-trading gate, or the currently approved list. Shows
-  win rate, Sharpe, drawdown, profit factor and walk-forward out-of-sample
-  figures, and why a symbol failed the gate. Use when the user asks to
-  "backtest RELIANCE", "which strategy suits TCS", "re-qualify the watchlist",
-  or "/backtest intraday RELIANCE,TCS".
+  RETIRED (core rebuild, Nov 2026) — do not use. The backtest API it drove (/backtest/run, batch, approved,
+  compare, replay …), the yfinance engine and the four legacy agents (intraday, scalping, swing, fno) it
+  qualified were removed. Strategies are now validated offline in stratlab/ with a pre-registered protocol;
+  the app runs only the four lab agents in PAPER. Kept for history only.
 ---
+
+> **RETIRED in the core rebuild (Nov 2026, `algotrader_v4/REBUILD.md`).** Do not use. The backtest API it drove (/backtest/run, batch, approved, compare, replay …), the yfinance engine and the four legacy agents (intraday, scalping, swing, fno) it qualified were removed. Strategies are now validated offline in stratlab/ with a pre-registered protocol; the app runs only the four lab agents in PAPER. Kept for history only.
+>
+> Instead: strategy research happens in `algotrader_v4/stratlab/` (pre-registered protocol, lab-parity tests in `test_pipeline.py`); paper results vs the lab are in `GET /api/v2/strategies` and `GET /api/v2/drift`; the forward lab (`GET /api/v2/forward-lab`, when enabled) follows many strategies on live data. Use /trade-review for paper results.
+>
+> Everything below is the original text, kept for history; its commands no longer work.
 
 # Backtest — AlgoTrader Pro
 

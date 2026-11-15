@@ -1,6 +1,6 @@
 # AlgoTrader Pro — one image: Python backend + built React dashboard.
 # Build context = algotrader_v4/ (Railway: root directory "algotrader_v4", this Dockerfile).
-# Persistent state (vault, ledger, swing positions, logs) lives under /data —
+# Persistent state (vault, ledger, paper book, shadow ledgers, PEAD store, logs) lives under /data —
 # mount a volume there. Secrets come from environment variables, never from the image.
 
 # ── 1. dashboard ──────────────────────────────────────────────────────────────
@@ -35,9 +35,6 @@ RUN rm -rf .env .secrets data/*.json frontend/node_modules && chmod +x deploy/en
 ENV PYTHONUNBUFFERED=1 \
     SECRETS_DIR=/data/secrets \
     PERFORMANCE_FILE=/data/app/performance.json \
-    AI_SWING_FILE=/data/app/ai_swing_positions.json \
-    STRATEGY_PARAMS_FILE=/data/app/strategy_params.json \
-    RESEARCH_LOG_FILE=/data/app/research_log.json \
     PORT=8000
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s CMD curl -sf http://localhost:${PORT}/health || exit 1

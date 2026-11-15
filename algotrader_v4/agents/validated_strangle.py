@@ -299,7 +299,9 @@ class WingedStrangleAgent(ValidatedAgent):
             return skip("no_data:spot")
         if vix <= 0:
             return skip("no_data:vix")
-        lots = self._lots()
+        lots = self.alloc_lots(self._lots())
+        if lots <= 0:
+            return skip("allocator_zero")
         plan, why = plan_strangle(sched, spot, vix, is_trading_day, lots)
         if plan is None:
             return skip(why)

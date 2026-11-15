@@ -1,0 +1,216 @@
+{
+ "built": "2026-11-15",
+ "calendar": {
+  "first": 20231110,
+  "last": 20261109,
+  "sessions": 726
+ },
+ "combined_default_book": {
+  "block_dd": {
+   "p5": 73521.45,
+   "p50": 135651.73,
+   "p95": 251641.71,
+   "p99": 325240.36
+  },
+  "daily_std": 8207.68,
+  "observed_max_dd": 132043.15,
+  "strategies": [
+   "AUC-FADE-2PCT",
+   "SWING-ATTN-ON-3X",
+   "VRP-STRANGLE-016-WINGED"
+  ]
+ },
+ "source": "lab 2023-26 trade files (DISCOVERY + FINAL), lab size",
+ "strategies": {
+  "AUC-FADE-2PCT": {
+   "block_dd": {
+    "p5": 25891.899999999998,
+    "p50": 39113.64500000002,
+    "p95": 67022.49849999999,
+    "p99": 88051.59959999993
+   },
+   "block_total": {
+    "p5": 115976.79999999999,
+    "p50": 273862.235,
+    "p95": 450338.2079999999,
+    "p99": 534188.6014
+   },
+   "boot_dd": {
+    "p5": 21395.46350000014,
+    "p50": 31978.120000000003,
+    "p95": 53492.10549999998,
+    "p99": 67561.19949999987
+   },
+   "daily_mean": 381.77,
+   "daily_std": 3897.48,
+   "fill_model": "entry = the official 09:15 auction open (lab: 09:15 bar open, 2.1 bps/side); exit 09:20 bar open",
+   "mean20_band": {
+    "p5": -462.71,
+    "p50": 162.86,
+    "p95": 785.67,
+    "p99": 1055.12
+   },
+   "net_mean": 171.62,
+   "net_std": 1724.1,
+   "net_total": 277161.41,
+   "observed_max_dd": 29535.33,
+   "ref_slippage_bps": 2.1,
+   "trades": 1615,
+   "trades_per_session": 2.2245,
+   "win_pct": 55.5,
+   "worst_day": -13527.1
+  },
+  "AUC-FADE-3PCT": {
+   "block_dd": {
+    "p5": 17282.90650000001,
+    "p50": 27138.005000000034,
+    "p95": 47620.45200000005,
+    "p99": 58140.68929999987
+   },
+   "block_total": {
+    "p5": 150336.478,
+    "p50": 280660.67500000005,
+    "p95": 431785.17449999996,
+    "p99": 496316.56139999995
+   },
+   "boot_dd": {
+    "p5": 14559.132000000027,
+    "p50": 21853.685000000005,
+    "p95": 35187.113999999994,
+    "p99": 43577.00890000001
+   },
+   "daily_mean": 390.99,
+   "daily_std": 3086.61,
+   "fill_model": "entry = the official 09:15 auction open (lab: 09:15 bar open, 2.1 bps/side); exit 09:20 bar open",
+   "mean20_band": {
+    "p5": -386.32,
+    "p50": 368.38,
+    "p95": 1099.38,
+    "p99": 1448.62
+   },
+   "net_mean": 372.52,
+   "net_std": 1981.52,
+   "net_total": 283860.09,
+   "observed_max_dd": 24605.28,
+   "ref_slippage_bps": 2.1,
+   "trades": 762,
+   "trades_per_session": 1.0496,
+   "win_pct": 59.6,
+   "worst_day": -10860.02
+  },
+  "EV-PEAD-LONG-H60": {
+   "block_dd": {
+    "p5": 412558.9989999996,
+    "p50": 819697.5700000004,
+    "p95": 1689175.9830000002,
+    "p99": 2253772.0139999986
+   },
+   "block_total": {
+    "p5": -464617.95399999997,
+    "p50": 1693198.74,
+    "p95": 4017448.7464999994,
+    "p99": 5074794.782299999
+   },
+   "boot_dd": {
+    "p5": 171233.1995000014,
+    "p50": 260092.78499999968,
+    "p95": 440715.7515,
+    "p99": 554077.3582000004
+   },
+   "daily_mean": 2368.37,
+   "daily_std": 28495.09,
+   "fill_model": "entry = next session's 09:15 open; exit = stop / 60-session time exit at the close",
+   "mean20_band": {
+    "p5": -4389.55,
+    "p50": 1886.91,
+    "p95": 9763.1,
+    "p99": 13422.49
+   },
+   "net_mean": 2084.16,
+   "net_std": 19155.25,
+   "net_total": 1719433.35,
+   "observed_max_dd": 1118594.2,
+   "ref_slippage_bps": 2.0,
+   "trades": 825,
+   "trades_per_session": 1.1364,
+   "win_pct": 49.8,
+   "worst_day": -159630.49
+  },
+  "SWING-ATTN-ON-3X": {
+   "block_dd": {
+    "p5": 8671.859999999999,
+    "p50": 13268.475000000006,
+    "p95": 22714.307499999944,
+    "p99": 27933.846800000058
+   },
+   "block_total": {
+    "p5": 80909.82900000001,
+    "p50": 165255.85,
+    "p95": 261682.84749999997,
+    "p99": 305804.8128
+   },
+   "boot_dd": {
+    "p5": 7483.972499999998,
+    "p50": 11319.194999999963,
+    "p95": 18983.6019999999,
+    "p99": 23391.32409999992
+   },
+   "daily_mean": 232.59,
+   "daily_std": 1766.84,
+   "fill_model": "entry = 15:21 bar open (live: the 15:21 ask); exit = next session's 09:15 open (auction)",
+   "mean20_band": {
+    "p5": -180.46,
+    "p50": 185.0,
+    "p95": 731.63,
+    "p99": 1107.91
+   },
+   "net_mean": 218.16,
+   "net_std": 1281.28,
+   "net_total": 168859.62,
+   "observed_max_dd": 12951.31,
+   "ref_slippage_bps": 2.0,
+   "trades": 774,
+   "trades_per_session": 1.0661,
+   "win_pct": 54.1,
+   "worst_day": -6285.91
+  },
+  "VRP-STRANGLE-016-WINGED": {
+   "block_dd": {
+    "p5": 88969.41649999999,
+    "p50": 167237.865,
+    "p95": 347289.16149999993,
+    "p99": 461468.82289999985
+   },
+   "block_total": {
+    "p5": -151537.54799999998,
+    "p50": 206709.175,
+    "p95": 526765.9715000001,
+    "p99": 655008.3095000001
+   },
+   "boot_dd": {
+    "p5": 82885.63950000016,
+    "p50": 155100.25,
+    "p95": 317660.62049999996,
+    "p99": 411505.8448
+   },
+   "daily_mean": 270.94,
+   "daily_std": 7109.68,
+   "fill_model": "legs at the 10:20 Black-Scholes credit (flat VIX) less a haircut; settlement at intrinsic from the expiry day's 15:00-15:29 mean close",
+   "mean20_band": {
+    "p5": -5049.43,
+    "p50": 1451.42,
+    "p95": 6459.8,
+    "p99": 7853.31
+   },
+   "net_mean": 1294.1,
+   "net_std": 15535.83,
+   "net_total": 196702.7,
+   "observed_max_dd": 129760.24,
+   "ref_slippage_bps": null,
+   "trades": 152,
+   "trades_per_session": 0.2094,
+   "win_pct": 80.3,
+   "worst_day": -51921.72
+  }
+ }
+}

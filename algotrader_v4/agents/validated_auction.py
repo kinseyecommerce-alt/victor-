@@ -227,7 +227,7 @@ class AuctionFadeAgent(ValidatedAgent):
             ds["ca_calendar_unavailable"] = True
             self._note("entry", "*", "info", "ca_calendar_unavailable (proceeding, flagged)")
 
-        notional = A.NOTIONAL * float(settings.validated_notional_scale)
+        notional = A.NOTIONAL * float(settings.validated_notional_scale) * self.alloc_scale()
         plan, skips = plan_auction(inputs, self.min_gap, notional)
         for s, why in skips.items():
             self._note("entry", s, "skip", why, log=(why != "no_signal"))
@@ -375,7 +375,7 @@ class AuctionFadeAgent(ValidatedAgent):
             if validated_data.price_adjusting_actions(s, day):
                 continue
             inputs.append(AuctionInput(s, pc, ss.first_open))
-        plan, _ = plan_auction(inputs, self.min_gap, A.NOTIONAL * float(settings.validated_notional_scale))
+        plan, _ = plan_auction(inputs, self.min_gap, A.NOTIONAL * float(settings.validated_notional_scale) * self.alloc_scale())
         bars = sorted((p.symbol, p.side) for p in plan)
         live = sorted((s, side) for s, side, _q in ds.get("planned") or [])
         res = {"day": day.isoformat(), "bars": bars, "live": live, "match": bars == live}

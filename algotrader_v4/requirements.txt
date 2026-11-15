@@ -1,13 +1,7 @@
-# ── Broker ──────────────────────────────────────────────────────
+# ── Broker / market data ──────────────────────────────────────────
 kiteconnect==5.0.1
-
-# ── Market data ───────────────────────────────────────────────────
-yfinance==0.2.51
-# TrueData WebSocket feed (live ticks, OHLCV history, options chain)
-# Install only if you have a TrueData subscription:
-#   pip install truedata-ws
-truedata-ws; extra == "truedata"
 httpx==0.28.1
+requests>=2.31          # pead_data / stratlab NSE archive fetches (also a kiteconnect dependency)
 
 # ── API server ────────────────────────────────────────────────────
 # NOTE: upgrade fastapi→0.115.x + starlette→0.41.x to fix CVE-2024-47874
@@ -17,36 +11,27 @@ uvicorn[standard]==0.34.3
 websockets==12.0
 
 # ── Security ──────────────────────────────────────────────────────
-slowapi==0.1.9
 pyotp==2.9.0
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
 PyJWT==2.9.0
 bcrypt==4.0.1
+cryptography>=42.0      # secret_store.py (Fernet vault); formerly pulled in by python-jose[cryptography]
 
-# ── AI ────────────────────────────────────────────────────────────
-anthropic>=2.3.0   # ai_trader.py needs output_config + server-side fallbacks
-openai>=1.60.0     # second AI provider — automatic failover when one is unavailable
-
-# ── Data / Technical analysis / Charting ─────────────────────────
+# ── Data ──────────────────────────────────────────────────────────
 pandas==2.2.2
 numpy==1.26.4
-ta==0.11.0
-matplotlib==3.10.9
 
 # ── Scheduling ────────────────────────────────────────────────────
 apscheduler==3.11.2
 
-# ── Utilities ────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────
 python-dotenv==1.0.1
 python-telegram-bot==21.3
 pydantic==2.7.3
 pydantic-settings==2.3.4
 loguru==0.7.2
-aiofiles==25.1.0
 
 # ── Swagger UI (served locally, no CDN dependency) ────────────────
 swagger-ui-bundle==1.1.0
 
-# ── Testing (not needed in production) ───────────────────────────
-playwright==1.52.0
+# Removed in the core rebuild (only the deleted code used them): yfinance, truedata-ws, slowapi, python-jose,
+# passlib, anthropic, openai, ta, matplotlib, aiofiles, playwright.

@@ -1,19 +1,15 @@
 """
-performance.py — the honest scoreboard, per-strategy statistics and automatic pruning.
+performance.py — the trade ledger, per-strategy statistics and the daily scoreboard.
 
-* Every closed trade is recorded with an estimated transaction cost (costs.py), so the
-  numbers here are after brokerage and taxes. The Claude API spend is charged too.
-* A daily snapshot (after the close) stores the day's net P&L next to the NIFTY 50 and
-  Nasdaq-100 closes, so returns can be compared over any period.
-* The scoreboard answers one question: is this account beating the index it could have
-  simply bought? NIFTY 50 is the real yardstick (it is what a Zerodha account could hold
-  instead); Nasdaq-100 is shown for reference only.
-* Pruning: once a strategy has PRUNE_MIN_TRADES closed trades, if its last
-  PRUNE_LOOKBACK_TRADES are net losers (net P&L < 0 and profit factor < 1) it is disabled
-  automatically and the owner is told. Re-enable it from the dashboard / API; the
-  judgement then restarts from that point.
+* Every closed trade is recorded once with its transaction cost (costs.py), so every number here is after
+  brokerage and taxes. The validated agents book the lab's cost assumption (cost_kind) and their lab id.
+* A daily snapshot stores the day's net P&L next to the NIFTY 50 close (Kite day candles), so the account can
+  be compared with the index it could simply have held.
+* No automatic pruning: the validated agents carry their own drawdown kill and the shadow registry's
+  pre-registered demotion rule. The ledger file keeps the "pruned" / "enabled_since" keys of older builds
+  unchanged (round-tripped, never interpreted).
 
-State lives in data/performance.json (atomic writes).
+State lives in PERFORMANCE_FILE (default data/performance.json; atomic writes).
 """
 from __future__ import annotations
 
@@ -34,7 +30,7 @@ from ist_clock import now_ist
 
 FILE = Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" / "performance.json")
 MAX_TRADES = 5000
-BENCHMARKS = {"NIFTY50": "^NSEI", "NASDAQ100": "^NDX"}
+BENCHMARKS = {"NIFTY50": "NIFTY 50"}    # Kite index name; day closes from Kite historical candles
 STRATEGY_LABELS = {
     "intraday": "Intraday agent", "scalping": "Scalping agent", "swing": "Swing agent", "fno": "F&O agent",
     "ai": "AI intraday", "ai_opt": "AI option buy", "ai_fut": "AI future", "ai_swing": "AI swing",
@@ -44,6 +40,14 @@ STRATEGY_LABELS = {
     "vrp_winged": "NIFTY winged strangle (validated)",
     "pead_h60": "Post-earnings drift 60d (candidate)",
 }
+
+
+def slippage_bps(signal_price: float, fill_price: float, side: str) -> Optional[float]:
+    """How much worse (positive) or better the fill was than the price the rule saw, in basis points."""
+    if not signal_price or not fill_price:
+        return None
+    adverse = (fill_price - signal_price) if side == "BUY" else (signal_price - fill_price)
+    return round(adverse / signal_price * 10000, 1)
 
 
 def _version(strategy: str) -> str:
@@ -62,6 +66,7 @@ class Performance:
         self.days: dict[str, dict] = {}            # date → snapshot
         self.pruned: dict[str, dict] = {}          # strategy → {since, reason}
         self.enabled_since: dict[str, str] = {}    # strategy → ISO time of the last manual re-enable
+        self._extra: dict = {}                     # unknown top-level keys of the file, written back unchanged
         self._bench_cache: dict[str, list[tuple[str, float]]] = {}
         self._bench_day: Optional[date] = None
         self._load()
@@ -79,14 +84,15 @@ class Performance:
         self.days = d.get("days", {})
         self.pruned = d.get("pruned", {})
         self.enabled_since = d.get("enabled_since", {})
+        self._extra = {k: v for k, v in d.items() if k not in ("trades", "days", "pruned", "enabled_since")}
 
     def _save(self) -> None:
         try:
             FILE.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=FILE.parent, prefix=".perf.")
             with os.fdopen(fd, "w") as f:
-                json.dump({"trades": self.trades[-MAX_TRADES:], "days": self.days, "pruned": self.pruned,
-                           "enabled_since": self.enabled_since}, f)
+                json.dump({**self._extra, "trades": self.trades[-MAX_TRADES:], "days": self.days,
+                           "pruned": self.pruned, "enabled_since": self.enabled_since}, f)
             os.replace(tmp, FILE)
         except Exception as exc:
             logger.error("[perf] could not save: {}", exc)
@@ -101,8 +107,8 @@ class Performance:
         """Called once per closed trade with its gross P&L. Returns the stored row (net of costs).
         order_id (the entry order) lets a restored paper book tell a trade that already closed from one
         still open (paper_book.py). cost_kind: cost the trade as this costs.py instrument class (the validated
-        agents book the lab's cost assumption); charge_risk=False keeps the cost out of risk_manager;
-        extra: fields merged into the stored row."""
+        agents book the lab's cost assumption); charge_risk: accepted for compatibility (there is no risk manager
+        to charge any more); extra: fields merged into the stored row."""
         if exit_price is None and quantity and entry_price:
             exit_price = entry_price + (pnl / quantity) * (1 if side == "BUY" else -1)
         # an option settled worthless exits at exactly ₹0 (not "unknown"): keep it, never fall back to the entry
@@ -122,7 +128,6 @@ class Performance:
         if order_id:
             row["oid"] = str(order_id)
         if signal_price:
-            from execution import slippage_bps
             row["signal"] = round(signal_price, 2)
             row["slip_bps"] = slippage_bps(signal_price, entry_price, side)
         if cost_kind:
@@ -132,107 +137,17 @@ class Performance:
         with self._lock:
             self.trades.append(row)
             self.trades = self.trades[-MAX_TRADES:]
-            newly = self._evaluate_pruning(strategy)
             self._save()
-        if newly:
-            self._announce_prune(strategy, newly)
-        if charge_risk:
-            try:
-                from risk_manager import risk_manager           # the daily loss limit is measured after costs
-                risk_manager.record_cost(cost)
-            except Exception as exc:
-                logger.error("[perf] cost not charged to the risk manager: {}", exc)
         return row
 
-    # ── pruning ──────────────────────────────────────────────────────────
     def _strategy_trades(self, strategy: str, since: Optional[str] = None, all_versions: bool = False) -> list[dict]:
-        """Trades of the strategy's CURRENT version (an agent rebuilt under the same name must not inherit
-        its predecessor's record: the v2 agents were being auto-disabled by the v1 agents' losses)."""
+        """Trades of the strategy's CURRENT version (an agent rebuilt under the same name must not inherit its
+        predecessor's record)."""
         v = _version(strategy)
         rows = [t for t in self.trades if t["strategy"] == strategy and (all_versions or t.get("version", "v1") == v)]
-        since = since or self.enabled_since.get(strategy)
         if since:
             rows = [t for t in rows if t["t"] >= since]
         return rows
-
-    def _current_prune(self, strategy: str) -> Optional[dict]:
-        p = self.pruned.get(strategy)
-        return p if p and p.get("version", "v1") == _version(strategy) else None
-
-    def _evaluate_pruning(self, strategy: str) -> Optional[str]:
-        import bot_state
-        if strategy in getattr(bot_state, "VALIDATED_AGENTS", ()):
-            return None                  # lab-protocol agents: their drawdown kill replaces pruning
-        if not settings.prune_enabled or self._current_prune(strategy):
-            return None
-        try:
-            import bot_state
-            if strategy in getattr(bot_state, "VALIDATED_AGENTS", ()):
-                return None              # lab-protocol agents: their drawdown kill replaces pruning
-        except Exception:
-            pass
-        rows = self._strategy_trades(strategy)[-settings.prune_lookback_trades:]
-        if len(rows) < settings.prune_min_trades:
-            return None
-        net = sum(t["net"] for t in rows)
-        gp = sum(t["net"] for t in rows if t["net"] > 0)
-        gl = -sum(t["net"] for t in rows if t["net"] <= 0)
-        pf = gp / gl if gl > 0 else float("inf")
-        if net < 0 and pf < 1.0:
-            reason = (f"last {len(rows)} trades: net ₹{net:,.0f} after costs, profit factor {pf:.2f}")
-            self.pruned[strategy] = {"since": now_ist().isoformat(timespec="seconds"), "reason": reason,
-                                     "version": _version(strategy)}
-            self._apply_toggle(strategy, False)
-            return reason
-        return None
-
-    def _apply_toggle(self, strategy: str, enabled: bool) -> None:
-        try:
-            import bot_state
-            if strategy in ("intraday", "scalping", "swing", "fno"):
-                bot_state.set_agent_enabled(strategy, enabled)
-        except Exception:
-            pass
-
-    def _announce_prune(self, strategy: str, reason: str) -> None:
-        msg = (f"⛔ Strategy {STRATEGY_LABELS.get(strategy, strategy)} disabled automatically — {reason}. "
-               "Re-enable it from the dashboard if you believe conditions changed.")
-        logger.warning("[perf] {}", msg)
-        try:
-            import asyncio
-            from agents.base_agent import send_telegram
-            asyncio.get_running_loop().create_task(send_telegram(msg))
-        except Exception:
-            pass
-
-    def is_allowed(self, strategy: str) -> tuple[bool, str]:
-        if not settings.prune_enabled:            # pruning switched off (e.g. a paper test of every agent)
-            return True, ""
-        p = self._current_prune(strategy)         # a prune of an earlier version of the agent does not apply
-        if p:
-            return False, f"{STRATEGY_LABELS.get(strategy, strategy)} was disabled automatically ({p['reason']})"
-        return True, ""
-
-    def restore_pruned(self) -> list[str]:
-        """With PRUNE_ENABLED=false, re-enable every agent an earlier automatic prune switched off. Returns them."""
-        if settings.prune_enabled:
-            return []
-        back = [s for s in list(self.pruned) if s in ("intraday", "scalping", "swing", "fno")]
-        for s in back:
-            self.set_enabled(s, True, "pruning disabled")
-        return back
-
-    def set_enabled(self, strategy: str, enabled: bool, reason: str = "manual") -> dict:
-        with self._lock:
-            if enabled:
-                self.pruned.pop(strategy, None)
-                self.enabled_since[strategy] = now_ist().isoformat()     # full precision: trades of the same second are excluded
-            else:
-                self.pruned[strategy] = {"since": now_ist().isoformat(timespec="seconds"), "reason": reason,
-                                         "version": _version(strategy)}
-            self._apply_toggle(strategy, enabled)
-            self._save()
-        return self.strategy_stats().get(strategy, {"strategy": strategy, "enabled": enabled})
 
     # ── statistics ───────────────────────────────────────────────────────
     @staticmethod
@@ -272,24 +187,23 @@ class Performance:
                 "note": "entry fills only; exits are at market/marketable limit and not yet measured"}
 
     def strategy_stats(self) -> dict[str, dict]:
+        """Per-strategy statistics of the kept strategies (and of any other name still in the ledger)."""
         import bot_state
         out = {}
-        names = set(STRATEGY_LABELS) | {t["strategy"] for t in self.trades}
+        names = set(bot_state.VALIDATED_AGENTS) | {t["strategy"] for t in self.trades}
         for s in sorted(names):
             rows = self._strategy_trades(s)
             st = self._stats(rows)
-            st.update(strategy=s, label=STRATEGY_LABELS.get(s, s),
-                      recent=self._stats(rows[-settings.prune_lookback_trades:]) if rows else None,
-                      version=_version(s), pruned=self._current_prune(s), enabled=not self._current_prune(s) and
-                      (bot_state.is_agent_enabled(s) if s in ("intraday", "scalping", "swing", "fno") else True),
-                      trades_until_judgement=max(0, settings.prune_min_trades - len(rows[-settings.prune_lookback_trades:])))
+            st.update(strategy=s, label=STRATEGY_LABELS.get(s, s), version=_version(s),
+                      kept=s in bot_state.VALIDATED_AGENTS,
+                      enabled=bot_state.is_agent_enabled(s) if s in bot_state.VALIDATED_AGENTS else False)
             out[s] = st
         return out
 
     # ── benchmarks ───────────────────────────────────────────────────────
     def _benchmark_closes(self, name: str) -> list[tuple[str, float]]:
-        """Daily closes [(YYYY-MM-DD, close)] for a benchmark, cached for the day.
-        NIFTY50 in the paper simulator = the streamed synthetic index."""
+        """Daily closes [(YYYY-MM-DD, close)] of a benchmark from Kite day candles (2 years), cached for the day.
+        Empty without Kite market data / a session."""
         today = now_ist().date()
         if self._bench_day != today:
             self._bench_cache, self._bench_day = {}, today
@@ -297,17 +211,15 @@ class Performance:
             return self._bench_cache[name]
         rows: list[tuple[str, float]] = []
         try:
-            if name == "NIFTY50" and not settings.uses_kite_market_data:
-                from daily_data import daily_closes
-                rows = [(d.isoformat(), c) for d, c in daily_closes("NIFTY 50", fallback_price=24000.0)]
-            else:
-                import yfinance as yf
-                df = yf.download(BENCHMARKS[name], period="2y", interval="1d", progress=False, auto_adjust=True)
-                if not df.empty:
-                    close = df["Close"]
-                    if hasattr(close, "columns"):
-                        close = close.iloc[:, 0]
-                    rows = [(d.strftime("%Y-%m-%d"), float(c)) for d, c in close.dropna().items()]
+            from kite_client import kite_client
+            if settings.uses_kite_market_data and kite_client.has_session():
+                tok = kite_client.get_instrument_tokens([BENCHMARKS[name]], "NSE").get(BENCHMARKS[name])
+                if tok:
+                    start = datetime.combine(today - timedelta(days=730), datetime.min.time())
+                    for r in kite_client.historical_data(tok, start, datetime.combine(today, datetime.max.time()),
+                                                         "day"):
+                        d = r["date"]
+                        rows.append(((d.date() if hasattr(d, "date") else d).isoformat()[:10], float(r["close"])))
         except Exception as exc:
             logger.warning("[perf] benchmark {} unavailable: {}", name, exc)
         self._bench_cache[name] = rows
@@ -326,7 +238,7 @@ class Performance:
 
     # ── daily snapshot ───────────────────────────────────────────────────
     def snapshot_today(self, ai_cost_usd: float = 0.0) -> dict:
-        """Store today's net P&L (and the API spend) with the benchmark closes. Idempotent."""
+        """Store today's net P&L with the benchmark closes. Idempotent."""
         today = now_ist().date().isoformat()
         snap = self._day_row(today, ai_cost_usd)
         # earlier days with trades but no snapshot (the 15:35 job did not run: restart, outage) — fill them in
@@ -345,7 +257,7 @@ class Performance:
         rows = [t for t in self.trades if t["t"][:10] == day]
         snap = {"date": day, "gross": round(sum(t["gross"] for t in rows), 2),
                 "costs": round(sum(t["cost"] for t in rows), 2),
-                "ai_cost_inr": round(ai_cost_usd * settings.usd_inr, 2), "trades": len(rows)}
+                "ai_cost_inr": 0.0, "trades": len(rows)}
         snap["net"] = round(snap["gross"] - snap["costs"] - snap["ai_cost_inr"], 2)
         for name in BENCHMARKS:
             closes = self._benchmark_closes(name)
@@ -369,8 +281,7 @@ class Performance:
         today_net = None
         if live_day_pnl is not None:
             today_rows = [t for t in self.trades if t["t"][:10] == today.isoformat()]
-            today_net = round(live_day_pnl - sum(t["cost"] for t in today_rows)
-                              - ai_cost_today_usd * settings.usd_inr, 2)
+            today_net = round(live_day_pnl - sum(t["cost"] for t in today_rows), 2)
         out = {"capital": cap, "as_of": now_ist().strftime("%Y-%m-%d %H:%M"), "periods": {}}
         for label, start in periods.items():
             if label == "today":
@@ -421,8 +332,7 @@ class Performance:
         out = []
         for d in sorted(self.days):
             cum += self.days[d]["net"]
-            out.append({"date": d, "cum_net": round(cum, 2), "nifty50": self.days[d].get("nifty50"),
-                        "nasdaq100": self.days[d].get("nasdaq100")})
+            out.append({"date": d, "cum_net": round(cum, 2), "nifty50": self.days[d].get("nifty50")})
         return out
 
 
