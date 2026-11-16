@@ -1450,7 +1450,7 @@ class Builder:
         clock = clock or (lambda: now)
         today = now.date()
         latest = today if now.time() >= dtime(19, 0) else today - timedelta(days=1)
-        budget = int(budget if budget is not None else getattr(_settings(), "builder_nse_max_requests_per_run", 2500))
+        budget = int(budget if budget is not None else getattr(_settings(), "builder_nse_max_requests_per_run", 5000))
         out = {"started": now.isoformat(timespec="seconds"), "requests": 0, "days": 0, "stopped": None,
                "errors": []}
         with _LOCK:
@@ -1710,7 +1710,7 @@ def minute_job(now: Optional[datetime] = None, root=None, **kw) -> dict:
     def cap():
         if disk_bytes(b.root) >= max_bytes():
             raise DiskCapReached(f"disk cap reached ({max_bytes() / 1048576:.0f} MB)")
-    kw.setdefault("max_calls", int(getattr(_settings(), "builder_kite_max_calls_per_run", 1500)))
+    kw.setdefault("max_calls", int(getattr(_settings(), "builder_kite_max_calls_per_run", 6000)))
     kw.setdefault("clock", lambda: ist_clock.now_ist().replace(tzinfo=None))
     kw.setdefault("market_hours", in_market_hours)
     kw.setdefault("lock", lock)
@@ -1778,8 +1778,8 @@ def _api_status(root=None) -> dict:
     out = {"enabled": enabled(), "root": str(Builder(root).root),
            "schedule": {"nse": "23:05 and 05:30 IST daily, 10:05 / 15:05 Sat-Sun",
                         "minute": "18:40 and 23:45 IST daily, 11:40 / 14:40 Sat-Sun"},
-           "budgets": {"kite_calls_per_run": int(getattr(_settings(), "builder_kite_max_calls_per_run", 1500)),
-                       "nse_requests_per_run": int(getattr(_settings(), "builder_nse_max_requests_per_run", 2500))}}
+           "budgets": {"kite_calls_per_run": int(getattr(_settings(), "builder_kite_max_calls_per_run", 6000)),
+                       "nse_requests_per_run": int(getattr(_settings(), "builder_nse_max_requests_per_run", 5000))}}
     try:
         out.update(Builder(root).status(now))
     except Exception as exc:
