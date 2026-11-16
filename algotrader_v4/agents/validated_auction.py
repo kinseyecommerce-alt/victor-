@@ -157,10 +157,10 @@ class AuctionFadeAgent(ValidatedAgent):
         return MIN_GAP[self.variant]
 
     def daily_loss_limit(self) -> float:
-        return float(settings.validated_auction_daily_loss_stop) * float(settings.validated_notional_scale)
+        return float(settings.validated_auction_daily_loss_stop) * self._scale()
 
     def dd_limit(self) -> float:
-        return float(settings.validated_auction_dd_kill) * float(settings.validated_notional_scale)
+        return float(settings.validated_auction_dd_kill) * self._scale()
 
     # ── entry (09:15:05) ─────────────────────────────────────────────────────
     @serialized
@@ -227,11 +227,11 @@ class AuctionFadeAgent(ValidatedAgent):
             ds["ca_calendar_unavailable"] = True
             self._note("entry", "*", "info", "ca_calendar_unavailable (proceeding, flagged)")
 
-        notional = A.NOTIONAL * float(settings.validated_notional_scale) * self.alloc_scale()
+        notional = A.NOTIONAL * self._scale() * self.alloc_scale()
         plan, skips = plan_auction(inputs, self.min_gap, notional)
         for s, why in skips.items():
             self._note("entry", s, "skip", why, log=(why != "no_signal"))
-        plan, f = apply_gross_cap(plan, float(settings.validated_auction_max_gross))
+        plan, f = apply_gross_cap(plan, float(settings.validated_auction_max_gross) * self._scale())
         if f is not None:
             self._note("entry", "*", "info", f"cap_scaled ×{f:.3f}")
             ds["cap_scaled"] = round(f, 4)
@@ -375,7 +375,7 @@ class AuctionFadeAgent(ValidatedAgent):
             if validated_data.price_adjusting_actions(s, day):
                 continue
             inputs.append(AuctionInput(s, pc, ss.first_open))
-        plan, _ = plan_auction(inputs, self.min_gap, A.NOTIONAL * float(settings.validated_notional_scale) * self.alloc_scale())
+        plan, _ = plan_auction(inputs, self.min_gap, A.NOTIONAL * self._scale() * self.alloc_scale())
         bars = sorted((p.symbol, p.side) for p in plan)
         live = sorted((s, side) for s, side, _q in ds.get("planned") or [])
         res = {"day": day.isoformat(), "bars": bars, "live": live, "match": bars == live}

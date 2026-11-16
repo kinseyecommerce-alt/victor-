@@ -419,6 +419,50 @@ def test_risk_budget_defaults_to_lab_sizing_and_only_scales_down():
         assert st["strategies"]["auc_fade"]["hard_caps"]["max_gross"] == settings.validated_auction_max_gross
 
 
+def test_per_agent_size_scale_defaults_to_lab_size_and_scales_limits_only():
+    """Each agent's own VALIDATED_<X>_NOTIONAL_SCALE: default 1.0 (lab size); it multiplies the global scale and moves
+    quantities, loss stops, drawdown kills and gross caps of THAT agent only."""
+    auc, attn, pead, vrp = (ALL_AGENTS[k] for k in ("auc_fade", "attn_on", "pead_h60", "vrp_winged"))
+    keys = ("validated_notional_scale", "validated_auction_notional_scale", "validated_attention_notional_scale",
+            "validated_pead_notional_scale")
+    saved = {k: getattr(settings, k) for k in keys}
+    try:
+        for k in keys:
+            assert getattr(type(settings)(), k) == 1.0, f"{k} must default to 1.0 (lab sizing)"
+            setattr(settings, k, 1.0)
+        assert auc._scale() == attn._scale() == pead._scale() == 1.0
+        base = (auc.daily_loss_limit(), auc.dd_limit(), pead.max_gross(), pead.dd_limit(), attn.dd_limit())
+        settings.validated_auction_notional_scale, settings.validated_pead_notional_scale = 5.0, 0.1
+        assert auc._scale() == 5.0 and attn._scale() == 1.0 and abs(pead._scale() - 0.1) < 1e-12
+        assert auc.daily_loss_limit() == base[0] * 5 and auc.dd_limit() == base[1] * 5
+        assert abs(pead.max_gross() - base[2] * 0.1) < 1e-6 and abs(pead.dd_limit() - base[3] * 0.1) < 1e-6
+        assert attn.dd_limit() == base[4], "another agent's factor never leaks"
+        assert auc.get_status()["size_scale"] == 5.0 and vrp._scale() == 1.0
+        settings.validated_notional_scale = 2.0                       # the global factor multiplies
+        assert auc._scale() == 10.0 and attn._scale() == 2.0
+        import drift_monitor as DM
+        settings.validated_notional_scale = 1.0
+        assert DM._size_factor(auc) == 5.0 and DM._size_factor(attn) == 1.0
+    finally:
+        for k, v in saved.items():
+            setattr(settings, k, v)
+
+
+def test_auction_quantity_and_gross_cap_follow_the_agent_scale():
+    """₹10 L capital for the auction fade = scale 5: ₹5 L per trade, gross cap ₹50 L (10 trades); same names."""
+    from agents import validated_auction as VA
+    from stratlab import auction as A
+    ins = [VA.AuctionInput(symbol=f"S{i}", prev_close=1000.0, auction_px=1000.0 * (1.03 + i * 0.001)) for i in range(3)]
+    p1, _ = VA.plan_auction(ins, 0.02, A.NOTIONAL)
+    p5, _ = VA.plan_auction(ins, 0.02, A.NOTIONAL * 5)
+    assert [t.symbol for t in p1] == [t.symbol for t in p5] and [t.side for t in p1] == [t.side for t in p5]
+    assert len(p1) == 3
+    for a, b in zip(p1, p5):
+        assert 4.9 <= b.qty / a.qty <= 5.1
+    capped, f = VA.apply_gross_cap(p5, 1_000_000.0 * 5)
+    assert f is None or f == 1.0, "3 trades of ₹5 L are inside the ₹50 L cap"
+
+
 def test_drawdown_brake_escalates_latches_and_resets():
     import risk_budget as RB
     import trading_state as TS
