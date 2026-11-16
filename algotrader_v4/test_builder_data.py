@@ -794,6 +794,20 @@ def test_market_hours_guard():
     assert r["stopped"] == "market hours" and r["calls"] == 5
 
 
+def test_minute_run_without_a_kite_session_is_skipped_quietly():
+    """Kite's token expires ~06:00 IST (renewed 08:45): a run without a session must not call Kite or record errors.
+    The weekday morning run was moved from 06:10 to 23:45, when the day's token is still valid."""
+    t = datetime(2026, 11, 16, 6, 10)
+    saved = settings.builder_data_enabled
+    settings.builder_data_enabled = True
+    try:
+        with patch.object(BD, "_kite_session_ok", lambda: False), \
+                patch.object(BM, "kite_fetch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Kite called"))):
+            assert BD.minute_job(now=t, root=_tmp()) == {"skipped": "no valid Kite session"}
+    finally:
+        settings.builder_data_enabled = saved
+
+
 def test_disk_cap_stops_writing_and_never_deletes():
     days = sessions(date(2026, 4, 6), 4)
     root = _tmp()
@@ -879,7 +893,7 @@ def test_flag_off_nothing_scheduled_and_no_network():
             ids = [i for i in s._sched.ids if i and i.startswith("builder_")]
             assert bool(ids) is expect, (flag, ids)
             if expect:
-                assert sorted(ids) == ["builder_minute", "builder_minute_early", "builder_minute_wkend",
+                assert sorted(ids) == ["builder_minute", "builder_minute_late", "builder_minute_wkend",
                                        "builder_nse", "builder_nse_early", "builder_nse_wkend"]
         settings.builder_data_enabled = True
         saved_mode = settings.trading_mode

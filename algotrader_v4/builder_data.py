@@ -49,7 +49,7 @@ refusing, the builder simply has no new data.
 
 SCHEDULE (IST, only with the flag on): NSE archives 23:05 and 05:30 daily (+ 10:05 / 15:05 on Sat-Sun), never
 inside 19:20-23:00 or 08:10-08:30 (the PEAD agent's 19:35-22:35 / 08:20 fetches from the same archive); Kite minute
-backfill 18:40 and 06:10 daily (+ 11:40 / 14:40 Sat-Sun), never 09:00-15:45 on a trading day.
+backfill 18:40 and 23:45 daily (+ 11:40 / 14:40 Sat-Sun), never 09:00-15:45 on a trading day.
 
 DISK: BUILDER_DATA_MAX_MB (default 2,600) for the whole <root>; measured as allocated blocks (symlinks not followed,
 hard links counted once). At the cap nothing more is written (status "disk_cap"); nothing is ever deleted except the
@@ -1696,6 +1696,10 @@ def minute_job(now: Optional[datetime] = None, root=None, **kw) -> dict:
     now = now or ist_clock.now_ist().replace(tzinfo=None)
     if in_market_hours(now):
         return {"skipped": "market hours (09:00-15:45 IST on a trading day)"}
+    if not kw.get("tokens") and not _kite_session_ok():
+        # Kite's access token expires ~06:00 IST and is renewed at 08:45: a run without a session would only collect
+        # errors (seen on the server at 06:10) — skip quietly, the next run picks up where this one would have
+        return {"skipped": "no valid Kite session"}
     b = Builder(root)
     try:
         import option_bar_archiver as OBA
@@ -1712,6 +1716,14 @@ def minute_job(now: Optional[datetime] = None, root=None, **kw) -> dict:
     kw.setdefault("lock", lock)
     prepare_minute_universe(b, kw)
     return BM.MinuteBackfill(b.minute).run(now, cap_check=cap, **kw)
+
+
+def _kite_session_ok() -> bool:
+    try:
+        import kite_auto_login
+        return bool(kite_auto_login.token_valid_today())
+    except Exception:
+        return True                       # cannot tell: let the run try (its own error stop still applies)
 
 
 def prepare_minute_universe(b: "Builder", kw: dict, token_fn: Optional[Callable] = None) -> dict:
@@ -1755,7 +1767,7 @@ def _api_status(root=None) -> dict:
         now = datetime.now()
     out = {"enabled": enabled(), "root": str(Builder(root).root),
            "schedule": {"nse": "23:05 and 05:30 IST daily, 10:05 / 15:05 Sat-Sun",
-                        "minute": "18:40 and 06:10 IST daily, 11:40 / 14:40 Sat-Sun"},
+                        "minute": "18:40 and 23:45 IST daily, 11:40 / 14:40 Sat-Sun"},
            "budgets": {"kite_calls_per_run": int(getattr(_settings(), "builder_kite_max_calls_per_run", 1500)),
                        "nse_requests_per_run": int(getattr(_settings(), "builder_nse_max_requests_per_run", 2500))}}
     try:

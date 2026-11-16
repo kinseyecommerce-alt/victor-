@@ -20,7 +20,7 @@ Jobs (IST):
   17:05                   shadow registry (SHADOW_REGISTRY_ENABLED)
   17:15                   drift & fill-quality monitor (warnings only)
   19:35-22:35, 08:20      PEAD evening / morning input refresh (VALIDATED_PEAD_ENABLED)
-  23:05, 05:30 (+10:05, 15:05 Sat-Sun)  builder NSE archives; 18:40, 06:10 (+11:40, 14:40 Sat-Sun)  builder Kite
+  23:05, 05:30 (+10:05, 15:05 Sat-Sun)  builder NSE archives; 18:40, 23:45 (+11:40, 14:40 Sat-Sun)  builder Kite
                           minute backfill (BUILDER_DATA_ENABLED)
   Sat 06:00               automatic strategy builder: one frozen batch of 400 candidates (BUILDER_ENABLED)
   07:05                   builder/v1 forward family: pending sessions of promoted builder strategies (BUILDER_ENABLED)
@@ -117,7 +117,7 @@ class PlatformScheduler:
                                       ("builder_nse_wkend", "10,15", 5, "sat,sun")):
                 self._sched.add_job(self._builder_nse, "cron", hour=_h, minute=_m, day_of_week=_dow, id=_id,
                                     misfire_grace_time=1800, max_instances=1, coalesce=True)
-            for _id, _h, _m, _dow in (("builder_minute", 18, 40, "*"), ("builder_minute_early", 6, 10, "*"),
+            for _id, _h, _m, _dow in (("builder_minute", 18, 40, "*"), ("builder_minute_late", 23, 45, "*"),
                                       ("builder_minute_wkend", "11,14", 40, "sat,sun")):
                 self._sched.add_job(self._builder_minute, "cron", hour=_h, minute=_m, day_of_week=_dow, id=_id,
                                     misfire_grace_time=1800, max_instances=1, coalesce=True)
@@ -127,7 +127,7 @@ class PlatformScheduler:
             self._sched.add_job(self._builder_weekly, "cron", day_of_week="sat", hour=6, minute=0, id="builder_weekly",
                                 misfire_grace_time=6 * 3600, max_instances=1, coalesce=True)
             # the builder/v1 forward family on its own flag (independent of FORWARD_LAB_ENABLED): every morning at
-            # 07:05 IST, after the data layer's overnight NSE (05:30) and Kite (06:10) runs, so the previous session
+            # 07:05 IST, after the data layer's overnight NSE (05:30) and Kite (23:45) runs, so the previous session
             # is complete in both; holds the data layer's lock; also registers promotions whose registration failed
             self._sched.add_job(self._builder_forward, "cron", hour=7, minute=5, id="builder_forward",
                                 misfire_grace_time=6 * 3600, max_instances=1, coalesce=True)

@@ -284,7 +284,7 @@ sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root
 ```json
 {"enabled": false, "root": "/data/app/builder_data",
  "schedule": {"nse": "23:05 and 05:30 IST daily, 10:05 / 15:05 Sat-Sun",
-              "minute": "18:40 and 06:10 IST daily, 11:40 / 14:40 Sat-Sun"},
+              "minute": "18:40 and 23:45 IST daily, 11:40 / 14:40 Sat-Sun"},
  "budgets": {"kite_calls_per_run": 1500, "nse_requests_per_run": 2500},
  "disk": {"used_mb": 412.6, "cap_mb": 2600.0, "cap_reached": false},
  "refused_until": null, "refused_at": null,
