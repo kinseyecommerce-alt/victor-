@@ -75,6 +75,44 @@ def _bars_json(path: str, upto: int | None) -> dict | None:
     return {"date": days, "o": o, "h": h, "l": l_, "c": c, "v": np.zeros(len(days))}
 
 
+UNIVERSE_FILE = "universe.json"
+
+
+def read_universe_file(minute_root: str) -> dict | None:
+    try:
+        with open(os.path.join(minute_root, UNIVERSE_FILE)) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def default_base() -> list:
+    try:
+        import forward_test
+        return list(forward_test.UNIVERSE)
+    except Exception:
+        return []
+
+
+def resolve_universe_lists(stored: list, doc: dict | None) -> dict:
+    """The engine's universe lists from the stored minute names and the data layer's universe file (or None)."""
+    stored = [s for s in stored if not s.startswith("_")]
+    if doc and doc.get("base"):
+        want = set(doc["base"])
+        base = [s for s in stored if s in want] or list(doc["base"])
+        extra = sorted(set(doc.get("extra") or []) | (set(stored) - set(base)))
+        meta = {k: doc.get(k) for k in ("mode", "membership", "written", "sources") if k in doc}
+        meta["source"] = "universe file"
+        return {"base": base, "extra": [s for s in extra if s not in set(base)],
+                "aliases": list(doc.get("aliases") or []), "meta": meta}
+    want = set(default_base())
+    base = [s for s in stored if s in want]
+    if not base:
+        return {"base": list(stored), "extra": [], "aliases": [], "meta": {"source": "all stored names"}}
+    return {"base": base, "extra": [s for s in stored if s not in set(base)], "aliases": [],
+            "meta": {"source": "stored names vs forward_test.UNIVERSE (no universe file)"}}
+
+
 class ServerSource:
     kind = "server"
 
@@ -129,11 +167,19 @@ class ServerSource:
                "results": os.path.join(self.events, "results.csv.gz"),
                "minute_manifest": os.path.join(self.minute_root, "manifest.json"),
                "minute_bars": os.path.join(self.minute_root, "bars")}
+        if os.path.exists(os.path.join(self.minute_root, UNIVERSE_FILE)):
+            ins["minute_universe"] = os.path.join(self.minute_root, UNIVERSE_FILE)   # (absent before the bg2 data layer)
         c = self.ctx()
         return {"source": "server", "root": self.root, "upto": self.upto, "end": self.end,
                 "daily_calendar": [int(c.daily.cal[0]), int(c.daily.cal[-1])],
                 "minute_calendar": [int(c.minute.cal[0]), int(c.minute.cal[-1])],
                 "inputs": {k: file_id(v) for k, v in ins.items()}}
+
+    def universe_lists(self) -> dict:
+        """{"base", "extra", "aliases", "meta"}: the minute store's universe file (builder_universe.py) when present;
+        else base = the stored names among forward_test.UNIVERSE (all stored names when none is), extra = the rest."""
+        stored = [s for s in self.store().symbols() if not s.startswith("_")]
+        return resolve_universe_lists(stored, read_universe_file(self.minute_root))
 
     # ── panels ──
     def ctx(self):
@@ -307,7 +353,9 @@ class ServerSource:
         names = [s for s in st.symbols() if not s.startswith("_")]
         names = sorted(names) + [x for x in F.INDEX_MIN if x in set(st.symbols())]
         man = os.path.join(self.minute_root, "manifest.json")
-        sig = _sig([file_id(man), file_id(os.path.join(self.minute_root, "bars")), self.upto, names, "mp1"])
+        base = set(self.universe_lists()["base"])
+        sig = _sig([file_id(man), file_id(os.path.join(self.minute_root, "bars")), self.upto, names, sorted(base),
+                    "mp2"])
         cpath = os.path.join(_cache_root(), f"server_minsum_{sig}.npz")
         if os.path.exists(cpath):
             z = np.load(cpath, allow_pickle=True)
@@ -333,8 +381,13 @@ class ServerSource:
             j = np.searchsorted(cal, z["days"])
             for k in F.MIN_FIELDS:
                 fields[k][i, j] = z[k]
-        nst = len([s for s in syms if not s.startswith("_")])
-        nbs = fields["nb"][:nst]
+        # special sessions from the BASE names only (the 97): names added later (NIFTY 200, recent listings with no
+        # bars before their listing) never change which sessions are special
+        brows = [i for i, s in enumerate(syms) if not s.startswith("_") and s in base]
+        if not brows:
+            brows = [i for i, s in enumerate(syms) if not s.startswith("_")]
+        nst = len(brows)
+        nbs = fields["nb"][brows]
         med = np.nanmedian(np.where(np.isfinite(nbs), nbs, 0.0), axis=0) if nst else np.zeros(T)
         special = {int(d) for d, m in zip(cal, med) if m < F.SPECIAL_MEDIAN_BARS}
         del nidx
@@ -374,10 +427,12 @@ def _iso(d: int) -> str:
 
 
 def make_synthetic_tree(root: str, start: int = 20210104, end: int = 20261109, n_stocks: int = 6,
-                        seed: int = 11, bars: int = 375) -> dict:
+                        seed: int = 11, bars: int = 375, n_extra: int = 0, late: dict | None = None) -> dict:
     """Random-walk market in the builder data layer's layout: minute store, delivery, fo_parts (stock + index
     futures, index options with Black-Scholes prices at 15 % vol), ban, participant OI, index bars, deals,
-    corporate actions, results. Deterministic in `seed`."""
+    corporate actions, results, and the minute store's universe file (the last `n_extra` stocks are the "added"
+    names of the NIFTY200 universe; `late` = {stock: first day}: that stock's minute bars start late, i.e. it has
+    incomplete minute data). Deterministic in `seed`."""
     import math
     import forward_lab_store as FS
     rng = np.random.default_rng(seed)
@@ -409,7 +464,11 @@ def make_synthetic_tree(root: str, start: int = 20210104, end: int = 20261109, n
              "c": np.round(c_.ravel(), 2), "v": v.ravel()}
         z["h"] = np.maximum.reduce([z["h"], z["o"], z["c"]])
         z["l"] = np.minimum.reduce([z["l"], z["o"], z["c"]])
-        store.write_sessions(name, z)
+        if late and name in late:
+            keep = z["date"] >= int(late[name])
+            store.write_sessions(name, {k: v[keep] for k, v in z.items()})
+        else:
+            store.write_sessions(name, z)
         daily[name] = {"o": z["o"].reshape(T, bars)[:, 0], "h": z["h"].reshape(T, bars).max(1),
                        "l": z["l"].reshape(T, bars).min(1), "c": z["c"].reshape(T, bars)[:, -1],
                        "v": v.sum(1)}
@@ -518,4 +577,8 @@ def make_synthetic_tree(root: str, start: int = 20210104, end: int = 20261109, n
             for i in range(10, T, 63):
                 ts = f"{_iso(days[i])} 17:30:00"
                 fh.write(f"{s},X,{_iso(days[i])},Q,{ts},ann,{ts},{ts},1,1\n")
-    return {"days": T, "stocks": stocks}
+    nb = n_stocks - int(n_extra)
+    with open(os.path.join(root, "minute", UNIVERSE_FILE), "w") as fh:
+        json.dump({"version": 1, "mode": "nifty200", "base": stocks[:nb], "extra": stocks[nb:], "aliases": [],
+                   "missing_on_kite": [], "membership": "synthetic", "sources": {}}, fh)
+    return {"days": T, "stocks": stocks, "base": stocks[:nb], "extra": stocks[nb:]}

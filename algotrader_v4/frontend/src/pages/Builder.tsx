@@ -23,6 +23,18 @@ const STAGE: Record<string, { label: string; tone: string }> = {
   proven: { label: 'Proven', tone: 'green' },
 }
 const ORDER = ['proven', 'final_confirmed', 'final_rejected', 'validation_failed', 'discovery_passed', 'discovery', 'frozen']
+const UNIVERSE_LABEL: Record<string, string> = {
+  NIFTY100: 'NIFTY 100 (97 names)', NIFTY200: 'NIFTY 200', TOP500: 'Top 500', INDEX: 'Index',
+}
+const UNIVERSE_TONE: Record<string, string> = { NIFTY100: 'slate', NIFTY200: 'violet', TOP500: 'blue', INDEX: 'amber' }
+const uLabel = (u: unknown) => UNIVERSE_LABEL[String(u)] || String(u ?? '—')
+
+/** Tooltip text of a grid cell: candidates tried and proven per stock universe. */
+function cellTitle(c: any, agent: string, mt: string): string {
+  const us = c?.universes && typeof c.universes === 'object' ? Object.entries(c.universes) : []
+  const lines = us.map(([u, v]: [string, any]) => `${uLabel(u)}: ${plain(v?.candidates)} tried, ${plain(v?.proven)} proven`)
+  return [`${AGENT_LABEL[agent] || agent} · ${MT_LABEL[mt] || mt}`, ...(lines.length ? lines : ['no candidates yet'])].join('\n')
+}
 
 function dsr(x: unknown): string {
   const v = num(x)
@@ -48,11 +60,14 @@ function Grid({ grid, agents, mtypes }: { grid: any[]; agents: string[]; mtypes:
                 const c = cell(a, m)
                 const n = num(c.proven) ?? 0
                 return (
-                  <td key={m} className={`rounded-lg px-1.5 py-1.5 align-top sm:rounded-xl sm:px-2 sm:py-2 ${n > 0 ? 'bg-green-50 dark:bg-green-950/40' : 'bg-slate-50 dark:bg-slate-800/50'}`} data-testid={`cell-${a}-${m}`}>
+                  <td key={m} title={cellTitle(c, a, m)} className={`rounded-lg px-1.5 py-1.5 align-top sm:rounded-xl sm:px-2 sm:py-2 ${n > 0 ? 'bg-green-50 dark:bg-green-950/40' : 'bg-slate-50 dark:bg-slate-800/50'}`} data-testid={`cell-${a}-${m}`}>
                     {n > 0 ? (
                       <div className="space-y-0.5">
                         <div className="text-sm font-semibold text-green-700 sm:text-base dark:text-green-400">{plain(n)} proven</div>
                         <div className="text-[10px] leading-tight text-slate-500 sm:text-[11px]">{plain(c.in_forward_lab)} in forward lab · {plain(c.qualified)} qualified{num(c.ready) ? ` · ${plain(c.ready)} ready` : ''}</div>
+                        <div className="text-[10px] leading-tight text-slate-500 sm:text-[11px]" data-testid="cell-universes">
+                          {Object.entries(c.universes || {}).filter(([, v]: [string, any]) => num(v?.proven)).map(([u, v]: [string, any]) => `${uLabel(u)} ${plain(v?.proven)}`).join(' · ')}
+                        </div>
                       </div>
                     ) : (
                       <div className="text-[10px] leading-tight text-slate-400 sm:text-xs">none proven yet</div>
@@ -97,6 +112,7 @@ export function Builder() {
           <p className="mt-2 text-xs text-slate-500">
             A strategy is proven only if it passes discovery, validation and one final look, beats random dates, loses its edge when its signal is shuffled,
             and its Deflated Sharpe Ratio is at least 0.95 after counting all {plain(d?.n_used)} tries. Proven strategies go to the forward lab first; paper trading is a human decision.
+            {' '}Each candidate is tested on one stock universe (NIFTY 100, NIFTY 200 or the top 500); a wider version of a rule is a new try with its own proof. Hover a cell for the tries per universe.
           </p>
         </Card>
 
@@ -109,12 +125,18 @@ export function Builder() {
                     <div className="flex items-center gap-2">
                       <span className="font-semibold">Batch {b?.id}</span>
                       <Badge tone={b?.status === 'evaluated' ? 'blue' : 'slate'}>{b?.status}</Badge>
+                      {b?.rule_version ? <span className="text-[11px] text-slate-500">{String(b.rule_version)}</span> : null}
                       {num(b?.errata) ? <Badge tone="amber">{plain(b.errata)} erratum</Badge> : null}
                     </div>
                     <div className="mt-0.5 text-xs text-slate-500">
                       {dateOnly(b?.created)} · {plain(b?.candidates)} candidates · discovery {plain(b?.discovery_passers)} (shuffle expects {plain(b?.shuffle_expected)})
                       {' '}· validation {plain(b?.validation_passers)} · final {plain(b?.final_confirmed)} · <b>{plain(b?.proven)} proven</b>
                     </div>
+                    {b?.universes && Object.keys(b.universes).length > 0 && (
+                      <div className="mt-0.5 text-[11px] text-slate-500" data-testid="batch-universes">
+                        Universes: {Object.entries(b.universes).map(([u, n]) => `${uLabel(u)} ${plain(n)}`).join(' · ')}
+                      </div>
+                    )}
                     <div className="truncate font-mono text-[10px] text-slate-400">hash {String(b?.hash || '').slice(0, 16)}…</div>
                   </div>
                   <ChevronRight size={16} className="text-slate-400" />
@@ -142,6 +164,7 @@ function CandidateRow({ c }: { c: any }) {
           <div className="flex flex-wrap items-center gap-1 text-xs">
             <Badge tone={st.tone}>{st.label}</Badge>
             <span className="text-slate-500">{AGENT_LABEL[c?.agent] || c?.agent} · {MT_LABEL[c?.mtype] || c?.mtype}</span>
+            {c?.universe ? <Badge tone={UNIVERSE_TONE[c.universe] || 'slate'} className="!text-[10px]"><span data-testid="candidate-universe">{uLabel(c.universe)}</span></Badge> : null}
           </div>
           <div className="mt-1 text-sm">{c?.text}</div>
         </div>
@@ -182,11 +205,14 @@ export function BuilderBatch({ id }: { id: string }) {
   const [limit, setLimit] = useState(40)
   const cands: any[] = Array.isArray(d?.candidates) ? d.candidates : []
   const shown = useMemo(() => {
-    const f = filter === 'all' ? cands : filter === 'passed' ? cands.filter((c) => c?.stage !== 'discovery' && c?.stage !== 'frozen') : cands.filter((c) => c?.agent === filter)
+    const f = filter === 'all' ? cands : filter === 'passed' ? cands.filter((c) => c?.stage !== 'discovery' && c?.stage !== 'frozen')
+      : filter.startsWith('u:') ? cands.filter((c) => c?.universe === filter.slice(2)) : cands.filter((c) => c?.agent === filter)
     return [...f].sort((a, b) => ORDER.indexOf(a?.stage) - ORDER.indexOf(b?.stage) || (num(b?.discovery?.dsr) ?? -1) - (num(a?.discovery?.dsr) ?? -1))
   }, [cands, filter])
   const errata: any[] = Array.isArray(d?.errata) ? d.errata : []
   const planted = d?.planted || {}
+  const uni = d?.universes || null
+  const usedUniverses = useMemo(() => Array.from(new Set(cands.map((c) => c?.universe).filter(Boolean))) as string[], [cands])
   return (
     <div className="space-y-4">
       <a href={href('builder')} className="inline-flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400"><ArrowLeft size={16} /> Strategy builder</a>
@@ -220,7 +246,12 @@ export function BuilderBatch({ id }: { id: string }) {
                   <Badge key={a} tone={planted[`gate_${a}`] ? 'green' : 'red'}>{AGENT_LABEL[a]} {planted[`gate_${a}`] ? 'detected' : 'not detected'}</Badge>
                 ))}
               </div>
-              <div className="text-slate-500">Windows: discovery to {d?.windows?.discovery?.[1] ?? '—'}, validation {d?.windows?.validation?.join('–') ?? '—'}, final {d?.windows?.final?.join('–') ?? '—'}. Hash <span className="font-mono">{String(d?.hash || '').slice(0, 16)}</span></div>
+              <div className="text-slate-500">Windows: discovery to {d?.windows?.discovery?.[1] ?? '—'}, validation {d?.windows?.validation?.join('–') ?? '—'}, final {d?.windows?.final?.join('–') ?? '—'}. Hash <span className="font-mono">{String(d?.hash || '').slice(0, 16)}</span> · rule {d?.rule_version || '—'}</div>
+              {uni?.NIFTY200 && (
+                <div className="text-slate-500" data-testid="batch-universe-resolution">
+                  NIFTY 200 on this batch's data: {plain(uni.NIFTY200.n)} names with complete minute data ({plain(uni.NIFTY100?.n)} base + {plain(uni.NIFTY200.added_complete?.length)} added){Array.isArray(uni.NIFTY200.added_incomplete) && uni.NIFTY200.added_incomplete.length ? `; ${plain(uni.NIFTY200.added_incomplete.length)} added names left out (incomplete minute data)` : ''}. Added names follow the current NIFTY 200 list, not point-in-time membership.
+                </div>
+              )}
             </div>
           </Card>
           <Card title={`Candidates (${shown.length})`} right={
@@ -228,6 +259,7 @@ export function BuilderBatch({ id }: { id: string }) {
               <option value="all">All</option>
               <option value="passed">Passed discovery</option>
               {Object.keys(AGENT_LABEL).map((a) => <option key={a} value={a}>{AGENT_LABEL[a]}</option>)}
+              {usedUniverses.map((u) => <option key={u} value={`u:${u}`}>{uLabel(u)}</option>)}
             </select>
           }>
             <ul className="divide-y divide-slate-100 dark:divide-slate-800">

@@ -67,12 +67,14 @@ def evaluate(root: str, bid: str, source: str = "lab", data_root: str | None = N
         raise BundleCorrupt(f"batch {bid}: the frozen inputs at {data_root} are not the ones in its registry record")
     doc = b.verify_frozen(bid, src.snapshot())
     rec = b.state()["batches"][bid]
+    # a batch is evaluated under the rule it was frozen with (a builder/v1 batch pending at the upgrade stays v1)
+    rule = builder.rule_by_sha(rec["rule_sha256"]) if rec.get("rule_sha256") else b.rule
     cands = [(r["id"], G.Candidate.from_json(r["cand"])) for r in doc["candidates"]]
     t0 = time.time()
     E = BE.Engine(src)
     E.cache_dir = str(builder.cache_dir())
     E.log = log
-    batch = EV.Batch(E, bid, cands, b.rule, str(b.batch_dir(bid) / "work"), int(rec["n_before"]), log,
+    batch = EV.Batch(E, bid, cands, rule, str(b.batch_dir(bid) / "work"), int(rec["n_before"]), log,
                      open_final=lambda ids: b.open_final(bid, ids))
     jobs = max(1, min(2, int(jobs)))
     if jobs > 1:

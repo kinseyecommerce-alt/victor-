@@ -1,8 +1,19 @@
 """
-stratlab/builder_grammar.py — the GRAMMAR of the automatic strategy builder (builder/v1). Pure: no data, no returns.
-
-A candidate is one sentence of the grammar:
-    agent x market type x signal block (+ its round parameters) x entry timing x exit rule x instrument
+stratlab/builder_grammar.py — the GRAMMAR of the automatic strategy builder. Pure: no data, no returns.
+Two frozen versions live side by side (a version is never edited, only added):
+  bg1 (rule builder/v1)  agent x market type x signal block (+ its round parameters) x entry timing x exit rule x
+                         instrument — the stock universe is implicit (minute grid: the 97 NIFTY-100 names; daily grid:
+                         the point-in-time top 500)
+  bg2 (rule builder/v2)  the same sentence x UNIVERSE (UNIVERSES below; a dimension of the draw):
+                           NIFTY100  the 97 NIFTY-100 names of the lab (forward_test.UNIVERSE)
+                           NIFTY200  NIFTY100 + the data layer's added NIFTY 200 names (the current NIFTY 200 list and
+                                     the historical NIFTY 100 members still listed); on the minute grid only the added
+                                     names with COMPLETE minute data over the candidate's whole split (engine rule)
+                           TOP500    the point-in-time top 500 by traded value (daily-grid stock blocks only)
+                           INDEX     NIFTY / BANKNIFTY instruments (no stock universe)
+                         A bg2 sentence whose universe is the one bg1 used implicitly IS the bg1 sentence: it is never
+                         drawn when its bg1 key was drawn (Candidate.v1_key); every other bg2 sentence is a NEW candidate
+                         (e.g. the NIFTY200 versions of the two proven lab rules get no credit from their NIFTY-100 proof)
 Building blocks come from the lab's own data only (stratlab/datagen_features.py: opening auction gap / path, volume
 shocks, index expiries, India VIX, delivery %, participant OI, the F&O ban list, futures OI quadrants, bulk / block
 deals by client class, results timing, corporate actions) plus the NIFTY / VIX daily series. The DIRECTION of every
@@ -29,10 +40,11 @@ MARKET TYPES (point-in-time, frozen; stratlab/builder_engine.market_types)
 A candidate trades only on sessions whose market type (known at its decision time) is its own.
 
 THE DRAW (deterministic, no replacement across batches): each (agent, market type) cell's full grammar list is
-ordered by sha256(GRAMMAR_VERSION | batch id | cell | candidate key); a batch takes, in that order, the first 20 whose
-key was never drawn in an earlier batch and that is not a near-duplicate of one already taken in this batch.
+ordered by sha256(<grammar version> | batch id | cell | candidate key); a batch takes, in that order, the first 20 whose
+key (bg2: and whose bg1-equivalent key) was never drawn in an earlier batch and that is not a near-duplicate of one
+already taken in this batch.
 NEAR-DUPLICATE (fixed): same agent, market type, block, exit kind and instrument, and at most ONE other field of the
-signature (each block parameter, the entry time, each exit parameter) differs.
+signature (each block parameter, the entry time, each exit parameter; bg2: also the universe) differs.
 """
 from __future__ import annotations
 
@@ -41,7 +53,16 @@ import hashlib
 import itertools
 import json
 
-GRAMMAR_VERSION = "bg1"
+GRAMMAR_V1 = "bg1"
+GRAMMAR_V2 = "bg2"
+VERSIONS = (GRAMMAR_V1, GRAMMAR_V2)
+GRAMMAR_VERSION = GRAMMAR_V2             # the current version (new batches); bg1 stays reproducible byte for byte
+UNIVERSES = ("NIFTY100", "NIFTY200", "TOP500", "INDEX")
+MINUTE_UNIVERSES = ("NIFTY100", "NIFTY200")
+DAILY_UNIVERSES = ("TOP500", "NIFTY100", "NIFTY200")
+UNIVERSE_TEXT = {"NIFTY100": "NIFTY 100 stocks (the lab's 97)",
+                 "NIFTY200": "NIFTY 200 stocks (the 97 + the added NIFTY 200 names)",
+                 "TOP500": "the point-in-time top-500 stocks", "INDEX": "index"}
 AGENTS = ("intraday", "scalping", "swing", "options", "futures")
 MARKET_TYPES = ("RISING", "FALLING", "SIDEWAYS", "HIGH_VOL")
 PER_CELL = 20
@@ -238,13 +259,38 @@ class Candidate:
     instrument: str           # STOCKS | NIFTY | BANKNIFTY
     product: str              # mis | cnc | fut | opt (side-dependent for swing: "cnc/fut")
     structure: str = ""       # options: long_atm | debit_spread | short_strangle | iron_condor (+ expiry)
+    universe: str = ""        # bg2 only (UNIVERSES); "" = a bg1 sentence (its implicit universe: implied_universe())
+
+    @property
+    def version(self) -> str:
+        return GRAMMAR_V2 if self.universe else GRAMMAR_V1
+
+    def _key(self, version: str, universe: str) -> str:
+        body = [version, self.agent, self.mtype, self.block, [list(p) for p in self.params], self.entry,
+                list(self.exit), self.instrument, self.product, self.structure]
+        if universe:
+            body.append(universe)
+        return json.dumps(body, separators=(",", ":"))
 
     @property
     def key(self) -> str:
-        """The identity across batches (never re-tested)."""
-        return json.dumps([GRAMMAR_VERSION, self.agent, self.mtype, self.block, [list(p) for p in self.params],
-                           self.entry, list(self.exit), self.instrument, self.product, self.structure],
-                          separators=(",", ":"))
+        """The identity across batches (never re-tested). A bg1 sentence keeps its bg1 key byte for byte."""
+        return self._key(self.version, self.universe)
+
+    @property
+    def v1_key(self) -> str | None:
+        """The bg1 key of the SAME sentence: a bg2 candidate whose universe is the one bg1 used implicitly is the bg1
+        candidate (never drawn again once its bg1 key was drawn). None when the universe is new (no bg1 twin)."""
+        if not self.universe:
+            return self.key
+        if self.universe != implied_universe(self.agent, self.block, self.instrument):
+            return None
+        return self._key(GRAMMAR_V1, "")
+
+    @property
+    def stock_universe(self) -> str:
+        """The universe the engine applies (bg1: the implicit one)."""
+        return self.universe or implied_universe(self.agent, self.block, self.instrument)
 
     @property
     def cell(self) -> str:
@@ -270,17 +316,43 @@ class Candidate:
 
     def signature(self) -> tuple:
         """Fields compared by the near-duplicate rule (besides the fixed agent / market / block / exit kind)."""
-        return tuple(v for _k, v in self.params) + (self.entry, self.structure) + tuple(self.exit[1:])
+        sig = tuple(v for _k, v in self.params) + (self.entry, self.structure) + tuple(self.exit[1:])
+        return sig + (self.universe,) if self.universe else sig
 
     def to_json(self) -> dict:
-        return {"agent": self.agent, "mtype": self.mtype, "block": self.block, "params": [list(p) for p in self.params],
-                "entry": self.entry, "exit": list(self.exit), "instrument": self.instrument, "product": self.product,
-                "structure": self.structure}
+        d = {"agent": self.agent, "mtype": self.mtype, "block": self.block, "params": [list(p) for p in self.params],
+             "entry": self.entry, "exit": list(self.exit), "instrument": self.instrument, "product": self.product,
+             "structure": self.structure}
+        if self.universe:                    # a bg1 candidate's JSON is unchanged
+            d["universe"] = self.universe
+        return d
 
     @staticmethod
     def from_json(d: dict) -> "Candidate":
         return Candidate(d["agent"], d["mtype"], d["block"], tuple(tuple(p) for p in d["params"]), d["entry"],
-                         tuple(d["exit"]), d["instrument"], d["product"], d.get("structure", ""))
+                         tuple(d["exit"]), d["instrument"], d["product"], d.get("structure", ""),
+                         d.get("universe", "") or "")
+
+
+def exec_grid(agent: str, block: str) -> str:
+    """The grid a sentence EXECUTES on: an intraday sentence on a daily block runs on the minute grid (prev_eod)."""
+    g = BLOCK[block].grid
+    return "prev_eod" if (agent == "intraday" and g == "daily") else g
+
+
+def implied_universe(agent: str, block: str, instrument: str) -> str:
+    """The universe a bg1 sentence used implicitly: index instruments -> INDEX; stock sentences on the minute grid
+    (incl. intraday on a daily block) -> NIFTY100 (the 97); stock sentences on the daily grid -> TOP500."""
+    if instrument in ("NIFTY", "BANKNIFTY"):
+        return "INDEX"
+    return "NIFTY100" if exec_grid(agent, block) in ("minute", "prev_eod", "idx_minute") else "TOP500"
+
+
+def universes_for(agent: str, block: str, instrument: str) -> tuple:
+    """bg2's universe choices of a sentence."""
+    if instrument in ("NIFTY", "BANKNIFTY"):
+        return ("INDEX",)
+    return MINUTE_UNIVERSES if exec_grid(agent, block) in ("minute", "prev_eod", "idx_minute") else DAILY_UNIVERSES
 
 
 def _side_word(b: Block, params: dict) -> str:
@@ -314,8 +386,24 @@ def _entries(agent: str, b: Block) -> list:
     return []
 
 
-def grammar(agent: str) -> list:
-    """Every sentence of one agent's grammar, without the market type (a fixed order)."""
+def grammar(agent: str, version: str | None = None) -> list:
+    """Every sentence of one agent's grammar, without the market type (a fixed order). bg1: 7-tuples (instrument,
+    product, block, params, entry, exit, structure); bg2: the same rows, each repeated once per universe choice
+    (universes_for) with the universe appended (8-tuples)."""
+    version = version or GRAMMAR_VERSION
+    if version == GRAMMAR_V1:
+        return _grammar_bg1(agent)
+    if version != GRAMMAR_V2:
+        raise KeyError(version)
+    out = []
+    for row in _grammar_bg1(agent):
+        for u in universes_for(agent, row[2], row[0]):
+            out.append(row + (u,))
+    return out
+
+
+def _grammar_bg1(agent: str) -> list:
+    """bg1 exactly as frozen in builder/v1 (never edited)."""
     out = []
     if agent in ("intraday", "scalping"):
         for b in BLOCKS:
@@ -392,13 +480,14 @@ def grammar(agent: str) -> list:
     raise KeyError(agent)
 
 
-def cell_grammar(agent: str, mtype: str) -> list:
-    return [Candidate(agent, mtype, blk, p, en, ex, inst, prod, st)
-            for inst, prod, blk, p, en, ex, st in grammar(agent)]
+def cell_grammar(agent: str, mtype: str, version: str | None = None) -> list:
+    return [Candidate(agent, mtype, row[2], row[3], row[4], row[5], row[0], row[1], row[6],
+                      row[7] if len(row) > 7 else "")
+            for row in grammar(agent, version)]
 
 
-def grammar_sizes() -> dict:
-    return {a: len(grammar(a)) for a in AGENTS}
+def grammar_sizes(version: str | None = None) -> dict:
+    return {a: len(grammar(a, version)) for a in AGENTS}
 
 
 def near_duplicate(a: Candidate, b: Candidate) -> bool:
@@ -411,24 +500,34 @@ def near_duplicate(a: Candidate, b: Candidate) -> bool:
     return sum(1 for x, y in zip(sa, sb) if x != y) <= 1
 
 
-def _order_key(batch_id: str, cell: str, key: str) -> str:
-    return hashlib.sha256(f"{GRAMMAR_VERSION}|{batch_id}|{cell}|{key}".encode()).hexdigest()
+def _order_key(batch_id: str, cell: str, key: str, version: str | None = None) -> str:
+    return hashlib.sha256(f"{version or GRAMMAR_VERSION}|{batch_id}|{cell}|{key}".encode()).hexdigest()
 
 
-def draw_batch(batch_id: str, drawn_keys, per_cell: int = PER_CELL) -> list:
+def never_drawn(c: Candidate, drawn: set) -> bool:
+    """True when neither the candidate's key nor (bg2) the key of its bg1 twin was drawn in an earlier batch."""
+    if c.key in drawn:
+        return False
+    v1 = c.v1_key
+    return not (v1 is not None and v1 in drawn)
+
+
+def draw_batch(batch_id: str, drawn_keys, per_cell: int = PER_CELL, version: str | None = None) -> list:
     """The batch's candidates: per (agent, market type) cell the first `per_cell` of the hash-ordered grammar list that
-    were never drawn before (drawn_keys) and are not near-duplicates of one already taken. Deterministic."""
+    were never drawn before (drawn_keys; bg2: nor their bg1 twin) and are not near-duplicates of one already taken.
+    Deterministic."""
+    version = version or GRAMMAR_VERSION
     drawn = set(drawn_keys)
     out = []
     for agent in AGENTS:
         for mt in MARKET_TYPES:
-            pool = cell_grammar(agent, mt)
-            pool.sort(key=lambda c: _order_key(batch_id, c.cell, c.key))
+            pool = cell_grammar(agent, mt, version)
+            pool.sort(key=lambda c: _order_key(batch_id, c.cell, c.key, version))
             taken = []
             for c in pool:
                 if len(taken) >= per_cell:
                     break
-                if c.key in drawn:
+                if not never_drawn(c, drawn):
                     continue
                 if any(near_duplicate(c, t) for t in taken):
                     continue
@@ -526,6 +625,8 @@ def describe(c: Candidate) -> str:
         return (f"{c.instrument} options {MT_TEXT[c.mtype]}: when {cond}, {what} on the {exp} expiry at the next "
                 f"session's official close (strikes from the previous session's real chain); {_exit_text(c)}.")
     inst = {"STOCKS": "stock", "NIFTY": "NIFTY future", "BANKNIFTY": "BANKNIFTY future"}[c.instrument]
+    if c.universe and c.instrument == "STOCKS":
+        inst = f"stock (universe: {UNIVERSE_TEXT[c.universe]})"
     dirn = {"long": "buy", "short": "sell short", "with": "trade", "against": "trade"}.get(side, side)
     tail = {"with": " in the direction of the move", "against": " against the move"}.get(side, "")
     if c.agent in ("intraday", "scalping"):
@@ -543,10 +644,27 @@ def describe(c: Candidate) -> str:
             f"{_exit_text(c)}.")
 
 
-def grammar_sha256() -> str:
-    """Fingerprint of the whole grammar (every agent's list in order)."""
-    h = hashlib.sha256(GRAMMAR_VERSION.encode())
+def grammar_sha256(version: str | None = None) -> str:
+    """Fingerprint of the whole grammar (every agent's list in order) of a version (default: the current one)."""
+    version = version or GRAMMAR_VERSION
+    h = hashlib.sha256(version.encode())
     for a in AGENTS:
-        for row in grammar(a):
+        for row in grammar(a, version):
             h.update(repr(row).encode())
     return h.hexdigest()
+
+
+def proven_rule_twins() -> list:
+    """The bg2 sentences that are the two proven lab rules widened to NIFTY200 (one per market type each): the 09:15
+    auction gap fade of >= 2 % / >= 3 % exited at 09:20 (scalping, AUC-FADE-2PCT / -3PCT) and the 3x-volume up-day
+    overnight long (futures carrier, SWING-ATTN-ON-3X). ORDINARY members of the grammar: drawn when the hash order
+    reaches them, judged like every other candidate, no credit from their NIFTY-100 proof. (Listed for tests and
+    reports only; the draw never looks at this list.)"""
+    out = []
+    for mt in MARKET_TYPES:
+        for g in (0.02, 0.03):
+            out.append(Candidate("scalping", mt, "gap_fade", (("g", g), ("mode", "fade_day")), "o0915",
+                                 ("time_min", 5), "STOCKS", "mis", "", "NIFTY200"))
+        out.append(Candidate("futures", mt, "attention_swing", (("day", "up"),), "o1521", ("overnight",), "STOCKS",
+                             "fut", "", "NIFTY200"))
+    return out

@@ -103,7 +103,10 @@ class Settings(BaseSettings):
     # NSE end-of-day archives (2012 ->) on the volume, PAPER research only, read-only towards trading. OFF by default
     # (no job scheduled, no network call). Hard disk cap for the whole builder directory (stop writing, never delete).
     builder_data_enabled: bool = False
-    builder_data_max_mb: float = 1800.0
+    builder_data_max_mb: float = 2600.0            # 1,800 before the NIFTY 200 minute universe (worst-case volume 4,524 MB)
+    # minute store universe: nifty100 = the forward lab's 97 + 2 indices (as before); nifty200 = those, unchanged, plus
+    # the added NIFTY 200 names (current list + historical NIFTY 100 members still on Kite; builder_universe.py)
+    builder_minute_universe: str = "nifty200"
     builder_kite_max_calls_per_run: int = 1500     # Kite historical_data calls per minute-backfill run
     builder_nse_max_requests_per_run: int = 2500   # NSE requests per archive run (one at a time, >= 1.5 s apart)
     # Automatic strategy builder (builder.py, builder_rule.json): one frozen batch of 400 candidates a week from our own

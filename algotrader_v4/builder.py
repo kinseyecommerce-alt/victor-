@@ -14,6 +14,13 @@ Weekly job (platform_scheduler, Saturday 06:00 IST, only with BUILDER_ENABLED=tr
   3. ingest    "final_open" was appended by the run before any FINAL return; "batch_result" (summary, N_used) is
                appended after a successful run; candidates -> trials ledger (if configured); proven -> promotion
 Disk: BUILDER_MAX_MB (default 400) for <root>; at the cap nothing is written (status disk_cap); nothing is deleted.
+
+Rule versions (RULES, each pinned): builder/v1 (grammar bg1) and builder/v2 (grammar bg2 = bg1 x the stock UNIVERSE:
+NIFTY100 / NIFTY200 / TOP500 / INDEX). One registry, one N: a registry started under v1 moves to v2 once (record
+"rule_upgrade" carrying N, candidates and FINAL looks at that moment); v1 records are never rewritten, a v1 batch still
+pending is evaluated under v1, new batches are frozen under v2 and never re-draw a v1 key (nor its bg2 twin). Under v2
+a NEW batch waits until the data layer's NIFTY 200 minute universe is complete (data_wait_reason, status
+"waiting_data"); a promoted strategy carries the universe's names as resolved on its batch's frozen data.
 """
 from __future__ import annotations
 
@@ -38,6 +45,13 @@ SEED_FILE = HERE / "builder_seed_0001.json"
 SEED_SHA256 = "15c6c036cd8153ca8be6463be234f55efd3da33e86a4376911d73abd5b3c40d8"
 # sha256 of builder_rule.json as committed (the pre-registration). An edited rule file is refused.
 RULE_SHA256 = "a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06"
+# builder/v2 (grammar bg2: the stock UNIVERSE is a dimension of the draw), written next to v1, which stays valid and is
+# never rewritten. New batches are frozen under the LAST pinned version; a batch is always evaluated under its own.
+RULE_FILE_V2 = HERE / "builder_rule_v2.json"
+RULE_SHA256_V2 = "7072377b40de2be492773868b962e8dcc10b7392fc099587fcd1b2ef53d45188"
+# the pinned versions in order: a registry may only move forward along this chain (record "rule_upgrade")
+RULES = (("builder/v1", RULE_FILE, RULE_SHA256), ("builder/v2", RULE_FILE_V2, RULE_SHA256_V2))
+CURRENT_RULE_FILE, CURRENT_RULE_SHA256 = RULES[-1][1], RULES[-1][2]
 DEFAULT_MAX_MB = 400.0
 MAX_ATTEMPTS = 3            # failed evaluation runs of one batch before it is recorded `failed` (bookkeeping, not a gate)
 _LOCK = threading.RLock()
@@ -75,14 +89,38 @@ def file_sha256(path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def load_rule(path=RULE_FILE, expect: Optional[str] = None) -> dict:
+def load_rule(path=None, expect: Optional[str] = None) -> dict:
+    """A pinned rule file. No path: the CURRENT version (the last of RULES). A pinned file must have its own pinned
+    sha256; any other path must have one of the pinned sha256s (an edited rule is refused)."""
+    path = Path(path) if path is not None else CURRENT_RULE_FILE
     sha = file_sha256(path)
-    want = RULE_SHA256 if expect is None else expect
-    if want != "PENDING" and sha != want:
-        raise RuleChanged(f"builder_rule.json sha256 {sha[:12]} != pinned {want[:12]}: the rule is frozen")
-    rule = json.loads(Path(path).read_text())
+    if expect is None:
+        pinned = {Path(f).resolve(): s for _v, f, s in RULES}
+        want = pinned.get(path.resolve())
+        ok = (sha == want) if want is not None else sha in {s for _v, _f, s in RULES}
+    else:
+        want = expect
+        ok = want == "PENDING" or sha == want
+    if not ok:
+        raise RuleChanged(f"{path.name} sha256 {sha[:12]} != pinned {str(want)[:12]}: the rule is frozen")
+    rule = json.loads(path.read_text())
     rule["_sha256"] = sha
     return rule
+
+
+def rule_by_sha(sha: str) -> dict:
+    """The pinned rule whose sha256 is `sha` (a batch is evaluated under the rule it was frozen with)."""
+    for _v, f, s in RULES:
+        if s == sha:
+            return load_rule(f)
+    raise RuleChanged(f"no pinned builder rule has sha256 {str(sha)[:12]}")
+
+
+def rule_index(sha: str) -> int:
+    for k, (_v, _f, s) in enumerate(RULES):
+        if s == sha:
+            return k
+    return -1
 
 
 def _settings():
@@ -203,11 +241,15 @@ class Builder:
     # ── folded registry state ──
     def state(self) -> dict:
         st = {"genesis": None, "batches": {}, "final_open": {}, "results": {}, "promoted": [], "n_used": 0,
-              "evaluated": 0, "final_looks": 0, "attempts": {}}
+              "evaluated": 0, "final_looks": 0, "attempts": {}, "rules": [], "upgrades": []}
         for rec in self.registry.records():
             k, d = rec["kind"], rec["data"]
             if k == "genesis":
                 st["genesis"] = d
+                st["rules"] = [d["rule_sha256"]]
+            elif k == "rule_upgrade":
+                st["rules"].append(d["to_sha256"])
+                st["upgrades"].append({**d, "ts": rec["ts"], "seq": rec["seq"]})
             elif k == "batch_frozen":
                 st["batches"][d["batch"]] = {**d, "frozen_seq": rec["seq"], "frozen_hash": rec["hash"],
                                              "created": rec["ts"]}
@@ -259,17 +301,41 @@ class Builder:
     def ensure_genesis(self) -> dict:
         st = self.state()
         if st["genesis"] is not None:
-            if st["genesis"]["rule_sha256"] != self.rule["_sha256"]:
-                raise RuleChanged("the builder registry was started under a different rule file")
+            self.ensure_rule(st)
             self.ensure_seed()
             return st["genesis"]
         from stratlab import builder_grammar as G
+        gv = self.rule["grammar"]["version"]
         g = {"rule_version": self.rule["version"], "rule_sha256": self.rule["_sha256"],
-             "grammar_version": G.GRAMMAR_VERSION, "grammar_sha256": G.grammar_sha256(),
+             "grammar_version": gv, "grammar_sha256": G.grammar_sha256(gv),
              "lab_trials_count": int(self.rule["dsr"]["lab_trials_count"])}
         self.registry.append("genesis", g)
         self.ensure_seed()
         return g
+
+    def ensure_rule(self, st: Optional[dict] = None) -> None:
+        """The registry's rule must be this builder's rule. A registry under the PREVIOUS pinned version moves forward
+        once (record "rule_upgrade" with N, candidates and FINAL looks at that moment: N continues from it, nothing
+        is recounted or rewritten); any other mismatch is refused (RuleChanged)."""
+        st = st or self.state()
+        chain = st["rules"] or [st["genesis"]["rule_sha256"]]
+        cur = self.rule["_sha256"]
+        if cur == chain[-1]:
+            return
+        if cur in chain:
+            raise RuleChanged("the builder registry already moved to a later rule: new batches need that rule")
+        i_last, i_cur = rule_index(chain[-1]), rule_index(cur)
+        if i_last < 0 or i_cur != i_last + 1:
+            raise RuleChanged("the builder registry was started under a different rule file")
+        from stratlab import builder_grammar as G
+        gv = self.rule["grammar"]["version"]
+        if int(self.rule["dsr"]["lab_trials_count"]) != int(st["genesis"]["lab_trials_count"]):
+            raise RuleChanged("a rule upgrade may not change the lab trials count (N never shrinks)")
+        self.registry.append("rule_upgrade", {
+            "from_version": RULES[i_last][0], "from_sha256": chain[-1], "to_version": self.rule["version"],
+            "to_sha256": cur, "grammar_version": gv, "grammar_sha256": G.grammar_sha256(gv),
+            "batches_before": len(st["batches"]), "evaluated_before": st["evaluated"],
+            "final_looks_before": st["final_looks"], "n_used_before": max(st["n_used"], self.n_base(st))})
 
     def ensure_seed(self, path=None) -> Optional[dict]:
         """Import the sandbox seed once (hash-chained, idempotent; refused if the file is not the pinned one). Skipped
@@ -341,21 +407,25 @@ class Builder:
             if bid in st["batches"]:
                 return st["batches"][bid]
             self.check_cap()
-            cands = G.draw_batch(bid, self.drawn_keys(st), per_cell or int(self.rule["batch"]["per_cell"]))
+            gv = self.rule["grammar"]["version"]
+            cands = G.draw_batch(bid, self.drawn_keys(st), per_cell or int(self.rule["batch"]["per_cell"]), version=gv)
             rows = []
             per: dict = {}
+            unis: dict = {}
             for c in cands:
                 k = per.get(c.cell, 0)
                 per[c.cell] = k + 1
+                cu = unis.setdefault(c.cell, {})
+                cu[c.stock_universe] = cu.get(c.stock_universe, 0) + 1
                 rows.append({"id": G.candidate_id(bid, c, k), "key": c.key, "cand": c.to_json(), "text": G.describe(c)})
-            doc = {"batch": bid, "generator": {"grammar_version": G.GRAMMAR_VERSION,
-                                               "grammar_sha256": G.grammar_sha256()},
+            doc = {"batch": bid, "generator": {"grammar_version": gv, "grammar_sha256": G.grammar_sha256(gv)},
                    "rule_sha256": self.rule["_sha256"], "snapshot": snapshot, "candidates": rows}
             p = self.candidates_path(bid)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(canon(doc))
             rec = {"batch": bid, "candidates_sha256": file_sha256(p), "n_candidates": len(rows),
                    "cells": per, "generator": doc["generator"], "rule_sha256": self.rule["_sha256"],
+                   "rule_version": self.rule["version"], "cell_universes": unis,
                    "snapshot_sha256": snapshot_sha(snapshot), "snapshot_end": snapshot.get("end"),
                    "source": snapshot.get("source"), "n_before": self.n_base(st)}
             if inputs:
@@ -429,10 +499,11 @@ class Builder:
     def _register_forward(self, p: dict) -> bool:
         try:
             import builder_forward
-            builder_forward.BuilderForward(self.root / "forward").register(
-                [{"id": p["id"], "batch": p["batch"], "cand": p["cand"], "reference": p["reference"],
-                  "fingerprint": p.get("fingerprint") or sha256_obj(p["cand"])[:16]}],
-                first_day=int(p.get("first_day") or 0))
+            row = {"id": p["id"], "batch": p["batch"], "cand": p["cand"], "reference": p["reference"],
+                   "fingerprint": p.get("fingerprint") or sha256_obj(p["cand"])[:16]}
+            if p.get("universe_names"):
+                row["universe_names"] = list(p["universe_names"])
+            builder_forward.BuilderForward(self.root / "forward").register([row], first_day=int(p.get("first_day") or 0))
         except Exception as exc:
             self.registry.append("forward_register_failed", {"id": p["id"], "error": f"{type(exc).__name__}: {exc}"[:300]})
             return False
@@ -521,7 +592,13 @@ class Builder:
         rec = {"id": cid, "batch": bid, "key": row["key"], "cand": row["cand"], "text": row["text"],
                "frozen_hash": st["batches"][bid]["frozen_hash"], "dsr": res["proof"]["dsr"]["dsr"],
                "reference": ref, "first_day": int(summary["windows"]["T"]),
-               "fingerprint": sha256_obj(row["cand"])[:16]}
+               "fingerprint": sha256_obj(row["cand"])[:16],
+               "rule_sha256": st["batches"][bid].get("rule_sha256")}
+        from stratlab import builder_grammar as G
+        rec["universe"] = G.Candidate.from_json(row["cand"]).stock_universe
+        names = (res.get("proof") or {}).get("universe_names")
+        if names:                      # the universe as resolved on the batch's frozen data: the forward step trades it
+            rec["universe_names"] = list(names)
         # persisted as NOT yet registered with builder/v1: reconcile_forward() retries on every weekly and daily
         # forward run until a "forward_registered" record exists
         self.registry.append("promoted", rec)
@@ -554,9 +631,16 @@ def reference_series(b: Builder, bid: str, cid: str, row: Optional[dict] = None)
 def write_catalog(b: Builder) -> Path:
     """<root>/catalog/builder_gen.py — generated by code, one spec per promoted strategy (never hand-edited)."""
     st = b.state()
-    specs = [{"id": p["id"], "batch": p["batch"], "key": p["key"], "cand": p["cand"], "text": p["text"],
-              "frozen_hash": p["frozen_hash"], "registry_hash": p["hash"]} for p in st["promoted"]]
-    body = ('"""GENERATED by builder.write_catalog — do not edit. Promoted builder/v1 strategies (catalogue-compatible\n'
+    specs = []
+    for p in st["promoted"]:
+        sp = {"id": p["id"], "batch": p["batch"], "key": p["key"], "cand": p["cand"], "text": p["text"],
+              "frozen_hash": p["frozen_hash"], "registry_hash": p["hash"]}
+        if p.get("universe_names"):
+            sp["universe_names"] = list(p["universe_names"])
+        if p.get("rule_sha256"):
+            sp["rule_sha256"] = p["rule_sha256"]
+        specs.append(sp)
+    body = ('"""GENERATED by builder.write_catalog — do not edit. Promoted builder strategies (catalogue-compatible\n'
             'specs: stratlab.builder_catalog.load() turns each into a runnable spec)."""\n'
             f"RULE_SHA256 = {b.rule['_sha256']!r}\n"
             f"SPECS = {json.dumps(specs, indent=1, sort_keys=True)}\n")
@@ -570,34 +654,35 @@ def write_catalog(b: Builder) -> Path:
 
 def append_trials(path: str, bid: str, summary: dict) -> int:
     """Every candidate's DISCOVERY row, every VALIDATION screen and FINAL look -> the lab trials ledger (era
-    builder-v1). Backed up first."""
+    builder-v1 / builder-v2 by the batch's rule; costs are builder/v1's in both). Backed up first."""
     from stratlab import trials as TR
     led = TR.TrialsLedger(path)
     if os.path.exists(path):
         shutil.copyfile(path, path + f".bak_builder_{bid}_" + time.strftime("%Y%m%d_%H%M%S"))
     W = summary["windows"]
+    vtag = str(summary.get("rule_version") or "builder/v1").split("/")[-1]          # v1 | v2
     rows = []
     keep = ("trades", "net", "pf", "mean_net", "std_net", "sr_trade", "mean_gross", "mean_cost", "n_days",
             "sr_daily", "skew_daily", "kurt_daily")
     for r in summary["rows"]:
         base = {"strategy_id": r["id"], "family": "builder", "group": f"{r['agent']}|{r['mtype']}",
-                "params_fp": "k:" + hashlib.sha1(r["key"].encode()).hexdigest()[:12], "era": "builder-v1",
+                "params_fp": "k:" + hashlib.sha1(r["key"].encode()).hexdigest()[:12], "era": f"builder-{vtag}",
                 "dataset": f"builder_{bid}", "cost_model": "builder/v1"}
         d = r["discovery"]
-        rows.append({**base, "protocol": "builder v1 discovery", "stage": "builder_discovery",
+        rows.append({**base, "protocol": f"builder {vtag} discovery", "stage": "builder_discovery",
                      "period": f"0-{W['discovery'][1]}", "trades": d["trades"], "net": d["net"], "pf": d["pf"],
                      "sr_daily": d["sr_daily"], "verdict": "PASSED GATES" if d["passed"] else "FAILED GATES",
                      "source": f"builder/{bid}#{r['id']}", "note": "; ".join(d["why"])})
         if r.get("validation"):
             s = r["validation"]["series"]
-            rows.append({**base, **{k: s.get(k) for k in keep}, "protocol": "builder v1 validation (protocol.screen)",
+            rows.append({**base, **{k: s.get(k) for k in keep}, "protocol": f"builder {vtag} validation (protocol.screen)",
                          "stage": "builder_validation", "period": "%d-%d" % tuple(W["validation"]),
                          "verdict": "PASSED SCREEN" if r["validation"]["passed"] else "FAILED SCREEN",
                          "source": f"builder/{bid}#{r['id']}",
                          "note": "; ".join(r["validation"]["screen"]["reasons"])})
         if r.get("final"):
             s = r["final"]["series"]
-            rows.append({**base, **{k: s.get(k) for k in keep}, "protocol": "builder v1 final",
+            rows.append({**base, **{k: s.get(k) for k in keep}, "protocol": f"builder {vtag} final",
                          "stage": "builder_final", "period": "%d-%d" % tuple(W["final"]),
                          "verdict": "CONFIRMED" if r["final"]["confirmed"] else "REJECTED ON FINAL",
                          "source": f"builder/{bid}#{r['id']}", "note": ""})
@@ -698,6 +783,10 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
             if snapshot_fn:
                 snap, inputs = snapshot_fn(), None
             else:
+                wait = data_wait_reason(b, source)
+                if wait:                                  # rule v2 schedule.data: no NIFTY200 on a half-filled store
+                    status.update({"status": "waiting_data", "reason": wait})
+                    raise _Done()
                 snap, inputs = snapshot_process(root, source)
             bid = b.freeze(snap, inputs=inputs)["batch"]
         status["batch"] = bid
@@ -738,6 +827,28 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
     except Exception:
         pass
     return status
+
+
+def data_wait_reason(b: "Builder", source: str = "server", root=None) -> Optional[str]:
+    """Why a NEW batch must not be frozen yet (None = go): under a rule whose grammar has the NIFTY200 universe, the
+    builder data layer's minute universe must be complete (every added name Kite lists fully backfilled)."""
+    if source != "server" or b.rule["grammar"]["version"] == "bg1":
+        return None
+    try:
+        import builder_universe as BU
+        ms = BU.minute_status(root)
+    except Exception as exc:
+        return f"minute universe status unavailable: {type(exc).__name__}: {str(exc)[:160]}"
+    if ms.get("mode") != "nifty200":
+        return ("BUILDER_MINUTE_UNIVERSE is nifty100: the NIFTY200 universe of builder/v2 would be the 97 names again "
+                "(new batches wait; a pending batch is still resumed)")
+    if ms.get("unresolved"):
+        return (f"{len(ms['unresolved'])} added names unresolved: the Kite instrument lookup failed "
+                f"({(ms.get('token_lookup') or {}).get('error') or 'no successful dump yet'}); retried next minute run")
+    if not ms.get("ready"):
+        return (f"minute backfill of the added NIFTY 200 names at {ms.get('progress_pct')} % "
+                f"({ms.get('names_ready')}/{ms.get('names_fetchable')} names complete)")
+    return None
 
 
 def weekly_job_locked(**kw) -> dict:
@@ -818,6 +929,36 @@ def _result(b: Builder, bid: str) -> Optional[dict]:
         return json.load(fh)
 
 
+_CU_CACHE: dict = {}
+
+
+def cell_universes(b: Builder, bid: str, fb: dict, st: dict) -> dict:
+    """{cell: {universe: candidates}} of a batch (bg1 batches and the seed: their implicit universes)."""
+    if fb.get("cell_universes"):
+        return fb["cell_universes"]
+    from stratlab import builder_grammar as G
+    ck = (str(b.root), bid, fb.get("candidates_sha256"))
+    if ck in _CU_CACHE:
+        return _CU_CACHE[ck]
+    out: dict = {}
+    if fb.get("seeded"):
+        for k in st.get("seed_keys") or []:
+            try:
+                v = json.loads(k)
+                cell, u = f"{v[1]}|{v[2]}", (v[10] if len(v) > 10 else G.implied_universe(v[1], v[3], v[7]))
+            except Exception:
+                continue
+            out.setdefault(cell, {}).setdefault(u, 0)
+            out[cell][u] += 1
+    else:
+        for r in (_jload(b.candidates_path(bid), {}) or {}).get("candidates", []):
+            c = G.Candidate.from_json(r["cand"])
+            out.setdefault(c.cell, {}).setdefault(c.stock_universe, 0)
+            out[c.cell][c.stock_universe] += 1
+    _CU_CACHE[ck] = out
+    return out
+
+
 def api_status(root=None) -> dict:
     """GET /api/v2/builder (API_V2.md)."""
     from stratlab import builder_grammar as G
@@ -826,16 +967,19 @@ def api_status(root=None) -> dict:
         rule = load_rule()
         rule_err = None
     except Exception as exc:
-        rule, rule_err = (json.loads(RULE_FILE.read_text()) if RULE_FILE.exists() else {}), str(exc)
-        rule["_sha256"] = file_sha256(RULE_FILE) if RULE_FILE.exists() else None
+        rule, rule_err = (json.loads(CURRENT_RULE_FILE.read_text()) if CURRENT_RULE_FILE.exists() else {}), str(exc)
+        rule["_sha256"] = file_sha256(CURRENT_RULE_FILE) if CURRENT_RULE_FILE.exists() else None
+    gv = (rule.get("grammar") or {}).get("version") or G.GRAMMAR_VERSION
     out = {"enabled": enabled(), "rule_version": rule.get("version"), "rule_sha256": rule.get("_sha256"),
            "rule_error": rule_err, "agents": list(G.AGENTS), "market_types": list(G.MARKET_TYPES),
-           "grammar_sizes": G.grammar_sizes(), "batches": [], "grid": [], "n_used": None,
+           "grammar_version": gv, "grammar_sizes": G.grammar_sizes(gv), "batches": [], "grid": [], "n_used": None,
            "lab_trials_count": (rule.get("dsr") or {}).get("lab_trials_count"), "evaluated": 0, "final_looks": 0,
-           "promoted": 0, "last_run": _jload(_status_path(root), {}), "chain_ok": True}
+           "promoted": 0, "last_run": _jload(_status_path(root), {}), "chain_ok": True,
+           "rules": [{"version": v, "sha256": s, "file": Path(f).name} for v, f, s in RULES],
+           "universes": {"choices": list(G.UNIVERSES), "text": dict(G.UNIVERSE_TEXT)}}
     if not (root / "registry.jsonl").exists():
-        out["grid"] = [{"agent": a, "mtype": m, "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0}
-                       for a in G.AGENTS for m in G.MARKET_TYPES]
+        out["grid"] = [{"agent": a, "mtype": m, "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0,
+                        "universes": {}} for a in G.AGENTS for m in G.MARKET_TYPES]
         try:
             sd = load_seed()
             out["n_used"] = int(sd["n_used_after"])          # imported on first use
@@ -854,14 +998,37 @@ def api_status(root=None) -> dict:
                        "candidates": st["seed"]["n_candidates"], "file_sha256": st["seed"]["file_sha256"]}
     out["n_used"] = max(st["n_used"], b.n_base(st))
     out["disk_mb"] = round(dir_bytes(root) / 1048576, 2)
+    out["rule_chain"] = [{"sha256": s, "version": (RULES[rule_index(s)][0] if rule_index(s) >= 0 else None)}
+                         for s in st["rules"]]
+    out["upgrades"] = st["upgrades"]
+    cu_all = {}
+    last_universes = None
     for bid in sorted(st["batches"], reverse=True):
         fb = st["batches"][bid]
         r = st["results"].get(bid)
+        cu = cell_universes(b, bid, fb, st)
+        for cell, d in cu.items():
+            for u, n in d.items():
+                cu_all.setdefault(cell, {}).setdefault(u, 0)
+                cu_all[cell][u] += n
         row = {"id": bid, "created": fb["created"], "hash": fb["frozen_hash"],
                "candidates_sha256": fb["candidates_sha256"], "snapshot_end": fb.get("snapshot_end"),
                "status": "seeded" if fb.get("seeded") else ("failed" if (r or {}).get("failed") else
                ("evaluated" if r else ("final_open" if bid in st["final_open"] else "frozen"))),
-               "candidates": fb["n_candidates"]}
+               "candidates": fb["n_candidates"],
+               "rule_version": fb.get("rule_version") or (RULES[rule_index(fb.get("rule_sha256", ""))][0]
+                                                          if rule_index(fb.get("rule_sha256", "")) >= 0 else
+                                                          "builder/v1"),
+               "grammar_version": (fb.get("generator") or {}).get("grammar_version"),
+               "universes": {u: sum(d.get(u, 0) for d in cu.values()) for u in G.UNIVERSES
+                             if any(d.get(u) for d in cu.values())}}
+        if r and last_universes is None and not r.get("failed") and not fb.get("seeded"):
+            res = _result(b, bid)
+            if res and res.get("universes"):
+                last_universes = {"batch": bid, **{k: v for k, v in res["universes"].items()
+                                                   if k in ("split", "meta", "counts")},
+                                  **{u: {k: v for k, v in (res["universes"].get(u) or {}).items() if k != "names"}
+                                     for u in ("NIFTY100", "NIFTY200", "TOP500")}}
         if r:
             row.update({k: r.get(k) for k in ("discovery_passers", "shuffle_passers", "validation_tested",
                                               "validation_passers", "final_confirmed", "n_used", "best_discovery_dsr")})
@@ -877,17 +1044,23 @@ def api_status(root=None) -> dict:
         fw = builder_forward.BuilderForward(root / "forward").status_by_id()
     except Exception:
         fw = {}
-    grid = {(a, m): {"agent": a, "mtype": m, "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0}
+    grid = {(a, m): {"agent": a, "mtype": m, "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0,
+                     "universes": {u: {"candidates": n, "proven": 0} for u, n in
+                                   sorted(cu_all.get(f"{a}|{m}", {}).items())}}
             for a in G.AGENTS for m in G.MARKET_TYPES}
     for p in st["promoted"]:
         g = grid[(p["cand"]["agent"], p["cand"]["mtype"])]
         g["proven"] += 1
+        u = p.get("universe") or G.Candidate.from_json(p["cand"]).stock_universe
+        g["universes"].setdefault(u, {"candidates": 0, "proven": 0})["proven"] += 1
         f = fw.get(p["id"])
         if f:
             g["in_forward_lab"] += 1
             g["qualified"] += int(f.get("status") == "qualified")
             g["ready"] += int(bool(f.get("ready")))
     out["grid"] = list(grid.values())
+    if last_universes:
+        out["universes"]["last_batch"] = last_universes
     out["promoted"] = len(st["promoted"])
     out["promoted_unregistered"] = sum(1 for p in st["promoted"] if not p.get("forward_registered"))
     return out
@@ -898,10 +1071,11 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
     root = Path(root) if root is not None else default_root()
     if not (root / "registry.jsonl").exists():
         return None
+    from stratlab import builder_grammar as G
     try:
         rule = load_rule()
     except Exception:
-        rule = json.loads(RULE_FILE.read_text())
+        rule = json.loads(CURRENT_RULE_FILE.read_text())
         rule["_sha256"] = None
     b = Builder(root, rule)
     st = b.state()
@@ -918,8 +1092,10 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
         v = (r.get("validation") or {}).get("screen") or {}
         f = (r.get("final") or {}).get("final") or {}
         pr = r.get("proof") or {}
+        cobj = G.Candidate.from_json(c["cand"])
         rows.append({"id": c["id"], "agent": c["cand"]["agent"], "mtype": c["cand"]["mtype"],
-                     "block": c["cand"]["block"], "text": c["text"], "stage": r.get("stage", "frozen"),
+                     "block": c["cand"]["block"], "universe": cobj.stock_universe,
+                     "universe_explicit": bool(cobj.universe), "text": c["text"], "stage": r.get("stage", "frozen"),
                      "discovery": {k: d.get(k) for k in ("trades", "pf", "net", "h1", "h2", "dsr", "passed",
                                                          "shuffle_passed", "why")} if d else None,
                      "validation": {"passed": (r.get("validation") or {}).get("passed"),
@@ -935,7 +1111,17 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
            "snapshot_end": fb.get("snapshot_end"), "generator": fb["generator"], "n_before": fb.get("n_before"),
            "status": "failed" if (st["results"].get(str(bid)) or {}).get("failed") else
            ("evaluated" if res else "frozen"), "candidates": rows,
-           "errata": (st.get("errata") or {}).get(str(bid), []), "seeded": bool(fb.get("seeded"))}
+           "errata": (st.get("errata") or {}).get(str(bid), []), "seeded": bool(fb.get("seeded")),
+           "rule_sha256": fb.get("rule_sha256"),
+           "rule_version": fb.get("rule_version") or (RULES[rule_index(fb.get("rule_sha256", ""))][0]
+                                                      if rule_index(fb.get("rule_sha256", "")) >= 0 else "builder/v1"),
+           "cell_universes": cell_universes(b, str(bid), fb, st)}
+    if res and res.get("universes"):
+        u = res["universes"]
+        out["universes"] = {k: v for k, v in u.items() if k in ("split", "complete_share", "meta", "counts")}
+        for k in ("NIFTY100", "NIFTY200", "TOP500"):
+            if k in u:
+                out["universes"][k] = dict(u[k])
     if fb.get("seeded"):
         sd = st.get("seed") or {}
         out.update({"status": "seeded", "seed": {k: sd.get(k) for k in ("file", "file_sha256", "counts", "final_looks",

@@ -266,8 +266,18 @@ The strategy builder's data layer (`builder_data.py`, `builder_minute.py`; `BUIL
 nothing scheduled, no network call; the endpoint still reports what is on disk). One entry per dataset: `from` / `to`
 (yyyymmdd, or the window tag `2024Q3` / `202410` for windowed feeds), `rows` (when known), `files`, `mb` (allocated
 on disk), `last_update` / `last_error`, `progress_pct` (share of the 2012 → (2016 → for minute bars) backfill that is
-final), `source`. `disk.cap_mb` = `BUILDER_DATA_MAX_MB` (default 1,800) for the whole builder directory; at the cap
-nothing more is written (`cap_reached: true`, runs stop with `disk_cap`), nothing is deleted. `refused_until` is set
+final), `source`. `disk.cap_mb` = `BUILDER_DATA_MAX_MB` (default 2,600; 1,800 before the NIFTY 200 minute universe) for
+the whole builder directory; at the cap nothing more is written (`cap_reached: true`, runs stop with `disk_cap`),
+nothing is deleted. `datasets.minute.universe` = the minute store's stock universe (`BUILDER_MINUTE_UNIVERSE`,
+`builder_universe.py`): `mode` (`nifty200` default | `nifty100`), `base` (the 97), `added_names` (current NIFTY 200
+list + historical NIFTY 100 members since 2016), `missing_on_kite` (names Kite does not list: delisted / merged —
+survivorship bias; recorded only from a successful Kite instrument dump), `unresolved` (names whose token
+lookup failed on the last run — a failed, empty or truncated dump never marks a name missing; retried next run, and a
+new v2 batch keeps waiting while any is unresolved), `token_lookup` {dump_size, error}, `coverage` / `base_coverage` {name: {from, to}}, `names_fetchable` / `names_ready` /
+`progress_pct` / `ready` (every added name Kite lists is fully backfilled — a new builder/v2 batch waits for it),
+`kite_calls_to_backfill`, `sources`, `membership`, and `projection` (KB per instrument-month measured on the stored
+base instruments, the worst-case MB still to fetch, MB after the backfill, growth per year, and the volume budget:
+forward lab 500 + option-bar archiver 1,024 + builder 400 + builder data cap <= 4,600 MB). `refused_until` is set
 for 24 h after NSE refused three requests in a row (no new data meanwhile; never worked around).
 Server paths / env vars for the lab readers (nsedata, flowdata, events_data, the forward-lab minute store): REBUILD.md
 section 6 — `<root>/nse` = `STRATLAB_NSE_DIR` (+ `STRATLAB_BARS_DIR=<root>/nse/bars`), `<root>/nse_view` = its last 400
@@ -276,9 +286,9 @@ sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root
 ```json
 {"enabled": false, "root": "/data/app/builder_data",
  "schedule": {"nse": "23:05 and 05:30 IST daily, 10:05 / 15:05 Sat-Sun",
-              "minute": "18:40 and 06:10 IST daily, 11:40 / 14:40 Sat-Sun"},
+              "minute": "18:40 and 23:45 IST daily, 11:40 / 14:40 Sat-Sun"},
  "budgets": {"kite_calls_per_run": 1500, "nse_requests_per_run": 2500},
- "disk": {"used_mb": 412.6, "cap_mb": 1800.0, "cap_reached": false},
+ "disk": {"used_mb": 412.6, "cap_mb": 2600.0, "cap_reached": false},
  "refused_until": null, "refused_at": null,
  "datasets": {
    "delivery": {"from": 20120102, "to": 20261113, "rows": 6012345, "files": 3690, "mb": 236.1, "progress_pct": 100.0,
@@ -291,7 +301,16 @@ sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root
    "corpactions": {…}, "index_membership": {…}, "events": {…},
    "minute": {"from": 20160101, "to": 20261113, "files": 12969, "mb": 655.0, "progress_pct": 100.0,
               "windows_final": 6633, "windows_total": 6633, "missing_symbols": [], "source": "Kite historical_data …",
-              "last_update": "2026-11-14T06:21:40", "last_error": null},
+              "last_update": "2026-11-14T06:21:40", "last_error": null,
+              "universe": {"mode": "nifty200", "base": 97, "added": 137, "added_names": ["360ONE", "ABBOTINDIA", …],
+                           "missing_on_kite": ["HDFC", "MINDTREE", …], "names_fetchable": 129, "names_ready": 0,
+                           "progress_pct": 0.0, "ready": false, "kite_calls_to_backfill": 8643,
+                           "coverage": {"360ONE": {"from": null, "to": null}, …}, "base_coverage": {…},
+                           "projection": {"kb_per_instrument_month": 51.2, "how": "measured on 97 stored base instruments",
+                                          "months_per_instrument": 131, "names": 137, "to_fetch_mb_worst_case": 897.0,
+                                          "builder_data_after_backfill_mb_worst_case": 2437.0, "cap_mb": 2600.0,
+                                          "volume": {"worst_case_mb": 4524.0, "worst_case_limit_mb": 4600.0,
+                                                     "within_limit": true, …}, …}}},
    "nse_view": {"from": 20250402, "to": 20261113, "files": 1625, "mb": 210.4, "progress_pct": null, …}},
  "last_run": {"started": "…", "requests": 2500, "days": 301, "stopped": "budget: request budget 2500 reached",
               "http": {"ok": 2210, "missing": 290}, "view": {"sessions": 400, "from": 20250402, "to": 20261113}},
@@ -299,9 +318,17 @@ sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root
 ```
 
 ### GET /api/v2/builder
-The AUTOMATIC STRATEGY BUILDER (`builder.py`, rule `builder_rule.json` builder/v1, sha256 pinned in
-`builder.RULE_SHA256`; `BUILDER_ENABLED`, default false → nothing scheduled; the endpoint still reports what is on
-disk). Every Saturday 06:00 IST it builds one batch of 400 candidates from our own data (5 agents × 4 market types ×
+The AUTOMATIC STRATEGY BUILDER (`builder.py`; rules `builder_rule.json` builder/v1 and `builder_rule_v2.json`
+builder/v2, sha256 pinned in `builder.RULE_SHA256` / `builder.RULE_SHA256_V2`, new batches under the last one;
+`BUILDER_ENABLED`, default false → nothing scheduled; the endpoint still reports what is on disk). builder/v2 (grammar
+bg2) adds the stock UNIVERSE to every sentence: `NIFTY100` (the 97), `NIFTY200` (the 97 + the data layer's added NIFTY
+200 names with complete minute data over the split), `TOP500` (point-in-time top 500, daily-grid stock blocks) or
+`INDEX`; a widened sentence is a new candidate, N is one count across v1 and v2. `rules` = the pinned versions,
+`rule_chain` / `upgrades` = this registry's versions and its `rule_upgrade` record(s) (N, candidates, FINAL looks at the
+upgrade), `grammar_version`, `universes` {choices, text, last_batch: what NIFTY100 / NIFTY200 resolved to on the last
+evaluated batch}. Batch rows add `rule_version`, `grammar_version`, `universes` {universe: candidates}; grid cells add
+`universes` {universe: {candidates, proven}} (the dashboard's cell tooltip). Weekly-run `last_run.status` can be
+`waiting_data` (a new v2 batch waits for the NIFTY 200 minute backfill; `reason`). Every Saturday 06:00 IST it builds one batch of 400 candidates from our own data (5 agents × 4 market types ×
 20, `stratlab/builder_grammar.py`), freezes the list in a hash-chained registry before any return is computed,
 evaluates it in its own process (DISCOVERY → ≤ 3 per cell to VALIDATION → one FINAL look → proof) and promotes only
 proven strategies to the forward lab's separate `builder/v1` family. `n_used` = the trial count the Deflated Sharpe
@@ -317,18 +344,26 @@ qualification) and `ready` (qualified, consistent, not demoted — a flag for a 
 use (`imported: false` before that; `n_used` is then already the seed's 2,970): its 400 keys are never drawn again, it
 is listed as batch 0001 with `status: "seeded"` (no candidate rows on the server), the server's first batch is 0002.
 ```json
-{"enabled": false, "rule_version": "builder/v1", "rule_sha256": "a455009021b9…", "rule_error": null,
+{"enabled": false, "rule_version": "builder/v2", "rule_sha256": "7072377b40de…", "rule_error": null,
+ "rules": [{"version": "builder/v1", "sha256": "a455009021b9…", "file": "builder_rule.json"},
+           {"version": "builder/v2", "sha256": "7072377b40de…", "file": "builder_rule_v2.json"}],
+ "rule_chain": [{"sha256": "a455009021b9…", "version": "builder/v1"}, {"sha256": "7072377b40de…", "version": "builder/v2"}],
+ "upgrades": [{"from_version": "builder/v1", "to_version": "builder/v2", "n_used_before": 2970, "evaluated_before": 400,
+               "final_looks_before": 2, "batches_before": 1, "grammar_version": "bg2", …}],
  "agents": ["intraday", "scalping", "swing", "options", "futures"],
- "market_types": ["RISING", "FALLING", "SIDEWAYS", "HIGH_VOL"],
- "grammar_sizes": {"intraday": 1176, "scalping": 414, "swing": 685, "options": 576, "futures": 394},
+ "market_types": ["RISING", "FALLING", "SIDEWAYS", "HIGH_VOL"], "grammar_version": "bg2",
+ "grammar_sizes": {"intraday": 2352, "scalping": 828, "swing": 2055, "options": 576, "futures": 750},
+ "universes": {"choices": ["NIFTY100", "NIFTY200", "TOP500", "INDEX"], "text": {…}, "last_batch": {…}},
  "n_used": 2970, "lab_trials_count": 2552, "evaluated": 400, "final_looks": 2, "promoted": 0, "chain_ok": true,
  "disk_mb": 0.9, "last_run": {"status": "complete", "batch": "0001", "proven": [], "seconds": 81.6},
  "batches": [{"id": "0001", "created": "2026-11-15T08:17:11", "hash": "f506bc18…", "candidates_sha256": "a3875563…",
               "snapshot_end": 20261109, "status": "evaluated", "candidates": 400, "discovery_passers": 27,
               "shuffle_passers": 6, "shuffle_expected": 6, "validation_tested": 21, "validation_passers": 2,
-              "final_confirmed": 0, "proven": 0, "errata": 1, "n_used": 2970,
+              "final_confirmed": 0, "proven": 0, "errata": 1, "n_used": 2970, "rule_version": "builder/v1",
+              "grammar_version": "bg1", "universes": {"NIFTY100": 163, "TOP500": 111, "INDEX": 126},
               "best_discovery_dsr": {"id": "bld0001_sca_ris_02_3e21a1", "dsr": 0.622}}],
- "grid": [{"agent": "intraday", "mtype": "RISING", "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0}, …]}
+ "grid": [{"agent": "intraday", "mtype": "RISING", "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0,
+           "universes": {"NIFTY100": {"candidates": 22, "proven": 0}, "NIFTY200": {"candidates": 9, "proven": 0}}}, …]}
 ```
 `status` of a batch: `frozen` (registered, not evaluated), `final_open` (FINAL looks recorded, result not ingested),
 `evaluated`.
@@ -341,7 +376,11 @@ control at p = 0.65 and the coin flip, `gate_<agent>`), `errata`, and every cand
 (generated from the grammar), `stage` (`discovery` = failed discovery, `discovery_passed`, `validation_failed`,
 `final_rejected`, `final_confirmed`, `proven`), `discovery` {trades, pf, net, h1, h2, dsr, passed, shuffle_passed,
 why}, `validation` {passed, trades, pf, net, reasons} | null, `final` {confirmed, trades, pf, net} | null, `proof`
-{dsr, gates, proven} | null.
+{dsr, gates, proven} | null, `universe` (bg1 rows: their implicit one; `universe_explicit` false). Batch fields
+`rule_version`, `rule_sha256`, `cell_universes` {cell: {universe: n}} and (evaluated builder/v2 batches) `universes`:
+what each universe resolved to on the batch's frozen data — `split`, `NIFTY100` {names, n}, `NIFTY200` {names, n,
+added_complete, added_incomplete, added_not_stored, daily_names}, `TOP500` {daily_symbols}, `meta` (membership note:
+the added names follow the current NIFTY 200 list, not point-in-time), `counts`.
 ```json
 {"id": "0001", "status": "evaluated", "windows": {"discovery": [0, 20241109], "validation": [20241110, 20251109],
  "final": [20251110, 20261109], "T": 20261109}, "discovery_passers": 27, "shuffle_passers": 6, "validation_tested": 21,
