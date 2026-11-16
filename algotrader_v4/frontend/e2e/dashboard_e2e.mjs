@@ -115,13 +115,16 @@ const MOCK_FL_DETAIL = {
 
 
 const MOCK_BUILDER = {
-  enabled: true, rule_version: 'builder/v1', rule_sha256: 'a455009021b9e2cf', lab_trials_count: 2552, n_used: 3372,
+  enabled: true, rule_version: 'builder/v2', rule_sha256: '7072377b40de2be4', lab_trials_count: 2552, n_used: 3372,
   evaluated: 800, final_looks: 4, promoted: 1, chain_ok: true,
   agents: ['intraday', 'scalping', 'swing', 'options', 'futures'], market_types: ['RISING', 'FALLING', 'SIDEWAYS', 'HIGH_VOL'],
   grid: ['intraday', 'scalping', 'swing', 'options', 'futures'].flatMap((a) => ['RISING', 'FALLING', 'SIDEWAYS', 'HIGH_VOL'].map((m) => ({
-    agent: a, mtype: m, proven: a === 'swing' && m === 'RISING' ? 1 : 0, in_forward_lab: a === 'swing' && m === 'RISING' ? 1 : 0, qualified: 0, ready: 0 }))),
+    agent: a, mtype: m, proven: a === 'swing' && m === 'RISING' ? 1 : 0, in_forward_lab: a === 'swing' && m === 'RISING' ? 1 : 0, qualified: 0, ready: 0,
+    universes: a === 'swing' ? { TOP500: { candidates: 30, proven: 0 }, NIFTY200: { candidates: 10, proven: m === 'RISING' ? 1 : 0 } }
+      : a === 'options' ? { INDEX: { candidates: 40, proven: 0 } } : { NIFTY100: { candidates: 22, proven: 0 }, NIFTY200: { candidates: 18, proven: 0 } } }))),
   batches: [
-    { id: '0002', created: '2026-11-21T06:00:05', hash: 'ab12cd34ef56ab12cd34', status: 'evaluated', candidates: 400, discovery_passers: 25, shuffle_expected: 7, shuffle_passers: 7, validation_passers: 2, final_confirmed: 1, proven: 1, errata: 0 },
+    { id: '0002', created: '2026-11-21T06:00:05', hash: 'ab12cd34ef56ab12cd34', status: 'evaluated', candidates: 400, discovery_passers: 25, shuffle_expected: 7, shuffle_passers: 7, validation_passers: 2, final_confirmed: 1, proven: 1, errata: 0,
+      rule_version: 'builder/v2', universes: { NIFTY100: 135, NIFTY200: 124, TOP500: 36, INDEX: 105 } },
     { id: '0001', created: '2026-11-15T08:17:11', hash: 'f506bc1888f72821', status: 'evaluated', candidates: 400, discovery_passers: 27, shuffle_expected: 6, shuffle_passers: 6, validation_passers: 2, final_confirmed: 0, proven: 0, errata: 1 },
   ],
 }
@@ -130,13 +133,15 @@ const MOCK_BUILDER_BATCH = {
   discovery_passers: 25, shuffle_passers: 7, validation_tested: 20, validation_passers: 2, final_confirmed: 1, proven: ['bld0002_swi_ris_03_abcdef'], n_proof: 3372,
   windows: { discovery: [0, 20241120], validation: [20241121, 20251120], final: [20251121, 20261120] },
   planted: { gate_intraday: true, gate_scalping: true, gate_swing: true, gate_options: false, gate_futures: true }, errata: [],
+  rule_version: 'builder/v2',
+  universes: { split: [20160101, 20261120], NIFTY100: { n: 97 }, NIFTY200: { n: 171, added_complete: Array(74).fill('X'), added_incomplete: Array(40).fill('Y') } },
   candidates: [
-    { id: 'bld0002_swi_ris_03_abcdef', agent: 'swing', mtype: 'RISING', block: 'deliv_up', stage: 'proven',
+    { id: 'bld0002_swi_ris_03_abcdef', agent: 'swing', mtype: 'RISING', block: 'deliv_up', stage: 'proven', universe: 'NIFTY200',
       text: "Swing in a RISING market (NIFTY above a rising 50-day average): when delivery % >= its 20-day mean + 15 points on >= 2x volume and a >= 2 % up day, buy the stock at the next session's open; hold 20 sessions, exit at the close.",
       discovery: { trades: 812, pf: 1.42, net: 912000, h1: 401000, h2: 511000, dsr: 0.97, passed: true, shuffle_passed: false, why: [] },
       validation: { passed: true, trades: 120, pf: 1.3, net: 88000, reasons: [] }, final: { confirmed: true, trades: 70, pf: 1.2, net: 31000 },
       proof: { dsr: 0.961, gates: { validation: true, final: true, dsr: true, placebo: true, shuffle: true, planted: true }, proven: true } },
-    { id: 'bld0002_int_fal_00_123456', agent: 'intraday', mtype: 'FALLING', block: 'gap_fade', stage: 'discovery',
+    { id: 'bld0002_int_fal_00_123456', agent: 'intraday', mtype: 'FALLING', block: 'gap_fade', stage: 'discovery', universe: 'NIFTY100',
       text: "Intraday in a FALLING market: when the stock opens >= 2% away from yesterday's close (call auction), trade the stock against the move at 09:15 (MIS); exit at 15:15.",
       discovery: { trades: 300, pf: 0.9, net: -12000, h1: -5000, h2: -7000, dsr: 0.0, passed: false, shuffle_passed: false, why: ['H1 net <= 0', 'H2 net <= 0'] } },
   ],
@@ -307,11 +312,16 @@ async function main() {
     const cellTxt = await phone.getByTestId('cell-swing-RISING').innerText()
     const emptyTxt = await phone.getByTestId('cell-options-FALLING').innerText()
     ok('builder (mock): proven cell and empty cell', cellTxt.includes('1 proven') && emptyTxt.includes('none proven yet'), `${cellTxt} | ${emptyTxt}`)
+    const tip = await phone.getByTestId('cell-swing-RISING').getAttribute('title')
+    ok('builder (mock): grid tooltip shows the universes', !!tip && tip.includes('NIFTY 200: 10 tried, 1 proven') && tip.includes('Top 500: 30 tried'), String(tip).replace(/\n/g, ' | '))
+    ok('builder (mock): proven cell names its universe', cellTxt.includes('NIFTY 200 1'), cellTxt.replace(/\n/g, ' | '))
     await shot(phone, 'phone-builder-mock')
     await visit(phone, 'builder/0002', 'phone (mocked builder)')
     await phone.getByTestId('builder-candidate').first().locator('button').click()
     const det = await phone.getByTestId('builder-candidate-detail').innerText()
     ok('builder (mock): proven candidate detail', det.includes('0.961') || det.includes('0.970'), det.slice(0, 80))
+    const ub = await phone.getByTestId('candidate-universe').allInnerTexts()
+    ok('builder (mock): candidate rows show their universe', ub.includes('NIFTY 200') && ub.includes('NIFTY 100 (97 names)'), ub.join(', '))
     await shot(phone, 'phone-builder-batch-mock')
 
     // mocked forward lab
@@ -359,6 +369,9 @@ async function main() {
     await visit(desk, 'builder/0002', 'desktop (mocked builder)')
     await desk.getByTestId('builder-filter').selectOption('passed')
     ok('builder (mock): filter "passed discovery"', (await desk.getByTestId('builder-candidate').count()) === 1)
+    await desk.getByTestId('builder-filter').selectOption('u:NIFTY100')
+    ok('builder (mock): filter by universe', (await desk.getByTestId('builder-candidate').count()) === 1)
+    ok('builder (mock): NIFTY 200 resolution shown', (await desk.getByTestId('batch-universe-resolution').innerText()).includes('171 names'))
     await shot(desk, 'desktop-builder-batch-mock')
     await desk.getByTestId('theme-toggle-desktop').click()
     await visit(desk, '', 'desktop')

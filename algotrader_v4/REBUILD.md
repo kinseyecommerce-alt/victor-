@@ -188,6 +188,15 @@ before the server's first daily list (no press-release dates: `announce_source =
 `known_date` = the session before the ex-date unless the server saw the action earlier. Status:
 `GET /api/v2/builder/data` (API_V2.md).
 
+Minute UNIVERSE (`BUILDER_MINUTE_UNIVERSE`, `builder_universe.py`): `nifty100` = the forward lab's 97 + 2 indices
+(as before); `nifty200` (default) = those, first and unchanged, then the added names: the current NIFTY 200 list
+(`<root>/flow/raw/index/daily/NIFTY200/`, nsearchives `ind_nifty200list.csv`, fetched daily from the first run on; a
+committed snapshot of 2026-11-16 until then) + every historical NIFTY 100 member since 2016 (`index_members.csv.gz`).
+`<root>/minute/universe.json` records base / extra / missing-on-Kite; the builder reads it. NIFTY 200 membership is NOT
+point-in-time (NSE Indices' month-end files cover NIFTY 50 / NEXT 50 only) and delisted names are not on Kite:
+survivorship bias of the added names, recorded with every batch. Disk: ~51 KB per instrument-month (measured; re-measured
+live in the API) → ≤ ~0.9 GB for ~137 added names with full history; cap 2,600 MB.
+
 ## 7. Automatic strategy builder (Part 2, `builder.py` + `builder_run.py` + `builder_forward.py` + `stratlab/builder_*.py`)
 
 Flag `BUILDER_ENABLED` (default false: no job). Saturday 06:00 IST: freeze 400 candidates (registry
@@ -199,3 +208,9 @@ compact option tables are cached on ephemeral disk (`BUILDER_CACHE_DIR`, default
 volume; the builder directory is capped at `BUILDER_MAX_MB` (400). Each frozen batch keeps its own immutable inputs under `<volume>/builder/inputs/<id>/` (panels, features, option tables ~160 MB at full scale, plus hard links to the data layer's minute files: free until the data layer replaces a file) and is always evaluated on them, so a retry sees identical data; they are deleted when the batch is ingested or failed. A batch that fails 3 times, or whose frozen inputs are lost while the live data changed, is closed `failed` (registry record `batch_failed`; its candidates stay counted in N and are never re-drawn). The builder/v1 forward family has its own job, `builder_forward`, 07:05 IST daily under `BUILDER_ENABLED` (it does not need `FORWARD_LAB_ENABLED`), holding the data layer's lock; it and the weekly job register any promoted strategy whose forward registration failed. The weekly job holds the data layer's lock while it
 freezes / evaluates. Rules: `builder_rule.json` (pinned in `builder.RULE_SHA256`), `builder_forward_rule.json`
 (pinned in `builder_forward.RULE_SHA256`). Results / design: `stratlab/README.md` (last section), API: API_V2.md.
+
+builder/v2 (`builder_rule_v2.json`, pinned in `builder.RULE_SHA256_V2`, written next to v1, which is never rewritten):
+grammar bg2 adds the stock UNIVERSE (NIFTY100 / NIFTY200 / TOP500 / INDEX) to every sentence; gates, controls, splits,
+costs and DSR are v1's. On the first weekly run after the deploy the registry appends `rule_upgrade` (N, candidates and
+FINAL looks at that moment; N continues from there). A v1 batch still pending is resumed under v1; new batches are v2,
+never re-draw a v1 key or its bg2 twin, and wait (`waiting_data`) until the NIFTY 200 minute backfill is complete.

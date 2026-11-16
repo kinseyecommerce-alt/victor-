@@ -1799,3 +1799,16 @@ workers, peak 3.4 GB of one forked worker before the sparse-signal fix, 1.2-1.6 
 Outputs (sandbox): `<scratchpad>/builder/root/` (registry.jsonl, batches/0001/{candidates.json, result.json.gz,
 work/}). Trials ledger: 423 rows appended (era builder-v1: 400 DISCOVERY, 21 VALIDATION, 2 FINAL). Tests:
 `../test_builder.py` (synthetic data in the server layout), run by `test_pipeline.py`.
+
+### builder/v2: the stock universe as a dimension of the draw (`../builder_rule_v2.json`, grammar bg2)
+
+Written 2026-11-16, before any v2 candidate was drawn; builder/v1 and its grammar bg1 stay valid byte for byte.
+A candidate is now block x entry x exit x instrument x UNIVERSE: NIFTY100 (the 97), NIFTY200 (the 97 + the data
+layer's added NIFTY 200 names with complete minute data over the split; membership NOT point-in-time for the added
+names, delisted names not on Kite = survivorship bias, recorded with every batch), TOP500 (point-in-time top 500,
+daily-grid stock blocks only) or INDEX. Sizes: intraday 2,352, scalping 828, swing 2,055, options 576, futures 750.
+A bg2 sentence on bg1's implicit universe is its bg1 twin (never re-drawn); every widened sentence is a new candidate
+counted in N, including the NIFTY200 versions of AUC-FADE-2PCT / -3PCT (scalping gap_fade o0915 time_min 5) and
+SWING-ATTN-ON-3X (futures attention_swing o1521 overnight): ordinary sentences, no credit from their NIFTY-100 proof
+(with only the seed drawn before, the deterministic order reaches the first of their 12 market-type versions in batch
+0005 and the last in batch 0038). Gates, controls, splits, costs and DSR are v1's; N is one count across v1 and v2.
