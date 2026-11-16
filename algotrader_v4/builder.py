@@ -43,6 +43,17 @@ RULE_FILE = HERE / "builder_rule.json"
 # every candidate the builder ever made counts in N and is never drawn again (builder_seed_0001.json, sha256 pinned).
 SEED_FILE = HERE / "builder_seed_0001.json"
 SEED_SHA256 = "15c6c036cd8153ca8be6463be234f55efd3da33e86a4376911d73abd5b3c40d8"
+# The sandbox's batches 0002-0006 (evaluated 2026-11-16 under builder/v1 on the lab's data), imported after seed 0001:
+# N continues from 4,979, their 2,000 keys are never re-drawn, the server's own first batch is 0007, and the proven
+# strategy of batch 0003 is imported as a "promoted" record (registered with the builder/v1 forward family by
+# reconcile_forward on the next builder run). sha256 pinned; an edited file is refused (SeedChanged).
+SEED2_FILE = HERE / "builder_seed_0002_0006.json"
+SEED2_SHA256 = "91dac10b6366c056e5e270f71804ef7da494dac007459bd49ed916ea39c584d9"
+
+
+def seed_files() -> list:
+    """The pinned seed files in import order (read at call time, so a test can patch one)."""
+    return [(SEED_FILE, SEED_SHA256), (SEED2_FILE, SEED2_SHA256)]
 # sha256 of builder_rule.json as committed (the pre-registration). An edited rule file is refused.
 RULE_SHA256 = "a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06"
 # builder/v2 (grammar bg2: the stock UNIVERSE is a dimension of the draw), written next to v1, which stays valid and is
@@ -79,6 +90,22 @@ def load_seed(path=None, expect: Optional[str] = None) -> dict:
     d = json.loads(path.read_text())
     d["_sha256"] = sha
     return d
+
+
+def seed_batches(doc: dict) -> list:
+    """The batch documents of a seed file: a single-batch seed (0001) is its own batch, a multi-batch seed lists them."""
+    if "batches" not in doc:
+        return [doc]
+    out = []
+    for bd in doc["batches"]:
+        out.append({"lab_trials_count": doc["lab_trials_count"],
+                    "development_evaluations": {"count": int(doc["development_evaluations"])}, **bd})
+    return out
+
+
+def load_seeds() -> list:
+    """Every pinned seed file, verified before anything is imported (one edited file refuses them all)."""
+    return [(Path(p), load_seed(p, expect=s)) for p, s in seed_files()]
 
 
 class DiskCapReached(RuntimeError):
@@ -278,21 +305,29 @@ class Builder:
                 st.setdefault("errata", {}).setdefault(d["batch"], []).append({**d, "ts": rec["ts"]})
             elif k == "seed":
                 bid = d["batch"]
-                st["seed"] = {**d, "ts": rec["ts"], "hash": rec["hash"]}
+                sd = {**d, "ts": rec["ts"], "hash": rec["hash"]}
+                st.setdefault("seed", sd)                    # the first seed (0001): kept for older readers
+                st.setdefault("seeds", {})[bid] = sd
+                n_before = d.get("n_before")
+                if n_before is None:
+                    n_before = d["lab_trials_count"] + d["development_evaluations"]
                 st["batches"][bid] = {"batch": bid, "seeded": True, "candidates_sha256": d["candidates_sha256"],
                                       "n_candidates": d["n_candidates"], "snapshot_end": d["snapshot_end"],
                                       "snapshot_sha256": d["snapshot_sha256"], "source": "sandbox seed",
                                       "generator": {"grammar_version": d["grammar_version"],
                                                     "grammar_sha256": d["grammar_sha256"]},
-                                      "n_before": d["lab_trials_count"] + d["development_evaluations"],
+                                      "rule_sha256": d.get("rule_sha256"), "n_before": int(n_before),
                                       "frozen_seq": rec["seq"], "frozen_hash": d["frozen_hash"], "created": rec["ts"]}
+                if d.get("cell_universes"):
+                    st["batches"][bid]["cell_universes"] = d["cell_universes"]
                 st["final_open"][bid] = [f["id"] for f in d["final_looks"]]
                 st["results"][bid] = {**{k2: v for k2, v in d["counts"].items() if k2 != "stages"}, "batch": bid,
-                                      "proven": [], "n_used": d["n_used_after"], "best_discovery_dsr": None,
+                                      "proven": list(d.get("proven") or []), "n_used": d["n_used_after"],
+                                      "best_discovery_dsr": d.get("best_discovery_dsr"),
                                       "ts": rec["ts"], "seeded": True}
                 st["evaluated"] += int(d["n_candidates"])
                 st["n_used"] = max(st["n_used"], int(d["n_used_after"]))
-                st["seed_keys"] = list(d["keys"])
+                st["seed_keys"] = list(st.get("seed_keys") or []) + list(d["keys"])
                 for e in d.get("errata") or []:
                     st.setdefault("errata", {}).setdefault(bid, []).append({**e, "batch": bid})
         st["final_looks"] = sum(len(v) for v in st["final_open"].values())
@@ -338,33 +373,60 @@ class Builder:
             "final_looks_before": st["final_looks"], "n_used_before": max(st["n_used"], self.n_base(st))})
 
     def ensure_seed(self, path=None) -> Optional[dict]:
-        """Import the sandbox seed once (hash-chained, idempotent; refused if the file is not the pinned one). Skipped
-        in the registry the seed was taken from (its batch 0001 carries the seed's frozen hash)."""
+        """Import the sandbox seeds once, in order (hash-chained, idempotent; every file is verified against its pinned
+        sha256 BEFORE anything is written). A seed batch is skipped in the registry it was taken from (that registry's
+        batch carries the seed's frozen hash). A seed's promoted strategies become "promoted" records (seeded=True):
+        reconcile_forward registers them with the builder/v1 forward family. `path` (tests): import only that file,
+        verified against the first pin. Returns the first seed record (None in the source registry)."""
+        files = [(Path(path), load_seed(path))] if path is not None else load_seeds()
         st = self.state()
-        if st.get("seed") is not None:
-            return st["seed"]
-        seed = load_seed(path)
-        fb = st["batches"].get(seed["batch"])
-        if fb is not None and fb.get("frozen_hash") == seed["frozen_hash"]:
-            return None                                   # the source registry itself
-        bid = seed["batch"] if seed["batch"] not in st["batches"] else "sandbox-" + seed["batch"]
-        keys = [c["key"] for c in seed["candidates"]]
-        if len(keys) != int(seed["n_candidates"]) or len(set(keys)) != len(keys):
-            raise SeedChanged("seed candidate keys are not unique / complete")
-        rec = {"batch": bid, "file": Path(path or SEED_FILE).name, "file_sha256": seed["_sha256"],
-               "frozen_hash": seed["frozen_hash"], "candidates_sha256": seed["candidates_sha256"],
-               "snapshot_sha256": seed["snapshot_sha256"], "snapshot_end": seed["snapshot_end"],
-               "result_sha256": seed["result_sha256"], "rule_sha256": seed["rule_sha256"],
-               "grammar_version": seed["grammar_version"], "grammar_sha256": seed["grammar_sha256"],
-               "n_candidates": int(seed["n_candidates"]), "counts": seed["counts"],
-               "final_looks": [{k: f[k] for k in ("id", "confirmed", "trades", "pf", "net")}
-                               for f in seed["final_looks"]],
-               "lab_trials_count": int(seed["lab_trials_count"]),
-               "development_evaluations": int(seed["development_evaluations"]["count"]),
-               "n_used_after": int(seed["n_used_after"]), "errata": seed.get("errata", []),
-               "keys_sha256": hashlib.sha256("\n".join(keys).encode()).hexdigest(), "keys": keys}
-        self.registry.append("seed", rec)
-        return self.state()["seed"]
+        done = {s["frozen_hash"] for s in (st.get("seeds") or {}).values()}
+        bid_of = {s["frozen_hash"]: s["batch"] for s in (st.get("seeds") or {}).values()}
+        wrote = False
+        for fpath, doc in files:
+            for seed in seed_batches(doc):
+                st = self.state()
+                if seed["frozen_hash"] in done:
+                    continue
+                fb = st["batches"].get(seed["batch"])
+                if fb is not None and fb.get("frozen_hash") == seed["frozen_hash"]:
+                    bid_of[seed["frozen_hash"]] = seed["batch"]
+                    continue                              # the source registry itself
+                bid = seed["batch"] if seed["batch"] not in st["batches"] else "sandbox-" + seed["batch"]
+                keys = [c["key"] for c in seed["candidates"]]
+                if len(keys) != int(seed["n_candidates"]) or len(set(keys)) != len(keys):
+                    raise SeedChanged("seed candidate keys are not unique / complete")
+                rec = {"batch": bid, "file": fpath.name, "file_sha256": doc["_sha256"],
+                       "frozen_hash": seed["frozen_hash"], "candidates_sha256": seed["candidates_sha256"],
+                       "snapshot_sha256": seed["snapshot_sha256"], "snapshot_end": seed["snapshot_end"],
+                       "result_sha256": seed["result_sha256"], "rule_sha256": seed["rule_sha256"],
+                       "grammar_version": seed["grammar_version"], "grammar_sha256": seed["grammar_sha256"],
+                       "n_candidates": int(seed["n_candidates"]), "counts": seed["counts"],
+                       "final_looks": [{k: f[k] for k in ("id", "confirmed", "trades", "pf", "net")}
+                                       for f in seed["final_looks"]],
+                       "lab_trials_count": int(seed["lab_trials_count"]),
+                       "development_evaluations": int(seed["development_evaluations"]["count"]),
+                       "n_used_after": int(seed["n_used_after"]), "errata": seed.get("errata", []),
+                       "keys_sha256": hashlib.sha256("\n".join(keys).encode()).hexdigest(), "keys": keys}
+                for k in ("n_before", "proven", "best_discovery_dsr", "cell_universes", "planted_gates"):
+                    if seed.get(k) is not None:
+                        rec[k] = seed[k]
+                self.registry.append("seed", rec)
+                done.add(seed["frozen_hash"])
+                bid_of[seed["frozen_hash"]] = bid
+                wrote = True
+            have = {p["id"] for p in self.state()["promoted"]}
+            for p in doc.get("promoted") or []:
+                if p["id"] in have:
+                    continue                              # the source registry (or imported before)
+                self.registry.append("promoted", {**p, "batch": bid_of.get(p["frozen_hash"], p["batch"]),
+                                                  "seeded": True, "seed_file": fpath.name,
+                                                  "seed_file_sha256": doc["_sha256"]})
+                wrote = True
+        st = self.state()
+        if wrote and st["promoted"]:
+            write_catalog(self)
+        return st.get("seed")
 
     def drawn_keys(self, st: Optional[dict] = None) -> set:
         st = st or self.state()
@@ -942,7 +1004,7 @@ def cell_universes(b: Builder, bid: str, fb: dict, st: dict) -> dict:
         return _CU_CACHE[ck]
     out: dict = {}
     if fb.get("seeded"):
-        for k in st.get("seed_keys") or []:
+        for k in ((st.get("seeds") or {}).get(bid) or {}).get("keys") or []:
             try:
                 v = json.loads(k)
                 cell, u = f"{v[1]}|{v[2]}", (v[10] if len(v) > 10 else G.implied_universe(v[1], v[3], v[7]))
@@ -981,10 +1043,12 @@ def api_status(root=None) -> dict:
         out["grid"] = [{"agent": a, "mtype": m, "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0,
                         "universes": {}} for a in G.AGENTS for m in G.MARKET_TYPES]
         try:
-            sd = load_seed()
-            out["n_used"] = int(sd["n_used_after"])          # imported on first use
-            out["seed"] = {"batch": sd["batch"], "frozen_hash": sd["frozen_hash"], "imported": False,
-                           "candidates": sd["n_candidates"]}
+            sds = [sb for _p, doc in load_seeds() for sb in seed_batches(doc)]
+            out["n_used"] = max(int(sb["n_used_after"]) for sb in sds)          # imported on first use
+            out["seed"] = {"batch": sds[0]["batch"], "frozen_hash": sds[0]["frozen_hash"], "imported": False,
+                           "candidates": sds[0]["n_candidates"]}
+            out["seeds"] = [{"batch": sb["batch"], "frozen_hash": sb["frozen_hash"], "imported": False,
+                             "candidates": sb["n_candidates"]} for sb in sds]
         except Exception as exc:
             out["n_used"] = out["lab_trials_count"]
             out["seed_error"] = str(exc)[:200]
@@ -996,6 +1060,9 @@ def api_status(root=None) -> dict:
     if st.get("seed"):
         out["seed"] = {"batch": st["seed"]["batch"], "frozen_hash": st["seed"]["frozen_hash"], "imported": True,
                        "candidates": st["seed"]["n_candidates"], "file_sha256": st["seed"]["file_sha256"]}
+        out["seeds"] = [{"batch": sd["batch"], "frozen_hash": sd["frozen_hash"], "imported": True,
+                         "candidates": sd["n_candidates"], "file": sd.get("file"), "file_sha256": sd["file_sha256"]}
+                        for sd in (st.get("seeds") or {}).values()]
     out["n_used"] = max(st["n_used"], b.n_base(st))
     out["disk_mb"] = round(dir_bytes(root) / 1048576, 2)
     out["rule_chain"] = [{"sha256": s, "version": (RULES[rule_index(s)][0] if rule_index(s) >= 0 else None)}
@@ -1123,9 +1190,9 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
             if k in u:
                 out["universes"][k] = dict(u[k])
     if fb.get("seeded"):
-        sd = st.get("seed") or {}
+        sd = (st.get("seeds") or {}).get(str(bid)) or {}
         out.update({"status": "seeded", "seed": {k: sd.get(k) for k in ("file", "file_sha256", "counts", "final_looks",
-                                                                         "n_used_after", "keys_sha256")}})
+                                                                         "n_used_after", "keys_sha256", "proven")}})
     if res:
         out.update({k: res.get(k) for k in ("windows", "discovery_passers", "shuffle_passers", "validation_tested",
                                             "validation_passers", "final_confirmed", "proven", "n_disc", "n_proof",

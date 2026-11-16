@@ -339,10 +339,13 @@ re-evaluated). A batch `status` can also be `failed` (3 failed evaluation runs, 
 changed): `failure` {reason, attempts}; its candidates still count in `n_used` and are never re-drawn. `promoted_unregistered` = promoted
 strategies whose builder/v1 registration has not succeeded yet (retried by every weekly / daily forward run). `grid`: one entry per agent × market type with `proven`, `in_forward_lab`, `qualified` (builder/v1
 qualification) and `ready` (qualified, consistent, not demoted — a flag for a human; nothing trades on it).
-`chain_ok: false` = the registry chain failed verification. `seed`: the sandbox's batch 0001
-(`builder_seed_0001.json`, sha256 pinned in `builder.SEED_SHA256`) imported as the registry's first records on first
-use (`imported: false` before that; `n_used` is then already the seed's 2,970): its 400 keys are never drawn again, it
-is listed as batch 0001 with `status: "seeded"` (no candidate rows on the server), the server's first batch is 0002.
+`chain_ok: false` = the registry chain failed verification. `seed` / `seeds`: the sandbox's batches 0001-0006
+(`builder_seed_0001.json` + `builder_seed_0002_0006.json`, sha256 pinned in `builder.SEED_SHA256` / `SEED2_SHA256`)
+imported as the registry's first records on first use (`imported: false` before that; `n_used` is then already the
+seeds' 4,979; `seed` = batch 0001, `seeds` = all six): their 2,400 keys are never drawn again, each is listed with
+`status: "seeded"` (no candidate rows on the server; `/builder/batches/{id}` shows its `seed` record incl.
+`proven`), the server's first own batch is 0007. The seeds' proven strategy is a `promoted` entry (`seeded: true`),
+counted in `promoted_unregistered` until the next builder run registers it with the builder/v1 forward family.
 ```json
 {"enabled": false, "rule_version": "builder/v2", "rule_sha256": "7072377b40de…", "rule_error": null,
  "rules": [{"version": "builder/v1", "sha256": "a455009021b9…", "file": "builder_rule.json"},

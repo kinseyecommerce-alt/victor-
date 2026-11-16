@@ -1793,6 +1793,14 @@ workers, peak 3.4 GB of one forked worker before the sparse-signal fix, 1.2-1.6 
   stage, the 2 FINAL looks, both errata, N after it = 2,970) is imported as the first records of any other registry
   (the server's) on first use: its N starts at 2,970, the 400 keys are never drawn again and its first batch is 0002.
   The rule's lab base (2,552) and the 16 development checks are unchanged (counted once).
+* **Seed 2** (`../builder_seed_0002_0006.json`, sha256 pinned in `builder.SEED2_SHA256`; 2026-11-16): sandbox batches
+  0002-0006 (builder/v1, bg1, the same lab snapshot, end 20261109), 2,000 candidates, 9 FINAL looks, N after them
+  4,979. Batch 0003 proved `bld0003_int_hig_02_0ea14e` (intraday, HIGH_VOL: fade a >= 1 % 09:15 gap, stop 1 % /
+  target 3 %, else exit 15:15; DSR 0.972 at N 3,775; FINAL 579 trades, PF 1.074). Imported after seed 0001 (both
+  files verified first): the server's N continues from 4,979, the 2,400 seeded keys are never drawn again, its first
+  own batch is 0007, and the proven strategy arrives as a `promoted` record (`seeded: true`) that the next builder
+  run registers with the builder/v1 forward family. Generator: `<scratchpad>/make_seed2.py` (reads the sandbox
+  registry only).
 * The registry was re-chained once (repair record) after a stale-tail bug with two writers; the data of every record
   is unchanged; the broken file is kept.
 
