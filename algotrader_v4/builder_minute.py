@@ -157,7 +157,7 @@ class MinuteBackfill:
     def run(self, now: datetime, fetch: Callable = kite_fetch, tokens: Optional[dict] = None,
             max_calls: int = 1500, cap_check: Optional[Callable[[], None]] = None,
             market_hours: Optional[Callable[[datetime], bool]] = None, clock: Optional[Callable[[], datetime]] = None,
-            lock=None, symbols=None, log: Callable = print) -> dict:
+            lock=None, symbols=None, log: Callable = print, unresolved=None) -> dict:
         """Fetch pending windows (newest first per instrument) until the call budget, the market-hours guard or the
         disk cap stops the run. Returns the run summary (also appended to the state)."""
         from builder_data import DiskCapReached
@@ -173,7 +173,9 @@ class MinuteBackfill:
             st = self.state()
             if tokens is None:
                 tokens = kite_tokens()
-            st["missing"] = [s for s in symbols if not tokens.get(s)]
+            unres = set(unresolved or [])           # token lookup failed this run: not missing, retried next run
+            st["missing"] = [s for s in symbols if not tokens.get(s) and s not in unres]
+            st["unresolved"] = sorted(s for s in symbols if not tokens.get(s) and s in unres)
             consecutive_err = 0
             for sym in symbols:
                 if out["stopped"]:

@@ -1051,6 +1051,7 @@ def test_v2_endpoint_shape():
             mu = j["datasets"]["minute"]["universe"]           # minute universe coverage (names, from / to, missing)
             assert mu["mode"] == "nifty200" and mu["added"] == len(mu["added_names"]) == 105, mu.get("error")
             assert set(mu["coverage"]) == set(mu["added_names"]) and "missing_on_kite" in mu and not mu["ready"]
+            assert mu["unresolved"] == [] and "token_lookup" in mu          # failed lookups are shown, not "missing"
             assert len(mu["base_coverage"]) == 97 and mu["projection"]["volume"]["within_limit"]
             assert mu["kite_calls_to_backfill"] >= 105 * 66            # 67 windows of 60 days from 2016-01-01
             want = {"delivery", "fo_parts", "participant_oi", "participant_vol", "ban", "fii_stats", "index_spot",
@@ -1156,6 +1157,62 @@ def test_minute_universe_adds_new_symbols_without_touching_the_97():
     from stratlab.builder_server_panels import ServerSource
     ul = ServerSource(str(root)).universe_lists()
     assert ul["base"] == ["INFY", "RELIANCE"] and "NEWCO" in ul["extra"] and ul["meta"]["source"] == "universe file"
+
+
+def test_regression_failed_instrument_dump_is_unresolved_not_missing():
+    """Review fix (PR #28): Kite's instrument dump can fail while the session is valid; kite_client.get_instruments()
+    then returns [] and every added name used to be persisted as `missing_on_kite`, so minute_status() saw nothing left
+    to backfill, reported ready=True and the builder would freeze a NIFTY200 batch on a store without those names.
+    A failed / empty / implausibly small dump must leave the names UNRESOLVED (never missing), keep ready=False and
+    new batches waiting, and be retried on the next run; only a successful dump may record a name as missing."""
+    import builder_universe as BU
+    import builder as B
+    import kite_client as KC
+    root = _tmp()
+    b = BD.Builder(root)
+    mb = BM.MinuteBackfill(b.minute)
+    now = datetime(2026, 11, 14, 22, 0)
+    fetch, _calls = _fake_kite()
+    r = mb.run(now, fetch=fetch, tokens=TOKENS, max_calls=10000, symbols=MSYMS, log=lambda *a: None)
+    assert r["stopped"] is None
+    syms = MSYMS + ["NEWCO", "GONECO"]
+
+    def one_run(dump):
+        kw = {"symbols": list(syms)}
+        with patch.object(BM, "kite_tokens", lambda: dict(TOKENS)), \
+                patch.object(KC.kite_client, "get_instruments", lambda exchange="NSE": dump):
+            BD.prepare_minute_universe(b, kw)
+        tok = {**TOKENS, "NEWCO": 21}
+        rev = {v: k for k, v in tok.items()}
+        mb.run(now, fetch=lambda t, a, z, iv: fetch(TOKENS["INFY"] if rev.get(t) == "NEWCO" else t, a, z, iv),
+               log=lambda *a: None, max_calls=10000, **{k: v for k, v in kw.items() if k in ("symbols", "tokens",
+                                                                                               "unresolved")})
+        return kw
+    # 1. the dump fails (swallowed by kite_client -> []): nothing may be recorded as missing on Kite
+    one_run([])
+    ms = BU.minute_status(root, now)
+    assert "NEWCO" not in ms["missing_on_kite"] and "GONECO" not in ms["missing_on_kite"], ms["missing_on_kite"]
+    assert ms["ready"] is False
+    assert ms["unresolved"] == ["GONECO", "NEWCO"]
+    assert "GONECO" not in mb.state()["missing"]
+    with patch.dict(os.environ, {"BUILDER_DATA_DIR": str(root)}):
+        why = B.data_wait_reason(B.Builder(root / "bld"), "server")
+    assert why and "unresolved" in why, why
+    # 2. an implausibly small dump (a truncated answer) counts as failed too
+    one_run([{"tradingsymbol": "NEWCO", "instrument_token": 21}])
+    ms = BU.minute_status(root, now)
+    assert ms["unresolved"] == ["GONECO", "NEWCO"] and ms["missing_on_kite"] == [] and ms["ready"] is False
+    # 3. the next run with a good dump resolves them: NEWCO gets its token and is backfilled, GONECO (absent from a
+    #    successful dump) is missing; only then is the extension ready
+    good = [{"tradingsymbol": f"FILLER{k}", "instrument_token": 1000 + k} for k in range(BU.DUMP_MIN_INSTRUMENTS)]
+    good.append({"tradingsymbol": "NEWCO", "instrument_token": 21})
+    kw = one_run(good)
+    assert kw["tokens"]["NEWCO"] == 21 and kw["unresolved"] == []
+    ms = BU.minute_status(root, now)
+    assert ms["unresolved"] == [] and ms["missing_on_kite"] == ["GONECO"] and ms["names_ready"] == 1
+    assert ms["ready"] is True
+    with patch.dict(os.environ, {"BUILDER_DATA_DIR": str(root)}):
+        assert B.data_wait_reason(B.Builder(root / "bld"), "server") is None
 
 
 def test_fetch_index_saves_the_nifty200_list_separately():

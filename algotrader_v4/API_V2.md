@@ -271,7 +271,9 @@ the whole builder directory; at the cap nothing more is written (`cap_reached: t
 nothing is deleted. `datasets.minute.universe` = the minute store's stock universe (`BUILDER_MINUTE_UNIVERSE`,
 `builder_universe.py`): `mode` (`nifty200` default | `nifty100`), `base` (the 97), `added_names` (current NIFTY 200
 list + historical NIFTY 100 members since 2016), `missing_on_kite` (names Kite does not list: delisted / merged —
-survivorship bias), `coverage` / `base_coverage` {name: {from, to}}, `names_fetchable` / `names_ready` /
+survivorship bias; recorded only from a successful Kite instrument dump), `unresolved` (names whose token
+lookup failed on the last run — a failed, empty or truncated dump never marks a name missing; retried next run, and a
+new v2 batch keeps waiting while any is unresolved), `token_lookup` {dump_size, error}, `coverage` / `base_coverage` {name: {from, to}}, `names_fetchable` / `names_ready` /
 `progress_pct` / `ready` (every added name Kite lists is fully backfilled — a new builder/v2 batch waits for it),
 `kite_calls_to_backfill`, `sources`, `membership`, and `projection` (KB per instrument-month measured on the stored
 base instruments, the worst-case MB still to fetch, MB after the backfill, growth per year, and the volume budget:

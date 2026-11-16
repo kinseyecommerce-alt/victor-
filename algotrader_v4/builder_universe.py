@@ -155,23 +155,60 @@ def minute_symbols(m: Optional[str] = None, root=None) -> list:
     return list(FS.MINUTE_SYMBOLS) + extra_names(root)[0]
 
 
+DUMP_MIN_INSTRUMENTS = 1000          # Kite's NSE dump has ~9,000 rows: fewer = a failed / truncated answer
+
+
+def resolve_tokens(names: list, instruments_fn=None) -> dict:
+    """Kite tokens of `names` from ONE NSE instrument dump, read-only. A name is "missing" only when a SUCCESSFUL dump
+    (no error, >= DUMP_MIN_INSTRUMENTS rows) does not list it; a failed, empty or implausibly small dump (kite_client
+    swallows its errors and returns []) leaves every name "unresolved" — never recorded as missing, retried next run.
+    Returns {"tokens", "missing", "unresolved", "dump_size", "error"}."""
+    names = sorted(set(names))
+    if not names:
+        return {"tokens": {}, "missing": [], "unresolved": [], "dump_size": None, "error": None}
+    try:
+        if instruments_fn is None:
+            from kite_client import kite_client
+            instruments_fn = lambda: kite_client.get_instruments("NSE")  # noqa: E731
+        dump = list(instruments_fn() or [])
+    except Exception as exc:
+        return {"tokens": {}, "missing": [], "unresolved": names, "dump_size": 0,
+                "error": f"instrument dump failed: {type(exc).__name__}: {str(exc)[:160]}"}
+    if len(dump) < DUMP_MIN_INSTRUMENTS:
+        return {"tokens": {}, "missing": [], "unresolved": names, "dump_size": len(dump),
+                "error": f"instrument dump has {len(dump)} rows (< {DUMP_MIN_INSTRUMENTS}): treated as failed"}
+    want, tok = set(names), {}
+    for inst in dump:
+        s = inst.get("tradingsymbol")
+        if s in want and inst.get("instrument_token"):
+            tok[s] = int(inst["instrument_token"])
+    return {"tokens": tok, "missing": sorted(want - set(tok)), "unresolved": [], "dump_size": len(dump),
+            "error": None}
+
+
 def kite_tokens(names: list) -> dict:
-    """{name: token} for the stock names among `names` (one instruments dump, read-only)."""
-    from kite_client import kite_client
-    return kite_client.get_instrument_tokens(list(names), "NSE") or {}
+    """{name: token} for the stock names among `names` (one instruments dump, read-only). Prefer resolve_tokens(),
+    which tells a failed lookup from a missing instrument."""
+    return resolve_tokens(names)["tokens"]
 
 
 def write_universe_file(minute_root, missing: Optional[list] = None, root=None, m: Optional[str] = None,
-                        symbols: Optional[list] = None) -> dict:
+                        symbols: Optional[list] = None, unresolved: Optional[list] = None,
+                        lookup: Optional[dict] = None) -> dict:
     """<minute>/universe.json: what ServerSource resolves NIFTY100 / NIFTY200 from ("extra" = the run's added names,
-    `symbols` beyond the 99, else extra_names()). Rewritten only when it changes."""
+    `symbols` beyond the 99, else extra_names()). `missing` only from a successful instrument dump; `unresolved` =
+    names whose token lookup failed this run (retried next run). Rewritten only when it changes."""
     m = m or mode()
     ext, src = extra_names(root) if m == "nifty200" else ([], {})
     if symbols is not None and m == "nifty200":
         skip = set(base_names()) | set(index_names())
         ext = [s for s in symbols if s not in skip]
+    unres = sorted(set(unresolved or []))
     doc = {"version": 1, "mode": m, "base": base_names(), "aliases": sorted(ALIASES), "extra": ext,
-           "missing_on_kite": sorted(missing or []), "membership": MEMBERSHIP_NOTE, "sources": src}
+           "missing_on_kite": sorted(set(missing or []) - set(unres)), "unresolved": unres,
+           "membership": MEMBERSHIP_NOTE, "sources": src}
+    if lookup is not None:
+        doc["token_lookup"] = {k: lookup.get(k) for k in ("dump_size", "error")}
     p = Path(minute_root) / "universe.json"
     old = None
     try:
@@ -269,8 +306,12 @@ def minute_status(root=None, now: Optional[datetime] = None) -> dict:
     else:                                                  # no minute run under this mode yet
         ext, src = extra_names(root) if m == "nifty200" else ([], {})
         base_doc = None
-    missing = set(st.get("missing") or []) | set((doc or {}).get("missing_on_kite") or [])
+    # the last run's token lookup: "missing" only from a successful instrument dump, "unresolved" = its lookup failed
+    unresolved = set((doc or {}).get("unresolved") or []) | set(st.get("unresolved") or [])
+    missing = set((doc or {}).get("missing_on_kite") or []) if doc is not None else set(st.get("missing") or [])
+    missing -= unresolved
     fetchable = [n for n in ext if n not in missing]
+    unresolved_added = sorted(unresolved & set(ext))
     syms = st.get("symbols") or {}
     names_ready = 0
     pending = 0
@@ -289,9 +330,11 @@ def minute_status(root=None, now: Optional[datetime] = None) -> dict:
     base = base_doc if base_doc else base_names()
     out = {"mode": m, "base": len(base), "added": len(ext), "added_names": ext,
            "missing_on_kite": sorted(x for x in missing if x in set(ext) | set(base)),
+           "unresolved": unresolved_added, "token_lookup": (doc or {}).get("token_lookup"),
            "names_fetchable": len(fetchable), "names_ready": names_ready, "progress_pct": pct,
-           # ready = a minute run resolved the universe under this mode AND every added name Kite lists is backfilled
-           "ready": bool(m == "nifty200" and doc is not None and base_doc is not None
+           # ready = a minute run resolved the universe under this mode, no added name's token lookup is unresolved,
+           # AND every added name Kite lists is backfilled
+           "ready": bool(m == "nifty200" and doc is not None and base_doc is not None and not unresolved_added
                          and names_ready == len(fetchable)),
            "universe_file": doc is not None, "universe_written": (doc or {}).get("written"),
            "coverage": coverage, "sources": src, "membership": MEMBERSHIP_NOTE,

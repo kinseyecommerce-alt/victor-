@@ -842,6 +842,9 @@ def data_wait_reason(b: "Builder", source: str = "server", root=None) -> Optiona
     if ms.get("mode") != "nifty200":
         return ("BUILDER_MINUTE_UNIVERSE is nifty100: the NIFTY200 universe of builder/v2 would be the 97 names again "
                 "(new batches wait; a pending batch is still resumed)")
+    if ms.get("unresolved"):
+        return (f"{len(ms['unresolved'])} added names unresolved: the Kite instrument lookup failed "
+                f"({(ms.get('token_lookup') or {}).get('error') or 'no successful dump yet'}); retried next minute run")
     if not ms.get("ready"):
         return (f"minute backfill of the added NIFTY 200 names at {ms.get('progress_pct')} % "
                 f"({ms.get('names_ready')}/{ms.get('names_fetchable')} names complete)")

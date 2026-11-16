@@ -1728,21 +1728,31 @@ def _kite_session_ok() -> bool:
 
 def prepare_minute_universe(b: "Builder", kw: dict, token_fn: Optional[Callable] = None) -> dict:
     """BUILDER_MINUTE_UNIVERSE: the instrument list of this run (the forward lab's 99 first, unchanged, then the added
-    NIFTY 200 names, builder_universe.py), their Kite tokens (names Kite does not list are recorded as missing) and
-    <minute>/universe.json. Sets kw["symbols"] / kw["tokens"] unless the caller gave them."""
+    NIFTY 200 names, builder_universe.py), their Kite tokens and <minute>/universe.json. A name is recorded as missing
+    on Kite only when a SUCCESSFUL instrument dump does not list it; when the lookup fails (kite_client returns an
+    empty dump on an error, or a truncated one) the names stay "unresolved" (kw["unresolved"]; never persisted as
+    missing, retried next run, and the builder keeps waiting). Sets kw["symbols"] / kw["tokens"] / kw["unresolved"]
+    unless the caller gave the tokens. token_fn: a resolver like builder_universe.resolve_tokens (tests)."""
     import builder_minute as BM
     import builder_universe as BU
     m = BU.mode()
     syms = kw.get("symbols") or BU.minute_symbols(m, b.root)
+    lookup = None
     if kw.get("tokens") is None:
         tok = dict(BM.kite_tokens())
-        extra = [s for s in syms if s not in tok and not s.startswith("_")]
-        if extra:
-            tok.update((token_fn or BU.kite_tokens)(extra))
+        stocks = [s for s in syms if not s.startswith("_")]
+        lookup = (token_fn or BU.resolve_tokens)([s for s in stocks if s not in tok])
+        if "tokens" not in lookup:                       # a plain {name: token} answer = a successful lookup
+            lookup = {"tokens": dict(lookup), "unresolved": [], "error": None, "dump_size": None}
+        tok.update(lookup["tokens"])
         kw["tokens"] = tok
+        # a failed dump also explains base names without a token (they come from the same instrument dump)
+        kw["unresolved"] = sorted(s for s in stocks if s not in tok) if lookup.get("error") else []
     kw["symbols"] = list(syms)
-    missing = [s for s in syms if not kw["tokens"].get(s)]
-    return BU.write_universe_file(b.minute, missing=missing, root=b.root, m=m, symbols=kw["symbols"])
+    unresolved = set(kw.get("unresolved") or [])
+    missing = [s for s in syms if not kw["tokens"].get(s) and s not in unresolved]
+    return BU.write_universe_file(b.minute, missing=missing, root=b.root, m=m, symbols=kw["symbols"],
+                                  unresolved=sorted(unresolved), lookup=lookup)
 
 
 _API_CACHE: dict = {}
