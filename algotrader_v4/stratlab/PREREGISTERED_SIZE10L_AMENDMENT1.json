@@ -1,0 +1,103 @@
+{
+ "N_K_V": {
+  "K": 435,
+  "K_options": 39,
+  "K_stock": 396,
+  "N": "4979 + K (435) + every FINAL look opened by this re-test (stock + options)",
+  "V": "max(robust (1.4826 x MAD)^2 of the DISCOVERY daily Sharpes of all K re-tested strategies with >= 1 trade at the new size, 1 / (T_days - 1))",
+  "dsr_series": "daily net P&L of DISCOVERY + FINAL at the new size, booked on the exit session"
+ },
+ "code_sha256": {
+  "kite_options.py": "ac44e8eaaa41a09abe26d687d44f09c345446372ac3937225586d3ec8855e752",
+  "nsedata.py": "5b776ab3ba9e1f0163696020fb29afc24c1cd401760bfc0e67ad082630960db8",
+  "options_r3.py": "d38a710c51580fda1f23cad241d07e6133b711b7057e5a0cea72aaba6d25e7a7",
+  "options_r4.py": "3ead89ae2240c1614f63a1028d08963e875039ebaa18cb6831c833246592c7cc",
+  "options_vrp.py": "e35bd40fbb91e4827d9f09021925c8464980f1bf5a2715b19226b1ec80c28e36",
+  "size10l_options.py": "68b3d31af52751a59c17177aae34e7e3b04cdf25d31daa1f1a33a69336f3a0b0",
+  "size10l_run.py": "2b20682418d5534d6fc4baf3106b7715800623ba69b3e3167c053cbf362c9fb7"
+ },
+ "options": {
+  "count": 39,
+  "discovery": "the lab's screen for a one-instrument positional strategy on 2023-11-10 .. 2025-12-16: net > 0 in H1 and H2, PF >= 1.15, >= 60 trades",
+  "engines": {
+   "nse": "options_r4 / kite_options through nsedata.make_simulator with nsedata._close_position wrapped; the wrapper's one-lot twin must equal the stored DISCOVERY result",
+   "replay": "stored per-leg trade files of options_vrp / options_r3 re-sized exactly (gross x lot ratio; fees = Rs 23.60 per order with a positive value + the proportional part x the lot ratio); the stored files reproduce the stored results at the original lots"
+  },
+  "fees": "per leg at the real lot count: options_replay.leg_cost (costs.round_trip_cost 'option'); fill haircut per unit unchanged",
+  "final": "one look per DISCOVERY passer at the new size (options_final_ledger.json, first write wins); CONFIRMED = net > 0 and PF >= 1.05. Replay strategies: the stored FINAL trades when the file has them (FINAL already opened at one lot), otherwise NOT AVAILABLE here (the model engine is not re-run) and the strategy cannot be proven; nse strategies: the simulator on the FINAL window",
+  "ids": {
+   "VRP-STRANGLE-016-NAKED": "replay",
+   "r3_options_0dte_ic_1030": "replay",
+   "r3_options_0dte_ss_1130": "replay",
+   "r3_options_bnf_wk_ic": "replay",
+   "r3_options_bnf_wk_ss_stop2x": "replay",
+   "r3_options_cs_trend20": "replay",
+   "r3_options_cs_trend50": "replay",
+   "r3_options_ibf_400": "replay",
+   "r3_options_ibf_400_tp25": "replay",
+   "r3_options_ic_10_03": "replay",
+   "r3_options_ic_25_10": "replay",
+   "r3_options_ls_highvix": "replay",
+   "r3_options_ls_lowvix": "replay",
+   "r3_options_ss16_stop2x": "replay",
+   "r3_options_ss16_stop2x_tp50": "replay",
+   "r3_options_ss16_stop2x_vix33": "replay",
+   "r3_options_wc_fri": "replay",
+   "r3_options_wc_mon": "replay",
+   "r4_realopt_bnf_mo_condor_3pct_w2_h5": "nse",
+   "r4_realopt_bnf_mo_oiwall_beyond_h5": "nse",
+   "r4_realopt_bnf_mo_strangle_3pct_h5": "nse",
+   "r4_realopt_nf_event_straddle_2d": "nse",
+   "r4_realopt_nf_event_straddle_eve": "nse",
+   "r4_realopt_nf_exp_eve_strangle_1pct": "nse",
+   "r4_realopt_nf_expwk_last2_condor_1pct_w1": "nse",
+   "r4_realopt_nf_expwk_last2_strangle_1pct": "nse",
+   "r4_realopt_nf_wk_condor_2pct_w1": "nse",
+   "r4_realopt_nf_wk_condor_prem10bp_w1": "nse",
+   "r4_realopt_nf_wk_oiwall_at": "nse",
+   "r4_realopt_nf_wk_oiwall_beyond": "nse",
+   "r4_realopt_nf_wk_straddle_stop15": "nse",
+   "r4_realopt_nf_wk_straddle_stop15_tp50": "nse",
+   "r4_realopt_nf_wk_strangle_2pct": "nse",
+   "r4_realopt_nf_wk_strangle_3pct": "nse",
+   "r4_realopt_nf_wk_strangle_prem10bp": "nse",
+   "r4_realopt_nf_wk_trendspread_sma20": "nse",
+   "r4_realopt_nf_wk_trendspread_sma50": "nse",
+   "r5_kite_tt_dst_spreads": "nse",
+   "r5_kite_tt_ic_wed": "nse"
+  },
+  "lots": {
+   "caveat": "exchange freeze quantities (orders above them are split, each paying Rs 20) are not modelled; cheap long structures can reach hundreds of lots",
+   "decided": "at entry, from entry prices only; one lot count per trade for all its legs",
+   "defined_risk_short": "max(1, floor(100000 / max risk per lot)); max risk = the worst expiry payoff of the structure at its entry prices (all legs one expiry, no uncovered short call or put)",
+   "long_or_debit": "max(1, floor(100000 / net premium paid per lot))",
+   "naked_short": "max(1, floor(500000 / margin per lot)); margin = the trade record's own margin estimate (options_replay) where present, else 12% x mean short strike x lot size; a credit structure with an uncovered short or legs in different expiries is sized by this rule"
+  },
+  "not_included": "option strategies without a stored per-leg trade file or a callable EOD simulator (VRP-WINGED-HIGHVIX, old-era option runs): their earlier verdicts stand",
+  "old_era": "no old-era option trade record carries per-leg prices, so an OOS judgement at the new size is NOT AVAILABLE; an option strategy therefore cannot be PROVEN by this re-test. Its one-lot old-era verdict is reported next to its FINAL result. (Known erratum: old-era EOD option settlement prices are 0 on weekly expiries before 2020-01.)",
+  "report_only": {
+   "VRP-STRANGLE-016-WINGED": "a live rule: re-sized for the report, verdict not re-opened, not a trial"
+  }
+ },
+ "report": "every type is covered: intraday (MIS), stock futures, options re-tested; delivery swing and index futures (identical at Rs 10 lakh: proportional fees / one real lot) and tfgrid (already Rs 10 lakh accounts) keep their existing results, restated",
+ "results_seen_at_writing": {
+  "options_at_new_size": "none (no option trade was re-sized or re-run before this file)",
+  "stock_part_of_the_first_plan": {
+   "controls": {
+    "planted_passed": true,
+    "random_passed": []
+   },
+   "discovery_passers_at_new_size": 9,
+   "discovery_screen_done": true,
+   "final_looks_opened": false
+  }
+ },
+ "supersedes": {
+  "file": "PREREGISTERED_SIZE10L.json",
+  "sha256": "02f654e6975ad1b18384b16e04354e2b5cf26b6666547840a8b84519ff31ddd4",
+  "what_stays": "everything in it (the K = 396 stock strategies, sizes, gates, windows, controls, one FINAL look, old-era rule, proven definition) except N, K and V below"
+ },
+ "title": "Amendment 1: options strategies are re-sized and re-tested as well",
+ "why": "User, after the first plan was frozen: 'not only intraday, swing - test all'. The flat Rs 20 per order per leg is a large share of a one-lot option trade, so option strategies change with the account size.",
+ "written": "2026-11-16 16:59:25 UTC"
+}
