@@ -1,6 +1,9 @@
 """
 builder_minute.py — deep 1-minute history for the strategy builder: the forward lab's universe (forward_test.UNIVERSE,
-97 stocks, plus NIFTY 50 and NIFTY BANK) back to 2016-01-01 from Kite, and the NIFTY 50 / INDIA VIX daily series.
+97 stocks, plus NIFTY 50 and NIFTY BANK) back to 2016-01-01 from Kite, and the NIFTY 50 / INDIA VIX daily series;
+with BUILDER_MINUTE_UNIVERSE=nifty200 (default) also the ADDED names of builder_universe.py (current NIFTY 200 list +
+historical NIFTY 100 members still on Kite), fetched AFTER the 99 instruments, same store / format / budget / guards
+(builder_data.minute_job passes the list and the tokens; names Kite does not list are recorded as "missing").
 
 STORE: a SIBLING of the forward lab's bar store with the SAME format and the SAME reader — it is a
 forward_lab_store.Store rooted at <builder>/minute (month files bars/<SYMBOL>/<YYYYMM>.npz in integer paise, the
@@ -14,8 +17,10 @@ Per symbol the windows are fetched newest first; a window is FINAL once it was f
 (still open) window is re-fetched on every run: that is the daily update (one call per instrument per run).
   resumable / idempotent  the window state lives in <builder>/minute/backfill.json; Store.write_sessions replaces the
                           sessions it is given, so re-fetching a window rewrites identical bytes
-  call budget             BUILDER_KITE_MAX_CALLS_PER_RUN (default 1,500) per run; ~66 windows x 99 instruments
-                          ~= 6,550 calls in all -> about 5 runs (two runs a night + two on weekend days ~= 3 days)
+  call budget             BUILDER_KITE_MAX_CALLS_PER_RUN (default 1,500) per run; ~67 windows x 99 instruments
+                          ~= 6,630 calls in all -> about 5 runs (two runs a night + two on weekend days ~= 3 days);
+                          the NIFTY 200 extension adds ~67 x the added names Kite lists (~125 -> ~8,400 calls,
+                          ~6 runs: three week nights or one weekend)
   market-hours guard      never between 09:00 and 15:45 IST on a trading day (checked before every call)
   locks                   the option-bar archiver's lock (the one the forward lab holds for its Kite calls) is held
                           per instrument, so the three Kite users never interleave

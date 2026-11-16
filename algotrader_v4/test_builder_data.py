@@ -1033,7 +1033,12 @@ def test_v2_endpoint_shape():
             assert r.status_code == 200
             j = r.json()
             assert {"enabled", "root", "datasets", "disk", "schedule", "budgets", "last_run"} <= set(j), set(j)
-            assert j["enabled"] is False and j["disk"]["cap_mb"] == 1800.0
+            assert j["enabled"] is False and j["disk"]["cap_mb"] == 2600.0
+            mu = j["datasets"]["minute"]["universe"]           # minute universe coverage (names, from / to, missing)
+            assert mu["mode"] == "nifty200" and mu["added"] == len(mu["added_names"]) == 105, mu.get("error")
+            assert set(mu["coverage"]) == set(mu["added_names"]) and "missing_on_kite" in mu and not mu["ready"]
+            assert len(mu["base_coverage"]) == 97 and mu["projection"]["volume"]["within_limit"]
+            assert mu["kite_calls_to_backfill"] >= 105 * 66            # 67 windows of 60 days from 2016-01-01
             want = {"delivery", "fo_parts", "participant_oi", "participant_vol", "ban", "fii_stats", "index_spot",
                     "deals", "corpactions", "index_membership", "events", "minute", "nse_view"}
             assert set(j["datasets"]) == want, set(j["datasets"])
@@ -1050,6 +1055,158 @@ def test_read_only_towards_trading():
         for bad in ("place_order", "paper_fill_at", "paper_marketable", "modify_order", "cancel_order",
                     "set_strategy(", "set_global(", "record_trade(", "set_agent_enabled", "squareoff", "ALL_AGENTS"):
             assert bad not in src, (mod.__name__, bad)
+
+
+# ══ the minute universe (BUILDER_MINUTE_UNIVERSE: the 97 + the added NIFTY 200 names) ═════════════════════════════
+def test_minute_universe_lists_and_modes():
+    import builder_universe as BU
+    root = _tmp()
+    base = set(FS.UNIVERSE_STOCKS)
+    ext, src = BU.extra_names(root)                    # nothing saved yet: the committed NIFTY 200 snapshot
+    assert src["current_nifty200"]["source"] == "committed snapshot" and len(set(BU.NIFTY200_SNAPSHOT)) == 200
+    assert ext == sorted(set(BU.NIFTY200_SNAPSHOT) - base) and len(ext) == 105
+    assert not set(ext) & (base | set(BU.ALIASES) | set(FS.INDEX_MIN))
+    assert {"BERGEPAINT", "PETRONET"} <= base - set(BU.NIFTY200_SNAPSHOT)   # base names that left NIFTY 200 stay base
+    # the data layer's saved daily list replaces the snapshot; historical NIFTY 100 members since 2016 are added
+    d = root / "flow" / "raw" / "index" / "daily" / "NIFTY200"
+    d.mkdir(parents=True)
+    names = sorted(BU.NIFTY200_SNAPSHOT)[:199] + ["NEWLIST"]
+    (d / "20261120.csv").write_text("Company Name,Industry,Symbol,Series,ISIN Code\n" +
+                                    "".join(f"X Ltd.,Y,{s},EQ,INE0\n" for s in names))
+    im = root / "flow" / "index_membership"
+    im.mkdir(parents=True)
+    with gzip.open(im / "index_members.csv.gz", "wt") as fh:
+        fh.write("index,symbol,lab_symbol,in_lab,from_date,to_date,from_precision,to_precision\n"
+                 "NIFTY100,OLDCO,OLDCO,0,20140101,20181231,month,month\n"        # left in 2018: fetched
+                 "NIFTYNEXT50,GONECO,GONECO,0,20120101,20150101,month,month\n"   # left before 2016: not fetched
+                 "NIFTY50,INFY,INFY,1,20120101,,month,\n")
+    ext, src = BU.extra_names(root)
+    assert "NEWLIST" in ext and "OLDCO" in ext and "GONECO" not in ext and "INFY" not in ext
+    assert src["current_nifty200"] == {"source": "nse daily list", "date": 20261120, "n": 200}
+    assert src["historical_nifty100"]["n"] == 2 and src["from_history_only"] == 1
+    # nifty100 = the forward lab's list exactly; nifty200 = that list first and unchanged, then the added names
+    assert BU.minute_symbols("nifty100", root) == list(FS.MINUTE_SYMBOLS)
+    m200 = BU.minute_symbols("nifty200", root)
+    assert m200[:len(FS.MINUTE_SYMBOLS)] == list(FS.MINUTE_SYMBOLS) and m200[len(FS.MINUTE_SYMBOLS):] == ext
+    assert BU.mode() == "nifty200"                     # the default
+    with patch.object(settings, "builder_minute_universe", "bogus"):
+        assert BU.mode() == "nifty200"
+    with patch.object(settings, "builder_minute_universe", "NIFTY100"):
+        assert BU.mode() == "nifty100"
+
+
+def test_minute_universe_adds_new_symbols_without_touching_the_97():
+    """The added names are fetched into the same store (same format, budgets, guards) AFTER the existing instruments;
+    the existing instruments' files are not rewritten; a name Kite does not list is recorded as missing."""
+    import builder_universe as BU
+    root = _tmp()
+    b = BD.Builder(root)
+    mb = BM.MinuteBackfill(b.minute)
+    now = datetime(2026, 11, 14, 22, 0)
+    fetch, calls = _fake_kite()
+    r = mb.run(now, fetch=fetch, tokens=TOKENS, max_calls=10000, symbols=MSYMS, log=lambda *a: None)
+    assert r["stopped"] is None
+    before = {str(p): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+              for p in sorted((b.minute / "bars").rglob("*.npz"))}
+    assert before
+    tokens = dict(TOKENS, NEWCO=21)
+    kw = {"symbols": MSYMS + ["NEWCO", "GONECO"]}
+    with patch.object(BM, "kite_tokens", lambda: dict(TOKENS)):
+        doc = BD.prepare_minute_universe(b, kw, token_fn=lambda names: {"NEWCO": 21} if "NEWCO" in names else {})
+    assert kw["tokens"] == tokens and doc["extra"] == ["NEWCO", "GONECO"] and doc["missing_on_kite"] == ["GONECO"]
+    assert doc["base"] == list(FS.UNIVERSE_STOCKS) and (b.minute / "universe.json").exists()
+    FS_TOK = {v: k for k, v in tokens.items()}
+    new_calls = []
+
+    def fetch_new(token, frm, to, interval):
+        new_calls.append((FS_TOK[token], interval))
+        if FS_TOK[token] == "NEWCO":
+            return fetch(TOKENS["INFY"], frm, to, interval)       # bars of the same shape
+        return fetch(token, frm, to, interval)
+    r = mb.run(now, fetch=fetch_new, tokens=kw["tokens"], max_calls=10000, symbols=kw["symbols"],
+               log=lambda *a: None)
+    assert r["stopped"] is None and "GONECO" in mb.state()["missing"]
+    after = {str(p): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+             for p in sorted((b.minute / "bars").rglob("*.npz")) if "/NEWCO/" not in str(p)}
+    assert after == before                                         # the existing files: not a byte, not a write
+    assert mb.store.load_symbol("NEWCO") is not None and len(list((b.minute / "bars" / "NEWCO").glob("*.npz")))
+    assert {sym for sym, iv in new_calls if iv == "minute"} == {"NEWCO"}, "only the added name is fetched"
+    assert len([1 for sym, iv in new_calls if iv == "minute"]) == len(BM.windows(now.date()))
+    # coverage / readiness of the added names (what the builder waits for before a NIFTY200 batch)
+    with patch.object(BD, "default_root", lambda: root):
+        ms = BU.minute_status(root, now)
+    assert ms["mode"] == "nifty200" and ms["added_names"] == ["NEWCO", "GONECO"] and ms["missing_on_kite"] == ["GONECO"]
+    assert ms["names_fetchable"] == 1 and ms["names_ready"] == 1 and ms["ready"] is True
+    assert ms["coverage"]["NEWCO"]["from"] == 20160101 and ms["coverage"]["GONECO"]["from"] is None
+    # the builder's server source resolves NIFTY100 / NIFTY200 from that file
+    from stratlab.builder_server_panels import ServerSource
+    ul = ServerSource(str(root)).universe_lists()
+    assert ul["base"] == ["INFY", "RELIANCE"] and "NEWCO" in ul["extra"] and ul["meta"]["source"] == "universe file"
+
+
+def test_fetch_index_saves_the_nifty200_list_separately():
+    root = _tmp()
+    b = BD.Builder(root)
+    body = b"Company Name,Industry,Symbol,Series,ISIN Code\nA Ltd.,X,AAA,EQ,INE1\n"
+
+    def fn(url):
+        if url.endswith("ind_nifty200list.csv"):
+            return "ok", body
+        return "missing", b""
+    net = FakeNet(fn)
+    st = b.state()
+    b.fetch_index(net.http(), st, date(2026, 11, 20), newest_only=True)
+    assert (root / "flow" / "raw" / "index" / "daily" / "NIFTY200" / "20261120.csv").read_bytes() == body
+    assert st["windows"]["index:daily200"]["status"] == "ok"
+    assert st["windows"]["index:daily"]["status"] == "error"            # the three lists keep their own window
+    assert not (root / "flow" / "raw" / "index" / "daily" / "NIFTY100").exists()
+
+
+def test_disk_projection_under_cap():
+    import builder_universe as BU
+    assert BD.DEFAULT_MAX_MB == 2600.0 and settings.builder_data_max_mb == 2600.0
+    caps = dict(BU.VOLUME_CAPS_MB, builder_data=BD.DEFAULT_MAX_MB)
+    assert sum(caps.values()) == 4524.0 <= BU.VOLUME_WORST_MAX_MB == 4600.0 <= BU.VOLUME_MB
+    root = _tmp()
+    # worst case: 105 current NIFTY 200 names + 32 historical NIFTY 100 members, all with full history from 2016
+    names = [f"N{k:03d}" for k in range(137)]
+    p = BU.projection(root / "minute", names, date(2026, 11, 16), cap_mb=2600.0, used_mb=1540.0)
+    assert p["how"].startswith("lab measurement") and 51.0 < p["kb_per_instrument_month"] < 52.5
+    assert p["months_per_instrument"] == 131 and 880 < p["to_fetch_mb_worst_case"] < 910
+    assert p["builder_data_after_backfill_mb_worst_case"] <= 2600.0 and p["volume"]["within_limit"]
+    # from the store itself once base instruments are stored
+    st = FS.Store(root / "minute", cap_root=root)
+    days = sessions(date(2025, 1, 1), 260)
+    t = np.arange(555, 555 + 375, dtype=np.int16)
+    z = {"date": np.repeat(np.array([d.year * 10000 + d.month * 100 + d.day for d in days], np.int32), 375),
+         "t": np.tile(t, len(days))}
+    px = 1000 + np.cumsum(np.random.default_rng(1).normal(0, 0.5, len(z["date"])))
+    z.update({"o": np.round(px, 2), "h": np.round(px + 0.5, 2), "l": np.round(px - 0.5, 2), "c": np.round(px, 2),
+              "v": np.full(len(px), 100.0)})
+    st.write_sessions("INFY", z)
+    p2 = BU.projection(root / "minute", names, date(2026, 11, 16))
+    assert p2["how"] == "measured on 1 stored base instruments" and p2["kb_per_instrument_month"] > 0
+    assert BU.store_sizes(root / "minute")["INFY"]["months"] >= 12
+
+
+def test_forward_lab_universe_untouched_by_the_minute_universe():
+    import forward_test
+    assert len(forward_test.UNIVERSE) == 97
+    assert list(FS.MINUTE_SYMBOLS) == list(forward_test.UNIVERSE) + ["_NIFTY50_min", "_NIFTYBANK_min"]
+    assert FL.file_sha256(FL.RULE_FILE) == FL.RULE_SHA256 == \
+        "2370ba69766d50de614cbe9049df9477258fa5b6a8ac364bd12eacf345f73468"
+    assert FL.load_rule()["groups"]["forward"]["initial_family_size"] == 1276
+
+    class K:
+        names: list = []
+
+        def get_instrument_tokens(self, names, exchange):
+            K.names = list(names)
+            return {}
+    FS.instrument_tokens(K())
+    assert set(K.names) == set(FS.UNIVERSE_STOCKS) | {"NIFTY 50", "NIFTY BANK", "INDIA VIX"}
+    src = inspect.getsource(FS)
+    assert "builder_universe" not in src and "nifty200" not in src.lower()
 
 
 def _resetting(f):

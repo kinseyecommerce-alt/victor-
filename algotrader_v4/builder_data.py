@@ -7,7 +7,9 @@ jobs return at once. PAPER only. Read-only towards trading: no order entry point
 imported, read or changed.
 
 LAYOUT (<root> = BUILDER_DATA_DIR, else <dir of PERFORMANCE_FILE>/builder_data — the Railway volume)
-  minute/       deep 1-minute bars 2016 -> (builder_minute.py; the forward lab's store format and reader)
+  minute/       deep 1-minute bars 2016 -> (builder_minute.py; the forward lab's store format and reader) of the
+                forward lab's 99 instruments + (BUILDER_MINUTE_UNIVERSE=nifty200, default) the added NIFTY 200 names
+                (builder_universe.py; universe.json lists them)
   nse/          NSE end-of-day archives 2012 -> in EXACTLY the layout stratlab/nsedata.py reads
                 (STRATLAB_NSE_DIR=<root>/nse STRATLAB_BARS_DIR=<root>/nse/bars and lab code runs unchanged):
       delivery.csv.gz            sec_bhavdata_full EQ rows (2020 ->), CM bhavcopy + MTO delivery file before 2020
@@ -49,7 +51,7 @@ SCHEDULE (IST, only with the flag on): NSE archives 23:05 and 05:30 daily (+ 10:
 inside 19:20-23:00 or 08:10-08:30 (the PEAD agent's 19:35-22:35 / 08:20 fetches from the same archive); Kite minute
 backfill 18:40 and 06:10 daily (+ 11:40 / 14:40 Sat-Sun), never 09:00-15:45 on a trading day.
 
-DISK: BUILDER_DATA_MAX_MB (default 1,800) for the whole <root>; measured as allocated blocks (symlinks not followed,
+DISK: BUILDER_DATA_MAX_MB (default 2,600) for the whole <root>; measured as allocated blocks (symlinks not followed,
 hard links counted once). At the cap nothing more is written (status "disk_cap"); nothing is ever deleted except the
 builder's own nse_view, which is rebuilt in place.
 Measured from the lab's scratch copies (2026-11, allocated blocks), full backfill 2012-01 .. 2026-11:
@@ -61,6 +63,12 @@ Measured from the lab's scratch copies (2026-11, allocated blocks), full backfil
   filing feeds + results / board meetings, deals, corporate actions, index files               ~50 MB   (+3 MB/yr)
   nse_view (400-session delivery file + nsedata's .npz cache: 332 MB per 753 sessions)        ~210 MB  (flat)
   total ~1.54 GB at the end of the backfill, ~115 MB a year after -> the 1.8 GB cap in ~2 years (then it stops).
+NIFTY 200 minute universe (builder_universe.py, 2026-11): ~105 current NIFTY 200 names + ~32 historical NIFTY 100
+members since 2016 (some not on Kite) at the same ~6.7 MB per instrument for 2016-01 .. 2026-11            <= ~920 MB
+  (worst case: every added name with full history; recent listings have less)                              (+90 MB/yr)
+  total worst case ~2.46 GB at the end of the backfill, ~205 MB a year after -> cap 2,600 MB. Volume (5,000 MB) worst
+  case = forward lab 500 + option-bar archiver 1,024 + builder 400 + builder data 2,600 = 4,524 MB (<= 4,600).
+  GET /api/v2/builder/data -> datasets.minute.universe.projection re-measures it from the store itself.
 """
 from __future__ import annotations
 
@@ -91,7 +99,7 @@ TIMEOUT_S = 30
 REFUSAL_STRIKES = 3
 REFUSAL_BACKOFF_H = 24
 MAX_FAILURES = 12                   # failed requests in a row (after retries) that end a run
-DEFAULT_MAX_MB = 1800.0
+DEFAULT_MAX_MB = 2600.0              # 1,800 before the NIFTY 200 minute universe (builder_universe.py)
 ARCHIVE = "https://nsearchives.nseindia.com"
 SITE = "https://www.nseindia.com"
 # the lab's build_delivery aliases (historic NSE symbol -> bars3y name)
@@ -1008,6 +1016,19 @@ class Builder:
                 else:
                     ok = False
             st["windows"]["index:daily"] = {"status": "ok" if ok else "error", "at": ymd(today) if ok else 0}
+        # the NIFTY 200 list (builder_universe.py: the minute store's added names); kept raw only (the membership
+        # files stay NIFTY 50 / NEXT 50 / 100), its own window so a failure never touches the three lists above
+        rec = st["windows"].get("index:daily200") or {}
+        if int(rec.get("at", 0)) < ymd(today):
+            status, body = http.get(f"{ARCHIVE}/content/indices/ind_nifty200list.csv")
+            did = True
+            ok = status == "ok" and b"Symbol" in body[:400]
+            if ok:
+                dd = self.flow / "raw" / "index" / "daily" / "NIFTY200"
+                prev = sorted(dd.glob("*.csv")) if dd.exists() else []
+                if not prev or prev[-1].read_bytes() != body:
+                    self.write(dd / f"{ymd(today)}.csv", body)
+            st["windows"]["index:daily200"] = {"status": "ok" if ok else str(status), "at": ymd(today) if ok else 0}
         # NSE Indices' month-end constituent + weight files (mcwb), niftyindices.com then nsearchives
         ms = self.months(NSE_START, today.replace(day=1) - timedelta(days=1))
         for s, e, tag in (reversed(ms[-1:]) if newest_only else reversed(ms)):
@@ -1598,17 +1619,30 @@ class Builder:
         out["events"]["mb"] = mb(self.events)
         out["index_membership"]["mb"] = mb(self.flow / "index_membership", self.flow / "raw" / "index")
         # minute bars
+        import builder_universe as BU
         mbf = BM.MinuteBackfill(self.minute)
         mst = mbf.state()
-        prog = mbf.progress(mst, today, now=now)
+        msyms = BU.minute_symbols(BU.mode(), self.root)
+        prog = mbf.progress(mst, today, symbols=msyms, now=now)
         mfiles = sum(1 for _ in (self.minute / "bars").rglob("*.npz")) if (self.minute / "bars").exists() else 0
         out["minute"] = {"from": prog["from"], "to": prog["to"], "rows": None, "files": mfiles,
                          "mb": mb(self.minute), "progress_pct": prog["progress_pct"],
                          "windows_final": prog["windows_final"], "windows_total": prog["windows_total"],
-                         "source": "Kite historical_data 1-minute (97 stocks + NIFTY 50 + NIFTY BANK), daily "
+                         "source": f"Kite historical_data 1-minute ({len(msyms) - 2} stocks, BUILDER_MINUTE_UNIVERSE="
+                                   f"{BU.mode()}: the 97 + the added NIFTY 200 names, + NIFTY 50 + NIFTY BANK), daily "
                                    "NIFTY 50 / INDIA VIX", "missing_symbols": mst.get("missing", []),
                          "last_update": (mst.get("last_run") or {}).get("finished"),
                          "last_error": (mst.get("last_error") or {}).get("error")}
+        try:
+            uni = BU.minute_status(self.root, now)
+            uni["projection"] = BU.projection(self.minute, uni["added_names"], today,
+                                              cap_mb=round(max_bytes() / 1048576, 1),
+                                              used_mb=disk_bytes(self.root) / 1048576)
+            uni["kite_calls_to_backfill"] = sum(len(mbf.pending(mst, n, today, now)) for n in uni["added_names"]
+                                                if n not in set(uni["missing_on_kite"]))
+            out["minute"]["universe"] = uni
+        except Exception as exc:
+            out["minute"]["universe"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
         out["nse_view"] = {"from": None, "to": None, "rows": None, "files": len(list(self.view.rglob("*")))
                            if self.view.exists() else 0, "mb": mb(self.view), "progress_pct": None,
                            "source": f"last {VIEW_SESSIONS} sessions of nse/ (forward-lab engine + nsedata cache)"}
@@ -1676,7 +1710,27 @@ def minute_job(now: Optional[datetime] = None, root=None, **kw) -> dict:
     kw.setdefault("clock", lambda: ist_clock.now_ist().replace(tzinfo=None))
     kw.setdefault("market_hours", in_market_hours)
     kw.setdefault("lock", lock)
+    prepare_minute_universe(b, kw)
     return BM.MinuteBackfill(b.minute).run(now, cap_check=cap, **kw)
+
+
+def prepare_minute_universe(b: "Builder", kw: dict, token_fn: Optional[Callable] = None) -> dict:
+    """BUILDER_MINUTE_UNIVERSE: the instrument list of this run (the forward lab's 99 first, unchanged, then the added
+    NIFTY 200 names, builder_universe.py), their Kite tokens (names Kite does not list are recorded as missing) and
+    <minute>/universe.json. Sets kw["symbols"] / kw["tokens"] unless the caller gave them."""
+    import builder_minute as BM
+    import builder_universe as BU
+    m = BU.mode()
+    syms = kw.get("symbols") or BU.minute_symbols(m, b.root)
+    if kw.get("tokens") is None:
+        tok = dict(BM.kite_tokens())
+        extra = [s for s in syms if s not in tok and not s.startswith("_")]
+        if extra:
+            tok.update((token_fn or BU.kite_tokens)(extra))
+        kw["tokens"] = tok
+    kw["symbols"] = list(syms)
+    missing = [s for s in syms if not kw["tokens"].get(s)]
+    return BU.write_universe_file(b.minute, missing=missing, root=b.root, m=m, symbols=kw["symbols"])
 
 
 _API_CACHE: dict = {}

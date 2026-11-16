@@ -323,7 +323,10 @@ class Batch:
                         "reference_daily": [round(x, 2) for x in ref],
                         "placebo": {"n": n, "long_share": round(ls, 3), "p95": p95, "median": float(np.median(nets))
                                     if nets else None, "actual": actual}, "gates": gates,
-                        "proven": all(gates.values())}
+                        "proven": all(gates.values()),
+                        # the universe as resolved on the frozen data: a promoted strategy trades exactly these names
+                        # in its forward family (None = no stock universe / TOP500 = no filter)
+                        "universe": c.stock_universe, "universe_names": self.E.frozen_names(c)}
             self.log(f"[builder {self.id}] proof {cid}: DSR {d['dsr']:.3f} placebo {actual:,.0f} vs p95 {p95:,.0f} "
                      f"-> {'PROVEN' if out[cid]['proven'] else 'not proven'}")
         _jsave(path, out)
@@ -359,7 +362,7 @@ class Batch:
                         stage = "proven" if prf.get(cid, {}).get("proven") else "final_confirmed"
             j = d["judge"]
             rows.append({"id": cid, "agent": c.agent, "mtype": c.mtype, "block": c.block, "key": c.key,
-                         "text": G.describe(c), "stage": stage,
+                         "universe": c.stock_universe, "text": G.describe(c), "stage": stage,
                          "discovery": {"trades": j["disc"]["trades"], "pf": j["disc"]["pf"], "net": j["disc"]["net"],
                                        "h1": j["h1"]["net"], "h2": j["h2"]["net"], "why": j["why"],
                                        "dsr": sel["dsr"][cid]["dsr"], "sr_daily": d["series"]["sr_daily"],
@@ -386,4 +389,13 @@ class Batch:
                 "n_disc": sel["n_disc"], "n_proof": n_proof, "v": sel["v"], "v_mad": sel["v_mad"],
                 "v_floor": sel["v_floor"], "best_discovery_dsr": {"id": best["id"], "dsr": best["discovery"]["dsr"]},
                 "planted": planted, "cells": cells, "rows": rows, "seconds": round(secs, 1),
-                "engine_stats": self.E.stats}
+                "engine_stats": self.E.stats, "universes": self.universes()}
+
+    def universes(self) -> dict:
+        """What each universe resolved to on the batch's frozen data (+ the frozen name list of every proven
+        candidate's universe, which its forward family entry trades)."""
+        rep = self.E.universe_report()
+        rep["counts"] = {}
+        for _cid, c in self.cands:
+            rep["counts"][c.stock_universe] = rep["counts"].get(c.stock_universe, 0) + 1
+        return rep

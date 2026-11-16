@@ -9,6 +9,11 @@ and its 1,276-strategy family are not touched; forward_lab.daily_job only calls 
 Read-only towards trading: no order entry point, agent, risk or trading state is imported, read or changed. 'ready'
 (QUALIFIED, consistent, not demoted) is a flag for a human; nothing reads it to trade.
 
+Data: the builder DATA LAYER's files (stratlab.builder_server_panels.ServerSource, BUILDER_DATA_DIR) cut at the day,
+never the forward lab's own 97-name store: its minute store holds every name of the NIFTY 200 extension. A strategy
+proven under builder/v2 is registered with its universe's frozen names ("universe_names") and trades exactly those;
+one without (builder/v1) trades its implicit universe (the 97 on the minute grid, the top 500 on the daily grid).
+
 Layout <builder root>/forward/: registry.jsonl (genesis, register, run, look, status), ledgers/<id>.jsonl (genesis +
 one "day" record per session with closed trades), status.json.
 """
@@ -111,6 +116,9 @@ class BuilderForward:
         if new:
             rows = [{"id": s["id"], "batch": s["batch"], "cand": s["cand"], "fingerprint": s["fingerprint"],
                      "reference": s["reference"]} for s in new]
+            for r, s in zip(rows, new):
+                if s.get("universe_names"):            # the universe frozen at the proof (builder/v2 candidates)
+                    r["universe_names"] = list(s["universe_names"])
             self.registry.append("register", {"registered_on": int(first_day), "strategies": rows,
                                               "family_size_after": len(st["family"]) + len(rows)})
             for s in rows:
@@ -247,7 +255,9 @@ def forward_trades(root: str, data_root: Optional[str], day: int, source: str = 
     E.cache_dir = str(builder.cache_dir())
     jobs = []
     for sid, s in st["strategies"].items():
-        jobs.append(BE.Job(sid, G.Candidate.from_json(s["cand"]), None, int(s["registered_on"]) + 1, int(day), False))
+        names = tuple(s["universe_names"]) if s.get("universe_names") else None
+        jobs.append(BE.Job(sid, G.Candidate.from_json(s["cand"]), None, int(s["registered_on"]) + 1, int(day), False,
+                           names=names))
     res = BE.run_jobs(E, jobs) if jobs else {}
     cal = sorted(set(int(x) for x in E.dcal) & set(int(x) for x in E.mcal))
     return {"day": int(day), "calendar": [d for d in cal if d <= int(day)],

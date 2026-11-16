@@ -93,7 +93,10 @@ def test_grammar_determinism():
     assert [c.key for c in a] == [c.key for c in b]
     c = G.draw_batch("0008", set())
     assert [x.key for x in a] != [x.key for x in c]
-    assert G.grammar_sha256() == json.loads((HERE / "builder_rule.json").read_text())["grammar"]["sha256"]
+    # each frozen rule pins its own grammar version (bg1 unchanged byte for byte next to bg2)
+    assert G.grammar_sha256("bg1") == json.loads((HERE / "builder_rule.json").read_text())["grammar"]["sha256"]
+    assert G.grammar_sha256("bg2") == json.loads((HERE / "builder_rule_v2.json").read_text())["grammar"]["sha256"]
+    assert G.grammar_sha256() == G.grammar_sha256("bg2") and G.GRAMMAR_VERSION == "bg2"
 
 
 def test_no_retest_across_batches():
@@ -139,7 +142,7 @@ def test_plain_english_from_grammar():
 # rule, splits, market types
 # ══════════════════════════════════════════════════════════════════════════
 def test_rule_frozen_and_pinned():
-    r = B.load_rule()
+    r = B.load_rule(B.RULE_FILE)                                   # builder/v1 stays valid and pinned
     assert r["_sha256"] == B.RULE_SHA256 == hashlib.sha256((HERE / "builder_rule.json").read_bytes()).hexdigest()
     assert r["carry"]["K_per_cell"] == 3 and r["dsr"]["min"] == 0.95 and r["dsr"]["lab_trials_count"] == 2552
     assert r["splits"]["validation_months_before_end"] == 24 and r["splits"]["final_months_before_end"] == 12
@@ -337,6 +340,10 @@ def test_batch_end_to_end_and_n_accounting():
     assert s["n_disc"] == lab + 20 and s["n_proof"] == s["n_disc"] + s["final_looks"]
     for a in G.AGENTS:
         assert f"gate_{a}" in s["planted"]
+    # a builder/v2 batch: every row carries its universe; the batch records what each universe resolved to
+    assert s["rule_version"] == "builder/v2" and all(r["universe"] in G.UNIVERSES for r in s["rows"])
+    assert s["universes"]["NIFTY100"]["n"] == 4 and s["universes"]["NIFTY200"]["added_complete"] == []
+    assert sum(s["universes"]["counts"].values()) == 20
     out = b.ingest(rec["batch"], s)
     st = b.state()
     assert st["evaluated"] == 420 and st["n_used"] == s["n_proof"]
@@ -432,7 +439,7 @@ def test_promotion_only_for_proven_and_forward_family():
     assert st["strategies"][pid]["registered_on"] == 20261109
     ns = {}
     exec(compile(gen, "builder_gen.py", "exec"), ns)
-    assert ns["SPECS"][0]["id"] == pid and ns["RULE_SHA256"] == B.RULE_SHA256
+    assert ns["SPECS"][0]["id"] == pid and ns["RULE_SHA256"] == B.CURRENT_RULE_SHA256 == B.RULE_SHA256_V2
 
 
 def test_forward_family_rule_and_v1_untouched():
@@ -641,12 +648,12 @@ def test_seed_file_pinned_and_consistent():
     assert sd["_sha256"] == B.SEED_SHA256 == hashlib.sha256(B.SEED_FILE.read_bytes()).hexdigest()
     assert sd["batch"] == "0001" and sd["n_candidates"] == 400 == len(sd["candidates"])
     assert sd["frozen_hash"].startswith("f506bc18") and sd["rule_sha256"] == B.RULE_SHA256
-    assert sd["grammar_sha256"] == G.grammar_sha256()
+    assert sd["grammar_sha256"] == G.grammar_sha256("bg1")
     assert sd["n_used_after"] == SEED_N == 2970
     assert len(sd["final_looks"]) == 2 and not any(f["confirmed"] for f in sd["final_looks"])
     assert sd["development_evaluations"]["count"] == B.load_rule()["dsr"]["development_evaluations"] == 16
-    # the 400 keys are exactly batch 0001's draw (deterministic grammar)
-    assert [c["key"] for c in sd["candidates"]] == [c.key for c in G.draw_batch("0001", set())]
+    # the 400 keys are exactly batch 0001's bg1 draw (deterministic grammar; bg1 is kept byte for byte)
+    assert [c["key"] for c in sd["candidates"]] == [c.key for c in G.draw_batch("0001", set(), version="bg1")]
 
 
 def test_seed_import_idempotent():
@@ -868,6 +875,292 @@ def test_regression_forward_registration_retried():
                        today=20261120)
         regs = [r for r in BF.BuilderForward(b.root / "forward").registry.records() if r["kind"] == "register"]
         assert len(regs) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# builder/v2: the stock UNIVERSE as a grammar dimension (bg2), N continuity, wider universe in promotion / forward
+# ══════════════════════════════════════════════════════════════════════════
+def uni_root() -> str:
+    """A synthetic tree with a NIFTY200 extension: base SYN00-02, added SYN03-07; SYN03 has complete minute data,
+    SYN04-07 start in 2025 (incomplete). Four of eight names without bars would make every earlier session 'special'
+    if the special-session rule looked at all names."""
+    if "uroot" not in _SYN:
+        root = os.path.join(_TMP, "data_uni")
+        late = {f"SYN0{k}": 20250602 for k in range(4, 8)}
+        SP.make_synthetic_tree(root, start=20230102, end=20261109, n_stocks=8, seed=7, n_extra=5, late=late)
+        _SYN["uroot"] = root
+    return _SYN["uroot"]
+
+
+def uni_engine():
+    if "uE" not in _SYN:
+        E = BE.Engine(SP.ServerSource(uni_root()))
+        E.cache_dir = os.path.join(_TMP, "cache")
+        _SYN["uE"] = E
+    return _SYN["uE"]
+
+
+def _v1_drawn() -> set:
+    """Every bg1 key a server registry holds after the seed and one v1 batch (0002)."""
+    seed = {c["key"] for c in B.load_seed()["candidates"]}
+    return seed | {c.key for c in G.draw_batch("0002", seed, version="bg1")}
+
+
+def test_bg2_never_redraws_a_v1_key():
+    drawn = _v1_drawn()
+    v1 = set(drawn)
+    for bid in ("0003", "0004", "0005"):
+        b = G.draw_batch(bid, drawn, version="bg2")
+        assert len(b) == 400 and all(c.version == "bg2" and c.universe for c in b)
+        cells = {}
+        for c in b:
+            cells[c.cell] = cells.get(c.cell, 0) + 1
+            assert c.key not in drawn, "a key of an earlier batch was drawn again"
+            assert c.v1_key is None or c.v1_key not in v1, "the bg1 twin of a v1-drawn sentence was drawn again"
+            assert c.key not in v1 and not c.key.startswith('["bg1"')
+        assert set(cells.values()) == {20} and len(cells) == 20
+        drawn |= {c.key for c in b}
+    # bg1 keys are unchanged byte for byte (seed rows), a bg1 candidate's JSON carries no universe
+    sd = B.load_seed()
+    c1 = G.draw_batch("0001", set(), version="bg1")
+    assert [c.key for c in c1] == [r["key"] for r in sd["candidates"]]
+    assert all("universe" not in c.to_json() and c.v1_key == c.key for c in c1)
+    # a bg2 twin of a v1 sentence IS that sentence: excluded once the bg1 key was drawn
+    twin = G.Candidate.from_json({**c1[0].to_json(), "universe": c1[0].stock_universe})
+    assert twin.v1_key == c1[0].key and not G.never_drawn(twin, {c1[0].key})
+    wide = G.Candidate.from_json({**c1[0].to_json(), "universe": "NIFTY200"})
+    assert wide.v1_key is None and G.never_drawn(wide, {c1[0].key}) and wide.key != twin.key
+
+
+def test_universe_dimension_deterministic():
+    drawn = _v1_drawn()
+    a = G.draw_batch("0009", drawn, version="bg2")
+    b = G.draw_batch("0009", drawn, version="bg2")
+    assert [c.key for c in a] == [c.key for c in b]
+    assert [c.key for c in a] != [c.key for c in G.draw_batch("0010", drawn, version="bg2")]
+    us = {c.universe for c in a}
+    assert {"NIFTY100", "NIFTY200", "INDEX"} <= us, us
+    for c in a:
+        assert c.universe in G.universes_for(c.agent, c.block, c.instrument)
+        if c.grid in ("minute", "prev_eod"):
+            assert c.universe in ("NIFTY100", "NIFTY200")
+        if c.instrument != "STOCKS":
+            assert c.universe == "INDEX"
+    for x in a:                                       # the universe is a near-duplicate field
+        for y in a:
+            assert x is y or not G.near_duplicate(x, y)
+    assert G.grammar_sizes("bg2")["intraday"] == 2 * G.grammar_sizes("bg1")["intraday"]
+    assert G.grammar_sizes("bg2")["swing"] == 3 * G.grammar_sizes("bg1")["swing"]
+    assert G.grammar_sizes("bg2")["options"] == G.grammar_sizes("bg1")["options"]
+    # the widened proven rules are ordinary bg2 sentences: in the grammar, NIFTY200, no bg1 twin (no inherited proof)
+    pool = {c.key for a_ in G.AGENTS for m in G.MARKET_TYPES for c in G.cell_grammar(a_, m, "bg2")}
+    tw = G.proven_rule_twins()
+    assert len(tw) == 12 and all(t.key in pool and t.universe == "NIFTY200" and t.v1_key is None for t in tw)
+    assert all("NIFTY 200" in G.describe(t) for t in tw)
+    import inspect
+    assert "proven_rule_twins" not in inspect.getsource(G.draw_batch)       # the draw never special-cases them
+
+
+def test_nifty200_minute_candidates_use_only_complete_names():
+    import dataclasses
+    E = uni_engine()
+    M = E.ctx.minute
+    names = lambda rows: sorted(M.syms[i] for i in rows)
+    assert names(E.universe_rows("NIFTY100")) == ["SYN00", "SYN01", "SYN02"]
+    assert names(E.universe_rows("NIFTY200")) == ["SYN00", "SYN01", "SYN02", "SYN03"]
+    rep = E.universe_report()
+    assert rep["NIFTY200"]["added_complete"] == ["SYN03"]
+    assert rep["NIFTY200"]["added_incomplete"] == ["SYN04", "SYN05", "SYN06", "SYN07"]
+    # special sessions come from the base names only: the four late names never make 2023-24 'special'
+    assert not any(d < 20250602 for d in M.special), sorted(M.special)[:5]
+    base = G.Candidate("intraday", "RISING", "gap_fade", (("g", 0.01), ("mode", "fade_day")), "o0915",
+                       ("time", "o1515"), "STOCKS", "mis", "", "NIFTY200")
+    seen = {}
+    for u, want in (("NIFTY200", {"SYN00", "SYN01", "SYN02", "SYN03"}), ("NIFTY100", {"SYN00", "SYN01", "SYN02"}),
+                    ("", {"SYN00", "SYN01", "SYN02"})):
+        got = set()
+        for mt in G.MARKET_TYPES:
+            c = dataclasses.replace(base, mtype=mt, universe=u)
+            sig = E.signals(c)
+            got |= {M.syms[s] for s in sig["s"].tolist()}
+            tr = BE.run_jobs(E, [BE.Job("x", c, None, 0, 20261109, False)])["x"]["trades"]
+            assert {t[1] for t in tr} <= want, ({t[1] for t in tr}, u)
+            es, _et = E.eligible(c, 0, 20261109)
+            assert {M.syms[s] for s in es.tolist()} <= want
+        assert got <= want and got, (u, got)
+        seen[u] = got
+    assert "SYN03" in seen["NIFTY200"]                 # the complete added name trades on NIFTY200 only
+    # daily grid: TOP500 = no filter; NIFTY100 / NIFTY200 = the base / base + added names (no minute completeness)
+    sw = G.Candidate("swing", "RISING", "deliv_up", (("pp", 15.0), ("day", "up")), "next_open", ("hold", 5), "STOCKS",
+                     "cnc/fut", "", "TOP500")
+    assert E.row_mask(sw) is None and E.row_mask(dataclasses.replace(sw, universe="")) is None
+    m100 = E.row_mask(dataclasses.replace(sw, universe="NIFTY100"))
+    m200 = E.row_mask(dataclasses.replace(sw, universe="NIFTY200"))
+    dn = E.ctx.daily.syms
+    assert {s for s, k in zip(dn, m100) if k} == {"SYN00", "SYN01", "SYN02"}
+    assert {s for s, k in zip(dn, m200) if k} == {f"SYN0{k}" for k in range(8)}
+    # a frozen name list (forward runs) overrides the resolution
+    c = dataclasses.replace(base, mtype="RISING")
+    sig = E.signals(c, names=("SYN01",))
+    assert {M.syms[s] for s in sig["s"].tolist()} <= {"SYN01"}
+
+
+def test_n_continuity_v1_to_v2_and_v1_batch_evaluated_under_v1():
+    root = os.path.join(_TMP, "upgrade")
+    shutil.rmtree(root, ignore_errors=True)
+    v1 = B.Builder(root, B.load_rule(B.RULE_FILE))
+    src = syn_source()
+    r1 = v1.freeze(src.snapshot(), per_cell=1)                  # a builder/v1 batch (bg1) left pending
+    assert r1["batch"] == "0002" and r1["generator"]["grammar_version"] == "bg1" and r1["n_before"] == SEED_N
+    keys1 = {c["key"] for c in json.loads(v1.candidates_path("0002").read_text())["candidates"]}
+    v2 = B.Builder(root)                                        # the deploy: the current rule is builder/v2
+    assert v2.rule["version"] == "builder/v2"
+    v2.ensure_genesis()                                         # the weekly job's first step: the upgrade record
+    st = v2.state()
+    assert st["rules"] == [B.RULE_SHA256, B.RULE_SHA256_V2]
+    up = st["upgrades"][0]
+    assert up["n_used_before"] == SEED_N and up["evaluated_before"] == 400 and up["batches_before"] == 2
+    assert up["final_looks_before"] == 2 and up["from_version"] == "builder/v1" and up["grammar_version"] == "bg2"
+    # the pending v1 batch is resumed first and evaluated under builder/v1 (its own rule); it counts in N
+    import builder_run
+    s = builder_run.evaluate(root, "0002", "synthetic", syn_root(), jobs=1, log=lambda m: None)
+    assert s["rule_version"] == "builder/v1" and s["n_disc"] == SEED_N + 20
+    v2.ingest("0002", s)
+    st = v2.state()
+    assert st["evaluated"] == 420 and v2.n_base(st) == 2552 + 16 + 420 + st["final_looks"]
+    assert st["batches"]["0002"]["frozen_hash"] == r1["frozen_hash"]                  # v1 records never rewritten
+    # N continues: the first v2 batch starts from the seed's 400 + the v1 batch's 20 + every FINAL look so far
+    r2 = v2.freeze({"source": "test", "end": 20261109}, per_cell=1)
+    assert r2["batch"] == "0003" and r2["generator"]["grammar_version"] == "bg2" and r2["rule_version"] == "builder/v2"
+    assert r2["n_before"] == SEED_N + 20 + st["final_looks"] - 2 == v2.n_base(st)
+    keys2 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v2.candidates_path("0003").read_text())["candidates"]]
+    seed = {c["key"] for c in B.load_seed()["candidates"]}
+    assert all(c.key not in keys1 | seed and (c.v1_key is None or c.v1_key not in keys1 | seed) for c in keys2)
+    # the registry moved on: a builder/v1 object can no longer freeze; the chain verifies; N never shrinks
+    try:
+        B.Builder(root, B.load_rule(B.RULE_FILE)).freeze({"source": "test", "end": 1}, per_cell=1)
+        raise AssertionError("a v1 builder must not freeze on a registry upgraded to v2")
+    except B.RuleChanged:
+        pass
+    assert v2.registry.verify()["ok"]
+    assert [r["kind"] for r in v2.registry.records()].count("rule_upgrade") == 1
+    B.Builder(root).ensure_genesis()                            # idempotent
+    assert [r["kind"] for r in v2.registry.records()].count("rule_upgrade") == 1
+    assert B.api_status(root)["n_used"] >= up["n_used_before"]
+    # a fresh registry starts directly under v2 (genesis + seed, no upgrade record)
+    fresh = new_builder("fresh_v2")
+    fresh.ensure_genesis()
+    assert [r["kind"] for r in fresh.registry.records()] == ["genesis", "seed"]
+    assert fresh.state()["genesis"]["grammar_version"] == "bg2"
+
+
+def test_rule_v2_pinned_and_v1_unchanged():
+    r1, r2 = B.load_rule(B.RULE_FILE), B.load_rule()
+    assert r1["_sha256"] == B.RULE_SHA256 == "a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06"
+    assert r2["_sha256"] == B.RULE_SHA256_V2 == hashlib.sha256((HERE / "builder_rule_v2.json").read_bytes()).hexdigest()
+    assert r2["version"] == "builder/v2" and r2["supersedes"]["sha256"] == B.RULE_SHA256
+    for k in ("splits", "costs", "discovery_gates", "carry", "validation", "final", "controls", "proven", "freeze"):
+        assert r1[k] == r2[k], k                              # only the grammar (universe) changed
+    for k in ("min", "lab_trials_count", "development_evaluations", "formula", "V"):
+        assert r1["dsr"][k] == r2["dsr"][k], k
+    assert r2["batch"]["per_cell"] == 20 and r2["batch"]["size"] == 400
+    assert set(r2["grammar"]["universes"]) >= {"NIFTY100", "NIFTY200", "TOP500", "INDEX"}
+    tmp = Path(_TMP) / "rule_v2_edit.json"
+    tmp.write_text((HERE / "builder_rule_v2.json").read_text().replace('"min": 0.95', '"min": 0.90'))
+    try:
+        B.load_rule(tmp)
+        raise AssertionError("an edited v2 rule must be refused")
+    except B.RuleChanged:
+        pass
+    assert B.rule_by_sha(B.RULE_SHA256)["version"] == "builder/v1"
+
+
+def test_promotion_and_forward_of_a_nifty200_strategy():
+    """A NIFTY200 candidate proven on the batch's data is promoted like any other; its forward entry trades the
+    universe frozen at the proof, read from the builder data layer's minute store (which holds the added names)."""
+    import dataclasses
+    E = uni_engine()
+    c = G.Candidate("intraday", "RISING", "gap_fade", (("g", 0.01), ("mode", "fade_day")), "o0915",
+                    ("time", "o1515"), "STOCKS", "mis", "", "NIFTY200")
+    frozen = E.frozen_names(c)
+    assert frozen == ["SYN00", "SYN01", "SYN02", "SYN03"]
+    with patch.object(settings, "builder_enabled", True):
+        b = new_builder("promo200")
+        rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
+        doc = json.loads(b.candidates_path(rec["batch"]).read_text())
+        doc["candidates"][0]["cand"] = c.to_json()                 # (test fixture: the first row is our candidate)
+        doc["candidates"][0]["key"] = c.key
+        b.candidates_path(rec["batch"]).write_text(B.canon(doc))
+        s = _fake_proven_summary(b, rec["batch"])
+        s["rows"][0]["proof"]["universe_names"] = frozen
+        s["windows"]["T"] = 20250101                               # registered on 2025-01-01: a forward year
+        b.ingest(rec["batch"], s)
+    pid = s["proven"][0]
+    pr = b.state()["promoted"][0]
+    assert pr["universe"] == "NIFTY200" and pr["universe_names"] == frozen and pr["forward_registered"]
+    fw = BF.BuilderForward(b.root / "forward")
+    assert fw.state()["strategies"][pid]["universe_names"] == frozen
+    gen = (b.root / "catalog" / "builder_gen.py").read_text()
+    assert '"universe": "NIFTY200"' in gen and "SYN03" in gen
+    from stratlab import builder_catalog as BC
+    spec = BC.load(str(b.root / "catalog" / "builder_gen.py"))[0]
+    assert spec.names == tuple(frozen) and spec.cand.universe == "NIFTY200"
+    # the forward step (builder data layer's store) trades exactly the frozen names, the added SYN03 included
+    res = BF.forward_trades(str(b.root / "forward"), uni_root(), 20261109, source="server")
+    syms = {t[1] for t in res["trades"][pid]}
+    assert syms and syms <= set(frozen), syms
+    E2 = BE.Engine(SP.ServerSource(uni_root()))
+    every = set()
+    for mt in G.MARKET_TYPES:
+        every |= {t[1] for t in BE.run_jobs(E2, [BE.Job("y", dataclasses.replace(c, mtype=mt), None, 20250101,
+                                                        20261109, False)])["y"]["trades"]}
+    assert "SYN03" in every
+
+
+def test_api_shows_universes():
+    b = new_builder("api_uni")
+    rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
+    st = B.api_status(b.root)
+    assert st["rule_version"] == "builder/v2" and st["grammar_version"] == "bg2"
+    assert [r["version"] for r in st["rules"]] == ["builder/v1", "builder/v2"]
+    assert set(st["universes"]["choices"]) == {"NIFTY100", "NIFTY200", "TOP500", "INDEX"}
+    row = [r for r in st["batches"] if r["id"] == rec["batch"]][0]
+    assert row["rule_version"] == "builder/v2" and sum(row["universes"].values()) == 20
+    seed_row = [r for r in st["batches"] if r["id"] == "0001"][0]
+    assert seed_row["rule_version"] == "builder/v1" and sum(seed_row["universes"].values()) == 400
+    assert all("universes" in g for g in st["grid"])
+    assert sum(u["candidates"] for g in st["grid"] for u in g["universes"].values()) == 420
+    d = B.api_batch(rec["batch"], b.root)
+    assert all(c["universe"] in G.UNIVERSES and c["universe_explicit"] for c in d["candidates"])
+    assert d["rule_version"] == "builder/v2" and sum(sum(v.values()) for v in d["cell_universes"].values()) == 20
+
+
+def test_new_batches_wait_for_the_minute_universe():
+    d = _data_copy("data_wait")
+    with patch.dict(os.environ, {"BUILDER_DATA_DIR": d}):
+        b = new_builder("wait")
+        assert B.data_wait_reason(b, "server") is None             # synthetic tree: universe file, nothing to add
+        p = Path(d) / "minute" / "universe.json"
+        u = json.loads(p.read_text())
+        p.write_text(json.dumps({**u, "extra": ["NEWCO"]}))         # an added name not backfilled yet
+        assert "0/1 names" in (B.data_wait_reason(b, "server") or "")
+        assert B.data_wait_reason(b, "lab") is None                 # (only the server's data layer is waited for)
+        assert B.data_wait_reason(B.Builder(b.root, B.load_rule(B.RULE_FILE)), "server") is None   # bg1: no wait
+        with patch.object(settings, "builder_minute_universe", "nifty100"):
+            assert "nifty100" in (B.data_wait_reason(b, "server") or "")
+        p.unlink()
+        assert B.data_wait_reason(b, "server")                      # no minute run under the new data layer yet
+        with patch.object(settings, "builder_enabled", True):
+            s = B.weekly_job(now=_sat(), root=b.root, source="server")
+        assert s["status"] == "waiting_data" and "batch" not in s, s
+        assert list(B.Builder(b.root).state()["batches"]) == ["0001"]            # nothing frozen, nothing counted
+
+
+def test_flag_defaults_unchanged():
+    from config import Settings
+    s = Settings(_env_file=None)
+    assert s.builder_enabled is False and s.builder_data_enabled is False and s.forward_lab_enabled is False
+    assert s.builder_minute_universe == "nifty200" and s.builder_data_max_mb == 2600.0 and s.builder_max_mb == 400.0
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]

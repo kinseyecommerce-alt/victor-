@@ -69,6 +69,9 @@ def write_bundle(src, dest: str, log=None) -> dict:
            "vix_c": P.vix["c"], "excl": json.dumps({str(k): v.tolist() for k, v in P.excl.items()}),
            "msyms": np.array(M.syms, dtype=object), "mcal": M.cal, "special": np.array(sorted(M.special), np.int64),
            "dirty": json.dumps({str(k): v.tolist() for k, v in M.dirty.items()})}
+    ul = getattr(src, "universe_lists", None)
+    if ul is not None:                     # the universe lists the engine resolves NIFTY100 / NIFTY200 from
+        arr["universe"] = json.dumps(ul(), sort_keys=True, default=str)
     for k in DAILY_KEYS:
         arr["d_" + k] = getattr(P, k)
     for k in MIN_FIELDS:
@@ -180,8 +183,14 @@ class BundleSource:
             ctx._c["m:pre"] = z["f_pre"]
             ctx._c["m:exp"] = json.loads(str(z["f_exp"]))
             self._nd = ({k: z["nd_" + k] for k in ("date", "o", "h", "l", "c")} if "nd_date" in z.files else None)
+            self._ul = json.loads(str(z["universe"])) if "universe" in z.files else None
             self._ctx = ctx
         return self._ctx
+
+    def universe_lists(self):
+        """As frozen with the batch (a bundle written before the bg2 data layer has none: every stock is base)."""
+        self.ctx()
+        return self._ul
 
     def nifty_daily(self):
         self.ctx()

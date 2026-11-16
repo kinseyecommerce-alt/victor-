@@ -27,6 +27,15 @@ EXECUTION
                minute grid, <= 10 entries a day (strongest first), one open position per symbol.
 MARKET TYPE    market_types(): per daily session from closes up to that session; a daily-grid decision on t uses t's,
                a minute-grid decision on t uses the previous daily session's.
+UNIVERSE       (grammar bg2; a bg1 candidate uses its implicit one) the stock rows a candidate may trade, applied to
+               its trigger cells and to the eligible cells of its controls (src.universe_lists(): "base" = the 97
+               NIFTY-100 names, "extra" = the data layer's added NIFTY 200 names):
+                 minute grid  NIFTY100 = the base rows; NIFTY200 = the base rows + every extra row with COMPLETE minute
+                              data over the split (complete_rows: bars on >= 98 % of the minute sessions from the
+                              calendar's first session to T, incl. one of the first 5 and one of the last 5)
+                 daily grid   TOP500 = every point-in-time top-500 member (no filter); NIFTY100 / NIFTY200 = members
+                              whose symbol is in the base / base + extra lists (+ the base's old symbols)
+               a forward run uses the names frozen at the proof (Job.names), never a recomputed list.
 """
 from __future__ import annotations
 
@@ -150,6 +159,8 @@ class Engine:
         self._sig: dict = {}
         self._walk_cache: dict = {}
         self.stats = {"walk_requests": 0, "walk_symbols": 0}
+        self.ulists = universe_lists_of(src, M)
+        self._umask: dict = {}
 
     # ── index daily bars aligned to the daily calendar ──
     def _index_daily(self) -> dict:
@@ -187,6 +198,113 @@ class Engine:
             return [c.instrument]
         return self.ctx.daily.syms
 
+    # ── universes ──
+    def minute_base_rows(self) -> list:
+        M = self.ctx.minute
+        base = set(self.ulists["base"])
+        rows = [i for i in M.stocks if M.syms[i] in base]
+        return rows if rows else list(M.stocks)
+
+    def complete_rows(self, rows: list, lo: int | None = None, hi: int | None = None) -> tuple:
+        """(complete, incomplete) minute rows over [lo, hi] (default: the calendar's first session .. T)."""
+        M = self.ctx.minute
+        lo = int(self.mcal[0]) if lo is None else int(lo)
+        hi = int(self.src.end) if hi is None else int(hi)
+        idx = np.nonzero((self.mcal >= lo) & (self.mcal <= hi))[0]
+        ok, bad = [], []
+        if not len(idx):
+            return ok, list(rows)
+        for r in rows:
+            h = np.isfinite(M.f["nb"][r, idx])
+            n = len(h)
+            if h[:min(5, n)].any() and h[max(0, n - 5):].any() and float(h.mean()) >= COMPLETE_SHARE:
+                ok.append(r)
+            else:
+                bad.append(r)
+        return ok, bad
+
+    def _extra_rows(self) -> list:
+        M = self.ctx.minute
+        base = set(self.minute_base_rows())
+        extra = set(self.ulists["extra"]) - set(self.ulists["base"])
+        return [i for i in M.stocks if M.syms[i] in extra and i not in base]
+
+    def universe_rows(self, universe: str) -> list:
+        """Minute rows of a stock universe (NIFTY100 / NIFTY200; anything else: the base rows)."""
+        key = ("m", universe)
+        if key not in self._umask:
+            base = self.minute_base_rows()
+            if universe == "NIFTY200":
+                ok, _bad = self.complete_rows(self._extra_rows())
+                rows = sorted(set(base) | set(ok))
+            else:
+                rows = base
+            self._umask[key] = rows
+        return self._umask[key]
+
+    def daily_universe_names(self, universe: str) -> set:
+        base = set(self.ulists["base"]) | set(self.ulists.get("aliases") or [])
+        if universe == "NIFTY100":
+            return base
+        return base | set(self.ulists["extra"])
+
+    def row_mask(self, c: G.Candidate, names=None):
+        """Bool mask over the rows of the candidate's EXECUTION grid (None = no filter)."""
+        g = c.grid
+        if c.single or g in ("idx_minute", "idx_daily"):
+            return None
+        u = c.stock_universe
+        if g in ("minute", "prev_eod"):
+            M = self.ctx.minute
+            key = ("mm", u) if names is None else ("mn", tuple(names))
+            if key not in self._umask:
+                m = np.zeros(len(M.syms), bool)
+                if names is None:
+                    m[self.universe_rows(u)] = True
+                else:
+                    want = set(names)
+                    m[[i for i in M.stocks if M.syms[i] in want]] = True
+                self._umask[key] = m
+            return self._umask[key]
+        if names is None and u == "TOP500":
+            return None
+        key = ("dm", u) if names is None else ("dn", tuple(names))
+        if key not in self._umask:
+            want = set(names) if names is not None else self.daily_universe_names(u)
+            self._umask[key] = np.array([s in want for s in self.ctx.daily.syms], bool)
+        return self._umask[key]
+
+    def universe_report(self) -> dict:
+        """What NIFTY100 / NIFTY200 / TOP500 resolve to on this data (recorded in the batch summary; the names are
+        the list a promoted strategy is frozen with)."""
+        M = self.ctx.minute
+        base = self.minute_base_rows()
+        extra = set(self.ulists["extra"]) - set(self.ulists["base"])
+        ok, bad = self.complete_rows(self._extra_rows())
+        stored = {M.syms[i] for i in M.stocks}
+        both = sorted(set(base) | set(ok))
+        return {"split": [int(self.mcal[0]), int(self.src.end)], "complete_share": COMPLETE_SHARE,
+                "NIFTY100": {"names": sorted(M.syms[i] for i in base), "n": len(base)},
+                "NIFTY200": {"names": sorted(M.syms[i] for i in both), "n": len(both),
+                             "added_complete": sorted(M.syms[i] for i in ok),
+                             "added_incomplete": sorted(M.syms[i] for i in bad),
+                             "added_not_stored": sorted(extra - stored),
+                             "daily_names": len(self.daily_universe_names("NIFTY200"))},
+                "TOP500": {"daily_symbols": len(self.ctx.daily.syms)},
+                "meta": self.ulists.get("meta", {})}
+
+    def frozen_names(self, c: G.Candidate) -> list | None:
+        """The name list a promoted candidate is frozen with (None: no stock universe or TOP500 = no filter)."""
+        if c.single or c.grid in ("idx_minute", "idx_daily"):
+            return None
+        u = c.stock_universe
+        if c.grid in ("minute", "prev_eod"):
+            M = self.ctx.minute
+            return sorted(M.syms[i] for i in self.universe_rows(u))
+        if u == "TOP500":
+            return None
+        return sorted(self.daily_universe_names(u))
+
     # ── signals ──
     def raw_signal(self, c: G.Candidate):
         """Sparse trigger cells (S, T, side, rank, hold) of the candidate's block on its own grid, before the
@@ -205,9 +323,10 @@ class Engine:
             del trig, side, rank, hold
         return self._sig[key]
 
-    def signals(self, c: G.Candidate, mtype: str | None = "own") -> dict:
+    def signals(self, c: G.Candidate, mtype: str | None = "own", names=None) -> dict:
         """Sparse trigger cells {s, t, side, rank, hold} sorted by (t, -rank, symbol) on the candidate's EXECUTION
-        grid (prev_eod -> minute grid), filtered to the candidate's market type (mtype=None: no filter)."""
+        grid (prev_eod -> minute grid), filtered to the candidate's market type (mtype=None: no filter) and to its
+        universe (names: an explicit frozen name list instead)."""
         S0, T0, SD0, RK0, HD0 = self.raw_signal(c)
         code = MT_CODE[c.mtype] if mtype == "own" else (None if mtype is None else MT_CODE[mtype])
         g = c.grid
@@ -238,6 +357,10 @@ class Engine:
                 reg = self.regime_m if g in ("minute", "idx_minute") else self.regime_d
                 k = reg[T_] == code
                 S, T_, SD, RK, HD = S[k], T_[k], SD[k], RK[k], HD[k]
+        um = self.row_mask(c, names)
+        if um is not None and len(S):
+            k = um[S]
+            S, T_, SD, RK, HD = S[k], T_[k], SD[k], RK[k], HD[k]
         return self.sort_sig(c, S, T_, SD, RK, HD)
 
     def sort_sig(self, c, S, T_, SD, RK, HD) -> dict:
@@ -266,6 +389,9 @@ class Engine:
             m = Pn.member & np.isfinite(o1) & e_ok[None, :]
             if c.product == "fut" or c.agent == "futures":
                 m &= Pn.fo
+            um = self.row_mask(c)
+            if um is not None:
+                m &= um[:, None]
             return np.nonzero(m)
         if g == "idx_daily":
             cal = self.dcal
@@ -279,7 +405,7 @@ class Engine:
         if g == "idx_minute":
             rows = [M.six["_NIFTY50_min" if c.instrument == "NIFTY" else "_NIFTYBANK_min"]]
         else:
-            rows = M.stocks
+            rows = self.universe_rows(c.stock_universe)
         inwin = (self.mcal >= lo) & (self.mcal <= hi)
         if code is not None:
             inwin &= self.regime_m == code
@@ -469,6 +595,21 @@ class Engine:
         return res
 
 
+COMPLETE_SHARE = 0.98
+
+
+def universe_lists_of(src, M) -> dict:
+    """The source's universe lists ({"base", "extra", "aliases", "meta"}); a source without them (the lab's): every
+    minute stock is base, nothing extra."""
+    fn = getattr(src, "universe_lists", None)
+    if fn is not None:
+        d = fn()
+        if d and d.get("base"):
+            return {"base": list(d["base"]), "extra": list(d.get("extra") or []),
+                    "aliases": list(d.get("aliases") or []), "meta": dict(d.get("meta") or {})}
+    return {"base": [M.syms[i] for i in M.stocks], "extra": [], "aliases": [], "meta": {"source": "all minute stocks"}}
+
+
 def _hm(m: int) -> str:
     return f"{m // 60:02d}:{m % 60:02d}"
 
@@ -598,6 +739,7 @@ class Job:
     stress: bool = True        # also compute the 5 bps (2.5 bps) version
     planted_p: float | None = None    # planted control: side = sign of the realised move with probability p
     seed: int = 0
+    names: tuple | None = None        # a frozen universe name list (promoted strategies in forward runs)
 
 
 def run_jobs(E: Engine, jobs: list) -> dict:
@@ -608,7 +750,7 @@ def run_jobs(E: Engine, jobs: list) -> dict:
         if j.cand.agent == "options":
             out[j.key] = BO.run_option_job(E, j)
             continue
-        sig = j.sig if j.sig is not None else E.signals(j.cand)
+        sig = j.sig if j.sig is not None else E.signals(j.cand, names=j.names)
         rows = E.plan(j.cand, sig, j.lo, j.hi)
         plans[j.key] = rows
         for k, r in enumerate(rows):
