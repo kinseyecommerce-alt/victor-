@@ -116,14 +116,17 @@ class Settings(BaseSettings):
     builder_minute_universe: str = "nifty200"
     builder_kite_max_calls_per_run: int = 6000     # Kite historical_data calls per minute-backfill run (~35-60 min)
     builder_nse_max_requests_per_run: int = 5000   # NSE requests per archive run (one at a time, >= 1.5 s apart)
-    # Automatic strategy builder (builder.py, builder_rule.json): one frozen batch of 400 candidates a week from our own
-    # data (Saturday 06:00 IST), evaluated in its own process; PAPER research only, OFF by default (no job scheduled).
+    # Automatic strategy builder (builder.py, builder_rule_v3.json): frozen batches of 400 candidates from our own data,
+    # every night from 02:30 IST (builder/v3; one a week, Saturday 06:00, under v1 / v2), each evaluated in its own
+    # process; PAPER research only, OFF by default (no job scheduled).
     # Measured on the lab machine (4 vCPU): one real batch 82 s with 2 workers, ~1.6 GB peak RSS per process.
     builder_enabled: bool = False
     builder_max_mb: float = 400.0              # disk cap of the builder directory (stop writing, never delete)
     builder_jobs: int = 2                      # evaluation worker processes (capped at 2)
     builder_time_limit_s: int = 7200           # wall-clock limit of one batch evaluation (resumable)
     builder_mem_mb: int = 4096                 # address-space limit per evaluation process
+    builder_night_batches: int = 12            # builder/v3: batches the 02:30 IST job may run in one night (one after
+    #                                            the other; none is started after 05:15 IST or inside market hours)
 
     # ── Engine: risk budget, trading states, approvals, drift, execution (see REBUILD.md) ──
     # Risk budget (risk_budget.py). RISK_BUDGET_DAILY_VOL = the book's daily P&L standard deviation budget in ₹, split

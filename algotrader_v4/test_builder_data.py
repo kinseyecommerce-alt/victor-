@@ -1212,7 +1212,9 @@ def test_regression_failed_instrument_dump_is_unresolved_not_missing():
     assert ms["unresolved"] == [] and ms["missing_on_kite"] == ["GONECO"] and ms["names_ready"] == 1
     assert ms["ready"] is True
     with patch.dict(os.environ, {"BUILDER_DATA_DIR": str(root)}):
-        assert B.data_wait_reason(B.Builder(root / "bld"), "server") is None
+        # (the minute-universe gate; builder/v3 adds the NSE archive gate, tested in test_builder.py)
+        assert B.data_wait_reason(B.Builder(root / "bld", B.load_rule(B.RULE_FILE_V2)), "server") is None
+        assert "NSE archive" in (B.data_wait_reason(B.Builder(root / "bld"), "server") or "")
 
 
 def test_fetch_index_saves_the_nifty200_list_separately():

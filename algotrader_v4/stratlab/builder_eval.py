@@ -101,11 +101,15 @@ def placebo_sig(E: BE.Engine, c: G.Candidate, lo: int, hi: int, n: int, long_sha
 
 
 def planted_candidates(rule: dict) -> dict:
-    """{agent: Candidate} — the planted-edge carriers (rule["controls"]["planted"]["carriers"])."""
+    """{agent: Candidate} — the planted-edge carriers (rule["controls"]["planted"]["carriers"]). Under a bg3 rule a
+    carrier takes the size regime of its own sentence (builder_grammar.size_regime); bg1 / bg2: Rs 1 lakh."""
     out = {}
+    sized = (rule.get("grammar") or {}).get("version") == G.GRAMMAR_V3
     for agent, d in rule["controls"]["planted"]["carriers"].items():
-        out[agent] = G.Candidate(agent, "RISING", d["block"], tuple(tuple(p) for p in d.get("params", [])),
-                                 d["entry"], tuple(d["exit"]), d["instrument"], d["product"], d.get("structure", ""))
+        params = tuple(tuple(p) for p in d.get("params", []))
+        size = G.size_regime(agent, d["block"], params, d["instrument"]) if sized else ""
+        out[agent] = G.Candidate(agent, "RISING", d["block"], params, d["entry"], tuple(d["exit"]), d["instrument"],
+                                 d["product"], d.get("structure", ""), "", size)
     return out
 
 

@@ -242,7 +242,9 @@ class BuilderForward:
 # the daily step (called at the end of forward_lab.daily_job)
 # ══════════════════════════════════════════════════════════════════════════
 def forward_trades(root: str, data_root: Optional[str], day: int, source: str = "server") -> dict:
-    """In the forward process: every registered strategy's trades over [registration, day] on data cut at `day`."""
+    """In the forward process: every registered strategy's trades over [registration, day] on data cut at `day`.
+    Each strategy trades the size of its own sentence (its candidate JSON's size regime; a builder/v1 / v2 strategy:
+    Rs 1 lakh per stock trade, a re-sized builder/v3 one: stratlab.builder_engine.SIZE_TABLES["c10"])."""
     from stratlab import builder_engine as BE
     from stratlab import builder_grammar as G
     from stratlab.builder_source import make_source

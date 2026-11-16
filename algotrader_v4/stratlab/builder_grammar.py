@@ -14,6 +14,17 @@ Two frozen versions live side by side (a version is never edited, only added):
                          A bg2 sentence whose universe is the one bg1 used implicitly IS the bg1 sentence: it is never
                          drawn when its bg1 key was drawn (Candidate.v1_key); every other bg2 sentence is a NEW candidate
                          (e.g. the NIFTY200 versions of the two proven lab rules get no credit from their NIFTY-100 proof)
+  bg3 (rule builder/v3)  bg2's sentences under the SIZE regime "c10" (Rs 10 lakh capital per agent): a sentence whose
+                         trades the engine books at a size builder/v3 changed (size_regime(): every MIS stock sentence
+                         of intraday / scalping, every stock sentence at futures costs = the futures agent's stock
+                         sentences and the swing sentences that can go short; every options sentence, whose lots
+                         now follow the capital) carries size "c10" and a NEW key (['bg3', ..., universe, 'c10']): it
+                         can be drawn again and every draw is a new trial in N. A sentence whose size is unchanged
+                         (swing long-only = CNC delivery at proportional fees; index futures at 1 real lot) IS its
+                         bg2 sentence (same key, same JSON; through it its bg1 twin): never drawn again once that
+                         key (or its bg1 twin) was drawn - its existing result IS its Rs 10 lakh result. The size
+                         numbers live in the engine (stratlab/builder_engine.SIZE_TABLES, builder_options.OPTION_SIZES)
+                         and in builder_rule_v3.json costs.size_rs.
 Building blocks come from the lab's own data only (stratlab/datagen_features.py: opening auction gap / path, volume
 shocks, index expiries, India VIX, delivery %, participant OI, the F&O ban list, futures OI quadrants, bulk / block
 deals by client class, results timing, corporate actions) plus the NIFTY / VIX daily series. The DIRECTION of every
@@ -55,8 +66,14 @@ import json
 
 GRAMMAR_V1 = "bg1"
 GRAMMAR_V2 = "bg2"
-VERSIONS = (GRAMMAR_V1, GRAMMAR_V2)
-GRAMMAR_VERSION = GRAMMAR_V2             # the current version (new batches); bg1 stays reproducible byte for byte
+GRAMMAR_V3 = "bg3"
+VERSIONS = (GRAMMAR_V1, GRAMMAR_V2, GRAMMAR_V3)
+GRAMMAR_VERSION = GRAMMAR_V3             # the current version (new batches); bg1 / bg2 stay reproducible byte for byte
+SIZE_LEGACY = ""                         # bg1 / bg2: Rs 1 lakh per stock trade
+SIZE_C10 = "c10"                         # bg3: Rs 10 lakh capital per agent (builder_engine.SIZE_TABLES)
+SIZE_TEXT = {SIZE_C10: "Rs 5 lakh per trade (Rs 10 lakh capital per agent)"}
+OPTION_SIZE_TEXT = {SIZE_C10: ("lots from Rs 10 lakh capital: Rs 1 lakh of premium (long / debit) or of maximum loss "
+                               "(iron condor), Rs 5 lakh of margin (naked strangle)")}
 UNIVERSES = ("NIFTY100", "NIFTY200", "TOP500", "INDEX")
 MINUTE_UNIVERSES = ("NIFTY100", "NIFTY200")
 DAILY_UNIVERSES = ("TOP500", "NIFTY100", "NIFTY200")
@@ -259,28 +276,37 @@ class Candidate:
     instrument: str           # STOCKS | NIFTY | BANKNIFTY
     product: str              # mis | cnc | fut | opt (side-dependent for swing: "cnc/fut")
     structure: str = ""       # options: long_atm | debit_spread | short_strangle | iron_condor (+ expiry)
-    universe: str = ""        # bg2 only (UNIVERSES); "" = a bg1 sentence (its implicit universe: implied_universe())
+    universe: str = ""        # bg2 / bg3 (UNIVERSES); "" = a bg1 sentence (its implicit universe: implied_universe())
+    size: str = ""            # bg3 only: the size regime of a sentence whose trade size builder/v3 changed (SIZE_C10);
+    #                           "" = Rs 1 lakh per stock trade (every bg1 / bg2 sentence and bg3's unchanged twins)
 
     @property
     def version(self) -> str:
+        if self.size:
+            return GRAMMAR_V3
         return GRAMMAR_V2 if self.universe else GRAMMAR_V1
 
-    def _key(self, version: str, universe: str) -> str:
+    def _key(self, version: str, universe: str, size: str = "") -> str:
         body = [version, self.agent, self.mtype, self.block, [list(p) for p in self.params], self.entry,
                 list(self.exit), self.instrument, self.product, self.structure]
         if universe:
             body.append(universe)
+        if size:
+            body.append(size)
         return json.dumps(body, separators=(",", ":"))
 
     @property
     def key(self) -> str:
-        """The identity across batches (never re-tested). A bg1 sentence keeps its bg1 key byte for byte."""
-        return self._key(self.version, self.universe)
+        """The identity across batches (never re-tested). A bg1 / bg2 sentence keeps its key byte for byte; a bg3
+        sentence of unchanged size IS its bg2 sentence (size ""), a re-sized one has its own bg3 key."""
+        return self._key(self.version, self.universe, self.size)
 
     @property
     def v1_key(self) -> str | None:
         """The bg1 key of the SAME sentence: a bg2 candidate whose universe is the one bg1 used implicitly is the bg1
         candidate (never drawn again once its bg1 key was drawn). None when the universe is new (no bg1 twin)."""
+        if self.size:
+            return None                      # a re-sized bg3 sentence is a new candidate: no twin in bg1 / bg2
         if not self.universe:
             return self.key
         if self.universe != implied_universe(self.agent, self.block, self.instrument):
@@ -325,13 +351,15 @@ class Candidate:
              "structure": self.structure}
         if self.universe:                    # a bg1 candidate's JSON is unchanged
             d["universe"] = self.universe
+        if self.size:                        # a bg1 / bg2 candidate's JSON is unchanged
+            d["size"] = self.size
         return d
 
     @staticmethod
     def from_json(d: dict) -> "Candidate":
         return Candidate(d["agent"], d["mtype"], d["block"], tuple(tuple(p) for p in d["params"]), d["entry"],
                          tuple(d["exit"]), d["instrument"], d["product"], d.get("structure", ""),
-                         d.get("universe", "") or "")
+                         d.get("universe", "") or "", d.get("size", "") or "")
 
 
 def exec_grid(agent: str, block: str) -> str:
@@ -353,6 +381,26 @@ def universes_for(agent: str, block: str, instrument: str) -> tuple:
     if instrument in ("NIFTY", "BANKNIFTY"):
         return ("INDEX",)
     return MINUTE_UNIVERSES if exec_grid(agent, block) in ("minute", "prev_eod", "idx_minute") else DAILY_UNIVERSES
+
+
+def size_regime(agent: str, block: str, params, instrument: str) -> str:
+    """bg3: the size regime of a sentence, from how the engine BOOKS its trades (builder_engine.cost_kind):
+      SIZE_C10  at least one trade is an MIS stock trade (intraday, scalping) or a stock trade at futures costs (the
+                futures agent's stock sentences; swing shorts), or the sentence is an OPTIONS sentence (its lots
+                follow the capital: builder_options.option_lots) - the sizes builder/v3 changed
+      ""        every trade keeps its builder/v1 size: swing sentences that only go long (CNC delivery; the block's
+                story side is "long", or a "day" block on an up day) and index FUTURES (1 real lot)."""
+    if agent == "options":
+        return SIZE_C10
+    if instrument in ("NIFTY", "BANKNIFTY"):
+        return SIZE_LEGACY
+    if agent in ("intraday", "scalping", "futures"):
+        return SIZE_C10
+    b = BLOCK[block]
+    kw = dict(params)
+    long_only = b.side == "long" or (b.side == "day" and kw.get("day") == "up") or \
+        (b.side == "side" and kw.get("side", 0) > 0)
+    return SIZE_LEGACY if long_only else SIZE_C10
 
 
 def _side_word(b: Block, params: dict) -> str:
@@ -389,16 +437,19 @@ def _entries(agent: str, b: Block) -> list:
 def grammar(agent: str, version: str | None = None) -> list:
     """Every sentence of one agent's grammar, without the market type (a fixed order). bg1: 7-tuples (instrument,
     product, block, params, entry, exit, structure); bg2: the same rows, each repeated once per universe choice
-    (universes_for) with the universe appended (8-tuples)."""
+    (universes_for) with the universe appended (8-tuples); bg3: bg2's rows with the size regime appended (9-tuples,
+    size_regime(): "c10" or "")."""
     version = version or GRAMMAR_VERSION
     if version == GRAMMAR_V1:
         return _grammar_bg1(agent)
-    if version != GRAMMAR_V2:
+    if version not in (GRAMMAR_V2, GRAMMAR_V3):
         raise KeyError(version)
     out = []
     for row in _grammar_bg1(agent):
         for u in universes_for(agent, row[2], row[0]):
             out.append(row + (u,))
+    if version == GRAMMAR_V3:
+        out = [row + (size_regime(agent, row[2], row[3], row[0]),) for row in out]
     return out
 
 
@@ -482,7 +533,7 @@ def _grammar_bg1(agent: str) -> list:
 
 def cell_grammar(agent: str, mtype: str, version: str | None = None) -> list:
     return [Candidate(agent, mtype, row[2], row[3], row[4], row[5], row[0], row[1], row[6],
-                      row[7] if len(row) > 7 else "")
+                      row[7] if len(row) > 7 else "", row[8] if len(row) > 8 else "")
             for row in grammar(agent, version)]
 
 
@@ -505,7 +556,8 @@ def _order_key(batch_id: str, cell: str, key: str, version: str | None = None) -
 
 
 def never_drawn(c: Candidate, drawn: set) -> bool:
-    """True when neither the candidate's key nor (bg2) the key of its bg1 twin was drawn in an earlier batch."""
+    """True when neither the candidate's key nor the key of its bg1 twin was drawn in an earlier batch (bg2 and bg3's
+    unchanged-size sentences; a re-sized bg3 sentence has no twin: only its own bg3 key counts)."""
     if c.key in drawn:
         return False
     v1 = c.v1_key
@@ -622,8 +674,9 @@ def describe(c: Candidate) -> str:
                 "debit_spread": "buy a 2 %-wide debit spread in the signal's direction (bull call / bear put)",
                 "short_strangle": "sell a 4 %-out-of-the-money strangle",
                 "iron_condor": "sell a 4 % strangle with 3 % wings (iron condor)"}[st]
+        lots = f" ({OPTION_SIZE_TEXT[c.size]})" if c.size else ""
         return (f"{c.instrument} options {MT_TEXT[c.mtype]}: when {cond}, {what} on the {exp} expiry at the next "
-                f"session's official close (strikes from the previous session's real chain); {_exit_text(c)}.")
+                f"session's official close (strikes from the previous session's real chain){lots}; {_exit_text(c)}.")
     inst = {"STOCKS": "stock", "NIFTY": "NIFTY future", "BANKNIFTY": "BANKNIFTY future"}[c.instrument]
     if c.universe and c.instrument == "STOCKS":
         inst = f"stock (universe: {UNIVERSE_TEXT[c.universe]})"
@@ -640,6 +693,11 @@ def describe(c: Candidate) -> str:
         prod = {"cnc/fut": "longs in delivery (CNC), shorts in stock futures", "fut": "futures"}.get(c.product,
                                                                                                     c.product)
         ent = "at the next session's open"
+    if c.size and c.agent == "swing":        # delivery longs keep Rs 1 lakh; only the futures shorts are re-sized
+        prod = ("longs in delivery (CNC, Rs 1 lakh per trade), shorts in stock futures (Rs 5 lakh per trade); "
+                "Rs 10 lakh capital per agent")
+    elif c.size:
+        prod = f"{prod}; {SIZE_TEXT[c.size]}"
     return (f"{c.agent.capitalize()} {MT_TEXT[c.mtype]}: when {when}, {dirn} the {inst}{tail} {ent} ({prod}); "
             f"{_exit_text(c)}.")
 

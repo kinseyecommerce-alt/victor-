@@ -1820,3 +1820,54 @@ counted in N, including the NIFTY200 versions of AUC-FADE-2PCT / -3PCT (scalping
 SWING-ATTN-ON-3X (futures attention_swing o1521 overnight): ordinary sentences, no credit from their NIFTY-100 proof
 (with only the seed drawn before, the deterministic order reaches the first of their 12 market-type versions in batch
 0005 and the last in batch 0038). Gates, controls, splits, costs and DSR are v1's; N is one count across v1 and v2.
+
+### builder/v3: trade size from Rs 10 lakh capital per agent (`../builder_rule_v3.json`, grammar bg3)
+
+Written 2026-11-16, before any v3 candidate was drawn; builder/v1 / v2 and the grammars bg1 / bg2 stay valid byte for
+byte. WHY (stated in the rule): the DISCOVERY results of the 2,400 candidates of batches 0001-0006 were split into edge
+before costs, slippage and fees (no VALIDATION / FINAL return was used). The median intraday / scalping sentence earns
+about nothing before fees and pays Rs 82 of fees per Rs 1 lakh round trip, of which Zerodha's flat Rs 20-per-order
+brokerage is about half: at Rs 5 lakh per trade the fee is Rs 45 per Rs 1 lakh. Rs 1 lakh per trade is not what an
+agent with Rs 10 lakh trades. This is a change made AFTER seeing results, so nothing is inherited: it is a new rule
+version, every re-sized sentence is a NEW candidate with a new key and one more trial in N, and no verdict of an
+earlier batch changes.
+
+* SIZE (`builder_engine.SIZE_TABLES`, = the rule's `costs.size_rs`; `Engine.apply_rule` refuses a mismatch): regime
+  `c10` = Rs 5 lakh per MIS stock trade (<= 10 entries a day x Rs 5 L x 20 % intraday margin = Rs 10 L) and per stock
+  trade at futures costs (about one real lot); Rs 1 lakh per CNC delivery long (proportional fees: PF does not depend on
+  the size); index futures 1 real lot. Slippage 2 bps / side (stress 5 bps) unchanged - a Rs 5 lakh order is ASSUMED
+  to fill like a Rs 1 lakh order (measured only in paper trading).
+* OPTION LOTS (`builder_options.option_lots`, `OPTION_SIZES` = the rule's `costs.size_rs.options`): one lot pays the
+  flat Rs 20 per order per leg on a small premium, so the lots follow the capital too. Decided AT ENTRY from the entry
+  fills only, the same for every leg: long ATM options and debit spreads max(1, floor(Rs 1,00,000 / net premium paid
+  per lot)); iron condors max(1, floor(Rs 1,00,000 / maximum loss per lot)), maximum loss = (widest wing - net
+  credit) x lot (the lab's `options_replay._max_risk` formula); naked short strangles max(1, floor(Rs 5,00,000 /
+  margin per lot)), margin = 12 % of the spot notional per lot (the lab's `options_vrp.NAKED_MARGIN_PCT`: the engine
+  has no SPAN margin). Conservative cap (added, not in the first brief): at most 1,800 NIFTY / 600 BANKNIFTY units
+  per leg = one un-sliced order per leg, so one flat brokerage per leg is honest. Fees: `options_replay.leg_cost` at
+  the real quantity; the haircut per unit is unchanged. nsedata's simulator is NOT edited: while a re-sized option job
+  runs, `nsedata.Position` is replaced by a subclass that sets the plan's lots when the position is opened, and
+  restored afterwards. A bg1 / bg2 option candidate still trades 1 lot.
+* GRAMMAR bg3 (`builder_grammar.size_regime`): bg2's 6,561 sentences per market type; re-sized (new key
+  `['bg3', ..., universe, 'c10']`): intraday 2,352, scalping 828, swing 900 (the sentences that can go short), options
+  576 (all), futures 542 (stock sentences) = 5,198; unchanged (the sentence IS its bg2 sentence, never re-drawn once
+  it or its bg1 twin was drawn): swing 1,155 (long-only = CNC delivery) and futures 208 (index futures, 1 lot) =
+  1,363. The unchanged sentences' earlier results ARE their Rs 10 lakh results (proportional delivery fees: the same
+  PF at any size; one real index lot: the flat brokerage is ~0.2 bps of the contract at 2026 levels, ~1 bps at 2012).
+* A candidate carries its regime (`Candidate.size`, in its key and JSON): a pending / seeded v1 / v2 batch and a v1 /
+  v2 promoted strategy keep Rs 1 lakh in the batch run and in the builder/v1 forward family.
+* LIMITATION (rule `costs.capital`): for multi-session holds (swing, futures) the number of concurrent positions is
+  not capped by the capital; a Rs 10 lakh account scales positions down (exact for CNC; futures lots are indivisible).
+* SCHEDULE: every night from 02:30 IST (was one batch on Saturday 06:00) batch after batch - each batch of 400 is
+  frozen, evaluated and ingested in full before the next is frozen, so N grows batch by batch exactly as before -
+  until the grammar has no undrawn sentence left (26,244 sentences x market types under bg3; 4 x 5,198 = 20,792 of
+  them re-sized; 25,709 undrawn on a fresh server registry after the seeds = about 65 batches), `BUILDER_NIGHT_BATCHES` (default 12) ran, 05:15 IST passed (an evaluation's limit ends 08:30) or a
+  batch did not complete. Same flag and process limits. The more sentences are tested, the higher N and the DSR bar:
+  testing everything does not make a pass easier.
+* DATA GATES of a new batch: the NIFTY 200 minute universe (as v2) AND the data layer's NSE archive backfill 2012 ->
+  (`builder.nse_archive_status`, read-only on the data layer's state: every calendar day up to 10 days ago final by
+  the data layer's own rule - a day in an error status blocks and is named in the wait reason - and every feed window
+  that ended more than 10 days ago fetched at least once; feed windows whose last answer was an error are reported,
+  not waited for).
+* No development evaluation on real data was run for builder/v3 (synthetic tests only): `development_evaluations`
+  stays 16. Gates, splits, controls, carry, DSR and promotion are unchanged.

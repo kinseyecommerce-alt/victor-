@@ -2,7 +2,8 @@
 stratlab/builder_catalog.py — loads the GENERATED catalogue of promoted builder strategies (<builder root>/catalog/
 builder_gen.py, written only by builder.write_catalog for proven candidates) into runnable specs. It is deliberately
 NOT in stratlab/catalog/ (whose every module is imported into stratlab.api.REGISTRY and so into the forward lab's frozen
-1,276-strategy family): builder strategies (rules builder/v1 and builder/v2) live in their own forward family, builder/v1.
+1,276-strategy family): builder strategies (rules builder/v1 .. v3) live in their own forward family, builder/v1. A spec's candidate
+carries its size regime (builder/v3: Candidate.size), so it trades the size it was proven at.
 """
 from __future__ import annotations
 

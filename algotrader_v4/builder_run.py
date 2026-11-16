@@ -72,6 +72,7 @@ def evaluate(root: str, bid: str, source: str = "lab", data_root: str | None = N
     cands = [(r["id"], G.Candidate.from_json(r["cand"])) for r in doc["candidates"]]
     t0 = time.time()
     E = BE.Engine(src)
+    E.apply_rule(rule)                     # the batch rule's trade sizes (a v1 / v2 batch: Rs 1 lakh)
     E.cache_dir = str(builder.cache_dir())
     E.log = log
     batch = EV.Batch(E, bid, cands, rule, str(b.batch_dir(bid) / "work"), int(rec["n_before"]), log,

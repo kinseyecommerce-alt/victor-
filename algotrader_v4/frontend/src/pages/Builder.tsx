@@ -92,12 +92,12 @@ export function Builder() {
   const grid: any[] = Array.isArray(d?.grid) ? d.grid : []
   return (
     <div className="space-y-4">
-      <PageHeader title="Strategy builder" subtitle="Builds strategies from our own data every week — and counts every try against luck" polls={[poll]} />
+      <PageHeader title="Strategy builder" subtitle="Builds strategies from our own data every night — and counts every try against luck" polls={[poll]} />
       <LoadState poll={poll}>
         {d?.rule_error && <Notice tone="red" title="Rule file changed">{String(d.rule_error)}</Notice>}
         {d && !d.enabled && (
-          <Notice tone="blue" title="Weekly runs are off on this server">
-            The builder runs one batch every Saturday at 06:00 once it is switched on (BUILDER_ENABLED). Batches already run are shown below.
+          <Notice tone="blue" title="Nightly runs are off on this server">
+            The builder runs batch after batch every night from 02:30 until every strategy is tested, once it is switched on (BUILDER_ENABLED). Batches already run are shown below.
           </Notice>
         )}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -106,6 +106,13 @@ export function Builder() {
           <Card><Stat label="Proven" value={plain(d?.promoted)} valueClass="text-green-600 dark:text-green-400" /></Card>
           <Card><Stat label="Luck correction N" value={plain(d?.n_used)} sub="every try ever counted" /></Card>
         </div>
+        {num(d?.undrawn?.total) ? (
+          <div className="text-xs text-slate-500" data-testid="builder-undrawn">
+            Still to test: {plain(d.undrawn.undrawn)} of {plain(d.undrawn.total)} strategies
+            {' '}({agents.map((a) => `${a} ${plain(d.undrawn.per_agent?.[a]?.undrawn)}`).join(' · ')})
+            {d?.last_run?.night ? ` · last night: ${plain(d.last_run.night.batches_run)} batches, stopped: ${String(d.last_run.night.stopped || '—')}` : ''}
+          </div>
+        ) : null}
 
         <Card title="Proven strategies by agent and market type">
           <Grid grid={grid} agents={agents} mtypes={mtypes} />
@@ -125,7 +132,7 @@ export function Builder() {
                     <div className="flex items-center gap-2">
                       <span className="font-semibold">Batch {b?.id}</span>
                       <Badge tone={b?.status === 'evaluated' ? 'blue' : 'slate'}>{b?.status}</Badge>
-                      {b?.rule_version ? <span className="text-[11px] text-slate-500">{String(b.rule_version)}</span> : null}
+                      {b?.rule_version ? <span className="text-[11px] text-slate-500">{String(b.rule_version)}{b?.size?.regime === 'c10' ? ' · sized for ₹10 L per agent' : ''}</span> : null}
                       {num(b?.errata) ? <Badge tone="amber">{plain(b.errata)} erratum</Badge> : null}
                     </div>
                     <div className="mt-0.5 text-xs text-slate-500">
