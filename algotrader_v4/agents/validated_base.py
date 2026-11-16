@@ -288,7 +288,12 @@ class ValidatedAgent(BaseAgent):
         return bool(self._setting("enabled", True))
 
     def _scale(self) -> float:
-        return float(getattr(settings, "validated_notional_scale", 1.0) or 1.0)
+        """Size factor vs the lab's sizing: the global VALIDATED_NOTIONAL_SCALE × this agent's own
+        VALIDATED_<X>_NOTIONAL_SCALE (both default 1.0). Quantities, loss stops, drawdown kills and gross caps scale
+        with it; the decision (which names, which side, when) never does."""
+        g = float(getattr(settings, "validated_notional_scale", 1.0) or 1.0)
+        own = float(self._setting("notional_scale", 1.0) or 1.0) if self.SETTING else 1.0
+        return g * own
 
     def alloc_scale(self) -> float:
         """The risk-budget allocator's size factor for this strategy (risk_budget.py): 1.0 = lab sizing (default);
@@ -600,6 +605,7 @@ class ValidatedAgent(BaseAgent):
             "live": self.live_stats(), "lab_expectation": self.LAB_EXPECTATION,
             "realised_today": self.realised_today(), "drawdown": self.drawdown(),
             "limits": {"daily_loss_stop": self.daily_loss_limit(), "dd_kill": self.dd_limit()},
+            "size_scale": self._scale(),
             "dd_killed": self._dd_killed, "live_readiness": self.live_readiness(),
         })
         return st

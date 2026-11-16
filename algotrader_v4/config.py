@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     # open positions still exit by rule)
     validated_only: bool = True
     validated_notional_scale: float = 1.0             # ₹1 L per stock trade × this (auction, attention, PEAD)
+    # Per-agent size factor on top of the global one (default 1.0 = the lab's ₹1 L per trade). Used to give each agent
+    # ₹10 L of capital: auction fade 5.0 (₹5 L per MIS trade, ≤ 10 trades × 20 % intraday margin = ₹10 L), PEAD 0.1
+    # (₹10,000 per position; the lab's peak of 88 open positions = ₹8.8 L), attention 1.0 (10 × ₹1 L delivery).
+    # Loss stops, drawdown kills and gross caps scale with it; decisions never change.
+    validated_auction_notional_scale: float = 1.0
+    validated_attention_notional_scale: float = 1.0
+    validated_pead_notional_scale: float = 1.0
     validated_special_sessions: str = ""              # "YYYY-MM-DD,..." special/short sessions (Muhurat, DR drills)
     # AUC-FADE (agents/validated_auction.py)
     validated_auction_enabled: bool = True
