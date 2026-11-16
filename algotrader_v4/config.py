@@ -107,8 +107,8 @@ class Settings(BaseSettings):
     # minute store universe: nifty100 = the forward lab's 97 + 2 indices (as before); nifty200 = those, unchanged, plus
     # the added NIFTY 200 names (current list + historical NIFTY 100 members still on Kite; builder_universe.py)
     builder_minute_universe: str = "nifty200"
-    builder_kite_max_calls_per_run: int = 1500     # Kite historical_data calls per minute-backfill run
-    builder_nse_max_requests_per_run: int = 2500   # NSE requests per archive run (one at a time, >= 1.5 s apart)
+    builder_kite_max_calls_per_run: int = 6000     # Kite historical_data calls per minute-backfill run (~35-60 min)
+    builder_nse_max_requests_per_run: int = 5000   # NSE requests per archive run (one at a time, >= 1.5 s apart)
     # Automatic strategy builder (builder.py, builder_rule.json): one frozen batch of 400 candidates a week from our own
     # data (Saturday 06:00 IST), evaluated in its own process; PAPER research only, OFF by default (no job scheduled).
     # Measured on the lab machine (4 vCPU): one real batch 82 s with 2 workers, ~1.6 GB peak RSS per process.

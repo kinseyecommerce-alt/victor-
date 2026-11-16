@@ -17,10 +17,10 @@ Per symbol the windows are fetched newest first; a window is FINAL once it was f
 (still open) window is re-fetched on every run: that is the daily update (one call per instrument per run).
   resumable / idempotent  the window state lives in <builder>/minute/backfill.json; Store.write_sessions replaces the
                           sessions it is given, so re-fetching a window rewrites identical bytes
-  call budget             BUILDER_KITE_MAX_CALLS_PER_RUN (default 1,500) per run; ~67 windows x 99 instruments
-                          ~= 6,630 calls in all -> about 5 runs (two runs a night + two on weekend days ~= 3 days);
-                          the NIFTY 200 extension adds ~67 x the added names Kite lists (~125 -> ~8,400 calls,
-                          ~6 runs: three week nights or one weekend)
+  call budget             BUILDER_KITE_MAX_CALLS_PER_RUN (default 6,000; 1,500 until Nov 2026) per run; ~67 windows
+                          x 99 instruments ~= 6,630 calls + the NIFTY 200 extension's ~67 x the added names Kite lists
+                          (~125 -> ~8,400 calls): ~15,000 calls in all, about 3 runs (two a night) at Kite's history
+                          rate (~35-60 min a run, every call still behind the market-hours guard)
   market-hours guard      never between 09:00 and 15:45 IST on a trading day (checked before every call)
   locks                   the option-bar archiver's lock (the one the forward lab holds for its Kite calls) is held
                           per instrument, so the three Kite users never interleave
