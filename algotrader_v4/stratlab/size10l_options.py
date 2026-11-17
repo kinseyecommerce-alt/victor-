@@ -193,9 +193,6 @@ def nse_rows(specs, lo: int, hi: int) -> dict:
                              "fees1": float(t.l1[2]), "lots0": 1, "lots": int(t[9] // t.l1[0]),
                              "rule": getattr(t, "rule", ""), "gross": float(t[10]), "fees": float(t[11]),
                              "net": float(t[12])})
-            dets = details.get(sp.id) or []
-            for r, d in zip(rows, dets if len(dets) == len(rows) else []):
-                r["rule"] = d.get("rule", "")
             out[sp.id] = rows
             Z.log(f"  options nse {sp.id}: {len(rows)} trades {lo}-{hi}")
     finally:

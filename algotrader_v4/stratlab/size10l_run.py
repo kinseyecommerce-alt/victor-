@@ -539,6 +539,7 @@ def stage_controls(jobs: int):
 
 
 def stage_final(jobs: int):
+    from . import catalog  # noqa: F401
     from . import audit_run as AR
     from .api import REGISTRY
     load_prereg()

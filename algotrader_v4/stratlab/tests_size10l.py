@@ -97,6 +97,35 @@ def t_catalogue_split():
     assert all(REGISTRY[i].cost_kind == "equity_cnc" or REGISTRY[i].underlying for i in un)
 
 
+def t_option_lot_rule():
+    from . import size10l_options as O
+    ce, pe = "CE", "PE"
+    # long straddle: 190 points x 75 = Rs 14,250 of premium per lot -> 7 lots
+    assert O.new_lots([(1, 1, 20000, ce, 100, 1), (1, 1, 20000, pe, 90, 1)], 75) == (7, "premium")
+    # debit spread: 35 points x 75 = Rs 2,625 -> 38 lots
+    assert O.new_lots([(1, 1, 20000, ce, 60, 1), (-1, 1, 20200, ce, 25, 1)], 75) == (38, "premium")
+    # iron condor: credit 29, wings 400 -> max risk 371 x 75 = Rs 27,825 -> 3 lots
+    ic = [(-1, 1, 20400, ce, 20, 1), (-1, 1, 19600, pe, 18, 1), (1, 1, 20800, ce, 5, 1), (1, 1, 19200, pe, 4, 1)]
+    assert O.new_lots(ic, 75) == (3, "max_risk")
+    # credit spread: width 200 - credit 35 = 165 x 75 = Rs 12,375 -> 8 lots
+    assert O.new_lots([(-1, 1, 20000, ce, 60, 1), (1, 1, 20200, ce, 25, 1)], 75) == (8, "max_risk")
+    # naked strangle: the record's margin, else 12 % of the mean short strike x lot (Rs 1,80,000) -> 2 lots
+    ns = [(-1, 1, 20400, ce, 20, 1), (-1, 1, 19600, pe, 18, 1)]
+    assert O.new_lots(ns, 75, 174220.0) == (2, "margin") and O.new_lots(ns, 75) == (2, "margin")
+    assert O.new_lots(ns, 75, 600000.0) == (1, "margin"), "never below one lot"
+    # a credit structure with legs in two expiries is sized as naked
+    assert O.new_lots([(-1, 1, 20000, ce, 60, 1), (1, 1, 20200, ce, 25, 2)], 75)[1] == "margin"
+
+
+def t_option_fees_flat_part_does_not_scale():
+    from . import size10l_options as O
+    assert O.flat_orders([(23.7, 112.68), (21.38, 0.0)]) == 3          # a leg settled at zero pays one order
+    f1 = 81.10
+    assert O.resize_fees(f1, 3, 1.0) == f1
+    f2 = O.resize_fees(f1, 3, 2.0)
+    assert f1 < f2 < 2 * f1 and abs(f2 - (3 * 23.6 + 2 * (f1 - 3 * 23.6))) < 0.01
+
+
 TESTS = [
     ("size10l: Rs 5 lakh for MIS and stock-futures trades, Rs 1 lakh delivery, index lots untouched", t_size_by_cost_kind),
     ("size10l: the wrapper changes the quantity only and carries the Rs 1 lakh twin", t_wrapper_changes_only_the_quantity),
@@ -105,6 +134,8 @@ TESTS = [
     ("size10l: index futures are not resized", t_index_future_untouched),
     ("size10l: daily series by exit session (trials.daily_pnl convention)", t_daily_series_books_on_the_exit_session),
     ("size10l: catalogue split into re-tested and unchanged ids", t_catalogue_split),
+    ("size10l options: lots from a premium / max-risk / margin budget, entry prices only", t_option_lot_rule),
+    ("size10l options: the flat brokerage per order does not scale with the lots", t_option_fees_flat_part_does_not_scale),
 ]
 
 
