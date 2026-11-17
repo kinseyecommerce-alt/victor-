@@ -363,15 +363,15 @@ qualification) and `ready` (qualified, consistent, not demoted — a flag for a 
 `chain_ok: false` = the registry chain failed verification. `seed` / `seeds`: the sandbox's batches 0001-0006
 (`builder_seed_0001.json` + `builder_seed_0002_0006.json`, sha256 pinned in `builder.SEED_SHA256` / `SEED2_SHA256`)
 imported as the registry's first records on first use (`imported: false` before that; `n_used` is then already the
-seeds' 4,979; `seed` = batch 0001, `seeds` = all six): their 2,400 keys are never drawn again, each is listed with
+seeds' 4,979 plus, under builder/v3, `lab_retest_trials` 455 = 5,434; `seed` = batch 0001, `seeds` = all six): their 2,400 keys are never drawn again, each is listed with
 `status: "seeded"` (no candidate rows on the server; `/builder/batches/{id}` shows its `seed` record incl.
 `proven`), the server's first own batch is 0007. The seeds' proven strategy is a `promoted` entry (`seeded: true`),
 counted in `promoted_unregistered` until the next builder run registers it with the builder/v1 forward family.
 ```json
-{"enabled": false, "rule_version": "builder/v3", "rule_sha256": "d360546ef5c7…", "rule_error": null,
+{"enabled": false, "rule_version": "builder/v3", "rule_sha256": "bcf23e8d3098…", "rule_error": null,
  "rules": [{"version": "builder/v1", "sha256": "a455009021b9…", "file": "builder_rule.json"},
            {"version": "builder/v2", "sha256": "7072377b40de…", "file": "builder_rule_v2.json"},
-           {"version": "builder/v3", "sha256": "d360546ef5c7…", "file": "builder_rule_v3.json"}],
+           {"version": "builder/v3", "sha256": "bcf23e8d3098…", "file": "builder_rule_v3.json"}],
  "size": {"regime": "c10", "per_trade_rs": {"equity_mis": 500000, "future": 500000, "equity_cnc": 100000},
           "options": {"premium_rs": 100000, "max_loss_rs": 100000, "naked_margin_rs": 500000, "naked_margin_pct": 0.12,
                       "max_units_per_leg": {"NIFTY": 1800, "BANKNIFTY": 600}},

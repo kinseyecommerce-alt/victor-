@@ -74,7 +74,7 @@ RULE_SHA256_V2 = "7072377b40de2be492773868b962e8dcc10b7392fc099587fcd1b2ef53d451
 # builder/v3 (grammar bg3: bg2 under the size regime "c10" = Rs 10 lakh capital per agent; nightly batches), written
 # next to v1 / v2, which stay valid and are never rewritten.
 RULE_FILE_V3 = HERE / "builder_rule_v3.json"
-RULE_SHA256_V3 = "d360546ef5c70dcc7d9055a1336b405509c3d460cec7f750c17ae87f4cd4fe59"
+RULE_SHA256_V3 = "bcf23e8d3098427b097870c98a9d888053d2f50f28e86d83aa5456fa9d79f116"
 # the pinned versions in order: a registry may only move forward along this chain (record "rule_upgrade")
 RULES = (("builder/v1", RULE_FILE, RULE_SHA256), ("builder/v2", RULE_FILE_V2, RULE_SHA256_V2),
          ("builder/v3", RULE_FILE_V3, RULE_SHA256_V3))
@@ -492,7 +492,8 @@ class Builder:
         return f"{len(st['batches']) + 1:04d}"
 
     def lab_count(self) -> int:
-        base = int(self.rule["dsr"]["lab_trials_count"])
+        # lab_retest_trials (builder/v3): the lab's own re-test of its catalogue at the rule's size regime
+        base = int(self.rule["dsr"]["lab_trials_count"]) + int(self.rule["dsr"].get("lab_retest_trials", 0) or 0)
         path = os.getenv("BUILDER_TRIALS_LEDGER") or os.getenv("STRATLAB_TRIALS")
         if not path or not os.path.exists(path):
             return base
@@ -1277,7 +1278,9 @@ def api_status(root=None) -> dict:
     out = {"enabled": enabled(), "rule_version": rule.get("version"), "rule_sha256": rule.get("_sha256"),
            "rule_error": rule_err, "agents": list(G.AGENTS), "market_types": list(G.MARKET_TYPES),
            "grammar_version": gv, "grammar_sizes": G.grammar_sizes(gv), "batches": [], "grid": [], "n_used": None,
-           "lab_trials_count": (rule.get("dsr") or {}).get("lab_trials_count"), "evaluated": 0, "final_looks": 0,
+           "lab_trials_count": (rule.get("dsr") or {}).get("lab_trials_count"),
+           "lab_retest_trials": int((rule.get("dsr") or {}).get("lab_retest_trials", 0) or 0),
+           "evaluated": 0, "final_looks": 0,
            "promoted": 0, "last_run": _jload(_status_path(root), {}), "chain_ok": True,
            "rules": [{"version": v, "sha256": s, "file": Path(f).name} for v, f, s in RULES],
            "size": {"text": (rule.get("costs") or {}).get("size"), "capital": (rule.get("costs") or {}).get("capital"),
@@ -1289,7 +1292,8 @@ def api_status(root=None) -> dict:
                         "universes": {}} for a in G.AGENTS for m in G.MARKET_TYPES]
         try:
             sds = [sb for _p, doc in load_seeds() for sb in seed_batches(doc)]
-            out["n_used"] = max(int(sb["n_used_after"]) for sb in sds)          # imported on first use
+            out["n_used"] = (max(int(sb["n_used_after"]) for sb in sds)         # imported on first use
+                             + int((rule.get("dsr") or {}).get("lab_retest_trials", 0) or 0))
             out["seed"] = {"batch": sds[0]["batch"], "frozen_hash": sds[0]["frozen_hash"], "imported": False,
                            "candidates": sds[0]["n_candidates"]}
             out["seeds"] = [{"batch": sb["batch"], "frozen_hash": sb["frozen_hash"], "imported": False,

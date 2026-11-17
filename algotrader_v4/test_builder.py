@@ -45,6 +45,8 @@ _SYN: dict = {}
 SEED1_N = 2552 + 16 + 400 + 2         # N after the sandbox batch 0001 (builder_seed_0001.json)
 SEED_EVAL, SEED_FINALS = 6 * 400, 2 + 2 + 3 + 0 + 2 + 2   # the six sandbox batches 0001-0006 and their FINAL looks
 SEED_N = 2552 + 16 + SEED_EVAL + SEED_FINALS   # = 4,979: N after every sandbox seed the server registry imports
+RETEST = 455                          # builder/v3 dsr.lab_retest_trials: the lab's catalogue re-test at the Rs 10 lakh size
+V3_N = SEED_N + RETEST                # = 5,434: N of a fresh registry under the current rule (builder/v3)
 FIRST, SECOND, THIRD = "0007", "0008", "0009"  # the server's own batches start after the six seeded ones
 SEED_KINDS = ["genesis"] + ["seed"] * 6 + ["promoted"]   # a fresh registry's first records
 PROVEN_SEEDED = "bld0003_int_hig_02_0ea14e"
@@ -341,7 +343,7 @@ def test_batch_end_to_end_and_n_accounting():
     for k in ("candidates", "discovery_passers", "shuffle_passers", "validation_tested", "validation_passers",
               "final_confirmed", "proven", "n_disc", "n_proof", "cells", "rows", "planted", "windows"):
         assert k in s, k
-    lab = SEED_N
+    lab = V3_N
     assert rec["n_before"] == lab
     assert s["n_disc"] == lab + 20 and s["n_proof"] == s["n_disc"] + s["final_looks"]
     for a in G.AGENTS:
@@ -353,7 +355,7 @@ def test_batch_end_to_end_and_n_accounting():
     out = b.ingest(rec["batch"], s)
     st = b.state()
     assert st["evaluated"] == SEED_EVAL + 20 and st["n_used"] == s["n_proof"]
-    assert b.n_base(st) == 2552 + 16 + SEED_EVAL + 20 + st["final_looks"]
+    assert b.n_base(st) == 2552 + RETEST + 16 + SEED_EVAL + 20 + st["final_looks"]
     # resumable: a re-run returns the stored units (no recompute)
     work = b.batch_dir(rec["batch"]) / "work"
     m0 = {p.name: p.stat().st_mtime for p in work.glob("*.json")}
@@ -376,7 +378,7 @@ def test_n_never_shrinks_and_counts_final_looks():
     st = b.state()
     assert st["final_looks"] == SEED_FINALS + 2 and st["n_used"] == SEED_N + 23   # the seeds' looks + this batch's 2
     r2 = b.freeze(snap, per_cell=1)
-    assert r2["n_before"] == SEED_N + 20 + 2
+    assert r2["n_before"] == V3_N + 20 + 2
     b.ingest(r2["batch"], {**summ, "n_proof": 10})               # a smaller N can never lower N_used
     assert b.state()["n_used"] == SEED_N + 23
     assert B.api_status(b.root)["n_used"] >= SEED_N + 23
@@ -607,7 +609,7 @@ def test_api_shape():
     for k in ("enabled", "rule_version", "rule_sha256", "agents", "market_types", "grid", "batches", "n_used",
               "lab_trials_count", "grammar_sizes"):
         assert k in empty, k
-    assert len(empty["grid"]) == 20 and empty["batches"] == [] and empty["n_used"] == SEED_N
+    assert len(empty["grid"]) == 20 and empty["batches"] == [] and empty["n_used"] == V3_N
     b = new_builder("api")
     rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
     s = _fake_proven_summary(b, rec["batch"])
@@ -712,7 +714,7 @@ def test_seed_import_idempotent():
     assert all(st["batches"][x]["seeded"] for x in st["batches"]) and st["seed"]["batch"] == "0001"
     assert sorted(st["seeds"]) == sorted(st["batches"])
     assert st["evaluated"] == SEED_EVAL and st["final_looks"] == SEED_FINALS
-    assert st["n_used"] == SEED_N and b.n_base(st) == SEED_N
+    assert st["n_used"] == SEED_N and b.n_base(st) == V3_N
     assert st["batches"]["0004"]["n_before"] == st["results"]["0003"]["n_used"]
     assert st["results"]["0003"]["proven"] == [PROVEN_SEEDED]
     # a fresh object on the same registry imports nothing again
@@ -720,7 +722,7 @@ def test_seed_import_idempotent():
     B.Builder(b.root).ensure_seed()
     assert [r["kind"] for r in b.registry.records()] == SEED_KINDS
     st_api = B.api_status(b.root)
-    assert st_api["n_used"] == SEED_N and {r["status"] for r in st_api["batches"]} == {"seeded"}
+    assert st_api["n_used"] == V3_N and {r["status"] for r in st_api["batches"]} == {"seeded"}
     assert len(st_api["batches"]) == 6 and st_api["seed"]["imported"] is True and len(st_api["seeds"]) == 6
     assert st_api["promoted"] == 1 and st_api["promoted_unregistered"] == 1
     assert B.api_batch("0001", b.root)["candidates"] == []          # the seed carries keys, not the sandbox's rows
@@ -728,7 +730,7 @@ def test_seed_import_idempotent():
     assert a3["status"] == "seeded" and a3["seed"]["proven"] == [PROVEN_SEEDED]
     assert a3["seed"]["file"] == B.SEED2_FILE.name and a3["cell_universes"]
     # before the registry exists the API already shows N after every seed
-    assert B.api_status(os.path.join(_TMP, "seed_idem_none"))["n_used"] == SEED_N
+    assert B.api_status(os.path.join(_TMP, "seed_idem_none"))["n_used"] == V3_N
 
 
 def test_seeded_promotion_registered_with_forward_family():
@@ -808,7 +810,7 @@ def test_seed2_tampered_refused():
 def test_seed_counts_in_n_and_keys_never_redrawn():
     b = new_builder("seed_n")
     rec = b.freeze({"source": "test", "end": 20261109})
-    assert rec["batch"] == FIRST and rec["n_before"] == SEED_N
+    assert rec["batch"] == FIRST and rec["n_before"] == V3_N
     seeded = {c["key"] for c in B.load_seed()["candidates"]}
     for x in B.seed_batches(B.load_seed(B.SEED2_FILE, expect=B.SEED2_SHA256)):
         seeded |= {c["key"] for c in x["candidates"]}
@@ -1462,7 +1464,7 @@ def test_rule_v3_pinned_and_only_size_grammar_schedule_changed():
     assert B.rule_sizes(r2)["per_trade_rs"]["equity_mis"] == 100000
     # before the first run (no registry yet) the API already shows the rule, its size and what is left to test
     api = B.api_status(os.path.join(_TMP, "never_ran"))
-    assert api["rule_version"] == "builder/v3" and api["size"]["regime"] == "c10" and api["n_used"] == SEED_N
+    assert api["rule_version"] == "builder/v3" and api["size"]["regime"] == "c10" and api["n_used"] == V3_N
     assert api["undrawn"]["total"] == 26244 and api["undrawn"]["undrawn"] == 25709 and api["night_batches"] == 12
     assert api["undrawn"]["per_agent"]["intraday"] == {"total": 9408, "undrawn": 9408}       # all re-sized: all new
     assert api["undrawn"]["per_agent"]["options"] == {"total": 2304, "undrawn": 2304}        # option lots re-sized
@@ -1728,7 +1730,7 @@ def _evaluate_recording(root, bid):
     return s, rec.seen
 
 
-def test_fresh_registry_under_v3_first_batch_0007_and_n_4979():
+def test_fresh_registry_under_v3_first_batch_0007_and_n_5434():
     b = new_builder("fresh_v3")
     b.ensure_genesis()
     assert [r["kind"] for r in b.registry.records()] == SEED_KINDS
@@ -1738,7 +1740,7 @@ def test_fresh_registry_under_v3_first_batch_0007_and_n_4979():
     assert st["n_used"] == SEED_N == 4979 and b.next_batch_id(st) == "0007"
     assert all(st["batches"][k].get("rule_sha256") == B.RULE_SHA256 for k in st["batches"])   # the seeds are v1
     rec = b.freeze(syn_source().snapshot(), per_cell=1)
-    assert rec["batch"] == "0007" and rec["n_before"] == 4979
+    assert rec["batch"] == "0007" and rec["n_before"] == V3_N == 5434
     assert rec["rule_version"] == "builder/v3" and rec["generator"]["grammar_version"] == "bg3"
     doc = json.loads(b.candidates_path("0007").read_text())
     cands = [G.Candidate.from_json(r["cand"]) for r in doc["candidates"]]
@@ -1749,15 +1751,15 @@ def test_fresh_registry_under_v3_first_batch_0007_and_n_4979():
     assert all(c.size == "" for c in cands if c.single and c.agent == "futures")
     # evaluated at the v3 sizes (the batch rule's): MIS Rs 5 lakh, nothing re-sized trades Rs 1 lakh MIS
     s, seen = _evaluate_recording(b.root, "0007")
-    assert s["rule_version"] == "builder/v3" and s["n_disc"] == 4979 + 20
+    assert s["rule_version"] == "builder/v3" and s["n_disc"] == V3_N + 20
     assert ("c10", "equity_mis", 500000.0) in seen and not any(k == "equity_mis" and v != 500000.0 for _r, k, v in seen)
     assert all(v == BE.SIZE_TABLES[r][k] for r, k, v in seen)
     b.ingest("0007", s)
     st = b.state()
-    assert st["evaluated"] == SEED_EVAL + 20 and b.n_base(st) == 4979 + 20 + st["final_looks"] - SEED_FINALS
+    assert st["evaluated"] == SEED_EVAL + 20 and b.n_base(st) == V3_N + 20 + st["final_looks"] - SEED_FINALS
     # the next batch counts every v3 candidate and FINAL look (one N; it never shrinks)
     r2 = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
-    assert r2["batch"] == "0008" and r2["n_before"] == b.n_base(st) >= 4979 + 20
+    assert r2["batch"] == "0008" and r2["n_before"] == b.n_base(st) >= V3_N + 20
     k1 = {r["key"] for r in doc["candidates"]}
     c2 = [G.Candidate.from_json(r["cand"]) for r in json.loads(b.candidates_path("0008").read_text())["candidates"]]
     assert all(G.never_drawn(c, seed | k1) for c in c2)
@@ -1790,7 +1792,7 @@ def test_upgrade_v1_to_v3_two_steps_and_pending_v1_batch_at_1_lakh():
         [("builder/v1", "builder/v2", "bg2"), ("builder/v2", "builder/v3", "bg3")]
     assert [(u["from_sha256"], u["to_sha256"]) for u in ups] == \
         [(B.RULE_SHA256, B.RULE_SHA256_V2), (B.RULE_SHA256_V2, B.RULE_SHA256_V3)]
-    assert all(u["n_used_before"] == SEED_N and u["evaluated_before"] == SEED_EVAL and u["batches_before"] == 7
+    assert all(u["n_used_before"] == V3_N and u["evaluated_before"] == SEED_EVAL and u["batches_before"] == 7
                and u["final_looks_before"] == SEED_FINALS for u in ups)
     assert st["batches"][FIRST]["frozen_hash"] == r1["frozen_hash"]            # earlier records never rewritten
     B.Builder(root).ensure_genesis()                             # idempotent
@@ -1804,7 +1806,7 @@ def test_upgrade_v1_to_v3_two_steps_and_pending_v1_batch_at_1_lakh():
     # new batches are builder/v3 (bg3); N continues
     r2 = v3.freeze({"source": "test", "end": 20261109}, per_cell=1)
     assert r2["batch"] == SECOND and r2["rule_version"] == "builder/v3" and r2["generator"]["grammar_version"] == "bg3"
-    assert r2["n_before"] == v3.n_base(st) == SEED_N + 20 + st["final_looks"] - SEED_FINALS
+    assert r2["n_before"] == v3.n_base(st) == V3_N + 20 + st["final_looks"] - SEED_FINALS
     keys1 = {c["key"] for c in json.loads(v3.candidates_path(FIRST).read_text())["candidates"]}
     c2 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v3.candidates_path(SECOND).read_text())["candidates"]]
     assert all(G.never_drawn(c, keys1 | _all_seed_keys()) for c in c2)
@@ -1918,7 +1920,7 @@ def test_nightly_job_runs_batches_up_to_the_budget():
         assert night["batches_run"] == 3 and night["stopped"].startswith("night budget (3")
         st = B.Builder(root).state()
         # each batch was frozen after the one before was ingested: N grows batch by batch, no key twice
-        assert [st["batches"][b_]["n_before"] for b_ in (FIRST, SECOND, THIRD)] == [SEED_N, SEED_N + 400, SEED_N + 800]
+        assert [st["batches"][b_]["n_before"] for b_ in (FIRST, SECOND, THIRD)] == [V3_N, V3_N + 400, V3_N + 800]
         assert st["evaluated"] == SEED_EVAL + 1200 and sorted(st["results"])[-3:] == [FIRST, SECOND, THIRD]
         keys = [c["key"] for b_ in (FIRST, SECOND, THIRD)
                 for c in json.loads(B.Builder(root).candidates_path(b_).read_text())["candidates"]]
