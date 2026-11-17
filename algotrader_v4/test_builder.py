@@ -45,6 +45,8 @@ _SYN: dict = {}
 SEED1_N = 2552 + 16 + 400 + 2         # N after the sandbox batch 0001 (builder_seed_0001.json)
 SEED_EVAL, SEED_FINALS = 6 * 400, 2 + 2 + 3 + 0 + 2 + 2   # the six sandbox batches 0001-0006 and their FINAL looks
 SEED_N = 2552 + 16 + SEED_EVAL + SEED_FINALS   # = 4,979: N after every sandbox seed the server registry imports
+RETEST = 455                          # builder/v3 dsr.lab_retest_trials: the lab's catalogue re-test at the Rs 10 lakh size
+V3_N = SEED_N + RETEST                # = 5,434: N of a fresh registry under the current rule (builder/v3)
 FIRST, SECOND, THIRD = "0007", "0008", "0009"  # the server's own batches start after the six seeded ones
 SEED_KINDS = ["genesis"] + ["seed"] * 6 + ["promoted"]   # a fresh registry's first records
 PROVEN_SEEDED = "bld0003_int_hig_02_0ea14e"
@@ -101,7 +103,8 @@ def test_grammar_determinism():
     # each frozen rule pins its own grammar version (bg1 unchanged byte for byte next to bg2)
     assert G.grammar_sha256("bg1") == json.loads((HERE / "builder_rule.json").read_text())["grammar"]["sha256"]
     assert G.grammar_sha256("bg2") == json.loads((HERE / "builder_rule_v2.json").read_text())["grammar"]["sha256"]
-    assert G.grammar_sha256() == G.grammar_sha256("bg2") and G.GRAMMAR_VERSION == "bg2"
+    assert G.grammar_sha256("bg3") == json.loads((HERE / "builder_rule_v3.json").read_text())["grammar"]["sha256"]
+    assert G.grammar_sha256() == G.grammar_sha256("bg3") and G.GRAMMAR_VERSION == "bg3"
 
 
 def test_no_retest_across_batches():
@@ -340,19 +343,19 @@ def test_batch_end_to_end_and_n_accounting():
     for k in ("candidates", "discovery_passers", "shuffle_passers", "validation_tested", "validation_passers",
               "final_confirmed", "proven", "n_disc", "n_proof", "cells", "rows", "planted", "windows"):
         assert k in s, k
-    lab = SEED_N
+    lab = V3_N
     assert rec["n_before"] == lab
     assert s["n_disc"] == lab + 20 and s["n_proof"] == s["n_disc"] + s["final_looks"]
     for a in G.AGENTS:
         assert f"gate_{a}" in s["planted"]
-    # a builder/v2 batch: every row carries its universe; the batch records what each universe resolved to
-    assert s["rule_version"] == "builder/v2" and all(r["universe"] in G.UNIVERSES for r in s["rows"])
+    # a builder/v3 batch: every row carries its universe; the batch records what each universe resolved to
+    assert s["rule_version"] == "builder/v3" and all(r["universe"] in G.UNIVERSES for r in s["rows"])
     assert s["universes"]["NIFTY100"]["n"] == 4 and s["universes"]["NIFTY200"]["added_complete"] == []
     assert sum(s["universes"]["counts"].values()) == 20
     out = b.ingest(rec["batch"], s)
     st = b.state()
     assert st["evaluated"] == SEED_EVAL + 20 and st["n_used"] == s["n_proof"]
-    assert b.n_base(st) == 2552 + 16 + SEED_EVAL + 20 + st["final_looks"]
+    assert b.n_base(st) == 2552 + RETEST + 16 + SEED_EVAL + 20 + st["final_looks"]
     # resumable: a re-run returns the stored units (no recompute)
     work = b.batch_dir(rec["batch"]) / "work"
     m0 = {p.name: p.stat().st_mtime for p in work.glob("*.json")}
@@ -375,7 +378,7 @@ def test_n_never_shrinks_and_counts_final_looks():
     st = b.state()
     assert st["final_looks"] == SEED_FINALS + 2 and st["n_used"] == SEED_N + 23   # the seeds' looks + this batch's 2
     r2 = b.freeze(snap, per_cell=1)
-    assert r2["n_before"] == SEED_N + 20 + 2
+    assert r2["n_before"] == V3_N + 20 + 2
     b.ingest(r2["batch"], {**summ, "n_proof": 10})               # a smaller N can never lower N_used
     assert b.state()["n_used"] == SEED_N + 23
     assert B.api_status(b.root)["n_used"] >= SEED_N + 23
@@ -445,7 +448,7 @@ def test_promotion_only_for_proven_and_forward_family():
     ns = {}
     exec(compile(gen, "builder_gen.py", "exec"), ns)
     assert [x["id"] for x in ns["SPECS"]] == [PROVEN_SEEDED, pid]
-    assert ns["RULE_SHA256"] == B.CURRENT_RULE_SHA256 == B.RULE_SHA256_V2
+    assert ns["RULE_SHA256"] == B.CURRENT_RULE_SHA256 == B.RULE_SHA256_V3
 
 
 def test_forward_family_rule_and_v1_untouched():
@@ -516,10 +519,12 @@ def test_flag_off_nothing_scheduled():
                 ps._sched = MagicMock()
                 ps.start()
                 ids = [c.kwargs.get("id") for c in ps._sched.add_job.call_args_list]
-                assert ("builder_weekly" in ids) is on, ids
-                if on:
-                    c = [c for c in ps._sched.add_job.call_args_list if c.kwargs.get("id") == "builder_weekly"][0]
-                    assert c.kwargs["day_of_week"] == "sat" and c.kwargs["hour"] == 6 and c.kwargs["minute"] == 0
+                assert ("builder_nightly" in ids) is on and "builder_weekly" not in ids, ids
+                if on:                                  # builder/v3: one batch every night at 02:30 IST
+                    c = [c for c in ps._sched.add_job.call_args_list if c.kwargs.get("id") == "builder_nightly"][0]
+                    assert c.kwargs["hour"] == 2 and c.kwargs["minute"] == 30 and "day_of_week" not in c.kwargs
+                    assert c.kwargs["misfire_grace_time"] <= 2 * 3600        # never started close to the open
+                    assert "02:30" in B.load_rule()["schedule"]["when"]
     with patch.object(settings, "builder_enabled", True), patch.object(settings, "trading_mode", "LIVE"):
         assert B.enabled() is False
 
@@ -604,7 +609,7 @@ def test_api_shape():
     for k in ("enabled", "rule_version", "rule_sha256", "agents", "market_types", "grid", "batches", "n_used",
               "lab_trials_count", "grammar_sizes"):
         assert k in empty, k
-    assert len(empty["grid"]) == 20 and empty["batches"] == [] and empty["n_used"] == SEED_N
+    assert len(empty["grid"]) == 20 and empty["batches"] == [] and empty["n_used"] == V3_N
     b = new_builder("api")
     rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
     s = _fake_proven_summary(b, rec["batch"])
@@ -709,7 +714,7 @@ def test_seed_import_idempotent():
     assert all(st["batches"][x]["seeded"] for x in st["batches"]) and st["seed"]["batch"] == "0001"
     assert sorted(st["seeds"]) == sorted(st["batches"])
     assert st["evaluated"] == SEED_EVAL and st["final_looks"] == SEED_FINALS
-    assert st["n_used"] == SEED_N and b.n_base(st) == SEED_N
+    assert st["n_used"] == SEED_N and b.n_base(st) == V3_N
     assert st["batches"]["0004"]["n_before"] == st["results"]["0003"]["n_used"]
     assert st["results"]["0003"]["proven"] == [PROVEN_SEEDED]
     # a fresh object on the same registry imports nothing again
@@ -717,7 +722,7 @@ def test_seed_import_idempotent():
     B.Builder(b.root).ensure_seed()
     assert [r["kind"] for r in b.registry.records()] == SEED_KINDS
     st_api = B.api_status(b.root)
-    assert st_api["n_used"] == SEED_N and {r["status"] for r in st_api["batches"]} == {"seeded"}
+    assert st_api["n_used"] == V3_N and {r["status"] for r in st_api["batches"]} == {"seeded"}
     assert len(st_api["batches"]) == 6 and st_api["seed"]["imported"] is True and len(st_api["seeds"]) == 6
     assert st_api["promoted"] == 1 and st_api["promoted_unregistered"] == 1
     assert B.api_batch("0001", b.root)["candidates"] == []          # the seed carries keys, not the sandbox's rows
@@ -725,7 +730,7 @@ def test_seed_import_idempotent():
     assert a3["status"] == "seeded" and a3["seed"]["proven"] == [PROVEN_SEEDED]
     assert a3["seed"]["file"] == B.SEED2_FILE.name and a3["cell_universes"]
     # before the registry exists the API already shows N after every seed
-    assert B.api_status(os.path.join(_TMP, "seed_idem_none"))["n_used"] == SEED_N
+    assert B.api_status(os.path.join(_TMP, "seed_idem_none"))["n_used"] == V3_N
 
 
 def test_seeded_promotion_registered_with_forward_family():
@@ -805,7 +810,7 @@ def test_seed2_tampered_refused():
 def test_seed_counts_in_n_and_keys_never_redrawn():
     b = new_builder("seed_n")
     rec = b.freeze({"source": "test", "end": 20261109})
-    assert rec["batch"] == FIRST and rec["n_before"] == SEED_N
+    assert rec["batch"] == FIRST and rec["n_before"] == V3_N
     seeded = {c["key"] for c in B.load_seed()["candidates"]}
     for x in B.seed_batches(B.load_seed(B.SEED2_FILE, expect=B.SEED2_SHA256)):
         seeded |= {c["key"] for c in x["candidates"]}
@@ -889,10 +894,40 @@ def _sat():
     return datetime(2026, 11, 21, 6, 0)
 
 
-def _data_copy(name: str) -> str:
+def _nse_window_keys(bd, upto) -> list:
+    import builder_data as BD
+    from datetime import date, timedelta
+    keys = [f"deals:{kind}:{tag}" for _s, _e, tag in bd.quarters(BD.NSE_START, upto) for kind in ("bulk", "block")]
+    keys += [f"ca:{tag}" for _s, _e, tag in bd.quarters(BD.NSE_START, upto + timedelta(days=92))]
+    keys += [f"mcwb:{tag}" for _s, _e, tag in bd.months(BD.NSE_START, upto)]
+    keys += [f"ev:{feed}:{tag}" for feed in BD.FEEDS for _s, e, tag in bd.months(BD.EVENTS_FROM, upto)
+             if feed != "ifr" or e >= date(2025, 4, 1)]
+    return keys
+
+
+def _mark_nse_complete(d: str) -> None:
+    """Fixture: the data layer's state file as it is once its NSE archive backfill (2012 ->) is complete (every
+    calendar day final, every feed window fetched). The synthetic tree itself has no state file."""
+    import builder_data as BD
+    from datetime import date, timedelta
+    bd = BD.Builder(d)
+    st = bd.state()
+    upto = date.today() + timedelta(days=2)
+    k = BD.NSE_START
+    while k <= upto:
+        st["days"][str(BD.ymd(k))] = {"cash": "no_session"}
+        k += timedelta(days=1)
+    for key in _nse_window_keys(bd, upto):
+        st["windows"][key] = {"status": "ok", "at": 99991231}
+    bd.save(st)
+
+
+def _data_copy(name: str, nse_complete: bool = True) -> str:
     d = os.path.join(_TMP, name)
     shutil.rmtree(d, ignore_errors=True)
     shutil.copytree(syn_root(), d)
+    if nse_complete:
+        _mark_nse_complete(d)
     return d
 
 
@@ -1169,7 +1204,7 @@ def test_n_continuity_v1_to_v2_and_v1_batch_evaluated_under_v1():
     r1 = v1.freeze(src.snapshot(), per_cell=1)                  # a builder/v1 batch (bg1) left pending
     assert r1["batch"] == FIRST and r1["generator"]["grammar_version"] == "bg1" and r1["n_before"] == SEED_N
     keys1 = {c["key"] for c in json.loads(v1.candidates_path(FIRST).read_text())["candidates"]}
-    v2 = B.Builder(root)                                        # the deploy: the current rule is builder/v2
+    v2 = B.Builder(root, B.load_rule(B.RULE_FILE_V2))           # the builder/v2 deploy
     assert v2.rule["version"] == "builder/v2"
     v2.ensure_genesis()                                         # the weekly job's first step: the upgrade record
     st = v2.state()
@@ -1200,18 +1235,20 @@ def test_n_continuity_v1_to_v2_and_v1_batch_evaluated_under_v1():
         pass
     assert v2.registry.verify()["ok"]
     assert [r["kind"] for r in v2.registry.records()].count("rule_upgrade") == 1
-    B.Builder(root).ensure_genesis()                            # idempotent
+    B.Builder(root, B.load_rule(B.RULE_FILE_V2)).ensure_genesis()        # idempotent
     assert [r["kind"] for r in v2.registry.records()].count("rule_upgrade") == 1
     assert B.api_status(root)["n_used"] >= up["n_used_before"]
-    # a fresh registry starts directly under v2 (genesis + seeds, no upgrade record)
-    fresh = new_builder("fresh_v2")
+    # a fresh registry started under v2 (genesis + seeds, no upgrade record)
+    fresh_root = os.path.join(_TMP, "fresh_v2")
+    shutil.rmtree(fresh_root, ignore_errors=True)
+    fresh = B.Builder(fresh_root, B.load_rule(B.RULE_FILE_V2))
     fresh.ensure_genesis()
     assert [r["kind"] for r in fresh.registry.records()] == SEED_KINDS
     assert fresh.state()["genesis"]["grammar_version"] == "bg2"
 
 
 def test_rule_v2_pinned_and_v1_unchanged():
-    r1, r2 = B.load_rule(B.RULE_FILE), B.load_rule()
+    r1, r2 = B.load_rule(B.RULE_FILE), B.load_rule(B.RULE_FILE_V2)
     assert r1["_sha256"] == B.RULE_SHA256 == "a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06"
     assert r2["_sha256"] == B.RULE_SHA256_V2 == hashlib.sha256((HERE / "builder_rule_v2.json").read_bytes()).hexdigest()
     assert r2["version"] == "builder/v2" and r2["supersedes"]["sha256"] == B.RULE_SHA256
@@ -1277,18 +1314,18 @@ def test_api_shows_universes():
     b = new_builder("api_uni")
     rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
     st = B.api_status(b.root)
-    assert st["rule_version"] == "builder/v2" and st["grammar_version"] == "bg2"
-    assert [r["version"] for r in st["rules"]] == ["builder/v1", "builder/v2"]
+    assert st["rule_version"] == "builder/v3" and st["grammar_version"] == "bg3"
+    assert [r["version"] for r in st["rules"]] == ["builder/v1", "builder/v2", "builder/v3"]
     assert set(st["universes"]["choices"]) == {"NIFTY100", "NIFTY200", "TOP500", "INDEX"}
     row = [r for r in st["batches"] if r["id"] == rec["batch"]][0]
-    assert row["rule_version"] == "builder/v2" and sum(row["universes"].values()) == 20
+    assert row["rule_version"] == "builder/v3" and sum(row["universes"].values()) == 20
     seed_row = [r for r in st["batches"] if r["id"] == "0001"][0]
     assert seed_row["rule_version"] == "builder/v1" and sum(seed_row["universes"].values()) == 400
     assert all("universes" in g for g in st["grid"])
     assert sum(u["candidates"] for g in st["grid"] for u in g["universes"].values()) == SEED_EVAL + 20
     d = B.api_batch(rec["batch"], b.root)
     assert all(c["universe"] in G.UNIVERSES and c["universe_explicit"] for c in d["candidates"])
-    assert d["rule_version"] == "builder/v2" and sum(sum(v.values()) for v in d["cell_universes"].values()) == 20
+    assert d["rule_version"] == "builder/v3" and sum(sum(v.values()) for v in d["cell_universes"].values()) == 20
 
 
 def test_new_batches_wait_for_the_minute_universe():
@@ -1318,6 +1355,738 @@ def test_flag_defaults_unchanged():
     s = Settings(_env_file=None)
     assert s.builder_enabled is False and s.builder_data_enabled is False and s.forward_lab_enabled is False
     assert s.builder_minute_universe == "nifty200" and s.builder_data_max_mb == 2600.0 and s.builder_max_mb == 400.0
+    assert s.builder_night_batches == 12
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# builder/v3: the size regime "c10" (Rs 10 lakh capital per agent), grammar bg3, nightly batches
+# ══════════════════════════════════════════════════════════════════════════
+BG1_SHA = "2084ade2c07de51ab95700e54c200e3d60c76f97d0ee38eba0ce464f899589ea"
+BG2_SHA = "8bbb31f2d0c3b911b5a1581be8b458159e74358792883f9db87cb40f4e41eef3"
+
+
+def _pin(t) -> float:
+    """The raw entry price of a trade tuple (its fill carries 2 bps of slippage)."""
+    return t[5] / (1.0 + t[3] * BE.R.SLIP_BPS / 1e4)
+
+
+def _sized_ok(t, notional: float) -> bool:
+    n = notional / _pin(t)
+    return n - 1.01 < t[9] < n + 0.01
+
+
+def _manual_sig(E, c, n: int = 400):
+    """Trigger cells of both directions on eligible cells (no market-type filter): a deterministic fixture."""
+    es, et = E.eligible(c, 0, 20261109, mtype=None)
+    k = np.arange(0, len(es), max(1, len(es) // n))
+    sides = np.where(np.arange(len(k)) % 2 == 0, 1, -1)
+    return E.sort_sig(c, es[k].tolist(), et[k].tolist(), sides.tolist(), np.linspace(1, 2, len(k)).tolist(),
+                      [0] * len(k))
+
+
+def test_rule_v3_pinned_and_only_size_grammar_schedule_changed():
+    r2, r3 = B.load_rule(B.RULE_FILE_V2), B.load_rule()
+    assert r3["_sha256"] == B.RULE_SHA256_V3 == B.CURRENT_RULE_SHA256 == \
+        hashlib.sha256((HERE / "builder_rule_v3.json").read_bytes()).hexdigest()
+    assert r3["version"] == "builder/v3" and r3["supersedes"]["sha256"] == B.RULE_SHA256_V2
+    assert [v for v, _f, _s in B.RULES] == ["builder/v1", "builder/v2", "builder/v3"]
+    # v1 / v2 files and both grammars are byte for byte what they were
+    assert B.RULE_SHA256 == hashlib.sha256((HERE / "builder_rule.json").read_bytes()).hexdigest()
+    assert B.RULE_SHA256_V2 == hashlib.sha256((HERE / "builder_rule_v2.json").read_bytes()).hexdigest()
+    assert G.grammar_sha256("bg1") == BG1_SHA and G.grammar_sha256("bg2") == BG2_SHA
+    # unchanged: gates, splits, controls, carry, validation, final, proven, freeze, fill model, fee schedule, DSR
+    for k in ("splits", "discovery_gates", "carry", "validation", "final", "controls", "proven", "freeze"):
+        assert r2[k] == r3[k], k
+    for k in ("fill_model", "fees"):
+        assert r2["costs"][k] == r3["costs"][k], k
+    for k in ("min", "lab_trials_count", "development_evaluations", "formula", "V", "series"):
+        assert r2["dsr"][k] == r3["dsr"][k], k
+    assert r3["batch"]["per_cell"] == 20 and r3["batch"]["size"] == 400
+    assert r3["grammar"]["universes"] == r2["grammar"]["universes"]
+    assert r3["grammar"]["market_types"] == r2["grammar"]["market_types"]
+    # changed: the size, the grammar version and the schedule
+    assert r3["costs"]["size"] != r2["costs"]["size"] and "size_rs" not in r2["costs"]
+    rs = r3["costs"]["size_rs"]
+    assert rs == {"regime": "c10", "equity_mis": 500000, "future": 500000, "equity_cnc": 100000,
+                  "options": {"premium_rs": 100000, "max_loss_rs": 100000, "naked_margin_rs": 500000,
+                              "naked_margin_pct": 0.12, "max_units_per_leg": {"NIFTY": 1800, "BANKNIFTY": 600}}}
+    assert {k: float(v) for k, v in rs.items() if k not in ("regime", "options")} == BE.SIZE_TABLES["c10"]
+    assert rs["options"] == BO.OPTION_SIZES["c10"]
+    from stratlab import options_vrp
+    assert rs["options"]["naked_margin_pct"] == options_vrp.NAKED_MARGIN_PCT           # the lab's own estimate
+    assert "IS their Rs 10 lakh result" in r3["costs"]["unchanged"] and "never re-drawn" in r3["costs"]["unchanged"]
+    assert "IS its Rs 10 lakh result" in r3["grammar"]["size_regime"]["unchanged"]
+    assert BE.SIZE_TABLES[""] == {"equity_mis": 100000.0, "equity_cnc": 100000.0, "future": 100000.0}
+    assert r3["costs"]["capital"]["per_agent_rs"] == 1000000 and "NOT capped" in r3["costs"]["capital"]["limitation"]
+    assert r3["grammar"]["version"] == "bg3" and r3["grammar"]["sha256"] == G.grammar_sha256("bg3")
+    assert r3["grammar"]["v2"]["sha256"] == BG2_SHA and r3["grammar"]["v1"]["sha256"] == BG1_SHA
+    assert r3["grammar"]["sizes"] == G.grammar_sizes("bg3") == G.grammar_sizes("bg2")
+    for a, d in r3["grammar"]["size_regime"]["counts"].items():
+        rows = G.grammar(a, "bg3")
+        assert d == {"re_sized": sum(1 for x in rows if x[8]), "unchanged": sum(1 for x in rows if not x[8])}, a
+    assert "02:30" in r3["schedule"]["when"] and "Saturday" in r2["schedule"]["when"]
+    assert r3["schedule"]["data_gates"] == ["minute_universe", "nse_archives"] and "data_gates" not in r2["schedule"]
+    assert r3["schedule"]["night"]["max_batches_default"] == 12 == settings.builder_night_batches
+    assert r3["schedule"]["night"]["no_new_batch_from"] == "05:15 IST" and B.NIGHT_STOP_MIN == 5 * 60 + 15
+    assert "BUILDER_NIGHT_BATCHES" in r3["schedule"]["when"] and "grammar_exhausted" in r3["schedule"]["when"]
+    assert "NSE archive backfill" in r3["schedule"]["data"]
+    assert "minute universe is complete" in r3["schedule"]["data"]
+    # an edited v3 rule is refused; a rule whose size table is not the engine's is refused by the engine
+    tmp = Path(_TMP) / "rule_v3_edit.json"
+    tmp.write_text((HERE / "builder_rule_v3.json").read_text().replace('"equity_mis": 500000', '"equity_mis": 900000'))
+    tmp2 = Path(_TMP) / "rule_v3_edit_opt.json"
+    tmp2.write_text((HERE / "builder_rule_v3.json").read_text().replace('"premium_rs": 100000', '"premium_rs": 900000'))
+    try:
+        B.load_rule(tmp)
+        raise AssertionError("an edited v3 rule must be refused")
+    except B.RuleChanged:
+        pass
+    E = engine()
+    E.apply_rule(r3)
+    E.apply_rule(r2)
+    E.apply_rule(B.load_rule(B.RULE_FILE))
+    assert E.sizes == BE.SIZE_TABLES
+    bad = json.loads(tmp.read_text())
+    try:
+        E.apply_rule(bad)
+        raise AssertionError("a size table that is not the engine's must be refused")
+    except BE.SizeMismatch:
+        pass
+    assert E.sizes == BE.SIZE_TABLES
+    try:
+        E.apply_rule(json.loads(tmp2.read_text()))
+        raise AssertionError("an option size table that is not the engine's must be refused")
+    except BE.SizeMismatch:
+        pass
+    assert E.option_sizes == BO.OPTION_SIZES
+    assert B.rule_by_sha(B.RULE_SHA256_V3)["version"] == "builder/v3"
+    assert B.rule_sizes(r3)["regime"] == "c10" and B.rule_sizes(r2)["regime"] == ""
+    assert B.rule_sizes(r2)["per_trade_rs"]["equity_mis"] == 100000
+    # before the first run (no registry yet) the API already shows the rule, its size and what is left to test
+    api = B.api_status(os.path.join(_TMP, "never_ran"))
+    assert api["rule_version"] == "builder/v3" and api["size"]["regime"] == "c10" and api["n_used"] == V3_N
+    assert api["undrawn"]["total"] == 26244 and api["undrawn"]["undrawn"] == 25709 and api["night_batches"] == 12
+    assert api["undrawn"]["per_agent"]["intraday"] == {"total": 9408, "undrawn": 9408}       # all re-sized: all new
+    assert api["undrawn"]["per_agent"]["options"] == {"total": 2304, "undrawn": 2304}        # option lots re-sized
+    assert api["undrawn"]["per_agent"]["futures"]["undrawn"] < api["undrawn"]["per_agent"]["futures"]["total"]
+    assert api["size"]["options"] == BO.OPTION_SIZES["c10"] and "IS their Rs 10 lakh result" in api["size"]["unchanged"]
+
+
+def test_bg3_size_regime_classification():
+    """Which sentences are re-sized: every MIS stock sentence, every stock sentence at futures costs (futures agent;
+    swing sentences that can go short) and every options sentence (lots from the capital); swing long-only and
+    index-futures sentences keep their bg2 identity."""
+    for a in G.AGENTS:
+        r2, r3 = G.grammar(a, "bg2"), G.grammar(a, "bg3")
+        assert [x[:8] for x in r3] == r2, a                        # bg3 = bg2's rows + the size regime
+        assert all(x[8] in ("", "c10") for x in r3)
+    assert all(x[8] == "c10" for a in ("intraday", "scalping") for x in G.grammar(a, "bg3"))
+    assert all(x[8] == "c10" for x in G.grammar("options", "bg3"))
+    for x in G.grammar("futures", "bg3"):
+        assert x[8] == ("c10" if x[0] == "STOCKS" else ""), x
+    E = engine()
+    seen = set()
+    n_long_only = n_short = 0
+    for c in G.cell_grammar("swing", "RISING", "bg3"):
+        if (c.block, c.params) in seen:
+            continue
+        seen.add((c.block, c.params))
+        sides = set(E.raw_signal(c)[2].tolist())
+        if c.size == "":                                           # a twin: the engine must book only CNC longs
+            assert sides <= {1}, (c.block, c.params, sides)
+            assert all(BE.cost_kind(c, sd) == "equity_cnc" for sd in sides)
+            n_long_only += 1
+        else:
+            assert G.BLOCK[c.block].side != "long"
+            n_short += bool(sides & {-1})
+    assert n_long_only >= 10 and n_short >= 5, (n_long_only, n_short)
+    # planted carriers take the size regime of their own sentence under bg3; Rs 1 lakh under bg1 / bg2
+    c3 = EV.planted_candidates(B.load_rule())
+    assert c3["intraday"].size == c3["scalping"].size == "c10"
+    assert c3["options"].size == "c10" and c3["swing"].size == c3["futures"].size == ""
+    assert all(c.size == "" for c in EV.planted_candidates(B.load_rule(B.RULE_FILE_V2)).values())
+    assert all(c.size == "" for c in EV.planted_candidates(B.load_rule(B.RULE_FILE)).values())
+
+
+def test_bg3_twin_rule_and_new_keys():
+    import dataclasses
+    sized = G.Candidate("intraday", "RISING", "gap_fade", (("g", 0.01), ("mode", "fade_day")), "o0915",
+                        ("time", "o1515"), "STOCKS", "mis", "", "NIFTY100", "c10")
+    old = dataclasses.replace(sized, size="")                      # the same sentence at Rs 1 lakh (bg2)
+    assert sized in G.cell_grammar("intraday", "RISING", "bg3") and old in G.cell_grammar("intraday", "RISING", "bg2")
+    assert old not in G.cell_grammar("intraday", "RISING", "bg3")
+    assert sized.version == "bg3" and old.version == "bg2" and sized.key != old.key
+    assert json.loads(sized.key)[0] == "bg3" and json.loads(sized.key)[-2:] == ["NIFTY100", "c10"]
+    assert sized.v1_key is None and old.v1_key is not None
+    # a re-sized sentence is drawable although its Rs 1 lakh versions (bg2 key, bg1 twin) were drawn; once only
+    assert G.never_drawn(sized, {old.key, old.v1_key})
+    assert not G.never_drawn(sized, {sized.key})
+    # JSON: a bg1 / bg2 candidate's JSON is unchanged (no "size"); a re-sized one round-trips with its size
+    assert "size" not in old.to_json() and sized.to_json()["size"] == "c10"
+    assert G.Candidate.from_json(sized.to_json()) == sized and G.Candidate.from_json(old.to_json()) == old
+    assert "Rs 5 lakh per trade" in G.describe(sized) and "Rs 5 lakh" not in G.describe(old)
+    sw = [c for c in G.cell_grammar("swing", "RISING", "bg3") if c.size][0]
+    assert "CNC, Rs 1 lakh per trade" in G.describe(sw) and "stock futures (Rs 5 lakh per trade)" in G.describe(sw)
+    # an unchanged-size sentence IS its bg2 sentence: same key; never drawn after its bg2 key or its bg1 twin
+    twin = [c for c in G.cell_grammar("futures", "RISING", "bg3") if c.single][0]        # an index future: 1 lot
+    assert twin.size == "" and twin.version == "bg2" and twin in G.cell_grammar("futures", "RISING", "bg2")
+    # an options sentence is re-sized (its lots follow the capital): a new bg3 key, drawable again
+    opt = G.cell_grammar("options", "RISING", "bg3")[0]
+    opt_old = dataclasses.replace(opt, size="")
+    assert opt.size == "c10" and opt.version == "bg3" and json.loads(opt.key)[0] == "bg3" and opt.v1_key is None
+    assert opt_old in G.cell_grammar("options", "RISING", "bg2") and opt_old not in G.cell_grammar("options", "RISING", "bg3")
+    assert G.never_drawn(opt, {opt_old.key, opt_old.v1_key}) and not G.never_drawn(opt, {opt.key})
+    assert "lots from Rs 10 lakh capital" in G.describe(opt) and "lots from" not in G.describe(opt_old)
+    assert not G.never_drawn(twin, {twin.key}) and not G.never_drawn(twin, {twin.v1_key})
+    lo = [c for c in G.cell_grammar("swing", "RISING", "bg3") if c.size == "" and c.universe == "TOP500"][0]
+    assert lo.v1_key and not G.never_drawn(lo, {lo.v1_key})
+    # the draw: with EVERY bg1 and bg2 key drawn, a bg3 batch holds only re-sized sentences (new trials, new keys)
+    drawn = {c.key for a in G.AGENTS for m in G.MARKET_TYPES for v in ("bg1", "bg2") for c in G.cell_grammar(a, m, v)}
+    b = G.draw_batch("0007", drawn, version="bg3")
+    assert b and all(c.size == "c10" and c.version == "bg3" and c.key not in drawn for c in b)
+    cells = {}
+    for c in b:
+        cells[c.cell] = cells.get(c.cell, 0) + 1
+    assert all(cells.get(f"{a}|{m}") == 20 for a in G.AGENTS for m in G.MARKET_TYPES), cells   # options too
+    b2 = G.draw_batch("0008", drawn | {c.key for c in b}, version="bg3")
+    assert not ({c.key for c in b2} & {c.key for c in b})
+    # the seeds (bg1 keys) block only their unchanged twins: a re-sized seed sentence comes back as a new candidate
+    seed = _all_seed_keys()
+    b3 = G.draw_batch("0007", seed, version="bg3")
+    assert len(b3) == 400 and all(G.never_drawn(c, seed) for c in b3)
+    assert all(c.key not in seed and (c.v1_key is None or c.v1_key not in seed) for c in b3)
+    assert G.draw_batch("0007", seed, version="bg3") == b3          # deterministic
+    assert any(c.size == "c10" for c in b3) and any(c.size == "" for c in b3)
+
+
+def test_v3_engine_trade_sizes_and_fee_per_rupee():
+    import dataclasses
+    from costs import round_trip_cost
+    E = engine()
+    hi = 20261109
+    # MIS (intraday): Rs 5 lakh per trade under bg3, Rs 1 lakh for the same sentence under bg2
+    mis = G.Candidate("intraday", "RISING", "gap_go", (("g", 0.01), ("mode", "go")), "o0920", ("time", "o1430"),
+                      "STOCKS", "mis", "", "NIFTY100", "c10")
+    mis_old = dataclasses.replace(mis, size="")
+    sig = E.signals(mis, mtype=None)
+    res = BE.run_jobs(E, [BE.Job("new", mis, sig, 0, hi, False), BE.Job("old", mis_old, sig, 0, hi, False)])
+    new, old = res["new"]["trades"], res["old"]["trades"]
+    assert len(new) == len(old) > 100
+    assert all(_sized_ok(t, 500000.0) for t in new) and all(_sized_ok(t, 100000.0) for t in old)
+    for a, b_ in zip(new, old):
+        assert a[1:9] == b_[1:9]                                   # the same trade (symbol, days, side, fills)
+        if a[9] >= 50:                                             # (whole shares: only the rounding differs)
+            assert a[11] / (a[9] * a[5]) < b_[11] / (b_[9] * b_[5])        # the fee per rupee traded falls
+    assert round_trip_cost(500000.0, 500000.0, "equity_mis") < 5 * round_trip_cost(100000.0, 100000.0, "equity_mis")
+    assert round_trip_cost(500000.0, 500000.0, "future") < 5 * round_trip_cost(100000.0, 100000.0, "future")
+    # scalping: MIS too
+    sc = G.Candidate("scalping", "RISING", "gap_go", (("g", 0.01), ("mode", "go")), "o0920", ("time_min", 5),
+                     "STOCKS", "mis", "", "NIFTY100", "c10")
+    tr = BE.run_jobs(E, [BE.Job("x", sc, E.signals(sc, mtype=None), 0, hi, False)])["x"]["trades"]
+    assert len(tr) > 100 and all(_sized_ok(t, 500000.0) for t in tr)
+    # swing: delivery longs stay Rs 1 lakh (CNC), shorts are booked at futures costs: Rs 5 lakh under bg3
+    sw = G.Candidate("swing", "RISING", "low_deliv", (), "next_open", ("hold", 3), "STOCKS", "cnc/fut", "", "TOP500",
+                     "c10")
+    assert sw in G.cell_grammar("swing", "RISING", "bg3")
+    sw_old = dataclasses.replace(sw, size="")
+    sg = _manual_sig(E, sw)
+    res = BE.run_jobs(E, [BE.Job("new", sw, sg, 0, hi, False), BE.Job("old", sw_old, sg, 0, hi, False)])
+    longs, shorts = [t for t in res["new"]["trades"] if t[3] > 0], [t for t in res["new"]["trades"] if t[3] < 0]
+    assert len(longs) > 20 and len(shorts) > 20
+    assert all(_sized_ok(t, 100000.0) for t in longs) and all(_sized_ok(t, 500000.0) for t in shorts)
+    assert all(_sized_ok(t, 100000.0) for t in res["old"]["trades"])
+    # the futures agent's stock sentences (futures costs): Rs 5 lakh both ways under bg3; index futures: 1 real lot
+    fs = G.Candidate("futures", "RISING", "low_deliv", (), "next_open", ("hold", 2), "STOCKS", "fut", "", "NIFTY100",
+                     "c10")
+    assert fs in G.cell_grammar("futures", "RISING", "bg3")
+    fs_old = dataclasses.replace(fs, size="")
+    sg = _manual_sig(E, fs)
+    res = BE.run_jobs(E, [BE.Job("new", fs, sg, 0, hi, False), BE.Job("old", fs_old, sg, 0, hi, False)])
+    assert len(res["new"]["trades"]) > 40 and {t[3] for t in res["new"]["trades"]} == {1, -1}
+    assert all(_sized_ok(t, 500000.0) for t in res["new"]["trades"])
+    assert all(_sized_ok(t, 100000.0) for t in res["old"]["trades"])
+    ix = [c for c in G.cell_grammar("futures", "RISING", "bg3") if c.instrument == "NIFTY" and c.block == "fii_flow"][0]
+    assert ix.size == ""
+    tr = BE.run_jobs(E, [BE.Job("x", ix, E.signals(ix, mtype=None), 0, hi, False)])["x"]["trades"]
+    assert tr and {t[9] for t in tr} == {BE.sim.LOT_SIZES["NIFTY"]}
+    # a bg1 candidate (no universe, no size): Rs 1 lakh, as ever
+    v1 = G.Candidate("intraday", "RISING", "gap_go", (("g", 0.01), ("mode", "go")), "o0920", ("time", "o1430"),
+                     "STOCKS", "mis", "")
+    tr = BE.run_jobs(E, [BE.Job("x", v1, E.signals(v1, mtype=None), 0, hi, False)])["x"]["trades"]
+    assert len(tr) > 100 and all(_sized_ok(t, 100000.0) for t in tr)
+
+
+def test_v3_option_lots_three_formulas():
+    cfg = BO.OPTION_SIZES["c10"]
+    lot = 75
+    # 1. long ATM: Rs 1 lakh of premium at risk -> floor(100000 / (premium x lot))
+    n, b = BO.option_lots("long_atm", [("CE", 25000.0, 1)], [200.0], lot, "NIFTY", 25010.0, cfg)
+    assert (n, b["rule"], b["per_lot_rs"]) == (6, "premium", 15000.0) and b["uncapped"] == 6
+    assert BO.option_lots("long_atm", [("PE", 25000.0, 1)], [1400.0], lot, "NIFTY", None, cfg)[0] == 1     # never < 1
+    #    debit spread: the NET premium paid per lot
+    n, b = BO.option_lots("debit_spread", [("CE", 25000.0, 1), ("CE", 25500.0, -1)], [200.0, 80.0], lot, "NIFTY",
+                          25010.0, cfg)
+    assert (n, b["per_lot_rs"]) == (11, 9000.0)                              # 100000 // (120 x 75)
+    # 2. iron condor: Rs 1 lakh of MAXIMUM LOSS -> (widest wing - net credit) x lot
+    legs = [("CE", 26000.0, -1), ("PE", 24000.0, -1), ("CE", 26750.0, 1), ("PE", 23250.0, 1)]
+    n, b = BO.option_lots("iron_condor", legs, [60.0, 70.0, 15.0, 20.0], lot, "NIFTY", 25000.0, cfg)
+    assert b["rule"] == "max_loss" and b["per_lot_rs"] == (750.0 - 95.0) * 75 and n == 2          # 100000 // 49125
+    from options_replay import Leg, _max_risk
+    lab = _max_risk([Leg("CE", 26000.0, -1, 60.0), Leg("PE", 24000.0, -1, 70.0), Leg("CE", 26750.0, 1, 15.0),
+                     Leg("PE", 23250.0, 1, 20.0)], 95.0, 75)
+    assert lab == b["per_lot_rs"]                                            # the lab's own max-risk formula
+    # 3. naked short strangle: Rs 5 lakh of margin, margin = 12 % of spot notional per lot (the lab's estimate)
+    legs = [("CE", 26000.0, -1), ("PE", 24000.0, -1)]
+    n, b = BO.option_lots("short_strangle", legs, [60.0, 70.0], lot, "NIFTY", 25000.0, cfg)
+    assert b["rule"] == "naked_margin" and b["per_lot_rs"] == 0.12 * 25000.0 * 75 == 225000.0 and n == 2
+    assert BO.option_lots("short_strangle", legs, [60.0, 70.0], lot, "NIFTY", None, cfg)[1]["per_lot_rs"] == 225000.0
+    assert BO.option_lots("short_strangle", legs, [60.0, 70.0], 30, "BANKNIFTY", 55000.0, cfg)[0] == 2   # 198,000 a lot
+    # the cap: one un-sliced order per leg (1,800 NIFTY / 600 BANKNIFTY units)
+    n, b = BO.option_lots("long_atm", [("CE", 25000.0, 1)], [5.0], lot, "NIFTY", 25010.0, cfg)
+    assert b["uncapped"] == 266 and b["cap"] == 24 and n == 24
+    assert BO.option_lots("long_atm", [("CE", 55000.0, 1)], [5.0], 30, "BANKNIFTY", 55000.0, cfg)[0] == 20
+    # only entry values are arguments: nothing later can be read (no look-ahead by construction)
+    import inspect
+    assert list(inspect.signature(BO.option_lots).parameters) == ["structure", "legs", "fills", "lot", "symbol",
+                                                                   "spot", "cfg"]
+    # the fee per lot falls as the lots rise (flat brokerage per order), through the existing leg-cost function
+    from options_replay import leg_cost
+    one, six = leg_cost(200.0, 260.0, 1, 75), leg_cost(200.0, 260.0, 1, 6 * 75)
+    assert six / 6 < one and six > one
+
+
+def test_v3_option_jobs_are_sized_at_entry_and_v1_v2_trade_one_lot():
+    import dataclasses
+    from stratlab import nsedata as N
+    E = engine()
+    cfg = BO.OPTION_SIZES["c10"]
+    orig_position = N.Position
+    seen = {}
+    for structure in ("long_atm", "debit_spread", "iron_condor", "short_strangle"):
+        pool = [c for c in G.cell_grammar("options", "RISING", "bg3")
+                if c.structure == f"{structure}:weekly" and c.instrument == "NIFTY" and c.exit == ("opt_hold", 3)]
+        cand = old = res = None
+        for c in pool:                                  # a sentence that trades on the synthetic chain
+            sig = E.signals(c, mtype=None)
+            o = dataclasses.replace(c, size="")
+            r = BE.run_jobs(E, [BE.Job("new", c, sig, 0, 20261109, False), BE.Job("old", o, sig, 0, 20261109, False)])
+            if len(r["new"]["trades"]) >= 5:
+                cand, old, res = c, o, r
+                break
+        assert cand is not None, structure
+        new, was, lots = res["new"]["trades"], res["old"]["trades"], res["new"]["lots"]
+        assert len(new) == len(was) == len(lots) and res["old"]["lots"] == []          # v2 sentence: 1 lot, no sizing
+        by_day = {d: (n, b) for d, n, b in lots}
+        n_multi = 0
+        for a, b_ in zip(new, was):
+            assert (a[1], a[2], a[6], a[9]) == (b_[1], b_[2], b_[6], b_[9])            # same position, same lot size
+            n, basis = by_day[a[2]]
+            # entry / exit values and the gross P&L are the 1-lot ones x lots (same fills: sizing changes nothing else)
+            assert abs(a[5] - n * b_[5]) < 1e-2 * n and abs(a[10] - n * b_[10]) <= 0.02 * n + 0.01
+            # the lots are the formula's, computed from the 1-lot ENTRY value only
+            lot = a[9]
+            if structure in ("long_atm", "debit_spread"):
+                want = max(1, min(basis["cap"], int(cfg["premium_rs"] // (b_[5] * lot)))) if b_[5] > 0 else 1
+                assert basis["rule"] == "premium" and abs(basis["per_lot_rs"] - b_[5] * lot) < 0.5
+            elif structure == "iron_condor":
+                want = max(1, min(basis["cap"], int(cfg["max_loss_rs"] // basis["per_lot_rs"]))) \
+                    if basis["per_lot_rs"] > 0 else 1
+                assert basis["rule"] == "max_loss"
+            else:
+                want = max(1, min(basis["cap"], int(cfg["naked_margin_rs"] // basis["per_lot_rs"])))
+                assert basis["rule"] == "naked_margin"
+            assert n == want and 1 <= n <= basis["cap"] == max(1, cfg["max_units_per_leg"]["NIFTY"] // lot)
+            if n > 1:                                   # the fee per lot falls as the lots rise
+                n_multi += 1
+                assert a[11] / n < b_[11] and a[11] > b_[11]
+        seen[structure] = (len(new), n_multi)
+        assert all(t[9] == N.lot_size("NIFTY", t[2]) for t in new)
+    assert sum(v[1] for v in seen.values()) > 0, seen                # (some positions held more than one lot)
+    assert N.Position is orig_position                               # the simulator's class is restored after a job
+    # a bg1 options candidate: 1 lot, the simulator untouched
+    v1 = G.Candidate("options", "RISING", cand.block, cand.params, cand.entry, cand.exit, cand.instrument, "opt",
+                     cand.structure)
+    r1 = BE.run_jobs(E, [BE.Job("x", v1, E.signals(v1, mtype=None), 0, 20261109, False)])["x"]
+    assert r1["lots"] == [] and [t[5] for t in r1["trades"]] == [t[5] for t in was]
+
+
+class _SizeRecorder:
+    """Records every (size regime, cost kind, Rs) the engine sizes a stock trade with."""
+    def __init__(self):
+        self.seen = set()
+        self._orig = BE.trade_notional
+
+    def __call__(self, c, kind, sizes=None):
+        v = self._orig(c, kind, sizes)
+        self.seen.add((c.size, kind, v))
+        return v
+
+
+def _evaluate_recording(root, bid):
+    import builder_run
+    rec = _SizeRecorder()
+    with patch.object(BE, "trade_notional", rec):
+        s = builder_run.evaluate(str(root), bid, "synthetic", syn_root(), jobs=1, log=lambda m: None)
+    return s, rec.seen
+
+
+def test_fresh_registry_under_v3_first_batch_0007_and_n_5434():
+    b = new_builder("fresh_v3")
+    b.ensure_genesis()
+    assert [r["kind"] for r in b.registry.records()] == SEED_KINDS
+    st = b.state()
+    assert st["genesis"]["rule_version"] == "builder/v3" and st["genesis"]["grammar_version"] == "bg3"
+    assert st["rules"] == [B.RULE_SHA256_V3] and st["upgrades"] == []
+    assert st["n_used"] == SEED_N == 4979 and b.next_batch_id(st) == "0007"
+    assert all(st["batches"][k].get("rule_sha256") == B.RULE_SHA256 for k in st["batches"])   # the seeds are v1
+    rec = b.freeze(syn_source().snapshot(), per_cell=1)
+    assert rec["batch"] == "0007" and rec["n_before"] == V3_N == 5434
+    assert rec["rule_version"] == "builder/v3" and rec["generator"]["grammar_version"] == "bg3"
+    doc = json.loads(b.candidates_path("0007").read_text())
+    cands = [G.Candidate.from_json(r["cand"]) for r in doc["candidates"]]
+    seed = _all_seed_keys()
+    assert all(G.never_drawn(c, seed) for c in cands) and [c.key for c in cands] == [r["key"] for r in doc["candidates"]]
+    assert all(c.size == "c10" for c in cands if c.agent in ("intraday", "scalping"))
+    assert all(c.size == "c10" for c in cands if c.agent == "options")
+    assert all(c.size == "" for c in cands if c.single and c.agent == "futures")
+    # evaluated at the v3 sizes (the batch rule's): MIS Rs 5 lakh, nothing re-sized trades Rs 1 lakh MIS
+    s, seen = _evaluate_recording(b.root, "0007")
+    assert s["rule_version"] == "builder/v3" and s["n_disc"] == V3_N + 20
+    assert ("c10", "equity_mis", 500000.0) in seen and not any(k == "equity_mis" and v != 500000.0 for _r, k, v in seen)
+    assert all(v == BE.SIZE_TABLES[r][k] for r, k, v in seen)
+    b.ingest("0007", s)
+    st = b.state()
+    assert st["evaluated"] == SEED_EVAL + 20 and b.n_base(st) == V3_N + 20 + st["final_looks"] - SEED_FINALS
+    # the next batch counts every v3 candidate and FINAL look (one N; it never shrinks)
+    r2 = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
+    assert r2["batch"] == "0008" and r2["n_before"] == b.n_base(st) >= V3_N + 20
+    k1 = {r["key"] for r in doc["candidates"]}
+    c2 = [G.Candidate.from_json(r["cand"]) for r in json.loads(b.candidates_path("0008").read_text())["candidates"]]
+    assert all(G.never_drawn(c, seed | k1) for c in c2)
+    # api: the size regime of the rule and of each batch
+    api = B.api_status(b.root)
+    assert api["rule_version"] == "builder/v3" and api["size"]["regime"] == "c10"
+    assert api["size"]["per_trade_rs"]["equity_mis"] == 500000 and "02:30" in api["schedule"]
+    rows = {r["id"]: r for r in api["batches"]}
+    assert rows["0007"]["size"]["regime"] == "c10" and rows["0001"]["size"]["regime"] == ""
+    assert rows["0001"]["size"]["per_trade_rs"]["equity_mis"] == 100000
+    d = B.api_batch("0007", b.root)
+    assert d["size"]["regime"] == "c10" and B.api_batch("0003", b.root)["size"]["regime"] == ""
+    assert {c["size"] for c in d["candidates"]} == {"", "c10"}
+    assert all(c["size"] == "c10" for c in d["candidates"] if c["id"].split("_")[1] in ("int", "sca"))
+
+
+def test_upgrade_v1_to_v3_two_steps_and_pending_v1_batch_at_1_lakh():
+    root = os.path.join(_TMP, "upgrade13")
+    shutil.rmtree(root, ignore_errors=True)
+    v1 = B.Builder(root, B.load_rule(B.RULE_FILE))
+    r1 = v1.freeze(syn_source().snapshot(), per_cell=1)           # a builder/v1 batch left pending
+    assert r1["batch"] == FIRST and r1["rule_version"] == "builder/v1"
+    v3 = B.Builder(root)                                         # the deploy: the current rule is builder/v3
+    assert v3.rule["version"] == "builder/v3"
+    v3.ensure_genesis()
+    st = v3.state()
+    assert st["rules"] == [B.RULE_SHA256, B.RULE_SHA256_V2, B.RULE_SHA256_V3]
+    ups = st["upgrades"]
+    assert [(u["from_version"], u["to_version"], u["grammar_version"]) for u in ups] == \
+        [("builder/v1", "builder/v2", "bg2"), ("builder/v2", "builder/v3", "bg3")]
+    assert [(u["from_sha256"], u["to_sha256"]) for u in ups] == \
+        [(B.RULE_SHA256, B.RULE_SHA256_V2), (B.RULE_SHA256_V2, B.RULE_SHA256_V3)]
+    assert all(u["n_used_before"] == V3_N and u["evaluated_before"] == SEED_EVAL and u["batches_before"] == 7
+               and u["final_looks_before"] == SEED_FINALS for u in ups)
+    assert st["batches"][FIRST]["frozen_hash"] == r1["frozen_hash"]            # earlier records never rewritten
+    B.Builder(root).ensure_genesis()                             # idempotent
+    assert [r["kind"] for r in v3.registry.records()].count("rule_upgrade") == 2
+    # the pending v1 batch is evaluated under builder/v1 at Rs 1 lakh per stock trade
+    s, seen = _evaluate_recording(root, FIRST)
+    assert s["rule_version"] == "builder/v1" and s["n_disc"] == SEED_N + 20
+    assert seen and all(r == "" and v == 100000.0 for r, _k, v in seen), seen
+    v3.ingest(FIRST, s)
+    st = v3.state()
+    # new batches are builder/v3 (bg3); N continues
+    r2 = v3.freeze({"source": "test", "end": 20261109}, per_cell=1)
+    assert r2["batch"] == SECOND and r2["rule_version"] == "builder/v3" and r2["generator"]["grammar_version"] == "bg3"
+    assert r2["n_before"] == v3.n_base(st) == V3_N + 20 + st["final_looks"] - SEED_FINALS
+    keys1 = {c["key"] for c in json.loads(v3.candidates_path(FIRST).read_text())["candidates"]}
+    c2 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v3.candidates_path(SECOND).read_text())["candidates"]]
+    assert all(G.never_drawn(c, keys1 | _all_seed_keys()) for c in c2)
+    for old in (B.RULE_FILE, B.RULE_FILE_V2):                    # the registry moved on
+        try:
+            B.Builder(root, B.load_rule(old)).freeze({"source": "test", "end": 1}, per_cell=1)
+            raise AssertionError("an earlier rule must not freeze on a registry upgraded to v3")
+        except B.RuleChanged:
+            pass
+    assert v3.registry.verify()["ok"]
+    assert B.api_status(root)["n_used"] >= SEED_N + 20
+    assert [x["version"] for x in B.api_status(root)["rule_chain"]] == ["builder/v1", "builder/v2", "builder/v3"]
+
+
+def test_upgrade_v2_to_v3_and_pending_v2_batch_at_1_lakh():
+    root = os.path.join(_TMP, "upgrade23")
+    shutil.rmtree(root, ignore_errors=True)
+    v2 = B.Builder(root, B.load_rule(B.RULE_FILE_V2))
+    r1 = v2.freeze(syn_source().snapshot(), per_cell=1)           # a builder/v2 batch (bg2) left pending
+    assert r1["batch"] == FIRST and r1["rule_version"] == "builder/v2"
+    assert v2.state()["rules"] == [B.RULE_SHA256_V2]
+    v3 = B.Builder(root)
+    v3.ensure_genesis()
+    st = v3.state()
+    assert st["rules"] == [B.RULE_SHA256_V2, B.RULE_SHA256_V3] and len(st["upgrades"]) == 1
+    assert st["upgrades"][0]["from_version"] == "builder/v2" and st["upgrades"][0]["grammar_version"] == "bg3"
+    s, seen = _evaluate_recording(root, FIRST)                   # under its own rule, at its own size
+    assert s["rule_version"] == "builder/v2" and seen and all(r == "" and v == 100000.0 for r, _k, v in seen)
+    v3.ingest(FIRST, s)
+    r2 = v3.freeze({"source": "test", "end": 20261109}, per_cell=1)
+    assert r2["batch"] == SECOND and r2["rule_version"] == "builder/v3"
+    keys1 = {c["key"] for c in json.loads(v3.candidates_path(FIRST).read_text())["candidates"]}
+    c1 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v3.candidates_path(FIRST).read_text())["candidates"]]
+    c2 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v3.candidates_path(SECOND).read_text())["candidates"]]
+    assert all(G.never_drawn(c, keys1 | _all_seed_keys()) for c in c2)
+    # no unchanged-size sentence of the v2 batch comes back; a re-sized one may (as a new candidate, a new key)
+    twins = {(c.agent, c.mtype, c.block, c.params, c.entry, c.exit, c.instrument, c.structure, c.universe)
+             for c in c1}
+    for c in c2:
+        if c.size == "":
+            assert (c.agent, c.mtype, c.block, c.params, c.entry, c.exit, c.instrument, c.structure,
+                    c.universe) not in twins
+    assert v3.registry.verify()["ok"]
+
+
+def test_forward_family_trades_the_candidates_own_size():
+    """builder_forward: a promoted strategy trades the size of its own sentence (a v1 / v2 strategy Rs 1 lakh, a v3
+    re-sized one Rs 5 lakh); the seeded proven strategy is a v1 sentence."""
+    import dataclasses
+    root = Path(_TMP) / "fwd_size"
+    shutil.rmtree(root, ignore_errors=True)
+    E = engine()
+    sized = None
+    for c in G.cell_grammar("intraday", "RISING", "bg3"):        # a sentence that trades in the forward window
+        if c.universe == "NIFTY100" and c.exit[0] == "time" and len(E.signals(c)["s"]) > 200:
+            tr = BE.run_jobs(E, [BE.Job("x", c, None, 20240102, 20261109, False)])["x"]["trades"]
+            if len(tr) > 30:
+                sized = c
+                break
+    assert sized is not None and sized.size == "c10"
+    old = dataclasses.replace(sized, size="")
+    fw = BF.BuilderForward(root)
+    fw.register([{"id": "new", "batch": "0007", "cand": sized.to_json(), "reference": {}, "fingerprint": "a"},
+                 {"id": "old", "batch": "0002", "cand": old.to_json(), "reference": {}, "fingerprint": "b"}], 20240101)
+    out = BF.forward_trades(str(root), syn_root(), 20261109, "synthetic")
+    new, was = out["trades"]["new"], out["trades"]["old"]
+    assert len(new) == len(was) > 30
+    assert all(_sized_ok(t, 500000.0) for t in new) and all(_sized_ok(t, 100000.0) for t in was)
+    # the seeded proven strategy (builder/v1): no size regime in its sentence -> Rs 1 lakh, reference unchanged
+    b = new_builder("fwd_size_seed")
+    b.ensure_genesis()
+    p = [x for x in b.state()["promoted"] if x["id"] == PROVEN_SEEDED][0]
+    assert "size" not in p["cand"] and G.Candidate.from_json(p["cand"]).size == ""
+    assert p["rule_sha256"] == B.RULE_SHA256 and B.sizes_by_sha(p["rule_sha256"])["regime"] == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# builder/v3: nightly batches until the grammar is exhausted; the NSE archive gate
+# ══════════════════════════════════════════════════════════════════════════
+def _fake_runner(calls):
+    def runner(r, bid):
+        calls.append(bid)
+        doc = B.Builder(r).verify_frozen(bid)
+        return {"candidates": len(doc["candidates"]), "discovery_passers": 0, "shuffle_passers": 0,
+                "validation_tested": 0, "validation_passers": 0, "final_looks": 0, "final_confirmed": 0,
+                "proven": [], "n_disc": 1, "n_proof": 1, "v": 0.0, "best_discovery_dsr": {}, "planted": {},
+                "rows": [], "windows": {}}
+    return runner
+
+
+def test_nightly_job_runs_batches_up_to_the_budget():
+    from datetime import datetime
+    root = os.path.join(_TMP, "night_budget")
+    shutil.rmtree(root, ignore_errors=True)
+    calls = []
+    snap = lambda: {"source": "test", "end": 1}                     # noqa: E731
+    t = datetime(2026, 11, 17, 2, 30)
+    with patch.object(settings, "builder_enabled", False):
+        assert B.nightly_job(now=t, root=root)["skipped"].startswith("BUILDER_ENABLED")
+        assert B.nightly_job_locked(now=t, root=root)["skipped"].startswith("BUILDER_ENABLED")
+        assert not os.path.exists(root)
+    with patch.object(settings, "builder_enabled", True), patch.object(settings, "builder_night_batches", 3):
+        fresh = B.Builder(root)
+        fresh.ensure_genesis()
+        before = B.grammar_progress(fresh)
+        assert before["grammar"] == "bg3" and before["total"] == 4 * sum(G.grammar_sizes("bg3").values()) == 26244
+        assert set(before["per_agent"]) == set(G.AGENTS) and 0 < before["undrawn"] < before["total"]
+        out = B.nightly_job(now=t, root=root, runner=_fake_runner(calls), snapshot_fn=snap)
+        night = out["night"]
+        assert out["status"] == "complete" and night["batches"] == [FIRST, SECOND, THIRD] == calls, out
+        assert night["batches_run"] == 3 and night["stopped"].startswith("night budget (3")
+        st = B.Builder(root).state()
+        # each batch was frozen after the one before was ingested: N grows batch by batch, no key twice
+        assert [st["batches"][b_]["n_before"] for b_ in (FIRST, SECOND, THIRD)] == [V3_N, V3_N + 400, V3_N + 800]
+        assert st["evaluated"] == SEED_EVAL + 1200 and sorted(st["results"])[-3:] == [FIRST, SECOND, THIRD]
+        keys = [c["key"] for b_ in (FIRST, SECOND, THIRD)
+                for c in json.loads(B.Builder(root).candidates_path(b_).read_text())["candidates"]]
+        assert len(keys) == len(set(keys)) == 1200
+        # progress to "all tested" is visible: undrawn sentences, total and per agent, in the night record and the API
+        assert night["undrawn"]["undrawn"] == before["undrawn"] - 1200
+        api = B.api_status(root)
+        assert api["undrawn"] == night["undrawn"] and api["night_batches"] == 3
+        assert sum(v["undrawn"] for v in api["undrawn"]["per_agent"].values()) == api["undrawn"]["undrawn"]
+        assert api["last_run"]["night"]["batches_run"] == 3 and api["last_run"]["night"]["batches"] == night["batches"]
+        # the next night continues where this one stopped
+        out = B.nightly_job(now=t, root=root, runner=_fake_runner(calls), snapshot_fn=snap, max_batches=1)
+        assert out["night"]["batches"] == ["0010"] and out["night"]["undrawn"]["undrawn"] == before["undrawn"] - 1600
+
+
+def test_nightly_job_stops_at_0515_market_hours_and_on_a_batch_that_did_not_complete():
+    from datetime import datetime
+    assert B.night_window_open(datetime(2026, 11, 17, 2, 30)) and B.night_window_open(datetime(2026, 11, 17, 5, 14))
+    assert not B.night_window_open(datetime(2026, 11, 17, 5, 15)) and not B.night_window_open(datetime(2026, 11, 17, 10, 0))
+    assert not B.night_window_open(datetime(2026, 11, 17, 15, 45)) and B.night_window_open(datetime(2026, 11, 17, 15, 46))
+    seen = []
+
+    def one_batch(**kw):
+        seen.append(kw)
+        return {"status": "complete", "batch": f"b{len(seen)}"}
+    times = iter([datetime(2026, 11, 17, 2, 30), datetime(2026, 11, 17, 4, 0), datetime(2026, 11, 17, 5, 14),
+                  datetime(2026, 11, 17, 5, 15), datetime(2026, 11, 17, 6, 0)])
+    root = os.path.join(_TMP, "night_clock")
+    with patch.object(settings, "builder_enabled", True), patch.object(B, "weekly_job", one_batch):
+        out = B.nightly_job(root=root, clock=lambda: next(times), max_batches=12)
+        assert out["night"]["batches"] == ["b1", "b2", "b3"] and "05:15" in out["night"]["stopped"], out
+        # an evaluation's wall-clock limit ends at 08:30 IST (never into the 09:00 market-hours guard)
+        assert [k["time_limit_s"] for k in seen] == [6 * 3600, 4 * 3600 + 1800, 3 * 3600 + 16 * 60]
+        assert [k["now"].hour for k in seen] == [2, 4, 5]
+        seen.clear()
+        out = B.nightly_job(now=datetime(2026, 11, 17, 10, 0), root=root, max_batches=12)      # a trading morning
+        assert out["night"]["batches"] == [] and seen == [] and "window closed" in out["night"]["stopped"]
+        out = B.nightly_job(now=datetime(2026, 11, 17, 20, 0), root=root, max_batches=2)       # an evening run
+        assert out["night"]["batches_run"] == 2 and [k["time_limit_s"] for k in seen] == [None, None]
+        assert B.nightly_job(root=root, now=datetime(2026, 11, 17, 2, 30), max_batches=0)["night"]["batches"] == []
+    # (c) a batch that does not complete ends the night; the pending batch is resumed first the next night
+    root = os.path.join(_TMP, "night_fail")
+    shutil.rmtree(root, ignore_errors=True)
+    calls = []
+
+    def crash(r, bid):
+        calls.append(bid)
+        raise B.RunFailed("time limit exceeded")
+    snap = lambda: {"source": "test", "end": 1}                     # noqa: E731
+    t = datetime(2026, 11, 17, 2, 30)
+    with patch.object(settings, "builder_enabled", True):
+        out = B.nightly_job(now=t, root=root, runner=crash, snapshot_fn=snap, max_batches=5)
+        assert out["status"] == "error" and out["night"]["stopped"] == "error" and out["night"]["batches"] == []
+        assert calls == [FIRST] and FIRST not in B.Builder(root).state()["results"]
+        out = B.nightly_job(now=t, root=root, runner=_fake_runner(calls), snapshot_fn=snap, max_batches=2)
+        assert out["night"]["batches"] == [FIRST, SECOND] and calls == [FIRST, FIRST, SECOND]
+    # the scheduler's job is the nightly run under the data layer's lock
+    import asyncio
+    import platform_scheduler as PS
+    for res in ({"night": {}}, {"skipped": "BUILDER_ENABLED is off or not PAPER"},
+                {"status": "waiting_data", "reason": "x", "night": {"batches_run": 0, "stopped": "waiting_data"}}):
+        with patch.object(B, "nightly_job_locked", return_value=res) as m:
+            asyncio.run(PS.PlatformScheduler()._builder_nightly())
+            assert m.call_count == 1
+
+
+def test_nightly_job_stops_when_the_grammar_is_exhausted():
+    from datetime import datetime
+    every = [c for a in G.AGENTS for m in G.MARKET_TYPES for c in G.cell_grammar(a, m, "bg3")]
+    cell = [c for c in every if c.cell == "intraday|RISING"]
+    seed = _all_seed_keys()                                      # (an option sentence the seeds did not draw)
+    remain = cell[::len(cell) // 25][:25] + [c for c in every if c.cell == "options|FALLING"
+                                             and G.never_drawn(c, seed)][:3]
+    left = {c.key for c in remain} | {c.v1_key for c in remain if c.v1_key}
+    base = ({c.key for c in every} | {c.v1_key for c in every if c.v1_key}) - left      # everything else is drawn
+    orig = B.Builder.drawn_keys
+    root = os.path.join(_TMP, "night_exhaust")
+    shutil.rmtree(root, ignore_errors=True)
+    calls = []
+    snap = lambda: {"source": "test", "end": 1}                     # noqa: E731
+    t = datetime(2026, 11, 17, 2, 30)
+    with patch.object(settings, "builder_enabled", True), \
+            patch.object(B.Builder, "drawn_keys", lambda self, st=None: orig(self, st) | base):
+        b = B.Builder(root)
+        b.ensure_genesis()
+        assert B.grammar_progress(b)["undrawn"] == 28
+        assert B.grammar_progress(b)["per_agent"]["intraday"]["undrawn"] == 25
+        out = B.nightly_job(now=t, root=root, runner=_fake_runner(calls), snapshot_fn=snap, max_batches=12)
+        night = out["night"]
+        assert out["status"] == "grammar_exhausted" == night["stopped"], out
+        assert 2 <= night["batches_run"] < 12 and night["undrawn"]["undrawn"] == 0
+        assert all(v["undrawn"] == 0 for v in night["undrawn"]["per_agent"].values())
+        drawn = [c["key"] for bid in night["batches"]
+                 for c in json.loads(B.Builder(root).candidates_path(bid).read_text())["candidates"]]
+        assert sorted(drawn) == sorted(c.key for c in remain)          # every remaining sentence once, nothing else
+        n_batches = len(B.Builder(root).state()["batches"])
+        # nothing is frozen any more: one more night (or one more single batch) changes nothing
+        again = B.nightly_job(now=t, root=root, runner=_fake_runner(calls), snapshot_fn=snap, max_batches=12)
+        assert again["night"]["batches"] == [] and again["status"] == "grammar_exhausted"
+        one = B.weekly_job(now=t, root=root, runner=_fake_runner(calls), snapshot_fn=snap)
+        assert one["status"] == "grammar_exhausted" and "batch" not in one and one["undrawn"]["undrawn"] == 0
+        assert len(B.Builder(root).state()["batches"]) == n_batches
+        assert B.api_status(root)["undrawn"]["undrawn"] == 0
+
+
+def test_new_v3_batches_wait_for_the_nse_archive_backfill():
+    import builder_data as BD
+    from datetime import date, timedelta
+    d = _data_copy("data_nse", nse_complete=False)
+    with patch.dict(os.environ, {"BUILDER_DATA_DIR": d}):
+        b = new_builder("wait_nse")
+        ns = B.nse_archive_status()
+        assert ns["complete"] is False and "not started" in ns["reason"]
+        assert "not started" in (B.data_wait_reason(b, "server") or "")
+        # the gate belongs to builder/v3 (schedule.data_gates): a v2 / v1 rule does not wait for it
+        assert B.data_wait_reason(B.Builder(b.root, B.load_rule(B.RULE_FILE_V2)), "server") is None
+        assert B.data_wait_reason(B.Builder(b.root, B.load_rule(B.RULE_FILE)), "server") is None
+        assert B.data_wait_reason(b, "lab") is None
+        with patch.object(settings, "builder_enabled", True):
+            s = B.weekly_job(now=_sat(), root=b.root, source="server")
+            assert s["status"] == "waiting_data" and "batch" not in s and "NSE archive" in s["reason"], s
+            n = B.nightly_job(now=_sat().replace(hour=2, minute=30), root=b.root, source="server", max_batches=3)
+            assert n["night"]["stopped"] == "waiting_data" and n["night"]["batches"] == []
+        assert sorted(B.Builder(b.root).state()["batches"]) == ["0001", "0002", "0003", "0004", "0005", "0006"]
+        _mark_nse_complete(d)
+        bd = BD.Builder(d)
+        raw = bd.state_path.read_bytes()
+        ns = B.nse_archive_status()
+        assert ns == {**ns, "complete": True, "days_pending": 0, "windows_pending": 0, "windows_error": 0,
+                      "from": 20120101, "reason": None}
+        assert B.data_wait_reason(b, "server") is None
+
+        def edit(fn):
+            st = json.loads(raw)
+            fn(st)
+            bd.state_path.write_text(json.dumps(st))
+            return B.nse_archive_status()
+        # a calendar day the backfill has not reached
+        ns = edit(lambda st: st["days"].pop("20150302"))
+        assert not ns["complete"] and ns["days_pending"] == 1 and "20150302" in ns["reason"]
+        assert "20150302" in B.data_wait_reason(b, "server")
+        # a session whose F&O archive ended in an error (retried by the data layer): not final -> wait
+        full = {"cash": "ok", "idx": "ok", "fo": "ok", "poi": "ok", "pvol": "ok", "ban": "ok", "fii": "n/a"}
+        ns = edit(lambda st: st["days"].update({"20180105": {**full, "fo": "error:error"}}))
+        assert not ns["complete"] and ns["days_pending"] == 1 and "error:error" in ns["reason"]
+        # ... a file NSE does not have (an old 404) is final; a session with every set final is complete
+        assert edit(lambda st: st["days"].update({"20180105": {**full, "fo": "missing", "ban": "stale"}}))["complete"]
+        assert not edit(lambda st: st["days"].update({"20180105": {"cash": "ok", "idx": "ok"}}))["complete"]
+        assert not edit(lambda st: st["days"].update({"20180105": {"cash": "error:refused"}}))["complete"]
+        # the newest days are re-read by the data layer on every run: they never block
+        recent = str(BD.ymd(date.today() - timedelta(days=2)))
+        assert edit(lambda st: st["days"].pop(recent, None))["complete"]
+        old_edge = str(BD.ymd(date.today() - timedelta(days=B.NSE_GATE_LAG_DAYS + 2)))
+        assert not edit(lambda st: st["days"].pop(old_edge))["complete"]
+        # feed windows: one never fetched blocks; one whose last answer was an error is reported, not waited for
+        ns = edit(lambda st: st["windows"].pop("deals:bulk:2015Q1"))
+        assert not ns["complete"] and ns["windows_pending"] == 1 and "deals:bulk:2015Q1" in ns["reason"]
+        ns = edit(lambda st: st["windows"].update({"mcwb:201203": {"status": "error:not zip", "at": 20261101}}))
+        assert ns["complete"] and ns["windows_error"] == 1 and ns["windows_pending"] == 0
+        ns = edit(lambda st: st["windows"].update({"ev:fr:201405": {"status": "missing", "at": 20261101}}))
+        assert ns["complete"] and ns["windows_error"] == 0
+        # read-only: the data layer's state file is never written by the gate
+        bd.state_path.write_bytes(raw)
+        m0 = bd.state_path.stat().st_mtime_ns
+        assert B.nse_archive_status()["complete"] and bd.state_path.stat().st_mtime_ns == m0
+        assert bd.state_path.read_bytes() == raw
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]

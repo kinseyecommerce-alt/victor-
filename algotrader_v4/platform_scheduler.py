@@ -22,7 +22,8 @@ Jobs (IST):
   19:35-22:35, 08:20      PEAD evening / morning input refresh (VALIDATED_PEAD_ENABLED)
   23:05, 05:30 (+10:05, 15:05 Sat-Sun)  builder NSE archives; 18:40, 23:45 (+11:40, 14:40 Sat-Sun)  builder Kite
                           minute backfill (BUILDER_DATA_ENABLED)
-  Sat 06:00               automatic strategy builder: one frozen batch of 400 candidates (BUILDER_ENABLED)
+  02:30                   automatic strategy builder: frozen batches of 400 candidates, one after the other until
+                          05:15 / BUILDER_NIGHT_BATCHES / the grammar is exhausted (BUILDER_ENABLED)
   07:05                   builder/v1 forward family: pending sessions of promoted builder strategies (BUILDER_ENABLED)
   every minute            portfolio drawdown brake (risk_budget.py)
 
@@ -122,10 +123,13 @@ class PlatformScheduler:
                 self._sched.add_job(self._builder_minute, "cron", hour=_h, minute=_m, day_of_week=_dow, id=_id,
                                     misfire_grace_time=1800, max_instances=1, coalesce=True)
         if self._builder_on():
-            # automatic strategy builder: one batch a week, Saturday 06:00 IST (outside market hours; the job re-checks
-            # the flag and PAPER and holds the builder data layer's lock while it freezes / evaluates)
-            self._sched.add_job(self._builder_weekly, "cron", day_of_week="sat", hour=6, minute=0, id="builder_weekly",
-                                misfire_grace_time=6 * 3600, max_instances=1, coalesce=True)
+            # automatic strategy builder (builder/v3 schedule): every night at 02:30 IST, after the data layer's 23:45
+            # Kite run and outside market hours, batch after batch (builder.nightly_job: each one frozen, evaluated and
+            # ingested before the next; stops at BUILDER_NIGHT_BATCHES, at 05:15 IST, when the grammar is exhausted or
+            # when a batch does not complete; every batch re-checks the flag, PAPER and market hours and holds the
+            # builder data layer's lock while it freezes / evaluates). A start later than 04:30 is skipped
+            self._sched.add_job(self._builder_nightly, "cron", hour=2, minute=30, id="builder_nightly",
+                                misfire_grace_time=2 * 3600, max_instances=1, coalesce=True)
             # the builder/v1 forward family on its own flag (independent of FORWARD_LAB_ENABLED): every morning at
             # 07:05 IST, after the data layer's overnight NSE (05:30) and Kite (23:45) runs, so the previous session
             # is complete in both; holds the data layer's lock; also registers promotions whose registration failed
@@ -456,14 +460,20 @@ class PlatformScheduler:
         except Exception:
             return False
 
-    async def _builder_weekly(self) -> None:
-        """Strategy builder weekly batch (builder.weekly_job re-checks the flag, PAPER and market hours; the evaluation
-        runs in its own process). Never touches orders, agents or risk."""
+    async def _builder_nightly(self) -> None:
+        """Strategy builder nightly batches (builder.nightly_job; every batch = builder.weekly_job, which re-checks
+        the flag, PAPER and market hours; the evaluation runs in its own process). Never touches orders, agents or
+        risk."""
         try:
             import builder
-            await asyncio.to_thread(builder.weekly_job_locked)
+            res = await asyncio.to_thread(builder.nightly_job_locked)
+            night = (res or {}).get("night") or {}
+            logger.info("[builder] night: {} batches {} — stopped: {}{} — undrawn {} of {}",
+                        night.get("batches_run"), night.get("batches"), night.get("stopped") or res.get("skipped"),
+                        f" ({res.get('reason') or res.get('error')})" if res.get("reason") or res.get("error") else "",
+                        (night.get("undrawn") or {}).get("undrawn"), (night.get("undrawn") or {}).get("total"))
         except Exception as exc:
-            logger.error("[platform] builder weekly job failed: {}", exc)
+            logger.error("[platform] builder nightly job failed: {}", exc)
 
     async def _builder_forward(self) -> None:
         """builder/v1 forward family (builder_forward.run_pending_locked re-checks BUILDER_ENABLED and PAPER; the

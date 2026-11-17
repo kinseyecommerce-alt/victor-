@@ -26,6 +26,20 @@ Exits: opt_hold h (close at the h-th session after entry; settlement first), opt
 session's mark: debit stop at value <= 50 % of the debit / target >= 250 %; credit stop at cost-to-close >= 2 x credit /
 target <= 50 %), opt_signal (NIFTY's previous close through its 10-session mean against the side, or VIX percentile
 < 0.5 for neutral structures). manage() reads only data dated before the session (marks, closes <= D-1).
+
+LOTS (grammar bg3, size regime "c10" = Rs 10 lakh capital per agent; OPTION_SIZES = builder_rule_v3.json
+costs.size_rs.options). A bg1 / bg2 candidate trades 1 lot, as ever. A re-sized candidate's lots are decided AT ENTRY
+from the entry fills only (option_lots; no later price is read), the same for every leg:
+  long_atm, debit_spread   max(1, floor(Rs 1,00,000 / net premium paid per lot))        - Rs 1 lakh of premium at risk
+  iron_condor              max(1, floor(Rs 1,00,000 / max loss per lot)), max loss = (widest wing - net credit) x lot
+  short_strangle (naked)   max(1, floor(Rs 5,00,000 / margin per lot)), margin = 12 % of spot notional per lot (the
+                           lab's own estimate, options_vrp.NAKED_MARGIN_PCT; spot = the index close of the entry
+                           session, else the mean of the two short strikes)
+  cap                      at most `max_units_per_leg` units per leg (NIFTY 1,800 / BANKNIFTY 600: one un-sliced order
+                           per leg, about NSE's freeze quantities), so the flat brokerage per order stays honest
+Fees are options_replay.leg_cost per leg at the real quantity, the haircut per unit is unchanged. The simulator is not
+edited: while a re-sized job runs, nsedata.Position is replaced by a subclass that sets the plan's lots when the
+position is opened (the fills are known there) and is restored afterwards.
 """
 from __future__ import annotations
 
@@ -42,6 +56,11 @@ from . import nsedata as N
 from . import options_r4 as O4
 
 INDICES = ("NIFTY", "BANKNIFTY")
+# option lots by size regime (builder_grammar.Candidate.size); "c10" is builder_rule_v3.json costs.size_rs.options
+OPTION_SIZES = {
+    G.SIZE_C10: {"premium_rs": 100000, "max_loss_rs": 100000, "naked_margin_rs": 500000, "naked_margin_pct": 0.12,
+                 "max_units_per_leg": {"NIFTY": 1800, "BANKNIFTY": 600}},
+}
 STRIKE_BAND = 0.15
 MAX_DTE = 75
 CHAIN_FIELDS = ("open", "high", "low", "close", "settle", "contracts", "oi", "chg_oi", "underlying", "lot")
@@ -352,6 +371,64 @@ def option_spec(E, cand, sid: str, entries: dict) -> N.OptionSpec:
                         manage=manage if kind in ("opt_bracket", "opt_signal") else None, family="builder_options")
 
 
+def option_lots(structure: str, legs: list, fills: list, lot: int, symbol: str, spot: float | None,
+                cfg: dict) -> tuple:
+    """(lots, basis) of one position from its ENTRY fills. legs: [(typ, strike, side)]; fills: per unit, per leg;
+    lot: units per lot; spot: the index level at entry (naked margin). basis = {"rule", "per_lot_rs", "budget_rs",
+    "uncapped", "cap"}. Never below 1 lot."""
+    lot = int(lot)
+    net = sum(sd * f for (_t, _k, sd), f in zip(legs, fills))           # per unit: > 0 debit, < 0 credit
+    if structure in ("long_atm", "debit_spread"):
+        rule, budget, per_lot = "premium", float(cfg["premium_rs"]), net * lot
+    elif structure == "iron_condor":
+        widths = [abs(a[1] - b[1]) for a in legs for b in legs if a[0] == b[0] and a[2] < 0 < b[2]]
+        rule, budget = "max_loss", float(cfg["max_loss_rs"])
+        per_lot = max(0.0, (max(widths) if widths else 0.0) + net) * lot    # widest wing - net credit
+    elif structure == "short_strangle":
+        shorts = [k for _t, k, sd in legs if sd < 0]
+        s = float(spot) if spot is not None and spot == spot and spot > 0 else sum(shorts) / max(1, len(shorts))
+        rule, budget, per_lot = "naked_margin", float(cfg["naked_margin_rs"]), float(cfg["naked_margin_pct"]) * s * lot
+    else:
+        raise KeyError(structure)
+    n = int(budget // per_lot) if per_lot > 0 else 1
+    cap = max(1, int(cfg["max_units_per_leg"][symbol]) // lot) if lot > 0 else 1
+    return max(1, min(n, cap)), {"rule": rule, "per_lot_rs": round(per_lot, 2), "budget_rs": budget,
+                                 "uncapped": max(1, n), "cap": cap}
+
+
+class _sized_positions:
+    """While active, every position nsedata's simulator opens gets its lots from option_lots (the fills are known
+    when the Position is created). cfg None (a bg1 / bg2 candidate): nothing is replaced, 1 lot."""
+
+    def __init__(self, cfg, structure: str, spot_at):
+        self.cfg, self.structure, self.spot_at = cfg, structure, spot_at
+        self.orig = None
+        self.log: list = []                              # (entry day, lots, basis) per opened position
+
+    def __enter__(self):
+        if self.cfg is None:
+            return self
+        import dataclasses
+        outer = self
+
+        @dataclasses.dataclass
+        class SizedPosition(N.Position):
+            def __post_init__(self):
+                legs = [(l.typ, l.strike, l.side) for l in self.plan.legs]
+                n, basis = option_lots(outer.structure, legs, self.fills, self.qty_per_lot, self.symbol,
+                                       outer.spot_at(self.entry_date), outer.cfg)
+                for l in self.plan.legs:
+                    l.lots = n
+                outer.log.append((int(self.entry_date), n, basis))
+        self.orig, N.Position = N.Position, SizedPosition
+        return self
+
+    def __exit__(self, *exc):
+        if self.orig is not None:
+            N.Position = self.orig
+        return False
+
+
 def ensure_loaded(E) -> None:
     fixed = getattr(E.src, "option_tables_path", None)
     if fixed:                                         # a frozen batch's own tables (stratlab/builder_bundle.py)
@@ -393,9 +470,16 @@ def run_option_job(E, job) -> dict:
         entries.setdefault(int(cal[e]), int(side) if side else 1)
     spec = option_spec(E, cand, job.key, entries)
     calendar = [int(x) for x in cal if int(x) <= job.hi]
-    tr, _det, _sk = N._simulate_one(spec, cand.instrument, calendar, job.lo, job.hi, 1.0)
-    tr5 = []
-    if job.stress:
-        tr5, _d5, _s5 = N._simulate_one(spec, cand.instrument, calendar, job.lo, job.hi, N.SENS_MULT)
+    cfg = (getattr(E, "option_sizes", None) or OPTION_SIZES).get(cand.size) if cand.size else None
+
+    def spot_at(day: int):
+        k = int(np.searchsorted(cal, int(day)))
+        return float(close[k]) if k < len(cal) and int(cal[k]) == int(day) and np.isfinite(close[k]) else None
+    with _sized_positions(cfg, cand.structure.split(":")[0], spot_at) as sz:
+        tr, _det, _sk = N._simulate_one(spec, cand.instrument, calendar, job.lo, job.hi, 1.0)
+        lots = list(sz.log)
+        tr5 = []
+        if job.stress:
+            tr5, _d5, _s5 = N._simulate_one(spec, cand.instrument, calendar, job.lo, job.hi, N.SENS_MULT)
     key = lambda t: (t[2], t[1])
-    return {"trades": sorted(tr, key=key), "trades5": sorted(tr5, key=key)}
+    return {"trades": sorted(tr, key=key), "trades5": sorted(tr5, key=key), "lots": lots}

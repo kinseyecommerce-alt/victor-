@@ -1,11 +1,14 @@
 """
-builder.py — the AUTOMATIC STRATEGY BUILDER (builder/v1): every week it BUILDS 400 candidate strategies from our own
-data (5 agents x 4 market types x 20, stratlab/builder_grammar.py), freezes them in a hash-chained registry BEFORE any
+builder.py — the AUTOMATIC STRATEGY BUILDER (builder/v1 .. v3): every night (builder/v3; every week under v1 / v2)
+it BUILDS 400 candidate strategies from our own data (5 agents x 4 market types x 20, stratlab/builder_grammar.py), freezes them in a hash-chained registry BEFORE any
 return is computed, evaluates them in a separate process under the frozen rule builder_rule.json (sha256 pinned below)
 and promotes only what is proven to the forward lab's separate builder/v1 family (builder_forward.py). PAPER research
 only: no order entry point, agent, risk or trading state is imported, read or changed.
 
-Weekly job (platform_scheduler, Saturday 06:00 IST, only with BUILDER_ENABLED=true and PAPER; the job re-checks both):
+The job (weekly_job = ONE batch; since builder/v3 platform_scheduler runs nightly_job at 02:30 IST - Saturday 06:00
+under v1 / v2 - which runs batch after batch until the grammar is exhausted, BUILDER_NIGHT_BATCHES ran, 05:15 IST
+passed or a batch did not complete; only with BUILDER_ENABLED=true and PAPER; the job re-checks both and skips inside
+market hours). One batch:
   1. freeze    draw the batch (deterministic in the batch id, never re-drawing a key of an earlier batch), write
                <root>/batches/<id>/candidates.json, append "batch_frozen" (candidate sha256, generator version, grammar
                sha256, data snapshot ids + sha256, N before) to <root>/registry.jsonl
@@ -21,6 +24,14 @@ NIFTY100 / NIFTY200 / TOP500 / INDEX). One registry, one N: a registry started u
 pending is evaluated under v1, new batches are frozen under v2 and never re-draw a v1 key (nor its bg2 twin). Under v2
 a NEW batch waits until the data layer's NIFTY 200 minute universe is complete (data_wait_reason, status
 "waiting_data"); a promoted strategy carries the universe's names as resolved on its batch's frozen data.
+builder/v3 (grammar bg3 = bg2 under the size regime "c10", Rs 10 lakh capital per agent): MIS stock trades and stock
+trades at futures costs are Rs 5 lakh per trade, option lots follow the capital (Rs 1 lakh of premium / of maximum
+loss, Rs 5 lakh of naked margin: stratlab/builder_options.option_lots); CNC delivery longs (proportional fees) and
+index-futures lots are unchanged - their existing results ARE their Rs 10 lakh results. The numbers are
+stratlab/builder_engine.SIZE_TABLES + builder_options.OPTION_SIZES = the rule's costs.size_rs. A re-sized sentence has
+a NEW bg3 key (drawn again, counted in N); a sentence of unchanged size is its bg2 sentence and is never re-drawn. A candidate carries its
+size regime, so a v1 / v2 batch (pending or seeded) and a v1 / v2 promoted strategy keep Rs 1 lakh. A registry moves
+forward along the chain v1 -> v2 -> v3 (one "rule_upgrade" record per step; a registry at v1 takes both steps at once).
 """
 from __future__ import annotations
 
@@ -60,11 +71,18 @@ RULE_SHA256 = "a455009021b9e2cfbc55106c8ee1310ac6a7135995a895b6b8cafda06fbc3c06"
 # never rewritten. New batches are frozen under the LAST pinned version; a batch is always evaluated under its own.
 RULE_FILE_V2 = HERE / "builder_rule_v2.json"
 RULE_SHA256_V2 = "7072377b40de2be492773868b962e8dcc10b7392fc099587fcd1b2ef53d45188"
+# builder/v3 (grammar bg3: bg2 under the size regime "c10" = Rs 10 lakh capital per agent; nightly batches), written
+# next to v1 / v2, which stay valid and are never rewritten.
+RULE_FILE_V3 = HERE / "builder_rule_v3.json"
+RULE_SHA256_V3 = "bcf23e8d3098427b097870c98a9d888053d2f50f28e86d83aa5456fa9d79f116"
 # the pinned versions in order: a registry may only move forward along this chain (record "rule_upgrade")
-RULES = (("builder/v1", RULE_FILE, RULE_SHA256), ("builder/v2", RULE_FILE_V2, RULE_SHA256_V2))
+RULES = (("builder/v1", RULE_FILE, RULE_SHA256), ("builder/v2", RULE_FILE_V2, RULE_SHA256_V2),
+         ("builder/v3", RULE_FILE_V3, RULE_SHA256_V3))
 CURRENT_RULE_FILE, CURRENT_RULE_SHA256 = RULES[-1][1], RULES[-1][2]
 DEFAULT_MAX_MB = 400.0
 MAX_ATTEMPTS = 3            # failed evaluation runs of one batch before it is recorded `failed` (bookkeeping, not a gate)
+NIGHT_STOP_MIN = 5 * 60 + 15   # builder/v3 nightly run: no batch is STARTED at / after 05:15 IST (nor in market hours)
+NSE_GATE_LAG_DAYS = 10         # the NSE archive gate ignores the newest days (the data layer re-reads them every run)
 _LOCK = threading.RLock()
 
 
@@ -141,6 +159,25 @@ def rule_by_sha(sha: str) -> dict:
         if s == sha:
             return load_rule(f)
     raise RuleChanged(f"no pinned builder rule has sha256 {str(sha)[:12]}")
+
+
+def rule_sizes(rule: Optional[dict]) -> dict:
+    """Rs per stock trade of a rule's batches by cost kind (+ the size regime): builder/v1 / v2 carry no costs.size_rs
+    (Rs 1 lakh everywhere, regime ""); builder/v3's is its costs.size_rs (regime "c10")."""
+    rs = ((rule or {}).get("costs") or {}).get("size_rs")
+    if rs:
+        return {"regime": rs.get("regime"),
+                "per_trade_rs": {k: v for k, v in rs.items() if k not in ("regime", "options")},
+                "options": rs.get("options"), "unchanged": ((rule or {}).get("costs") or {}).get("unchanged")}
+    return {"regime": "", "per_trade_rs": {"equity_mis": 100000, "future": 100000, "equity_cnc": 100000},
+            "options": "1 lot", "unchanged": None}
+
+
+def sizes_by_sha(sha: Optional[str]) -> dict:
+    try:
+        return rule_sizes(rule_by_sha(sha) if sha else None)
+    except Exception:
+        return rule_sizes(None)
 
 
 def rule_index(sha: str) -> int:
@@ -349,9 +386,10 @@ class Builder:
         return g
 
     def ensure_rule(self, st: Optional[dict] = None) -> None:
-        """The registry's rule must be this builder's rule. A registry under the PREVIOUS pinned version moves forward
-        once (record "rule_upgrade" with N, candidates and FINAL looks at that moment: N continues from it, nothing
-        is recounted or rewritten); any other mismatch is refused (RuleChanged)."""
+        """The registry's rule must be this builder's rule. A registry under an EARLIER pinned version moves forward
+        along the chain, one "rule_upgrade" record per step (v1 -> v2 -> v3: a v1 registry opened under v3 gets two
+        records), each with N, candidates and FINAL looks at that moment: N continues from it, nothing is recounted
+        or rewritten; any other mismatch is refused (RuleChanged)."""
         st = st or self.state()
         chain = st["rules"] or [st["genesis"]["rule_sha256"]]
         cur = self.rule["_sha256"]
@@ -360,17 +398,30 @@ class Builder:
         if cur in chain:
             raise RuleChanged("the builder registry already moved to a later rule: new batches need that rule")
         i_last, i_cur = rule_index(chain[-1]), rule_index(cur)
-        if i_last < 0 or i_cur != i_last + 1:
+        if i_last < 0 or i_cur <= i_last:
             raise RuleChanged("the builder registry was started under a different rule file")
         from stratlab import builder_grammar as G
-        gv = self.rule["grammar"]["version"]
-        if int(self.rule["dsr"]["lab_trials_count"]) != int(st["genesis"]["lab_trials_count"]):
-            raise RuleChanged("a rule upgrade may not change the lab trials count (N never shrinks)")
-        self.registry.append("rule_upgrade", {
-            "from_version": RULES[i_last][0], "from_sha256": chain[-1], "to_version": self.rule["version"],
-            "to_sha256": cur, "grammar_version": gv, "grammar_sha256": G.grammar_sha256(gv),
-            "batches_before": len(st["batches"]), "evaluated_before": st["evaluated"],
-            "final_looks_before": st["final_looks"], "n_used_before": max(st["n_used"], self.n_base(st))})
+        steps = [self.rule if k == i_cur else load_rule(RULES[k][1]) for k in range(i_last + 1, i_cur + 1)]
+        for r in steps:                      # every step is checked before the first record is written
+            if int(r["dsr"]["lab_trials_count"]) != int(st["genesis"]["lab_trials_count"]):
+                raise RuleChanged("a rule upgrade may not change the lab trials count (N never shrinks)")
+            if int(r["dsr"].get("development_evaluations", 0)) < int(self._dev_evals(chain[-1])):
+                raise RuleChanged("a rule upgrade may not lower the development evaluations (N never shrinks)")
+        n_before = max(st["n_used"], self.n_base(st))
+        for k, r in zip(range(i_last + 1, i_cur + 1), steps):
+            gv = r["grammar"]["version"]
+            self.registry.append("rule_upgrade", {
+                "from_version": RULES[k - 1][0], "from_sha256": RULES[k - 1][2], "to_version": r["version"],
+                "to_sha256": r["_sha256"], "grammar_version": gv, "grammar_sha256": G.grammar_sha256(gv),
+                "batches_before": len(st["batches"]), "evaluated_before": st["evaluated"],
+                "final_looks_before": st["final_looks"], "n_used_before": n_before})
+
+    @staticmethod
+    def _dev_evals(sha: str) -> int:
+        try:
+            return int(rule_by_sha(sha)["dsr"].get("development_evaluations", 0))
+        except Exception:
+            return 0
 
     def ensure_seed(self, path=None) -> Optional[dict]:
         """Import the sandbox seeds once, in order (hash-chained, idempotent; every file is verified against its pinned
@@ -441,7 +492,8 @@ class Builder:
         return f"{len(st['batches']) + 1:04d}"
 
     def lab_count(self) -> int:
-        base = int(self.rule["dsr"]["lab_trials_count"])
+        # lab_retest_trials (builder/v3): the lab's own re-test of its catalogue at the rule's size regime
+        base = int(self.rule["dsr"]["lab_trials_count"]) + int(self.rule["dsr"].get("lab_retest_trials", 0) or 0)
         path = os.getenv("BUILDER_TRIALS_LEDGER") or os.getenv("STRATLAB_TRIALS")
         if not path or not os.path.exists(path):
             return base
@@ -661,7 +713,7 @@ class Builder:
         names = (res.get("proof") or {}).get("universe_names")
         if names:                      # the universe as resolved on the batch's frozen data: the forward step trades it
             rec["universe_names"] = list(names)
-        # persisted as NOT yet registered with builder/v1: reconcile_forward() retries on every weekly and daily
+        # persisted as NOT yet registered with builder/v1: reconcile_forward() retries on every batch and daily
         # forward run until a "forward_registered" record exists
         self.registry.append("promoted", rec)
         write_catalog(self)
@@ -716,20 +768,22 @@ def write_catalog(b: Builder) -> Path:
 
 def append_trials(path: str, bid: str, summary: dict) -> int:
     """Every candidate's DISCOVERY row, every VALIDATION screen and FINAL look -> the lab trials ledger (era
-    builder-v1 / builder-v2 by the batch's rule; costs are builder/v1's in both). Backed up first."""
+    builder-v1 / -v2 / -v3 by the batch's rule; the cost model is builder/v1's for v1 / v2 batches and builder/v3's
+    (the re-sized trades) for v3 batches). Backed up first."""
     from stratlab import trials as TR
     led = TR.TrialsLedger(path)
     if os.path.exists(path):
         shutil.copyfile(path, path + f".bak_builder_{bid}_" + time.strftime("%Y%m%d_%H%M%S"))
     W = summary["windows"]
-    vtag = str(summary.get("rule_version") or "builder/v1").split("/")[-1]          # v1 | v2
+    vtag = str(summary.get("rule_version") or "builder/v1").split("/")[-1]          # v1 | v2 | v3
+    cost_model = "builder/v3" if vtag == "v3" else "builder/v1"
     rows = []
     keep = ("trades", "net", "pf", "mean_net", "std_net", "sr_trade", "mean_gross", "mean_cost", "n_days",
             "sr_daily", "skew_daily", "kurt_daily")
     for r in summary["rows"]:
         base = {"strategy_id": r["id"], "family": "builder", "group": f"{r['agent']}|{r['mtype']}",
                 "params_fp": "k:" + hashlib.sha1(r["key"].encode()).hexdigest()[:12], "era": f"builder-{vtag}",
-                "dataset": f"builder_{bid}", "cost_model": "builder/v1"}
+                "dataset": f"builder_{bid}", "cost_model": cost_model}
         d = r["discovery"]
         rows.append({**base, "protocol": f"builder {vtag} discovery", "stage": "builder_discovery",
                      "period": f"0-{W['discovery'][1]}", "trades": d["trades"], "net": d["net"], "pf": d["pf"],
@@ -797,7 +851,7 @@ def run_process(root: Path, bid: str, source: str = "server", jobs: int = 1, tim
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# the weekly job
+# the batch job (nightly since builder/v3; the name weekly_job is kept for its callers)
 # ══════════════════════════════════════════════════════════════════════════
 def _status_path(root: Path) -> Path:
     return Path(root) / "status.json"
@@ -808,8 +862,10 @@ class _Done(Exception):
 
 
 def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server", runner=None,
-               snapshot_fn=None) -> dict:
-    """Scheduler entry point. Off (flag false or LIVE) -> returns at once: nothing read or written."""
+               snapshot_fn=None, time_limit_s: Optional[int] = None) -> dict:
+    """ONE batch (resume the pending one, else freeze + evaluate + ingest a new one). Off (flag false or LIVE) ->
+    returns at once: nothing read or written. A new batch is not frozen while the data layer is incomplete (status
+    "waiting_data") or when the grammar has no undrawn sentence left (status "grammar_exhausted")."""
     if not enabled():
         return {"skipped": "BUILDER_ENABLED is off or not PAPER"}
     import ist_clock
@@ -849,6 +905,11 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
                 if wait:                                  # rule v2 schedule.data: no NIFTY200 on a half-filled store
                     status.update({"status": "waiting_data", "reason": wait})
                     raise _Done()
+            left = grammar_progress(b, st)
+            if left["undrawn"] == 0:                      # every sentence of the grammar was drawn: nothing to freeze
+                status.update({"status": "grammar_exhausted", "undrawn": left})
+                raise _Done()
+            if snapshot_fn is None:
                 snap, inputs = snapshot_process(root, source)
             bid = b.freeze(snap, inputs=inputs)["batch"]
         status["batch"] = bid
@@ -857,8 +918,9 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
             if runner is not None:
                 summary = runner(root, bid)
             else:
+                limit = int(getattr(s, "builder_time_limit_s", 14400))
                 summary = run_process(root, bid, source, jobs=int(getattr(s, "builder_jobs", 2)),
-                                      time_limit_s=int(getattr(s, "builder_time_limit_s", 14400)),
+                                      time_limit_s=min(limit, int(time_limit_s)) if time_limit_s else limit,
                                       mem_mb=int(getattr(s, "builder_mem_mb", 3584)))
         except Exception as exc:
             n = b.record_attempt(bid, f"{type(exc).__name__}: {exc}")
@@ -893,7 +955,9 @@ def weekly_job(now: Optional[datetime] = None, root=None, source: str = "server"
 
 def data_wait_reason(b: "Builder", source: str = "server", root=None) -> Optional[str]:
     """Why a NEW batch must not be frozen yet (None = go): under a rule whose grammar has the NIFTY200 universe, the
-    builder data layer's minute universe must be complete (every added name Kite lists fully backfilled)."""
+    builder data layer's minute universe must be complete (every added name Kite lists fully backfilled); under
+    builder/v3 (schedule.data_gates) the data layer's per-session NSE archive backfill (2012 ->) must be complete too
+    (nse_archive_status)."""
     if source != "server" or b.rule["grammar"]["version"] == "bg1":
         return None
     try:
@@ -910,7 +974,186 @@ def data_wait_reason(b: "Builder", source: str = "server", root=None) -> Optiona
     if not ms.get("ready"):
         return (f"minute backfill of the added NIFTY 200 names at {ms.get('progress_pct')} % "
                 f"({ms.get('names_ready')}/{ms.get('names_fetchable')} names complete)")
+    gates = (b.rule.get("schedule") or {}).get("data_gates") or ["minute_universe"]
+    if "nse_archives" in gates:                           # builder/v3: the NSE archive backfill (2012 ->) too
+        try:
+            ns = nse_archive_status(root=root)
+        except Exception as exc:
+            return f"NSE archive status unavailable: {type(exc).__name__}: {str(exc)[:160]}"
+        if not ns["complete"]:
+            return ns["reason"]
     return None
+
+
+def nse_archive_status(now: Optional[datetime] = None, root=None) -> dict:
+    """Is the builder data layer's NSE archive backfill (2012-01-01 ->) complete? Read-only: builder_data's own state
+    file and its own finality rule (builder_data.Builder.final / process_day's done-condition), nothing is fetched or
+    written.
+      days     every calendar day from NSE_START to today - NSE_GATE_LAG_DAYS must be FINAL: its cash archive status is
+               final (ok / no session / missing, as the data layer rules it) and, on a session, so is every per-session
+               set (index closes, F&O parts, participant OI / volume, ban list, FII stats). A day in an error status
+               (retried by the data layer on every run) is NOT final: the gate waits and names it.
+      windows  every quarterly / monthly feed window (deals, corporate actions, index membership, filing feeds) that
+               ended more than NSE_GATE_LAG_DAYS ago must have been ATTEMPTED after its end; windows whose last answer
+               was an error are counted in `windows_error` (reported, not blocking: NSE does not serve some old
+               months, and the data layer keeps retrying them)."""
+    import builder_data as BD
+    from datetime import timedelta
+    if now is None:
+        import ist_clock
+        now = ist_clock.now_ist()
+    today = now.date()
+    bd = BD.Builder(root)
+    out = {"complete": False, "from": BD.ymd(BD.NSE_START), "days_pending": None, "windows_pending": None,
+           "windows_error": None, "reason": None}
+    if not bd.state_path.exists():
+        out["reason"] = "the data layer's NSE archive backfill has not started (no state file)"
+        return out
+    st = bd.state()
+    days = st.get("days") or {}
+    last = today - timedelta(days=NSE_GATE_LAG_DAYS)
+    out["to"] = BD.ymd(last)
+    pending, d = [], BD.NSE_START
+    while d <= last:
+        k = BD.ymd(d)
+        ds = days.get(str(k)) or {}
+        cash = ds.get("cash")
+        done = bd.final(cash, k, today) and (cash != "ok" or all(bd.final(ds.get(x), k, today) for x in BD.DAY_SETS))
+        if not done:
+            pending.append(k)
+        d += timedelta(days=1)
+    wins = st.get("windows") or {}
+    expected = [(f"deals:{kind}:{tag}", e) for _s, e, tag in bd.quarters(BD.NSE_START, today)
+                for kind in ("bulk", "block")]
+    expected += [(f"ca:{tag}", e) for _s, e, tag in bd.quarters(BD.NSE_START, today + timedelta(days=92))]
+    expected += [(f"mcwb:{tag}", e) for _s, e, tag in bd.months(BD.NSE_START,
+                                                                   today.replace(day=1) - timedelta(days=1))]
+    expected += [(f"ev:{feed}:{tag}", e) for feed in BD.FEEDS for _s, e, tag in bd.months(BD.EVENTS_FROM, today)
+                 if feed != "ifr" or e >= BD.date(2025, 4, 1)]
+    wp, we = [], []
+    for key, e in expected:
+        if e > last:
+            continue
+        rec = wins.get(key) or {}
+        if rec.get("status") == "ok" or bd._wdone(st, key, e, today):
+            continue
+        if rec and int(rec.get("at", 0) or 0) > BD.ymd(e) + 3:
+            we.append(key)                               # attempted after its end, last answer an error
+        else:
+            wp.append(key)
+    out.update({"days_pending": len(pending), "windows_pending": len(wp), "windows_error": len(we),
+                "complete": not pending and not wp})
+    if pending:
+        k = pending[-1]
+        stt = {x: (days.get(str(k)) or {}).get(x) for x in BD.DAY_SETS if (days.get(str(k)) or {}).get(x)}
+        out["reason"] = (f"NSE archive backfill (2012 ->) incomplete: {len(pending)} calendar days from {pending[0]} "
+                         f"to {pending[-1]} not final yet (newest: {k} {stt or 'not fetched'})")
+    elif wp:
+        out["reason"] = (f"NSE feed backfill incomplete: {len(wp)} windows not fetched yet (e.g. {wp[0]})")
+    return out
+
+
+def night_window_open(now: datetime) -> bool:
+    """May a batch START now? Not between NIGHT_STOP (05:15 IST) and the end of the market-hours guard (15:45), and
+    never inside market hours: the 02:30 job's last batch starts before 05:15."""
+    m = now.hour * 60 + now.minute
+    return not (NIGHT_STOP_MIN <= m <= 15 * 60 + 45)
+
+
+def nightly_job(now: Optional[datetime] = None, root=None, source: str = "server", runner=None, snapshot_fn=None,
+                clock=None, max_batches: Optional[int] = None, locked: bool = False) -> dict:
+    """builder/v3 schedule: batch after batch in one night. Each batch is ONE weekly_job call (frozen, evaluated and
+    ingested in full before the next is frozen; 400 candidates each; N grows batch by batch exactly as with one batch a
+    night). Stops when (a) the grammar has no undrawn sentence left, (b) BUILDER_NIGHT_BATCHES batches ran or the night
+    window closed (no batch is started after 05:15 IST or inside market hours), or (c) a batch did not complete
+    (failed / error / disk cap / waiting for data). `clock` (tests): the time before each batch."""
+    if not enabled():
+        return {"skipped": "BUILDER_ENABLED is off or not PAPER"}
+    import ist_clock
+    clock = clock or ((lambda: now) if now is not None else ist_clock.now_ist)
+    budget = int(max_batches if max_batches is not None else getattr(_settings(), "builder_night_batches", 12) or 0)
+    root = Path(root) if root is not None else default_root()
+    t = clock()
+    night = {"started": t.isoformat(timespec="seconds"), "budget": budget, "batches": [], "stopped": None}
+    last: dict = {}
+    while True:
+        if len(night["batches"]) >= budget:
+            night["stopped"] = f"night budget ({budget} batches)"
+            break
+        if not night_window_open(t):
+            night["stopped"] = "night window closed (no batch is started after 05:15 IST or inside market hours)"
+            break
+        # an evaluation must be over before the 09:00 market-hours guard: its wall-clock limit ends at 08:30
+        end = t.replace(hour=8, minute=30, second=0, microsecond=0)
+        limit = int((end - t).total_seconds()) if t < end else None
+        kw = dict(now=t, root=root, source=source, runner=runner, snapshot_fn=snapshot_fn,
+                  time_limit_s=max(600, limit) if limit is not None else None)
+        last = weekly_job_locked(**kw) if locked else weekly_job(**kw)
+        if last.get("status") != "complete":
+            night["stopped"] = last.get("status") or last.get("skipped") or "not complete"
+            break
+        night["batches"].append(last.get("batch"))
+        t = clock()
+    night["batches_run"] = len(night["batches"])
+    night["finished"] = datetime.now().isoformat(timespec="seconds")
+    try:
+        b = Builder(root)
+        if (root / "registry.jsonl").exists():
+            night["undrawn"] = grammar_progress(b)
+    except Exception as exc:
+        night["undrawn_error"] = f"{type(exc).__name__}: {exc}"[:200]
+    out = {**last, "night": night}
+    try:
+        if (root / "registry.jsonl").exists() or last.get("status"):
+            _jsave(_status_path(root), out)
+    except Exception:
+        pass
+    return out
+
+
+def nightly_job_locked(**kw) -> dict:
+    """nightly_job; every batch holds the builder data layer's lock on its own (weekly_job_locked), so the data
+    layer's jobs can run between two batches but never while one freezes or is evaluated."""
+    if not enabled():
+        return {"skipped": "BUILDER_ENABLED is off or not PAPER"}
+    return nightly_job(locked=True, **kw)
+
+
+_GP_CACHE: dict = {}
+
+
+def grammar_progress(b: "Builder", st: Optional[dict] = None) -> dict:
+    """How much of the CURRENT grammar is still undrawn: sentences (x market type) whose key - and whose bg1 twin -
+    was never drawn in any batch (the seeds included). {"grammar", "total", "undrawn", "drawn", "per_agent":
+    {agent: {"total", "undrawn"}}}. Zero undrawn = every sentence of the grammar was tested (or is frozen)."""
+    from stratlab import builder_grammar as G
+    st = st or b.state()
+    gv = b.rule["grammar"]["version"]
+    ck = (str(b.root), gv, len(st["batches"]), len(st.get("seed_keys") or []))
+    if ck in _GP_CACHE:
+        return _GP_CACHE[ck]
+    out = undrawn_counts(gv, b.drawn_keys(st))
+    _GP_CACHE.clear()
+    _GP_CACHE[ck] = out
+    return out
+
+
+def undrawn_counts(gv: str, drawn) -> dict:
+    """grammar_progress for a given set of drawn keys (pure)."""
+    from stratlab import builder_grammar as G
+    drawn = set(drawn)
+    per = {}
+    for a in G.AGENTS:
+        tot = und = 0
+        for m in G.MARKET_TYPES:
+            for c in G.cell_grammar(a, m, gv):
+                tot += 1
+                und += bool(G.never_drawn(c, drawn))
+        per[a] = {"total": tot, "undrawn": und}
+    out = {"grammar": gv, "total": sum(v["total"] for v in per.values()),
+           "undrawn": sum(v["undrawn"] for v in per.values()), "per_agent": per}
+    out["drawn"] = out["total"] - out["undrawn"]
+    return out
 
 
 def weekly_job_locked(**kw) -> dict:
@@ -1035,23 +1278,34 @@ def api_status(root=None) -> dict:
     out = {"enabled": enabled(), "rule_version": rule.get("version"), "rule_sha256": rule.get("_sha256"),
            "rule_error": rule_err, "agents": list(G.AGENTS), "market_types": list(G.MARKET_TYPES),
            "grammar_version": gv, "grammar_sizes": G.grammar_sizes(gv), "batches": [], "grid": [], "n_used": None,
-           "lab_trials_count": (rule.get("dsr") or {}).get("lab_trials_count"), "evaluated": 0, "final_looks": 0,
+           "lab_trials_count": (rule.get("dsr") or {}).get("lab_trials_count"),
+           "lab_retest_trials": int((rule.get("dsr") or {}).get("lab_retest_trials", 0) or 0),
+           "evaluated": 0, "final_looks": 0,
            "promoted": 0, "last_run": _jload(_status_path(root), {}), "chain_ok": True,
            "rules": [{"version": v, "sha256": s, "file": Path(f).name} for v, f, s in RULES],
+           "size": {"text": (rule.get("costs") or {}).get("size"), "capital": (rule.get("costs") or {}).get("capital"),
+                    **rule_sizes(rule)},
+           "schedule": (rule.get("schedule") or {}).get("when"),
            "universes": {"choices": list(G.UNIVERSES), "text": dict(G.UNIVERSE_TEXT)}}
     if not (root / "registry.jsonl").exists():
         out["grid"] = [{"agent": a, "mtype": m, "proven": 0, "in_forward_lab": 0, "qualified": 0, "ready": 0,
                         "universes": {}} for a in G.AGENTS for m in G.MARKET_TYPES]
         try:
             sds = [sb for _p, doc in load_seeds() for sb in seed_batches(doc)]
-            out["n_used"] = max(int(sb["n_used_after"]) for sb in sds)          # imported on first use
+            out["n_used"] = (max(int(sb["n_used_after"]) for sb in sds)         # imported on first use
+                             + int((rule.get("dsr") or {}).get("lab_retest_trials", 0) or 0))
             out["seed"] = {"batch": sds[0]["batch"], "frozen_hash": sds[0]["frozen_hash"], "imported": False,
                            "candidates": sds[0]["n_candidates"]}
             out["seeds"] = [{"batch": sb["batch"], "frozen_hash": sb["frozen_hash"], "imported": False,
                              "candidates": sb["n_candidates"]} for sb in sds]
+            ck = ("no-registry", gv, len(sds))
+            if ck not in _GP_CACHE:                       # (the seeds' keys count as drawn before the first run too)
+                _GP_CACHE[ck] = undrawn_counts(gv, [c["key"] for sb in sds for c in sb["candidates"]])
+            out["undrawn"] = _GP_CACHE[ck]
         except Exception as exc:
             out["n_used"] = out["lab_trials_count"]
             out["seed_error"] = str(exc)[:200]
+        out["night_batches"] = int(getattr(_settings(), "builder_night_batches", 12) or 0)
         return out
     b = Builder(root, rule)
     st = b.state()
@@ -1064,6 +1318,11 @@ def api_status(root=None) -> dict:
                          "candidates": sd["n_candidates"], "file": sd.get("file"), "file_sha256": sd["file_sha256"]}
                         for sd in (st.get("seeds") or {}).values()]
     out["n_used"] = max(st["n_used"], b.n_base(st))
+    try:
+        out["undrawn"] = grammar_progress(b, st)
+    except Exception as exc:
+        out["undrawn"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    out["night_batches"] = int(getattr(_settings(), "builder_night_batches", 12) or 0)
     out["disk_mb"] = round(dir_bytes(root) / 1048576, 2)
     out["rule_chain"] = [{"sha256": s, "version": (RULES[rule_index(s)][0] if rule_index(s) >= 0 else None)}
                          for s in st["rules"]]
@@ -1087,6 +1346,7 @@ def api_status(root=None) -> dict:
                                                           if rule_index(fb.get("rule_sha256", "")) >= 0 else
                                                           "builder/v1"),
                "grammar_version": (fb.get("generator") or {}).get("grammar_version"),
+               "size": sizes_by_sha(fb.get("rule_sha256")),
                "universes": {u: sum(d.get(u, 0) for d in cu.values()) for u in G.UNIVERSES
                              if any(d.get(u) for d in cu.values())}}
         if r and last_universes is None and not r.get("failed") and not fb.get("seeded"):
@@ -1162,7 +1422,8 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
         cobj = G.Candidate.from_json(c["cand"])
         rows.append({"id": c["id"], "agent": c["cand"]["agent"], "mtype": c["cand"]["mtype"],
                      "block": c["cand"]["block"], "universe": cobj.stock_universe,
-                     "universe_explicit": bool(cobj.universe), "text": c["text"], "stage": r.get("stage", "frozen"),
+                     "universe_explicit": bool(cobj.universe), "size": cobj.size, "text": c["text"],
+                     "stage": r.get("stage", "frozen"),
                      "discovery": {k: d.get(k) for k in ("trades", "pf", "net", "h1", "h2", "dsr", "passed",
                                                          "shuffle_passed", "why")} if d else None,
                      "validation": {"passed": (r.get("validation") or {}).get("passed"),
@@ -1179,7 +1440,7 @@ def api_batch(bid: str, root=None) -> Optional[dict]:
            "status": "failed" if (st["results"].get(str(bid)) or {}).get("failed") else
            ("evaluated" if res else "frozen"), "candidates": rows,
            "errata": (st.get("errata") or {}).get(str(bid), []), "seeded": bool(fb.get("seeded")),
-           "rule_sha256": fb.get("rule_sha256"),
+           "rule_sha256": fb.get("rule_sha256"), "size": sizes_by_sha(fb.get("rule_sha256")),
            "rule_version": fb.get("rule_version") or (RULES[rule_index(fb.get("rule_sha256", ""))][0]
                                                       if rule_index(fb.get("rule_sha256", "")) >= 0 else "builder/v1"),
            "cell_universes": cell_universes(b, str(bid), fb, st)}

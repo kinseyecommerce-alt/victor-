@@ -318,8 +318,9 @@ sessions (the forward lab's engine), `<root>/flow` = `STRATLAB_FLOW_DIR`, `<root
 ```
 
 ### GET /api/v2/builder
-The AUTOMATIC STRATEGY BUILDER (`builder.py`; rules `builder_rule.json` builder/v1 and `builder_rule_v2.json`
-builder/v2, sha256 pinned in `builder.RULE_SHA256` / `builder.RULE_SHA256_V2`, new batches under the last one;
+The AUTOMATIC STRATEGY BUILDER (`builder.py`; rules `builder_rule.json` builder/v1, `builder_rule_v2.json`
+builder/v2 and `builder_rule_v3.json` builder/v3, sha256 pinned in `builder.RULE_SHA256` / `RULE_SHA256_V2` /
+`RULE_SHA256_V3`, new batches under the last one;
 `BUILDER_ENABLED`, default false → nothing scheduled; the endpoint still reports what is on disk). builder/v2 (grammar
 bg2) adds the stock UNIVERSE to every sentence: `NIFTY100` (the 97), `NIFTY200` (the 97 + the data layer's added NIFTY
 200 names with complete minute data over the split), `TOP500` (point-in-time top 500, daily-grid stock blocks) or
@@ -328,7 +329,27 @@ bg2) adds the stock UNIVERSE to every sentence: `NIFTY100` (the 97), `NIFTY200` 
 upgrade), `grammar_version`, `universes` {choices, text, last_batch: what NIFTY100 / NIFTY200 resolved to on the last
 evaluated batch}. Batch rows add `rule_version`, `grammar_version`, `universes` {universe: candidates}; grid cells add
 `universes` {universe: {candidates, proven}} (the dashboard's cell tooltip). Weekly-run `last_run.status` can be
-`waiting_data` (a new v2 batch waits for the NIFTY 200 minute backfill; `reason`). Every Saturday 06:00 IST it builds one batch of 400 candidates from our own data (5 agents × 4 market types ×
+`waiting_data` (a new v2 / v3 batch waits for the NIFTY 200 minute backfill; `reason`). builder/v3 (grammar bg3, the
+current rule) sizes the test trades from Rs 10 lakh capital per agent: `size` = {`text`, `capital` (the rule's
+statement and its limitation), `regime` ("c10"), `per_trade_rs` {`equity_mis`: 500000, `future`: 500000 (stock trades
+at futures costs), `equity_cnc`: 100000}, `options` {`premium_rs`: 100000 (long ATM / debit spread: net premium per
+trade), `max_loss_rs`: 100000 (iron condor), `naked_margin_rs`: 500000 at `naked_margin_pct` 0.12 of spot notional,
+`max_units_per_leg`}, `unchanged` (the rule's statement: CNC delivery longs and index futures at 1 lot keep their size
+and their earlier result, which IS their Rs 10 lakh result; they are never re-drawn)}; a re-sized sentence (every
+intraday, scalping and options sentence, stock-futures sentences, swing sentences that can go short) is a new
+candidate (key `["bg3", …, universe, "c10"]`), a sentence of unchanged size keeps its bg2 key. Batch rows and
+`GET /api/v2/builder/batches/{id}` add `size` {`regime`: "" (Rs 1 lakh, v1 / v2 batches and the seeds) | "c10",
+`per_trade_rs`}; a candidate row has `size` ("" | "c10") and its `cand` carries `"size": "c10"` when it is re-sized. `schedule` = the rule's schedule
+text. `undrawn` = progress to "every strategy tested": {`grammar`, `total` (sentences x market types of the current
+grammar: 26,244), `undrawn`, `drawn`, `per_agent` {agent: {`total`, `undrawn`}}} - a sentence counts as drawn once its
+key (or its bg1 / bg2 twin) is in any batch, the seeds included; `night_batches` = `BUILDER_NIGHT_BATCHES`.
+`last_run` is the last batch's status plus `night` {`started`, `finished`, `budget`, `batches` (ids run that night),
+`batches_run`, `stopped` (night budget | night window closed | grammar_exhausted | waiting_data | failed | error |
+disk_cap | …), `undrawn`}; `last_run.status` can also be `grammar_exhausted` (nothing left to freeze) and
+`waiting_data` with a `reason` that names the gate (NIFTY 200 minute universe, or the NSE archive backfill 2012 ->:
+days not final yet / feed windows not fetched). Every night from 02:30 IST (builder/v3: batch after batch until the
+grammar is exhausted, `BUILDER_NIGHT_BATCHES` ran or 05:15 IST passed; one batch on Saturday 06:00 under v1 / v2) it
+builds one batch of 400 candidates from our own data (5 agents × 4 market types ×
 20, `stratlab/builder_grammar.py`), freezes the list in a hash-chained registry before any return is computed,
 evaluates it in its own process (DISCOVERY → ≤ 3 per cell to VALIDATION → one FINAL look → proof) and promotes only
 proven strategies to the forward lab's separate `builder/v1` family. `n_used` = the trial count the Deflated Sharpe
@@ -342,14 +363,23 @@ qualification) and `ready` (qualified, consistent, not demoted — a flag for a 
 `chain_ok: false` = the registry chain failed verification. `seed` / `seeds`: the sandbox's batches 0001-0006
 (`builder_seed_0001.json` + `builder_seed_0002_0006.json`, sha256 pinned in `builder.SEED_SHA256` / `SEED2_SHA256`)
 imported as the registry's first records on first use (`imported: false` before that; `n_used` is then already the
-seeds' 4,979; `seed` = batch 0001, `seeds` = all six): their 2,400 keys are never drawn again, each is listed with
+seeds' 4,979 plus, under builder/v3, `lab_retest_trials` 455 = 5,434; `seed` = batch 0001, `seeds` = all six): their 2,400 keys are never drawn again, each is listed with
 `status: "seeded"` (no candidate rows on the server; `/builder/batches/{id}` shows its `seed` record incl.
 `proven`), the server's first own batch is 0007. The seeds' proven strategy is a `promoted` entry (`seeded: true`),
 counted in `promoted_unregistered` until the next builder run registers it with the builder/v1 forward family.
 ```json
-{"enabled": false, "rule_version": "builder/v2", "rule_sha256": "7072377b40de…", "rule_error": null,
+{"enabled": false, "rule_version": "builder/v3", "rule_sha256": "bcf23e8d3098…", "rule_error": null,
  "rules": [{"version": "builder/v1", "sha256": "a455009021b9…", "file": "builder_rule.json"},
-           {"version": "builder/v2", "sha256": "7072377b40de…", "file": "builder_rule_v2.json"}],
+           {"version": "builder/v2", "sha256": "7072377b40de…", "file": "builder_rule_v2.json"},
+           {"version": "builder/v3", "sha256": "bcf23e8d3098…", "file": "builder_rule_v3.json"}],
+ "size": {"regime": "c10", "per_trade_rs": {"equity_mis": 500000, "future": 500000, "equity_cnc": 100000},
+          "options": {"premium_rs": 100000, "max_loss_rs": 100000, "naked_margin_rs": 500000, "naked_margin_pct": 0.12,
+                      "max_units_per_leg": {"NIFTY": 1800, "BANKNIFTY": 600}},
+          "unchanged": "CNC delivery longs … and index futures at 1 real lot keep their size … that result IS their Rs 10 lakh result …",
+          "text": "Rs 10 lakh capital per agent. …", "capital": {"per_agent_rs": 1000000, "limitation": "…"}},
+ "schedule": "every night at 02:30 IST (…), batch after batch: …", "night_batches": 12,
+ "undrawn": {"grammar": "bg3", "total": 26244, "undrawn": 25709, "drawn": 535,
+             "per_agent": {"intraday": {"total": 9408, "undrawn": 9408}, "swing": {"total": 8220, "undrawn": 7945}, …}},
  "rule_chain": [{"sha256": "a455009021b9…", "version": "builder/v1"}, {"sha256": "7072377b40de…", "version": "builder/v2"}],
  "upgrades": [{"from_version": "builder/v1", "to_version": "builder/v2", "n_used_before": 2970, "evaluated_before": 400,
                "final_looks_before": 2, "batches_before": 1, "grammar_version": "bg2", …}],

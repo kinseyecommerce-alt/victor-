@@ -199,7 +199,7 @@ live in the API) → ≤ ~0.9 GB for ~137 added names with full history; cap 2,6
 
 ## 7. Automatic strategy builder (Part 2, `builder.py` + `builder_run.py` + `builder_forward.py` + `stratlab/builder_*.py`)
 
-Flag `BUILDER_ENABLED` (default false: no job). Saturday 06:00 IST: freeze 400 candidates (registry
+Flag `BUILDER_ENABLED` (default false: no job). Every night 02:30 IST (builder/v3; Saturday 06:00 before): freeze 400 candidates (registry
 `<volume>/builder/registry.jsonl`), evaluate them in `python -m builder_run` (nice 10, `BUILDER_JOBS` <= 2,
 `BUILDER_MEM_MB` 4096 address space per process, `BUILDER_TIME_LIMIT_S` 7200, resumable), ingest; proven strategies go
 to the forward lab's separate family builder/v1 (processed at the end of `forward_lab.daily_job`). Reads the data layer
@@ -214,3 +214,18 @@ grammar bg2 adds the stock UNIVERSE (NIFTY100 / NIFTY200 / TOP500 / INDEX) to ev
 costs and DSR are v1's. On the first weekly run after the deploy the registry appends `rule_upgrade` (N, candidates and
 FINAL looks at that moment; N continues from there). A v1 batch still pending is resumed under v1; new batches are v2,
 never re-draw a v1 key or its bg2 twin, and wait (`waiting_data`) until the NIFTY 200 minute backfill is complete.
+
+builder/v3 (`builder_rule_v3.json`, pinned in `builder.RULE_SHA256_V3`, the current rule; v1 / v2 never rewritten):
+the test trade size follows the owner's capital of Rs 10 lakh per agent (grammar bg3 = bg2 under the size regime
+`c10`): Rs 5 lakh per MIS stock trade and per stock trade at futures costs; option lots from the capital at entry
+(Rs 1 lakh of net premium for long options / debit spreads, Rs 1 lakh of maximum loss for iron condors, Rs 5 lakh of
+margin at 12 % of spot notional for naked strangles, at most one un-sliced order per leg); Rs 1 lakh per CNC delivery
+long and 1 lot per index future (unchanged: their earlier results are their Rs 10 lakh results); every re-sized
+sentence is a new candidate counted in N, a sentence of unchanged size is never re-drawn; a v1 / v2 batch or promoted strategy keeps Rs 1 lakh. The job now runs EVERY NIGHT from
+02:30 IST (`builder_nightly` -> `builder.nightly_job_locked`; Saturday 06:00 before), still only with
+`BUILDER_ENABLED` and outside market hours: batch after batch (each frozen, evaluated and ingested before the next),
+until the grammar has no undrawn sentence left, `BUILDER_NIGHT_BATCHES` (12) ran, 05:15 IST passed or a batch did not
+complete. A NEW v3 batch waits (`waiting_data`) for the NIFTY 200 minute universe and for the data layer's NSE archive
+backfill 2012 -> (`builder.nse_archive_status`: every calendar day up to 10 days ago final, every past feed window
+fetched once). `GET /api/v2/builder` shows `undrawn` (sentences still to test, total and per agent) and the last
+night's record. A registry at v1 or v2 moves forward with one `rule_upgrade` record per step.

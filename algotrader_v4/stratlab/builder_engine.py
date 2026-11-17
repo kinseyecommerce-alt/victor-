@@ -36,6 +36,17 @@ UNIVERSE       (grammar bg2; a bg1 candidate uses its implicit one) the stock ro
                  daily grid   TOP500 = every point-in-time top-500 member (no filter); NIFTY100 / NIFTY200 = members
                               whose symbol is in the base / base + extra lists (+ the base's old symbols)
                a forward run uses the names frozen at the proof (Job.names), never a recomputed list.
+SIZE           the rupee size of a stock trade comes from the candidate's size regime (grammar bg3: Candidate.size) and
+               the cost kind the trade is booked at (cost_kind): SIZE_TABLES. "" (every bg1 / bg2 candidate, bg3's
+               unchanged twins): Rs 1 lakh everywhere (builder/v1). "c10" (builder/v3, Rs 10 lakh capital per agent):
+               Rs 5 lakh per MIS trade (<= 10 entries a day x Rs 5 L x 20 % intraday margin = Rs 10 L) and per stock
+               trade at futures costs (about one real lot, ~20 % margin), Rs 1 lakh per CNC delivery long (delivery
+               fees are proportional). Index futures stay 1 real lot. Option lots under "c10" follow the capital
+               (builder_options.option_lots / OPTION_SIZES: Rs 1 lakh of premium or of maximum loss, Rs 5 lakh of
+               naked margin, decided from the entry fills); a bg1 / bg2 option candidate trades 1 lot. A candidate
+               carries its regime in its key and JSON, so a pending v1 / v2 batch and a promoted v1 / v2 strategy keep
+               their size; apply_rule() checks the batch rule's costs.size_rs against the tables (a mismatch is
+               refused).
 """
 from __future__ import annotations
 
@@ -57,6 +68,20 @@ MT_CODE = {m: i for i, m in enumerate(G.MARKET_TYPES)}
 SMA_N, SLOPE_N, VIX_N, VIX_MIN, VIX_Q = 50, 10, 252, 200, 0.75
 MAX_PER_DAY = R.MAX_PER_DAY
 NOTIONAL = R.NOTIONAL
+# Rs per stock trade by size regime (Candidate.size) and cost kind; the c10 row is builder_rule_v3.json costs.size_rs
+SIZE_TABLES = {
+    G.SIZE_LEGACY: {"equity_mis": NOTIONAL, "equity_cnc": NOTIONAL, "future": NOTIONAL},
+    G.SIZE_C10: {"equity_mis": 5.0 * NOTIONAL, "equity_cnc": NOTIONAL, "future": 5.0 * NOTIONAL},
+}
+
+
+class SizeMismatch(RuntimeError):
+    pass
+
+
+def trade_notional(c: G.Candidate, kind: str, sizes: dict | None = None) -> float:
+    """Rs of one stock trade of candidate c booked at cost kind `kind`."""
+    return float((sizes or SIZE_TABLES)[c.size][kind])
 ENTRY_MIN = G.ENTRY_MIN
 SQUARE_MIN = 915
 SCALP_MAX_MIN = 30
@@ -161,6 +186,26 @@ class Engine:
         self.stats = {"walk_requests": 0, "walk_symbols": 0}
         self.ulists = universe_lists_of(src, M)
         self._umask: dict = {}
+        self.sizes = {k: dict(v) for k, v in SIZE_TABLES.items()}
+
+    def apply_rule(self, rule: dict) -> None:
+        """The batch rule's stock trade sizes. builder/v1 / v2 carry no costs.size_rs (Rs 1 lakh, the legacy row);
+        builder/v3's must equal the engine's frozen table for its regime (SizeMismatch otherwise: an edited table or
+        rule is refused, never silently applied)."""
+        rs = ((rule or {}).get("costs") or {}).get("size_rs")
+        if not rs:
+            return
+        from . import builder_options as BO
+        regime = rs.get("regime")
+        want = {k: float(rs[k]) for k in ("equity_mis", "equity_cnc", "future") if k in rs}
+        if regime not in SIZE_TABLES or want != {k: float(v) for k, v in SIZE_TABLES[regime].items()}:
+            raise SizeMismatch(f"rule {rule.get('version')} costs.size_rs {rs} != engine table "
+                               f"{SIZE_TABLES.get(regime)}")
+        if rs.get("options") != BO.OPTION_SIZES.get(regime):
+            raise SizeMismatch(f"rule {rule.get('version')} costs.size_rs.options {rs.get('options')} != "
+                               f"{BO.OPTION_SIZES.get(regime)}")
+        self.sizes[regime] = want
+        self.option_sizes = {**getattr(self, "option_sizes", {}), regime: dict(rs["options"])}
 
     # ── index daily bars aligned to the daily calendar ──
     def _index_daily(self) -> dict:
@@ -717,8 +762,9 @@ def build_trades(E: Engine, cid: str, c: G.Candidate, rows: list, walks: dict, s
         else:
             xt = G.HHMM.get(fo_, "15:15")
         sym = names[s]
-        qty = sim.LOT_SIZES[sym] if c.single else max(1, int(NOTIONAL // pin))
-        tr = R._trade(cid, sym, cal[e], side, et, pin, cal[x], xt, pout, qty, cost_kind(c, side), slip)
+        kind = cost_kind(c, side)
+        qty = sim.LOT_SIZES[sym] if c.single else max(1, int(trade_notional(c, kind, E.sizes) // pin))
+        tr = R._trade(cid, sym, cal[e], side, et, pin, cal[x], xt, pout, qty, kind, slip)
         reason = w[3] if walk is not None else {"end": "window_end", "stop": "stop", "target": "target"}.get(fo_,
                                                                                                          "time")
         out.append(tr[:13] + (reason,))
