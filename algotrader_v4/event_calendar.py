@@ -165,14 +165,57 @@ async def _fetch_corporate_actions() -> None:
         f"?index=equities&from_date={from_str}&to_date={to_str}"
     )
 
+    data = None
     try:
         data = await nse_client.get(url)
-        if not data or not isinstance(data, list):
-            logger.debug("[events] corporate actions: empty or non-list response")
-            return
-        _parse_corporate_actions(data)
     except Exception as exc:
         logger.warning("[events] corporate actions fetch error: {}", exc)
+    if not data or not isinstance(data, list):
+        # NSE's site often refuses this client from a cloud address. The builder data layer stores the SAME feed
+        # (quarterly windows, the open ones re-fetched on every archive run): use its copy when it is recent.
+        data = _stored_corporate_actions(today, to_date)
+        if data is None:
+            logger.debug("[events] corporate actions: empty or non-list response, no recent stored copy")
+            return
+        logger.info("[events] corporate actions from the data layer's stored copy ({} rows in the window)", len(data))
+    try:
+        _parse_corporate_actions(data)
+    except Exception as exc:
+        logger.warning("[events] corporate actions parse error: {}", exc)
+
+
+CA_COPY_MAX_AGE_DAYS = 3        # a stored copy fetched longer ago than this does not count as a loaded calendar
+
+
+def _stored_corporate_actions(today: date, to_date: date, root=None) -> Optional[list]:
+    """The rows of the builder data layer's stored corporate-action feed with an ex-date in [today, to_date], or None
+    when there is no copy of every quarter the window touches fetched within CA_COPY_MAX_AGE_DAYS. Read-only."""
+    try:
+        import gzip
+        import json
+        import builder_data as BD
+        b = BD.Builder(root) if root is not None else BD.Builder()
+        windows = (b.state() or {}).get("windows") or {}
+        oldest = int((today - timedelta(days=CA_COPY_MAX_AGE_DAYS)).strftime("%Y%m%d"))
+        rows: list = []
+        for _s, _e, tag in BD.Builder.quarters(today, to_date):
+            rec = windows.get(f"ca:{tag}") or {}
+            path = b.flow / "raw" / "ca" / f"{tag}.json.gz"
+            if rec.get("status") != "ok" or int(rec.get("at", 0)) < oldest or not path.exists():
+                return None
+            part = json.loads(gzip.decompress(path.read_bytes()))
+            if not isinstance(part, list):
+                return None
+            rows.extend(part)
+        out = []
+        for r in rows:
+            dt = _parse_dmy((r.get("exDate") or "").strip())
+            if dt is not None and today <= dt.date() <= to_date:
+                out.append(r)
+        return out
+    except Exception as exc:
+        logger.debug("[events] stored corporate actions unavailable: {}", exc)
+        return None
 
 
 def _parse_corporate_actions(data: list) -> None:
@@ -181,7 +224,7 @@ def _parse_corporate_actions(data: list) -> None:
     pa: dict[str, list] = {}
     for item in data:
         sym = (item.get("symbol") or "").strip().upper()
-        purpose = (item.get("purpose") or "").strip()
+        purpose = (item.get("purpose") or item.get("subject") or "").strip()
         dt = _parse_dmy((item.get("exDate") or "").strip())
         if sym and dt is not None and any(k in purpose.lower() for k in _PRICE_ADJUSTING):
             pa.setdefault(sym, []).append((dt.date(), purpose))
@@ -194,7 +237,7 @@ def _parse_corporate_actions(data: list) -> None:
     today_date = date.today()
     for item in data:
         symbol  = (item.get("symbol") or "").strip().upper()
-        purpose = (item.get("purpose") or "").strip()
+        purpose = (item.get("purpose") or item.get("subject") or "").strip()
         ex_date_str = (item.get("exDate") or "").strip()
         if not symbol or not purpose:
             continue
@@ -297,11 +340,14 @@ def _inject_rbi_dates() -> None:
 # ── Date parsing utilities ────────────────────────────────────────────────────
 
 def _parse_dmy(s: str) -> Optional[datetime]:
-    """Parse DD-MM-YYYY (NSE ex-date format). Returns None on failure."""
-    try:
-        return datetime.strptime(s.strip(), "%d-%m-%Y")
-    except (ValueError, AttributeError):
-        return None
+    """Parse an NSE ex-date: DD-Mon-YYYY (what the corporate-actions feed sends, e.g. 03-Jan-2012) or DD-MM-YYYY.
+    Returns None on failure."""
+    for fmt in ("%d-%b-%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(s.strip(), fmt)
+        except (ValueError, AttributeError):
+            continue
+    return None
 
 
 def _parse_iso_or_dmy(s: str) -> Optional[datetime]:
