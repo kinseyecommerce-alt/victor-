@@ -781,20 +781,27 @@ class Builder:
         k = ymd(d)
         if self.delivery.has(k):
             return "ok"
-        if k >= SEC_FULL_FROM:
+        df = None
+        old_route = k < SEC_FULL_FROM
+        if not old_route:
             status, body = http.get(f"{ARCHIVE}/products/content/sec_bhavdata_full_{d:%d%m%Y}.csv")
             if status == "missing":
                 return "no_session"
             if status != "ok":
                 return f"error:{status}"
-            if not body.lstrip().startswith(b"SYMBOL"):
-                return "error:unexpected content"
-            df = parse_sec_full(body, k, universe)
-        else:
+            if body.lstrip().startswith(b"SYMBOL"):
+                df = parse_sec_full(body, k, universe)
+            else:
+                # NSE serves a few days' files as something else under the .csv name (2022-08-08 is an Excel
+                # workbook): take that day from the old-format pair below, which the archive also keeps for
+                # these years. If that pair is not there either, the day stays in error (never silently final).
+                old_route = True
+        if old_route:
+            fallback = k >= SEC_FULL_FROM
             status, cm = http.get(f"{ARCHIVE}/content/historical/EQUITIES/{d.year}/{MON[d.month - 1]}/"
                                   f"cm{d:%d}{MON[d.month - 1]}{d.year}bhav.csv.zip")
             if status == "missing":
-                return "no_session"
+                return "error:unexpected content" if fallback else "no_session"
             if status != "ok":
                 return f"error:{status}"
             s2, mto = http.get(f"{ARCHIVE}/archives/equities/mto/MTO_{d:%d%m%Y}.DAT")
@@ -803,7 +810,7 @@ class Builder:
             try:
                 df = parse_cm_mto(cm, mto if s2 == "ok" else None, k, universe)
             except zipfile.BadZipFile:
-                return "no_session"
+                return "error:unexpected content" if fallback else "no_session"
         if df is None:
             return "stale"
         self.check_cap(len(df) * 40)
