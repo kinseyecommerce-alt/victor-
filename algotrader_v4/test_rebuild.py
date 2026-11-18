@@ -463,6 +463,67 @@ def test_auction_quantity_and_gross_cap_follow_the_agent_scale():
     assert f is None or f == 1.0, "3 trades of ₹5 L are inside the ₹50 L cap"
 
 
+def test_ca_calendar_parses_the_real_feed_and_falls_back_to_the_stored_copy():
+    """Regression: the corporate-action calendar never loaded on the server ('ca_calendar_unavailable' every day)
+    and, when it did load, matched nothing: NSE's feed sends `subject` and ex-dates like 03-Jan-2012, the parser
+    read `purpose` and DD-MM-YYYY. Now (1) the parser reads the real rows, (2) when the site answers nothing the
+    data layer's stored copy of the same feed is used if it was fetched in the last 3 days, never an older one."""
+    import asyncio, gzip, json, tempfile
+    from datetime import date, timedelta
+    from unittest.mock import patch
+    import event_calendar as EC
+    import builder_data as BD
+    today = date.today()
+    ex = today + timedelta(days=2)
+    rows = [{"symbol": "ABC", "subject": "Bonus 1:1", "exDate": ex.strftime("%d-%b-%Y"), "series": "EQ"},
+            {"symbol": "XYZ", "subject": "Interim Dividend Rs.5/- Per Share", "exDate": ex.strftime("%d-%b-%Y")},
+            {"symbol": "OLD", "subject": "Face Value Split", "exDate": (today - timedelta(days=30)).strftime("%d-%b-%Y")}]
+    saved = (EC._price_actions, EC._loaded_at, dict(EC._event_cache))
+    try:
+        # (1) the real row format
+        EC._price_actions, EC._loaded_at = {}, None
+        EC._parse_corporate_actions(rows)
+        assert EC.price_adjusting_actions("ABC", ex) == ["Bonus 1:1"] and EC.price_adjusting_actions("XYZ", ex) == []
+        assert EC.ca_calendar_loaded()
+        assert EC._parse_dmy("03-Jan-2012").date() == date(2012, 1, 3) and EC._parse_dmy("03-01-2012").date() == date(2012, 1, 3)
+        # (2) the stored copy
+        root = tempfile.mkdtemp(prefix="ca_copy_")
+        b = BD.Builder(root)
+        st = b.state()
+        to = today + timedelta(days=7)
+        for _s, _e, tag in BD.Builder.quarters(today, to):
+            pth = b.flow / "raw" / "ca" / f"{tag}.json.gz"
+            pth.parent.mkdir(parents=True, exist_ok=True)
+            pth.write_bytes(gzip.compress(json.dumps(rows).encode()))
+            st.setdefault("windows", {})[f"ca:{tag}"] = {"status": "ok", "at": int(today.strftime("%Y%m%d"))}
+        b.save(st)
+        got = EC._stored_corporate_actions(today, to, root=root)
+        assert got is not None and {r["symbol"] for r in got} == {"ABC", "XYZ"}, "only ex-dates inside the window"
+
+        async def nothing(_url):
+            return None
+        real_builder = BD.Builder
+        EC._price_actions, EC._loaded_at = {}, None
+        with patch.object(EC.nse_client, "get", nothing), patch.object(BD, "Builder", lambda r=None: real_builder(root)):
+            BD.Builder.quarters = real_builder.quarters
+            asyncio.run(EC._fetch_corporate_actions())
+        assert EC.ca_calendar_loaded() and EC.price_adjusting_actions("ABC", ex) == ["Bonus 1:1"]
+        # a copy older than the limit is not a calendar
+        for k in list(st["windows"]):
+            st["windows"][k]["at"] = int((today - timedelta(days=EC.CA_COPY_MAX_AGE_DAYS + 2)).strftime("%Y%m%d"))
+        b.save(st)
+        assert EC._stored_corporate_actions(today, to, root=root) is None
+        EC._price_actions, EC._loaded_at = {}, None
+        with patch.object(EC.nse_client, "get", nothing), patch.object(BD, "Builder", lambda r=None: real_builder(root)):
+            BD.Builder.quarters = real_builder.quarters
+            asyncio.run(EC._fetch_corporate_actions())
+        assert not EC.ca_calendar_loaded(), "a stale copy must leave the calendar unavailable (flagged)"
+    finally:
+        EC._price_actions, EC._loaded_at = saved[0], saved[1]
+        EC._event_cache.clear()
+        EC._event_cache.update(saved[2])
+
+
 def test_drawdown_brake_escalates_latches_and_resets():
     import risk_budget as RB
     import trading_state as TS

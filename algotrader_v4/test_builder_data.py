@@ -481,6 +481,42 @@ def test_old_era_cm_bhavcopy_and_mto_route():
     assert not any("sec_bhavdata_full" in u for u in net.urls)        # pre-2020: never asked
 
 
+def test_regression_sec_full_served_as_a_workbook_falls_back_to_cm_and_mto():
+    """NSE serves sec_bhavdata_full_08082022.csv as an Excel workbook (bytes 'PK...'). Before the fix that day stayed
+    'error:unexpected content' for ever, so the builder's NSE-archive gate never opened. Now the day is read from the
+    old-format pair (CM bhavcopy zip + MTO), and stays an ERROR (never 'no_session') when that pair is missing too."""
+    d = date(2022, 8, 8)
+    cm_csv = ("SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN\n"
+              "RELIANCE,EQ,2530,2575,2520,2568.5,2568,2534.2,5000000,12800000000,08-AUG-2022,150000,INE002A01018\n"
+              "TCS,EQ,3360,3390,3340,3375,3374,3364.6,1500000,5050000000,08-AUG-2022,90000,INE467B01029\n")
+    zb = io.BytesIO()
+    with zipfile.ZipFile(zb, "w") as z:
+        z.writestr("cm08AUG2022bhav.csv", cm_csv)
+    mto = ("Record Type,Sr No,Name of Security,Type,Quantity Traded,Deliverable Quantity,% of Deliverable\n"
+           "20,1,RELIANCE,EQ,5000000,2600000,52.00\n20,2,TCS,EQ,1500000,900000,60.00\n")
+    workbook = b"PK\x03\x04\x14\x00\x06\x00[Content_Types].xml"
+
+    def fn(url, with_old=True):
+        if "sec_bhavdata_full_08082022" in url:
+            return "ok", workbook
+        if with_old and "cm08AUG2022bhav" in url:
+            return "ok", zb.getvalue()
+        if with_old and "MTO_08082022" in url:
+            return "ok", mto.encode()
+        return "missing", b""
+    b = BD.Builder(_tmp())
+    net = FakeNet(fn)
+    assert b.fetch_cash(net.http(), d, set(BD.lab_names())) == "ok"
+    got = b.delivery.read_day(20220808).set_index("symbol")
+    assert float(got.loc["RELIANCE", "close"]) == 2568.5 and float(got.loc["RELIANCE", "deliv_pct"]) == 52.0
+    assert float(got.loc["TCS", "deliv_qty"]) == 900000
+    assert any("sec_bhavdata_full_08082022" in u for u in net.urls) and any("cm08AUG2022bhav" in u for u in net.urls)
+    # the old pair missing as well: still an error (retried), never ruled a holiday
+    b2 = BD.Builder(_tmp())
+    st = b2.fetch_cash(FakeNet(lambda u: fn(u, with_old=False)).http(), d, set(BD.lab_names()))
+    assert st == "error:unexpected content" and not BD.Builder.final(st, 20220808, date(2026, 11, 18))
+
+
 # ══ availability, resumability, budgets, guards ══════════════════════════════════════════════════════════════════
 def test_availability_rule_unchanged():
     """The server files carry the trade date; nsedata's own `before` rule decides: a row dated D is not returned for
