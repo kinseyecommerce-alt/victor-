@@ -91,6 +91,9 @@ def json_safe(obj):
     return obj
 
 
+POSITION_MARK_S = 30.0          # seconds between two quote calls for the marks of unsubscribed open positions
+
+
 class TickEngine:
     def __init__(self) -> None:
         self._running = False
@@ -104,6 +107,11 @@ class TickEngine:
         self._ws_received: set[str] = set()
         self._last_quote_warn = 0.0
         self._no_quote: set[str] = set()
+        # marks of open paper positions the watchlist does not cover (PEAD small caps, option legs): a price for the
+        # paper book's unrealised P&L only. They are NOT ticks: latest() never returns them, so a paper fill still
+        # uses the quote the agent fetched at that instant (the tested fill model), never a mark up to 30 s old.
+        self._marks: dict[str, float] = {}
+        self._marks_at = 0.0
 
     # ── subscriptions ──
     def subscribe(self, watchlist: list[dict]) -> None:
@@ -212,12 +220,47 @@ class TickEngine:
             if not settings.uses_kite_market_data:
                 await asyncio.sleep(60)
                 continue
+            await self._refresh_position_marks()
             if not is_market_open():
                 await self._fetch_kite_batch(idle=True)
                 await asyncio.sleep(60)
                 continue
             await self._fetch_kite_batch()
             await asyncio.sleep(max(0.0, 1.0 - (time.monotonic() - t0)))
+
+    async def _refresh_position_marks(self, force: bool = False) -> int:
+        """One Kite quote() call, at most every POSITION_MARK_S, for the open paper positions that have no
+        subscription. Never raises; returns the number of marks stored."""
+        if not force and time.monotonic() - self._marks_at < POSITION_MARK_S:
+            return 0
+        self._marks_at = time.monotonic()
+        try:
+            rows = [p for p in kite_client._paper_positions
+                    if p.get("quantity") and p.get("tradingsymbol") not in self._exchange]
+            keep = {p["tradingsymbol"] for p in rows}
+            for gone in [k for k in self._marks if k not in keep]:
+                self._marks.pop(gone, None)
+            if not rows or not kite_client.has_session():
+                return 0
+            ins = sorted({f"{p.get('exchange') or 'NSE'}:{p['tradingsymbol']}" for p in rows})
+            raw = await asyncio.get_event_loop().run_in_executor(None, lambda: kite_client.quote_kite(ins))
+            n = 0
+            for p in rows:
+                q = (raw or {}).get(f"{p.get('exchange') or 'NSE'}:{p['tradingsymbol']}") or {}
+                px = float(q.get("last_price") or 0)
+                if px > 0:
+                    self._marks[p["tradingsymbol"]] = px
+                    n += 1
+            return n
+        except Exception as exc:
+            if time.monotonic() - self._last_quote_warn > 60:
+                self._last_quote_warn = time.monotonic()
+                logger.warning("[tick] position marks failed: {}", exc)
+            return 0
+
+    def mark(self, symbol: str) -> float:
+        """The newest mark of an open paper position without a subscription (0.0 when there is none)."""
+        return float(self._marks.get(symbol) or 0.0)
 
     async def _fetch_kite_batch(self, idle: bool = False) -> None:
         """One Kite quote() call for every subscribed symbol the WebSocket is not covering."""

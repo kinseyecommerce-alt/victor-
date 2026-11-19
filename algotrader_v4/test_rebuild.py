@@ -524,6 +524,58 @@ def test_ca_calendar_parses_the_real_feed_and_falls_back_to_the_stored_copy():
         EC._event_cache.update(saved[2])
 
 
+def test_open_positions_outside_the_watchlist_get_marks_but_never_ticks():
+    """Regression: the unrealised P&L of the PEAD small caps and the strangle's option legs stood still all day (the
+    price feed follows only its watchlist). Their marks are now polled (one quote call, at most every 30 s) and used
+    by the paper book ONLY for last_price / pnl: latest() stays empty for them, so a paper fill still uses the
+    agent's own fresh quote."""
+    import asyncio
+    from unittest.mock import patch
+    from tick_engine import tick_engine as TE
+    from kite_client import kite_client as KC
+    saved = (list(KC._paper_positions), dict(TE._marks), TE._marks_at)
+    calls = []
+
+    def fake_quote(ins):
+        calls.append(list(ins))
+        return {"NSE:MARSONS": {"last_price": 171.5}, "NFO:NIFTY26NOV25750CE": {"last_price": 21.4},
+                "NSE:GONE": {"last_price": 0}}
+    try:
+        KC._paper_positions[:] = [
+            {"tradingsymbol": "MARSONS", "exchange": "NSE", "product": "CNC", "quantity": 59, "average_price": 168.84,
+             "last_price": 168.84, "pnl": 0.0, "buy_value": 59 * 168.84, "sell_value": 0.0},
+            {"tradingsymbol": "NIFTY26NOV25750CE", "exchange": "NFO", "product": "NRML", "quantity": -130,
+             "average_price": 33.7, "last_price": 33.7, "pnl": 0.0, "buy_value": 0.0, "sell_value": 130 * 33.7},
+            {"tradingsymbol": "CLOSED", "exchange": "NSE", "product": "MIS", "quantity": 0, "average_price": 10.0,
+             "last_price": 10.0, "pnl": 5.0, "buy_value": 100.0, "sell_value": 105.0}]
+        TE._marks.clear()
+        TE._marks["STALE"] = 1.0
+        with patch.object(KC, "quote_kite", fake_quote), patch.object(KC, "has_session", lambda: True):
+            n = asyncio.run(TE._refresh_position_marks(force=True))
+            assert n == 2 and len(calls) == 1 and sorted(calls[0]) == ["NFO:NIFTY26NOV25750CE", "NSE:MARSONS"]
+            assert asyncio.run(TE._refresh_position_marks()) == 0 and len(calls) == 1, "at most one call per 30 s"
+        assert TE.mark("MARSONS") == 171.5 and TE.mark("NIFTY26NOV25750CE") == 21.4 and TE.mark("STALE") == 0.0
+        assert TE.latest("MARSONS")[0] is None and TE.latest("NIFTY26NOV25750CE")[0] is None, "marks are not ticks"
+        assert KC._paper_ltp("MARSONS") == 0.0 and KC._paper_touch("MARSONS", "SELL", 0.0) == 0.0   # fills unchanged
+        KC._mark_paper_positions()
+        rows = {p["tradingsymbol"]: p for p in KC._paper_positions}
+        assert rows["MARSONS"]["last_price"] == 171.5 and rows["MARSONS"]["pnl"] == round(59 * (171.5 - 168.84), 2)
+        assert rows["NIFTY26NOV25750CE"]["last_price"] == 21.4
+        assert rows["NIFTY26NOV25750CE"]["pnl"] == round(130 * 33.7 - 130 * 21.4, 2)      # short leg gains as it falls
+        assert rows["CLOSED"]["last_price"] == 10.0 and rows["CLOSED"]["pnl"] == 5.0       # a flat row is untouched
+        # a failing quote never raises and keeps the last marks
+        def boom(_ins):
+            raise RuntimeError("kite down")
+        with patch.object(KC, "quote_kite", boom), patch.object(KC, "has_session", lambda: True):
+            assert asyncio.run(TE._refresh_position_marks(force=True)) == 0
+        assert TE.mark("MARSONS") == 171.5
+    finally:
+        KC._paper_positions[:] = saved[0]
+        TE._marks.clear()
+        TE._marks.update(saved[1])
+        TE._marks_at = saved[2]
+
+
 def test_drawdown_brake_escalates_latches_and_resets():
     import risk_budget as RB
     import trading_state as TS
