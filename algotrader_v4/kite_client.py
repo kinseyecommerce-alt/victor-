@@ -663,6 +663,12 @@ class KiteClient:
         paper book kept the fill price as last_price and pnl at 0 for the whole session."""
         for pos in self._paper_positions:
             px = self._paper_ltp(pos["tradingsymbol"])
+            if px <= 0 and pos.get("quantity"):
+                try:                               # a position outside the watchlist: its mark (marks only, no fills)
+                    from tick_engine import tick_engine
+                    px = tick_engine.mark(pos["tradingsymbol"])
+                except Exception:
+                    px = 0.0
             if px > 0:
                 pos["last_price"] = px
             if "buy_value" in pos:
