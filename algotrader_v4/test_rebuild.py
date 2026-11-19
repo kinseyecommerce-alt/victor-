@@ -557,7 +557,7 @@ def test_open_positions_outside_the_watchlist_get_marks_but_never_ticks():
         assert TE.mark("MARSONS") == 171.5 and TE.mark("NIFTY26NOV25750CE") == 21.4 and TE.mark("STALE") == 0.0
         assert TE.latest("MARSONS")[0] is None and TE.latest("NIFTY26NOV25750CE")[0] is None, "marks are not ticks"
         assert KC._paper_ltp("MARSONS") == 0.0 and KC._paper_touch("MARSONS", "SELL", 0.0) == 0.0   # fills unchanged
-        KC._mark_paper_positions()
+        # the refresh itself wrote the marks into the paper book's rows (no dashboard request needed)
         rows = {p["tradingsymbol"]: p for p in KC._paper_positions}
         assert rows["MARSONS"]["last_price"] == 171.5 and rows["MARSONS"]["pnl"] == round(59 * (171.5 - 168.84), 2)
         assert rows["NIFTY26NOV25750CE"]["last_price"] == 21.4

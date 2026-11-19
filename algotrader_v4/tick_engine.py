@@ -235,6 +235,15 @@ class TickEngine:
             return 0
         self._marks_at = time.monotonic()
         try:
+            return await self._fetch_position_marks()
+        finally:
+            try:                       # write the newest prices into the paper book's rows (last_price / pnl only):
+                kite_client._mark_paper_positions()        # nothing else did this between two dashboard requests
+            except Exception as exc:
+                logger.debug("[tick] paper book marking failed: {}", exc)
+
+    async def _fetch_position_marks(self) -> int:
+        try:
             rows = [p for p in kite_client._paper_positions
                     if p.get("quantity") and p.get("tradingsymbol") not in self._exchange]
             keep = {p["tradingsymbol"] for p in rows}
