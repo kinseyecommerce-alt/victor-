@@ -517,6 +517,64 @@ def test_regression_sec_full_served_as_a_workbook_falls_back_to_cm_and_mto():
     assert st == "error:unexpected content" and not BD.Builder.final(st, 20220808, date(2026, 11, 18))
 
 
+def test_regression_old_fo_file_with_two_digit_years_and_a_note_row():
+    """fo14MAY2012bhav.csv has dates like 31-May-12 and a last line '*Updated' with empty columns. Before the fix
+    norm_old raised ValueError, which ended the whole archive run on that day, night after night. Now the file is
+    read (the note row dropped), and an unreadable F&O file marks only its own day as an error."""
+    d = date(2012, 5, 14)
+    hdr = ("INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,"
+           "OPEN_INT,CHG_IN_OI,TIMESTAMP\r\n")
+    body = (hdr + "FUTIDX,NIFTY,31-May-12,0,XX,4900,4950,4880,4907.8,4907.8,73169,169860.22,2263125,157850,14-May-12\r\n"
+            "OPTIDX,NIFTY,31-May-12,5000,CE,60,70,50,55.5,55.5,1000,2500,500000,1000,14-May-12\r\n"
+            "*Updated,,,,,,,,,,,,,,\r\n")
+    zb = io.BytesIO()
+    with zipfile.ZipFile(zb, "w") as z:
+        z.writestr("fo14MAY2012bhav.csv", body)
+    n, bad = BD.parse_fo(zb.getvalue(), d, "old")
+    assert bad is None and len(n) == 2 and set(n["expiry"]) == {"2012-05-31"} and set(n["date"]) == {"2012-05-14"}
+    assert float(n.loc[n.instrument == "OPTIDX", "settle"].iloc[0]) == 55.5
+    # four-digit years still read
+    zb4 = io.BytesIO()
+    with zipfile.ZipFile(zb4, "w") as z:
+        z.writestr("fo15MAY2012bhav.csv", body.replace("31-May-12", "31-May-2012").replace("14-May-12", "15-MAY-2012")
+                   .replace("*Updated,,,,,,,,,,,,,,\r\n", ""))
+    n4, bad4 = BD.parse_fo(zb4.getvalue(), date(2012, 5, 15), "old")
+    assert bad4 is None and len(n4) == 2 and set(n4["expiry"]) == {"2012-05-31"}
+    # an unreadable file: that day is an error (retried), the run goes on
+    zbad = io.BytesIO()
+    with zipfile.ZipFile(zbad, "w") as z:
+        z.writestr("fo14MAY2012bhav.csv", hdr + "FUTIDX,NIFTY,not-a-date,0,XX,1,1,1,1,1,1,1,1,1,14-May-12\r\n")
+    b = BD.Builder(_tmp())
+    st = b.state()
+    net = FakeNet(lambda url: ("ok", zbad.getvalue()) if "fo14MAY2012bhav" in url else ("missing", b""))
+    got = b.fetch_fo(net.http(), d, st)
+    assert got.startswith("error:parse") and not BD.Builder.final(got, 20120514, date(2026, 11, 19))
+    assert st["fo_status"]["20120514"].split(",")[1] == "error"
+
+
+def test_regression_fii_sheet_in_xlsx_format_is_read():
+    """fii_stats_30-Jul-2019.xls is an .xlsx workbook: without openpyxl the day stayed 'unparsed:xlrd missing' and the
+    builder's archive gate never opened. openpyxl is now a requirement."""
+    req = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements.txt")).read()
+    assert "openpyxl" in req and "xlrd" in req
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["FII DERIVATIVES STATISTICS FOR 30-Jul-2019"])
+    ws.append([None, "BUY", None, "SELL", None, "OPEN INTEREST AT THE END OF THE DAY", None])
+    ws.append([None, "No. of contracts", "Amt in Crores", "No. of contracts", "Amt in Crores", "No. of contracts",
+               "Amt in Crores"])
+    ws.append(["INDEX FUTURES", 60381, 4249.54, 45939, 3310.33, 189761, 14720.26])
+    ws.append(["INDEX OPTIONS", 3000000, 200000.5, 2990000, 199000.25, 800000, 60000.75])
+    ws.append(["STOCK FUTURES", 250000, 14000.0, 260000, 14500.0, 1500000, 85000.0])
+    ws.append(["STOCK OPTIONS", 90000, 5000.0, 91000, 5100.0, 120000, 7000.0])
+    buf = io.BytesIO()
+    wb.save(buf)
+    assert buf.getvalue()[:2] == b"PK"
+    recs, why = BD.parse_fii_xls(buf.getvalue(), 20190730)
+    assert why == "ok" and recs and recs[0]["instrument"] == "INDEX FUTURES" and recs[0]["buy_contracts"] == 60381.0
+
+
 # ══ availability, resumability, budgets, guards ══════════════════════════════════════════════════════════════════
 def test_availability_rule_unchanged():
     """The server files carry the trade date; nsedata's own `before` rule decides: a row dated D is not returned for

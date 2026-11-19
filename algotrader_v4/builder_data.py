@@ -497,19 +497,35 @@ def norm_udiff(df):
         "lot": _num(df["NewBrdLotQty"])})
 
 
+def _dmy_dates(col):
+    """NSE's DD-Mon-YYYY dates; a few old files (fo14MAY2012bhav) carry DD-Mon-YY instead."""
+    import pandas as pd
+    v = col.str.strip()
+    try:
+        return pd.to_datetime(v, format="%d-%b-%Y")
+    except ValueError:
+        return pd.to_datetime(v, format="%d-%b-%y")
+
+
 def norm_old(df, d: date):
-    """fetch_fo.py norm_old (+ the content date of the TIMESTAMP column)."""
+    """fetch_fo.py norm_old (+ the content date of the TIMESTAMP column). Rows that are not contracts (a trailing
+    note such as '*Updated' with empty columns, as in fo14MAY2012bhav) are dropped."""
     import pandas as pd
     df = df.rename(columns=lambda c: c.strip())
+    full = None
+    for c in ("SYMBOL", "EXPIRY_DT", "TIMESTAMP"):
+        ok = df[c].fillna("").astype(str).str.strip().ne("")
+        full = ok if full is None else (full & ok)
+    df = df[full].reset_index(drop=True)
     out = pd.DataFrame({
         "date": d.strftime("%Y-%m-%d"), "instrument": df["INSTRUMENT"].str.strip(), "symbol": df["SYMBOL"].str.strip(),
-        "expiry": pd.to_datetime(df["EXPIRY_DT"].str.strip(), format="%d-%b-%Y").dt.strftime("%Y-%m-%d"),
+        "expiry": _dmy_dates(df["EXPIRY_DT"]).dt.strftime("%Y-%m-%d"),
         "strike": _num(df["STRIKE_PR"]), "type": df["OPTION_TYP"].str.strip(),
         "open": _num(df["OPEN"]), "high": _num(df["HIGH"]), "low": _num(df["LOW"]),
         "close": _num(df["CLOSE"]), "settle": _num(df["SETTLE_PR"]),
         "contracts": _num(df["CONTRACTS"]), "oi": _num(df["OPEN_INT"]),
         "chg_oi": _num(df["CHG_IN_OI"]), "underlying": float("nan"), "lot": float("nan")})
-    out["content_date"] = pd.to_datetime(df["TIMESTAMP"].str.strip(), format="%d-%b-%Y").dt.strftime("%Y-%m-%d")
+    out["content_date"] = _dmy_dates(df["TIMESTAMP"]).dt.strftime("%Y-%m-%d")
     return out
 
 
@@ -600,7 +616,7 @@ def parse_fii_xls(raw: bytes, day: int) -> tuple[Optional[list], str]:
     import pandas as pd
     try:
         x = pd.read_excel(io.BytesIO(raw), header=None)
-    except ImportError:
+    except ImportError:               # .xls needs xlrd, the few .xlsx sheets (fii_stats_30-Jul-2019) need openpyxl
         return None, "unparsed:xlrd missing"
     except Exception as exc:
         return None, f"error:parse {str(exc)[:80]}"
@@ -850,7 +866,11 @@ class Builder:
             st["fo_status"][str(k)] = f"{d.isoformat()},missing,,0,0,0,0"
             return "missing"
         fmt, body = got
-        n, bad = parse_fo(body, d, fmt)
+        try:
+            n, bad = parse_fo(body, d, fmt)
+        except Exception as exc:      # one unreadable file must not end the whole run: the day stays in error
+            st["fo_status"][str(k)] = f"{d.isoformat()},error,{fmt},0,0,0,0"
+            return f"error:parse {type(exc).__name__}: {str(exc)[:60]}"
         if n is None:
             st["fo_status"][str(k)] = f"{d.isoformat()},stale,{fmt},0,0,0,0"
             return "stale"
