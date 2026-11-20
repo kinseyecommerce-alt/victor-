@@ -507,6 +507,16 @@ def _dmy_dates(col):
         return pd.to_datetime(v, format="%d-%b-%y")
 
 
+def raw_part_ok(body: bytes, kind: str) -> bool:
+    """Is this the participant OI / volume table or the ban list? A few participant files (OI 13-Jun-2018, volume
+    06-Aug-2013) come without their title line and start at the 'Client Type' header; oldera_fo._parse_participant
+    finds that header by itself, so they are accepted as they are."""
+    head = body[:300].lower()
+    if kind == "ban":
+        return b"securities" in head
+    return b"participant" in head or head.lstrip().startswith((b"client type", b"client_type", b"client,"))
+
+
 def norm_old(df, d: date):
     """fetch_fo.py norm_old (+ the content date of the TIMESTAMP column). Rows that are not contracts (a trailing
     note such as '*Updated' with empty columns, as in fo14MAY2012bhav) are dropped."""
@@ -886,11 +896,10 @@ class Builder:
         url = {"poi": f"{ARCHIVE}/content/nsccl/fao_participant_oi_{d:%d%m%Y}.csv",
                "pvol": f"{ARCHIVE}/content/nsccl/fao_participant_vol_{d:%d%m%Y}.csv",
                "ban": f"{ARCHIVE}/archives/fo/sec_ban/fo_secban_{d:%d%m%Y}.csv"}[kind]
-        check = b"Securities" if kind == "ban" else b"Participant"
         status, body = http.get(url)
         if status != "ok":
             return status if status == "missing" else f"error:{status}"
-        if check not in body[:300]:
+        if not raw_part_ok(body, kind):
             return "error:unexpected content"
         sub = {"poi": "oi", "pvol": "vol", "ban": "ban"}[kind]
         self.write(self.nse / "raw_part" / sub / f"{k}.csv", body)
