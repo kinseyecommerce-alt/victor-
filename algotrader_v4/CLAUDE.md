@@ -82,9 +82,11 @@ Strategies that passed stratlab's pre-registered protocol run as PAPER-only, sch
   (Kite minute candles through `summarize_sessions`, the same function the parity test uses), not `ohlc.close`.
 - Size per agent: `VALIDATED_<AUCTION|ATTENTION|PEAD>_NOTIONAL_SCALE` (default 1.0 = the lab's ₹1 L per trade) multiplies
   the global `VALIDATED_NOTIONAL_SCALE` in `ValidatedAgent._scale()`; quantities, loss stops, drawdown kills and gross
-  caps of that agent scale with it, decisions never change, observers normalise back to lab size. Production gives
-  each agent ₹10 L of capital through Railway variables: auction 5.0 (₹5 L per MIS trade, ≤ 10 trades at 20 % margin),
-  PEAD 0.1 (₹10,000 per position, lab peak 88 open), attention 1.0, strangle 2 lots; `RISK_CAPITAL` 40 L.
+  caps of that agent scale with it, decisions never change, observers normalise back to lab size. Production splits
+  ₹1 crore of paper capital through Railway variables (since 2026-11-20): auction 10.0 (₹20 L: ₹10 L per MIS trade,
+  ≤ 10 trades at 20 % margin; ₹10 L is also the per-order limit of the SEBI check), attention 2.0 (₹20 L: ₹2 L per
+  stock), PEAD 0.25 (₹25 L: ₹25,000 per position, lab peak 88 open), strangle 2 lots (₹10 L), ₹25 L in reserve;
+  `RISK_CAPITAL` 75 L.
 - `VALIDATED_ONLY` (default true): false blocks every validated entry (`validated_only_off`); open positions still
   exit / settle by rule. The legacy book it used to switch between was removed in the core rebuild.
 - Every early return logs through `_note()` / `_skip()` + the per-day `day_log`; `GET /validated` shows all three
