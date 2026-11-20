@@ -4252,6 +4252,9 @@ def t_va_parity_audit():
         rows["NTPC"] = bars(_DA, 500_000 / 366, 101.0, 101.0)
         res = a.parity_audit(rows)
         assert res["bars_only"] == ["NTPC"] and a.deviations.get("parity_mismatch") == 1
+        det = res["detail"]["NTPC"]                         # a mismatch carries the bars' own numbers
+        assert det["bar_ratio"] and det["bar_ratio"] > 3 and det["bar_cum_vol"] > 0 and det["prev20_mean"] > 0
+        assert det["close_1520"] > det["prev_close"] and det["excluded"] is None and det["quote_ratio"] is None
 
 
 def t_va_pruning_exempt_and_no_telegram():

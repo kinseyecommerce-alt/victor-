@@ -340,7 +340,24 @@ class AttentionOvernightAgent(ValidatedAgent):
         bars_set, live_set = {p.symbol for p in planned}, set(self.last_decision.get("symbols") or [])
         res = {"audited": True, "bars_only": sorted(bars_set - live_set), "quotes_only": sorted(live_set - bars_set)}
         if res["bars_only"] or res["quotes_only"]:
-            self._deviation("parity_mismatch", "*", f"bars-only {res['bars_only']} quotes-only {res['quotes_only']}")
+            # what the bars said about each disputed name, so a mismatch explains itself (quote volume vs bar sum)
+            by = {x.symbol: x for x in inputs}
+            qr = self.last_decision.get("ratios") or {}
+            detail = {}
+            for sym in res["bars_only"] + res["quotes_only"]:
+                x = by.get(sym)
+                if x is None:
+                    detail[sym] = {"bars": "no input (bars / previous close / 20 sessions missing)",
+                                   "quote_ratio": qr.get(sym)}
+                    continue
+                base = float(sum(x.prev20_full_vols[-T.LOOKBACK:]) / T.LOOKBACK) if x.prev20_full_vols else 0.0
+                detail[sym] = {"bar_cum_vol": x.cum_vol_1520, "prev20_mean": round(base, 1),
+                               "bar_ratio": round(x.cum_vol_1520 / base, 3) if base > 0 else None,
+                               "close_1520": x.close_1520, "prev_close": x.prev_close,
+                               "excluded": excluded.get(sym), "quote_ratio": qr.get(sym)}
+            res["detail"] = detail
+            self._deviation("parity_mismatch", "*", f"bars-only {res['bars_only']} quotes-only {res['quotes_only']} "
+                                                    f"detail {detail}")
         self.last_decision["audit"] = res
         return res
 
