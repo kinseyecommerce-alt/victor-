@@ -1048,6 +1048,12 @@ def nse_archive_status(now: Optional[datetime] = None, root=None) -> dict:
         stt = {x: (days.get(str(k)) or {}).get(x) for x in BD.DAY_SETS if (days.get(str(k)) or {}).get(x)}
         out["reason"] = (f"NSE archive backfill (2012 ->) incomplete: {len(pending)} calendar days from {pending[0]} "
                          f"to {pending[-1]} not final yet (newest: {k} {stt or 'not fetched'})")
+        if len(pending) <= 12:                           # a few stuck days: name every one with what is not final
+            def _bad(kk):
+                ds_ = days.get(str(kk)) or {}
+                return {x: ds_.get(x) for x in BD.DAY_SETS if not bd.final(ds_.get(x), kk, today)} or "not fetched"
+            out["pending_days"] = {str(kk): _bad(kk) for kk in pending}
+            out["reason"] += "; all: " + "; ".join(f"{kk} {v}" for kk, v in out["pending_days"].items())
     elif wp:
         out["reason"] = (f"NSE feed backfill incomplete: {len(wp)} windows not fetched yet (e.g. {wp[0]})")
     return out

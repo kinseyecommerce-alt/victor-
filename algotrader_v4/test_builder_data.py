@@ -575,6 +575,37 @@ def test_regression_fii_sheet_in_xlsx_format_is_read():
     assert why == "ok" and recs and recs[0]["instrument"] == "INDEX FUTURES" and recs[0]["buy_contracts"] == 60381.0
 
 
+def test_regression_participant_file_without_its_title_line_is_accepted():
+    """fao_participant_oi_13062018.csv and fao_participant_vol_06082013.csv start at the 'Client Type' header (no
+    'Participant wise ...' title line). The content check refused them for ever ('error:unexpected content'), which
+    kept the builder's archive gate shut on those days; the parser reads them as they are."""
+    hdr = ("Client Type,Future Index Long,Future Index Short,Future Stock Long,Future Stock Short,"
+           "Option Index Call Long,Option Index Put Long,Option Index Call Short,Option Index Put Short,"
+           "Option Stock Call Long,Option Stock Put Long,Option Stock Call Short,Option Stock Put Short,"
+           "Total Long Contracts,Total Short Contracts\r\n")
+    rows = ("Client,255533,170613,1048634,438279,481180,715231,583933,886558,263176,131878,212194,127548,2895632,2419125\r\n"
+            "DII,33606,53480,45053,934643,60490,87184,0,0,126,0,570,0,226459,988693\r\n"
+            "FII,103982,143439,707223,496300,204945,363987,110940,164500,32254,27253,36943,24654,1439644,976776\r\n"
+            "Pro,23441,49030,160323,92011,190923,172776,242665,288120,50406,41022,96255,47951,638891,816032\r\n"
+            "TOTAL,416562,416562,1961233,1961233,937538,1339178,937538,1339178,345962,200153,345962,200153,5200626,5200626\r\n")
+    bare = (hdr + rows).encode()
+    titled = ('"Participant wise Open Interest (no. of contracts) in Equity Derivatives as on June 12, 2018",,,\r\n'
+              + hdr + rows).encode()
+    assert BD.raw_part_ok(bare, "poi") and BD.raw_part_ok(bare, "pvol") and BD.raw_part_ok(titled, "poi")
+    assert not BD.raw_part_ok(b"<html><body>Access denied</body></html>", "poi")
+    assert not BD.raw_part_ok(bare, "ban") and BD.raw_part_ok(b"Securities in Ban For Trade Date 06-August-2013,\n1,HDIL\n", "ban")
+    d = date(2018, 6, 13)
+    b = BD.Builder(_tmp())
+    net = FakeNet(lambda url: ("ok", bare) if "fao_participant_oi_13062018" in url else ("missing", b""))
+    assert b.fetch_raw_part(net.http(), d, "poi") == "ok"
+    saved = b.nse / "raw_part" / "oi" / "20180613.csv"
+    assert saved.read_bytes() == bare
+    from stratlab import oldera_fo as OF
+    problems: list = []
+    recs = OF._parse_participant(str(saved), "2018-06-13", problems)
+    assert len(recs) == 5 and not problems and {r["client_type"] for r in recs} >= {"FII", "DII"}
+
+
 # ══ availability, resumability, budgets, guards ══════════════════════════════════════════════════════════════════
 def test_availability_rule_unchanged():
     """The server files carry the trade date; nsedata's own `before` rule decides: a row dated D is not returned for
