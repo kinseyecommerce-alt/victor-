@@ -43,6 +43,9 @@ CA_FACTOR_TOL = 0.02
 BAD_GAP = 0.40
 
 
+DELIVERY_CHUNK = 500_000         # rows of the cash table read at a time (memory, not results)
+
+
 def _cache_root() -> str:
     return os.environ.get("BUILDER_CACHE_DIR") or "/tmp/builder_cache"
 
@@ -207,16 +210,47 @@ class ServerSource:
             F._CH.update({"list": [], "by": {}})
 
     def _delivery_frame(self):
+        """The cash table (date, symbol, OHLC, prev_close, volume, deliv_pct), one row per (symbol, date). Read in
+        chunks and without a Python string per row: at full scale (2012 ->, every listed stock: millions of rows) the
+        one-shot read with per-row string work took several GB, and the snapshot process died at its address-space
+        limit before any panel existed. Same rows and values as before."""
+        import sys
         import pandas as pd
-        df = pd.read_csv(os.path.join(self.nse, "delivery.csv.gz"), dtype={"symbol": str, "bars_symbol": str},
-                         usecols=["date", "symbol", "open", "high", "low", "close", "prev_close", "volume", "deliv_pct"])
-        df["date"] = df["date"].astype(str).str.replace("-", "").astype(np.int64)
-        if self.upto is not None:
-            df = df[df["date"] <= int(self.upto)]
-        for k in ("open", "high", "low", "close", "prev_close", "volume", "deliv_pct"):
-            df[k] = pd.to_numeric(df[k], errors="coerce")
-        df["symbol"] = df["symbol"].str.strip().str.upper()
-        return df.drop_duplicates(["symbol", "date"], keep="last")
+        cols = ["date", "symbol", "open", "high", "low", "close", "prev_close", "volume", "deliv_pct"]
+        parts, keys, ids = [], [], {}
+        for ch in pd.read_csv(os.path.join(self.nse, "delivery.csv.gz"), dtype={"symbol": str}, usecols=cols,
+                              chunksize=DELIVERY_CHUNK):
+            d = ch["date"]
+            if d.dtype.kind in "iu":
+                dates = d.to_numpy(np.int64)
+            else:                                        # "2012-01-02" style: convert each distinct value once
+                codes, uniq = pd.factorize(d.astype(str))
+                dates = np.array([int(str(u).replace("-", "")) for u in uniq], np.int64)[codes]
+            ch["date"] = dates
+            if self.upto is not None:
+                ch = ch[ch["date"] <= int(self.upto)].copy()
+            for k in cols[2:]:
+                ch[k] = pd.to_numeric(ch[k], errors="coerce")
+            # strip / upper the distinct names only; the column then points at those few shared (interned) strings
+            codes, uniq = pd.factorize(ch["symbol"])
+            names = np.array([sys.intern(str(u).strip().upper()) for u in uniq], dtype=object)
+            sym = np.empty(len(ch), dtype=object)
+            ok = codes >= 0
+            sym[ok] = names[codes[ok]]
+            sym[~ok] = np.nan
+            ch["symbol"] = sym
+            parts.append(ch)
+            # an integer key per (symbol, date) row, to find duplicate rows without hashing strings (-1: no symbol)
+            nid = np.array([ids.setdefault(n, len(ids)) for n in names], np.int64)
+            sid = np.where(ok, nid[np.where(ok, codes, 0)] if len(nid) else 0, -1)
+            keys.append(sid * 100_000_000 + ch["date"].to_numpy(np.int64))
+        if not parts:
+            return pd.DataFrame(columns=cols)
+        df = pd.concat(parts, ignore_index=True)
+        del parts
+        dup = pd.Series(np.concatenate(keys)).duplicated(keep="last").to_numpy()
+        del keys
+        return df[~dup] if dup.any() else df             # (symbol, date) unique, the last row kept, as before
 
     def daily_panel(self):
         import pandas as pd
@@ -232,20 +266,40 @@ class ServerSource:
         else:
             df = self._delivery_frame()
             cal = np.array(sorted(df["date"].unique()), np.int64)
-            tv = df.assign(tv=df["close"] * df["volume"]).pivot(index="symbol", columns="date", values="tv")
-            tv = tv.reindex(columns=cal)
+            # symbol x session matrices by direct indexing (one cell per (symbol, date) row: the frame is unique on
+            # that pair). The same numbers as DataFrame.pivot, without pivot's copies of a multi-million-row table
+            ok = df["symbol"].notna().to_numpy()
+            all_syms = sorted(set(df["symbol"].to_numpy()[ok]))
+            six = pd.Series(np.arange(len(all_syms)), index=all_syms)
+            si = six.reindex(df["symbol"].to_numpy()[ok]).to_numpy(np.int64)
+            ti = np.searchsorted(cal, df["date"].to_numpy(np.int64)[ok])
+
+            def grid(values, rows=None):
+                """values per table row -> (symbols x sessions); rows = new row of each symbol (-1: left out)."""
+                v = np.asarray(values, float)[ok]
+                if rows is None:
+                    out = np.full((len(all_syms), len(cal)), np.nan)
+                    out[si, ti] = v
+                    return out
+                r = rows[si]
+                take = r >= 0
+                out = np.full((int((rows >= 0).sum()), len(cal)), np.nan)
+                out[r[take], ti[take]] = v[take]
+                return out
+            tv = pd.DataFrame(grid(df["close"].to_numpy(float) * df["volume"].to_numpy(float)), index=all_syms,
+                              columns=cal)
             m = tv.T.rolling(TV_WINDOW, min_periods=TV_MIN).mean().shift(1).T     # previous 60 sessions only
             rk = m.rank(axis=0, ascending=False, method="first")
             mem = (rk <= TOP_N).to_numpy()
             keep = mem.any(axis=1)
-            syms = [s for s, k in zip(tv.index.tolist(), keep) if k]
+            syms = [s for s, k in zip(all_syms, keep) if k]
             member = mem[keep]
-            sub = df[df["symbol"].isin(set(syms))]
+            row_of = np.full(len(all_syms), -1, np.int64)
+            row_of[keep] = np.arange(int(keep.sum()))
             arr = {}
             for k, col in (("o", "open"), ("h", "high"), ("l", "low"), ("c", "close"), ("v", "volume"),
                            ("pc", "prev_close"), ("dp", "deliv_pct")):
-                arr[k] = sub.pivot(index="symbol", columns="date", values=col).reindex(index=syms,
-                                                                                      columns=cal).to_numpy(float)
+                arr[k] = grid(df[col].to_numpy(float), row_of)
             # backward adjustment for capital changes (NSE's adjusted prev_close)
             c_prev = np.full_like(arr["c"], np.nan)
             c_prev[:, 1:] = arr["c"][:, :-1]
@@ -265,6 +319,8 @@ class ServerSource:
                 gap = np.abs(arr["o"] / c_prev - 1.0)
             for i, t in zip(*np.nonzero(np.nan_to_num(gap, nan=0.0) > BAD_GAP)):
                 excl.setdefault(str(int(i)), []).append(int(cal[t]))
+            # free the cash table and its index arrays before the futures table is read
+            del df, tv, m, rk, mem, c_prev, f, cum, adj, gap, si, ti, ok, six, row_of
             fo, doi = self._fut_panels(syms, cal)
             arr["doi"] = doi
             os.makedirs(os.path.dirname(cpath), exist_ok=True)
@@ -291,6 +347,9 @@ class ServerSource:
                    "exp": self._expiries()}
 
     def _fut_parts(self):
+        """Every day's futures rows (day, exp, symbol, instrument, oi). Each small daily file is converted to numbers
+        on its own and its names are interned, so the full table never holds a Python string per cell."""
+        import sys
         import pandas as pd
         out = []
         for p in sorted(glob.glob(os.path.join(self.nse, "fo_parts", "fut", "*.csv.gz"))):
@@ -298,15 +357,17 @@ class ServerSource:
             if self.upto is not None and d > int(self.upto):
                 continue
             df = pd.read_csv(p, usecols=["date", "symbol", "expiry", "instrument", "oi"], dtype=str)
-            out.append(df)
+            out.append(pd.DataFrame({
+                "day": df["date"].str.replace("-", "").astype(np.int64).to_numpy(),
+                "exp": df["expiry"].str.replace("-", "").astype(np.int64).to_numpy(),
+                "oi": pd.to_numeric(df["oi"], errors="coerce").fillna(0.0).to_numpy(),
+                "symbol": np.array([sys.intern(x.strip().upper()) if isinstance(x, str) else x
+                                    for x in df["symbol"]], dtype=object),
+                "instrument": np.array([sys.intern(x) if isinstance(x, str) else x for x in df["instrument"]],
+                                       dtype=object)}))
         if not out:
             return None
-        df = pd.concat(out, ignore_index=True)
-        df["day"] = df["date"].str.replace("-", "").astype(np.int64)
-        df["exp"] = df["expiry"].str.replace("-", "").astype(np.int64)
-        df["oi"] = pd.to_numeric(df["oi"], errors="coerce").fillna(0.0)
-        df["symbol"] = df["symbol"].str.strip().str.upper()
-        return df
+        return pd.concat(out, ignore_index=True)
 
     def _fut_panels(self, syms, cal):
         S, T = len(syms), len(cal)

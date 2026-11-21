@@ -92,6 +92,7 @@ def json_safe(obj):
 
 
 POSITION_MARK_S = 30.0          # seconds between two quote calls for the marks of unsubscribed open positions
+POSITION_MARK_RETRY_S = 900.0    # after a FAILED marks call (expired Kite token at night / on a weekend): next try
 
 
 class TickEngine:
@@ -112,6 +113,7 @@ class TickEngine:
         # uses the quote the agent fetched at that instant (the tested fill model), never a mark up to 30 s old.
         self._marks: dict[str, float] = {}
         self._marks_at = 0.0
+        self._marks_failed = False     # the last marks call failed: retry every POSITION_MARK_RETRY_S, warn once
 
     # ── subscriptions ──
     def subscribe(self, watchlist: list[dict]) -> None:
@@ -231,7 +233,8 @@ class TickEngine:
     async def _refresh_position_marks(self, force: bool = False) -> int:
         """One Kite quote() call, at most every POSITION_MARK_S, for the open paper positions that have no
         subscription. Never raises; returns the number of marks stored."""
-        if not force and time.monotonic() - self._marks_at < POSITION_MARK_S:
+        wait = POSITION_MARK_RETRY_S if self._marks_failed else POSITION_MARK_S
+        if not force and time.monotonic() - self._marks_at < wait:
             return 0
         self._marks_at = time.monotonic()
         try:
@@ -260,11 +263,15 @@ class TickEngine:
                 if px > 0:
                     self._marks[p["tradingsymbol"]] = px
                     n += 1
+            if self._marks_failed:
+                self._marks_failed = False
+                logger.info("[tick] position marks are back ({} marks)", n)
             return n
         except Exception as exc:
-            if time.monotonic() - self._last_quote_warn > 60:
-                self._last_quote_warn = time.monotonic()
-                logger.warning("[tick] position marks failed: {}", exc)
+            if not self._marks_failed:                 # one line per outage, then a retry every 15 minutes
+                self._marks_failed = True
+                logger.warning("[tick] position marks failed (next try in {:.0f} min): {}",
+                               POSITION_MARK_RETRY_S / 60.0, exc)
             return 0
 
     def mark(self, symbol: str) -> float:

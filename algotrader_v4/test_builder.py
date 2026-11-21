@@ -2089,6 +2089,113 @@ def test_new_v3_batches_wait_for_the_nse_archive_backfill():
         assert bd.state_path.read_bytes() == raw
 
 
+def test_server_cash_and_futures_readers_match_the_one_shot_reference_at_any_chunk_size():
+    """The memory-light readers (chunked cash table, per-file futures rows) return exactly what the one-shot readers
+    returned - on dashed dates, padded lower-case names, duplicate rows and a junk number - and the daily panel does
+    not depend on where the chunks are cut (the snapshot process died at its address-space limit on the one-shot
+    read at full scale)."""
+    import glob
+    import pandas as pd
+    root = os.path.join(_TMP, "readers")
+    SP.make_synthetic_tree(root, start=20250102, end=20261109, n_stocks=5, seed=9)
+    p = os.path.join(root, "nse", "delivery.csv.gz")
+    df = pd.read_csv(p, dtype=str)
+    df.loc[df.index[::7], "date"] = df.loc[df.index[::7], "date"].map(lambda x: f"{x[:4]}-{x[4:6]}-{x[6:]}")
+    df.loc[df.index[::5], "symbol"] = df.loc[df.index[::5], "symbol"].map(lambda x: " " + x.lower() + " ")
+    df = pd.concat([df, df.iloc[[3, 3, 10, len(df) - 1]]], ignore_index=True)   # duplicates, one far from its twin
+    df.loc[20, "volume"] = "n/a"
+    df.to_csv(p, index=False, compression="gzip")
+
+    def reference():                                   # the reader before the rewrite, verbatim
+        d = pd.read_csv(p, dtype={"symbol": str, "bars_symbol": str},
+                        usecols=["date", "symbol", "open", "high", "low", "close", "prev_close", "volume", "deliv_pct"])
+        d["date"] = d["date"].astype(str).str.replace("-", "").astype(np.int64)
+        for k in ("open", "high", "low", "close", "prev_close", "volume", "deliv_pct"):
+            d[k] = pd.to_numeric(d[k], errors="coerce")
+        d["symbol"] = d["symbol"].str.strip().str.upper()
+        return d.drop_duplicates(["symbol", "date"], keep="last")
+
+    def norm(d):
+        return d.sort_values(["symbol", "date"]).reset_index(drop=True)
+
+    def panel(chunk, tag):
+        old_chunk, old_cache = SP.DELIVERY_CHUNK, os.environ["BUILDER_CACHE_DIR"]
+        SP.DELIVERY_CHUNK = chunk
+        os.environ["BUILDER_CACHE_DIR"] = os.path.join(_TMP, "cache_readers_" + tag)
+        try:
+            src = SP.ServerSource(root)
+            return norm(src._delivery_frame()), src.daily_panel(), src._fut_parts()
+        finally:
+            SP.DELIVERY_CHUNK, os.environ["BUILDER_CACHE_DIR"] = old_chunk, old_cache
+    ref = norm(reference())
+    assert len(ref) == len(df) - 4 and ref["volume"].isna().sum() == 1
+    frames = {}
+    for chunk, tag in ((SP.DELIVERY_CHUNK, "big"), (7, "seven"), (1, "one")):
+        a, (P, extra), fut = panel(chunk, tag)
+        pd.testing.assert_frame_equal(ref, a[list(ref.columns)], check_dtype=False)
+        frames[tag] = (P, extra, fut)
+    P0, e0, f0 = frames["big"]
+    assert len(P0.syms) == 5 and P0.c.shape[1] == len(set(ref["date"]))
+    for tag in ("seven", "one"):
+        P1, e1, _f = frames[tag]
+        assert list(P0.syms) == list(P1.syms) and np.array_equal(P0.cal, P1.cal)
+        for k in ("o", "h", "l", "c", "v", "member", "fo"):
+            x, y = np.asarray(getattr(P0, k)), np.asarray(getattr(P1, k))
+            assert x.shape == y.shape and np.array_equal(x, y, equal_nan=(x.dtype.kind == "f")), (tag, k)
+        for k in ("dp", "doi"):
+            assert np.array_equal(e0[k], e1[k], equal_nan=True), (tag, k)
+    # official closes land in the right cell (unadjusted data: no corporate action in the synthetic tree)
+    row = ref[(ref["symbol"] == P0.syms[2]) & (ref["date"] == int(P0.cal[40]))].iloc[0]
+    assert abs(float(P0.c[2, 40]) - float(row["close"])) < 1e-9 and abs(float(P0.v[2, 40]) - float(row["volume"])) < 1e-6
+    # futures rows: the per-file numeric reader == the one-shot string reader
+    parts = [pd.read_csv(q, usecols=["date", "symbol", "expiry", "instrument", "oi"], dtype=str)
+             for q in sorted(glob.glob(os.path.join(root, "nse", "fo_parts", "fut", "*.csv.gz")))]
+    r = pd.concat(parts, ignore_index=True)
+    assert len(r) == len(f0) and len(f0) > 1000
+    assert np.array_equal(r["date"].str.replace("-", "").astype(np.int64).to_numpy(), f0["day"].to_numpy())
+    assert np.array_equal(r["expiry"].str.replace("-", "").astype(np.int64).to_numpy(), f0["exp"].to_numpy())
+    assert np.array_equal(pd.to_numeric(r["oi"], errors="coerce").fillna(0.0).to_numpy(), f0["oi"].to_numpy())
+    assert list(r["symbol"].str.strip().str.upper()) == list(f0["symbol"]) and list(r["instrument"]) == list(f0["instrument"])
+
+
+def test_snapshot_process_gets_its_own_memory_limit_and_single_threaded_libraries():
+    """The snapshot process takes BUILDER_SNAPSHOT_MEM_MB (not the 4,096 MB default it died at) and both child
+    processes run one thread per numeric library with two malloc arenas (RLIMIT_AS counts their reservations)."""
+    import subprocess
+    assert settings.builder_snapshot_mem_mb == 6144 and B.snapshot_mem_mb() == 6144
+    for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        assert B.PROCESS_ENV[k] == "1"
+    assert B.PROCESS_ENV["MALLOC_ARENA_MAX"] == "2"
+    seen = {}
+
+    class P:
+        returncode, stderr = 1, "x" * 3000 + "MemoryError: the end"
+
+    def fake_run(cmd, **kw):
+        seen["cmd"], seen["env"] = cmd, kw["env"]
+        return P()
+    real, old = subprocess.run, settings.builder_snapshot_mem_mb
+    subprocess.run = fake_run
+    try:
+        settings.builder_snapshot_mem_mb = 5000
+        root = Path(_TMP) / "snaproot"
+        root.mkdir(exist_ok=True)
+        try:
+            B.snapshot_process(root, "server")
+            raise AssertionError("a failed snapshot process must raise")
+        except B.RunFailed as exc:
+            assert "MemoryError: the end" in str(exc) and len(str(exc)) > 1000     # enough of the traceback is kept
+        assert seen["cmd"][seen["cmd"].index("--mem-mb") + 1] == "5000"
+        assert all(seen["env"][k] == v for k, v in B.PROCESS_ENV.items())
+        try:
+            B.snapshot_process(root, "server", mem_mb=3000)
+        except B.RunFailed:
+            pass
+        assert seen["cmd"][seen["cmd"].index("--mem-mb") + 1] == "3000"
+    finally:
+        subprocess.run, settings.builder_snapshot_mem_mb = real, old
+
+
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]
 
 

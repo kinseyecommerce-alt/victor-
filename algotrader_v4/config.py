@@ -125,6 +125,7 @@ class Settings(BaseSettings):
     builder_jobs: int = 2                      # evaluation worker processes (capped at 2)
     builder_time_limit_s: int = 7200           # wall-clock limit of one batch evaluation (resumable)
     builder_mem_mb: int = 4096                 # address-space limit per evaluation process
+    builder_snapshot_mem_mb: int = 6144        # address-space limit of the snapshot process (full daily panel)
     builder_night_batches: int = 12            # builder/v3: batches the 02:30 IST job may run in one night (one after
     #                                            the other; none is started after 05:15 IST or inside market hours)
 
