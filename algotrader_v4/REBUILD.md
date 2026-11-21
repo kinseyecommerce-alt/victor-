@@ -201,7 +201,8 @@ live in the API) → ≤ ~0.9 GB for ~137 added names with full history; cap 2,6
 
 Flag `BUILDER_ENABLED` (default false: no job). Every night 02:30 IST (builder/v3; Saturday 06:00 before): freeze 400 candidates (registry
 `<volume>/builder/registry.jsonl`), evaluate them in `python -m builder_run` (nice 10, `BUILDER_JOBS` <= 2,
-`BUILDER_MEM_MB` 4096 address space per process, `BUILDER_TIME_LIMIT_S` 7200, resumable), ingest; proven strategies go
+`BUILDER_MEM_MB` 4096 address space per evaluation process, `BUILDER_SNAPSHOT_MEM_MB` 6144 for the snapshot
+process that builds the full daily panel (one thread per numeric library, two malloc arenas), `BUILDER_TIME_LIMIT_S` 7200, resumable), ingest; proven strategies go
 to the forward lab's separate family builder/v1 (processed at the end of `forward_lab.daily_job`). Reads the data layer
 of section 6 through `stratlab/builder_server_panels.ServerSource` (`BUILDER_DATA_DIR`); its derived panels and the
 compact option tables are cached on ephemeral disk (`BUILDER_CACHE_DIR`, default `/tmp/builder_cache`), never on the

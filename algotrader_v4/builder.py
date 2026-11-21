@@ -812,6 +812,13 @@ class RunFailed(RuntimeError):
     pass
 
 
+# One thread per numeric library and two malloc arenas in the builder's child processes: the address-space limit
+# (RLIMIT_AS) counts every thread's stack and every arena's reservation, which on an 8-core box is hundreds of MB
+# that hold no data.
+PROCESS_ENV = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+               "NUMEXPR_NUM_THREADS": "1", "MALLOC_ARENA_MAX": "2"}
+
+
 def run_process(root: Path, bid: str, source: str = "server", jobs: int = 1, time_limit_s: int = 14400,
                 mem_mb: int = 3584, data_root: Optional[str] = None) -> dict:
     """python -m builder_run in its own process group (never inside the API process). Raises RunFailed on a timeout,
@@ -825,8 +832,7 @@ def run_process(root: Path, bid: str, source: str = "server", jobs: int = 1, tim
            "--jobs", str(max(1, min(2, int(jobs)))), "--mem-mb", str(int(mem_mb))]
     if data_root:
         cmd += ["--data-root", str(data_root)]
-    env = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1",
-               BUILDER_CACHE_DIR=str(cache_dir()))
+    env = dict(os.environ, BUILDER_CACHE_DIR=str(cache_dir()), **PROCESS_ENV)
     t0 = time.time()
     with open(work / "run.log", "a") as logf:
         p = subprocess.Popen(cmd, cwd=str(HERE), env=env, stdout=logf, stderr=subprocess.STDOUT, text=True,
@@ -1186,8 +1192,14 @@ def data_snapshot(source: str = "server", data_root: Optional[str] = None) -> di
     return make_source(source, data_root).snapshot()
 
 
+def snapshot_mem_mb() -> int:
+    """Address-space limit of the snapshot process (BUILDER_SNAPSHOT_MEM_MB): it builds the full daily panel from
+    the whole cash table, so it gets more room than one evaluation process."""
+    return int(getattr(_settings(), "builder_snapshot_mem_mb", 6144))
+
+
 def snapshot_process(root: Path, source: str = "server", data_root: Optional[str] = None, time_limit_s: int = 3600,
-                     mem_mb: int = 4096, bundle: bool = True) -> tuple:
+                     mem_mb: Optional[int] = None, bundle: bool = True) -> tuple:
     """data_snapshot in a separate process (python -m builder_run --snapshot): the API process never builds panels.
     With bundle=True the process also writes the batch's IMMUTABLE inputs (stratlab/builder_bundle.py) under
     <root>/inputs/ (server sources; dropped again when the builder directory would pass BUILDER_MAX_MB).
@@ -1196,13 +1208,14 @@ def snapshot_process(root: Path, source: str = "server", data_root: Optional[str
     if out.exists():
         out.unlink()
     cmd = [sys.executable, "-m", "builder_run", "--snapshot", "--root", str(root), "--source", source,
-           "--mem-mb", str(int(mem_mb))] + (["--data-root", str(data_root)] if data_root else []) + \
+           "--mem-mb", str(int(mem_mb if mem_mb is not None else snapshot_mem_mb()))] + \
+        (["--data-root", str(data_root)] if data_root else []) + \
         (["--bundle"] if bundle else [])
-    env = dict(os.environ, BUILDER_CACHE_DIR=str(cache_dir()))
+    env = dict(os.environ, BUILDER_CACHE_DIR=str(cache_dir()), **PROCESS_ENV)
     p = subprocess.run(cmd, cwd=str(HERE), env=env, capture_output=True, text=True, timeout=int(time_limit_s),
                        start_new_session=True)
     if p.returncode != 0 or not out.exists():
-        raise RunFailed(f"snapshot process exit {p.returncode}: {(p.stderr or '')[-400:]}")
+        raise RunFailed(f"snapshot process exit {p.returncode}: {(p.stderr or '')[-1200:]}")
     doc = json.loads(out.read_text())
     inputs = doc.get("inputs")
     if inputs:
