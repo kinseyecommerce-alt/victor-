@@ -566,14 +566,34 @@ def test_open_positions_outside_the_watchlist_get_marks_but_never_ticks():
         # a failing quote never raises and keeps the last marks
         def boom(_ins):
             raise RuntimeError("kite down")
+        tries = []
+
+        def boom_counted(_ins):
+            tries.append(1)
+            raise RuntimeError("kite down")
         with patch.object(KC, "quote_kite", boom), patch.object(KC, "has_session", lambda: True):
             assert asyncio.run(TE._refresh_position_marks(force=True)) == 0
         assert TE.mark("MARSONS") == 171.5
+        # after a failed call (an expired token at night) the next try waits 15 minutes instead of 30 seconds
+        import time
+        import tick_engine as TEM
+        assert TE._marks_failed and TEM.POSITION_MARK_RETRY_S == 900.0
+        with patch.object(KC, "quote_kite", boom_counted), patch.object(KC, "has_session", lambda: True):
+            TE._marks_at = time.monotonic() - 60.0                       # 60 s later: still inside the retry wait
+            assert asyncio.run(TE._refresh_position_marks()) == 0 and not tries
+            TE._marks_at = time.monotonic() - 901.0                      # 15 minutes later: one more try
+            assert asyncio.run(TE._refresh_position_marks()) == 0 and len(tries) == 1 and TE._marks_failed
+        with patch.object(KC, "quote_kite", fake_quote), patch.object(KC, "has_session", lambda: True):
+            TE._marks_at = time.monotonic() - 901.0
+            assert asyncio.run(TE._refresh_position_marks()) == 2 and not TE._marks_failed   # back to every 30 s
+            TE._marks_at = time.monotonic() - 31.0
+            assert asyncio.run(TE._refresh_position_marks()) == 2
     finally:
         KC._paper_positions[:] = saved[0]
         TE._marks.clear()
         TE._marks.update(saved[1])
         TE._marks_at = saved[2]
+        TE._marks_failed = False
 
 
 def test_drawdown_brake_escalates_latches_and_resets():
