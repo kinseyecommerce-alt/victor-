@@ -1112,6 +1112,14 @@ def nightly_job(now: Optional[datetime] = None, root=None, source: str = "server
         b = Builder(root)
         if (root / "registry.jsonl").exists():
             night["undrawn"] = grammar_progress(b)
+            st_ = b.state()
+            res = st_["results"]
+            # what the night found, in one place (the scheduler logs it): per batch the gate counts, and N after
+            night["results"] = {bid: {k: res[bid].get(k) for k in ("discovery_passers", "validation_passers",
+                                                                     "final_confirmed", "proven", "n_used")}
+                                for bid in night["batches"] if bid in res}
+            night["proven"] = [c for bid in night["batches"] if bid in res for c in (res[bid].get("proven") or [])]
+            night["n_used"] = max(st_["n_used"], b.n_base(st_))           # N as GET /api/v2/builder reports it
     except Exception as exc:
         night["undrawn_error"] = f"{type(exc).__name__}: {exc}"[:200]
     out = {**last, "night": night}

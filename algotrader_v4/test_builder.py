@@ -1918,6 +1918,8 @@ def test_nightly_job_runs_batches_up_to_the_budget():
         night = out["night"]
         assert out["status"] == "complete" and night["batches"] == [FIRST, SECOND, THIRD] == calls, out
         assert night["batches_run"] == 3 and night["stopped"].startswith("night budget (3")
+        assert sorted(night["results"]) == [FIRST, SECOND, THIRD] and isinstance(night["proven"], list)
+        assert night["n_used"] >= V3_N and all("discovery_passers" in r for r in night["results"].values())
         st = B.Builder(root).state()
         # each batch was frozen after the one before was ingested: N grows batch by batch, no key twice
         assert [st["batches"][b_]["n_before"] for b_ in (FIRST, SECOND, THIRD)] == [V3_N, V3_N + 400, V3_N + 800]
