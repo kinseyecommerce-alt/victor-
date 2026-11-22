@@ -39,7 +39,7 @@ from loguru import logger
 
 import stratlab.auction as A
 import validated_data
-from agents.validated_base import PlannedTrade, ValidatedAgent, paper_marketable, paper_row, serialized
+from agents.validated_base import PlannedTrade, ValidatedAgent, paper_fill_at, paper_marketable, paper_row, serialized
 from config import settings
 from ist_clock import is_trading_day, now_ist  # noqa: F401  (now_ist: module-level clock the tests patch)
 
@@ -254,11 +254,10 @@ class AuctionFadeAgent(ValidatedAgent):
                 if not ok:
                     self._note("entry", p.symbol, "skip", f"sebi: {why}")
                     continue
-                oid = kite_client.paper_fill_at(p.symbol, "NSE", side, p.qty, "MIS", p.entry_ref,
-                                                tag=ENTRY_TAG, fill_kind="AUCTION")
+                oid, fill = paper_fill_at(p.symbol, "NSE", side, p.qty, "MIS", p.entry_ref, ENTRY_TAG, "AUCTION")
                 sebi_compliance.record_order_id(self.name, p.symbol, oid)
                 gap = p.entry_ref / next(x.prev_close for x in inputs if x.symbol == p.symbol) - 1
-                self._open(p, "MIS", "NSE", p.entry_ref, oid, meta={"gap": round(gap, 6), "rank": n + 1})
+                self._open(p, "MIS", "NSE", fill, oid, meta={"gap": round(gap, 6), "rank": n + 1})
                 self._note("entry", p.symbol, "entered", f"{side} x{p.qty} @ {p.entry_ref} gap {gap * 100:+.2f}%")
                 n += 1
             except Exception as exc:

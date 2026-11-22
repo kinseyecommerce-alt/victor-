@@ -199,10 +199,45 @@ class SEBICompliance:
         logger.info("SEBICompliance module initialised — 10 regulations active")
 
     # ── Reg 2: Kill switch ─────────────────────────────────────────────────────
+    @staticmethod
+    def _kill_file():
+        import os
+        from pathlib import Path
+        return Path(os.getenv("KILL_SWITCH_FILE")
+                    or Path(os.getenv("PERFORMANCE_FILE") or Path(__file__).resolve().parent / "data" /
+                            "performance.json").with_name("kill_switch.json"))
+
+    def load_persisted_kill(self) -> bool:
+        """A kill switch triggered before a restart stays triggered (until reset_kill_switch). True when restored."""
+        import json
+        try:
+            f = self._kill_file()
+            if f.exists():
+                d = json.loads(f.read_text())
+                with self._lock:
+                    self._state, self._kill_reason = KillSwitchState.KILLED, str(d.get("reason") or "restored")
+                logger.critical("SEBI KILL SWITCH still triggered after restart: {} (since {})",
+                                self._kill_reason, d.get("at"))
+                return True
+        except Exception as exc:
+            logger.error("SEBI: kill-switch file unreadable ({}) — treating as KILLED", exc)
+            with self._lock:
+                self._state, self._kill_reason = KillSwitchState.KILLED, "kill-switch file unreadable"
+            return True
+        return False
+
     def trigger_kill_switch(self, reason: str = "Emergency halt") -> None:
+        import json
+        from datetime import datetime
         with self._lock:
             self._state       = KillSwitchState.KILLED
             self._kill_reason = reason
+        try:
+            f = self._kill_file()
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps({"reason": reason, "at": datetime.now().isoformat(timespec="seconds")}))
+        except Exception as exc:
+            logger.error("SEBI: kill switch not persisted: {}", exc)
         logger.critical("SEBI KILL SWITCH TRIGGERED: {}", reason)
 
     def pause_trading(self, reason: str = "Manual pause") -> None:
@@ -233,6 +268,10 @@ class SEBICompliance:
         with self._lock:
             self._state       = KillSwitchState.ACTIVE
             self._kill_reason = ""
+        try:
+            self._kill_file().unlink(missing_ok=True)
+        except Exception as exc:
+            logger.error("SEBI: kill-switch file not removed: {}", exc)
         logger.warning("SEBI: Kill switch reset — trading ACTIVE")
         return True, "ACTIVE"
 
@@ -431,3 +470,4 @@ class SEBICompliance:
 
 
 sebi_compliance = SEBICompliance()
+sebi_compliance.load_persisted_kill()

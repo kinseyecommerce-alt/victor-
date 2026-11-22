@@ -3920,7 +3920,7 @@ def t_va_lab_constants_and_fingerprint():
     assert _VA.LAB_FINGERPRINT == "7aeeaffc15b1aacb", _VA.LAB_FINGERPRINT
     a = _VA.AttentionOvernightAgent()
     assert a.VERSION == "SWING-ATTN-ON-3X/attn1/v1" and a.LAB_ID == "SWING-ATTN-ON-3X"
-    assert a.product == "CNC" and a.COST_KIND == "future" and a.scheduled and not a.strategy_rule_exits
+    assert a.product == "CNC" and a.COST_KIND == "equity_cnc" and a.scheduled and not a.strategy_rule_exits
     assert _VA.T.attention_rule is _T_va.attention_rule, "the rule is imported from the lab, not copied"
 
 
@@ -4004,7 +4004,7 @@ def t_va_summarize_sessions():
 def t_va_live_path_end_to_end():
     """Acceptance: a signal reaches the paper broker at the tested size and product (CNC carrier), survives the
     15:15 square-off, a same-day restart and an overnight (stale-snapshot) restart, exits at the next session's
-    09:15 auction print, and is booked once in the ledger at the lab's futures costs (CNC cost alongside)."""
+    09:15 auction print, and is booked once in the ledger at CNC delivery costs (the lab's futures cost alongside)."""
     import platform_scheduler as _mav_va
     q = _va_signal_quotes(12)
     with _va_env(_va_at(_DA, 15, 21, 0), q) as (a, clk, p):
@@ -4058,7 +4058,8 @@ def t_va_live_path_end_to_end():
         for t in rows:
             e, x, n = q[t["symbol"]]["ask"], q2[t["symbol"]]["open"], t["qty"]
             assert t["exit"] == round(x, 2) and t["gross"] == round((x - e) * n, 2)
-            assert t["cost"] == _rtc_va(e * n, x * n, "future"), "booked at the lab's futures costs"
+            assert t["cost"] == _rtc_va(e * n, x * n, "equity_cnc"), "booked at CNC delivery costs (what is held)"
+            assert t["cost_lab_future"] == _rtc_va(e * n, x * n, "future"), "the lab's futures cost alongside"
             assert t["cost_cnc"] == _rtc_va(e * n, x * n, "equity_cnc") and t["version"] == a.VERSION
         # nothing books twice: a second exit run, and a restart from the pre-exit snapshot
         assert asyncio.run(a.exit_at_open(q2)) == []
@@ -4421,7 +4422,7 @@ def t_va_lab_parity():
     assert n_div <= 3, explained
 
 
-run("attention: lab constants imported, LAB_FINGERPRINT pinned, CNC carrier at futures costs", t_va_lab_constants_and_fingerprint)
+run("attention: lab constants imported, LAB_FINGERPRINT pinned, CNC carrier at CNC costs", t_va_lab_constants_and_fingerprint)
 run("attention: ratio exactly 3.0 / close == prev close not traded; qty floor(1e5/px) ≥ 1; < 20 sessions", t_va_rule_boundaries)
 run("attention: top 10 by volume ratio, ties by symbol", t_va_top10_ties_by_symbol)
 run("attention: special-session (t, t+1, in between) and corporate-action exclusions", t_va_exclusions)

@@ -69,7 +69,7 @@ A strategy card (plus `day_log`, the day's decision log, only on this endpoint).
 ```json
 {
  "name": "auc_fade", "label": "Opening-auction fade", "lab_id": "AUC-FADE-2PCT",
- "version": "AUC-FADE-2PCT/auction1/v1", "status": "proven", "proven": true,
+ "version": "AUC-FADE-2PCT/auction1/v1", "status": "candidate", "proven": false, "why_not_proven": "signal and entry use the final 09:15 auction price …",
  "enabled": {"setting": true, "toggle": true}, "running": true, "entry_block": null,
  "trading_state": {"own": "ACTIVE", "effective": "ACTIVE"},
  "allocator_scale": 1.0,

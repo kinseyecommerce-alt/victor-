@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     # ₹10 L of capital: auction fade 5.0 (₹5 L per MIS trade, ≤ 10 trades × 20 % intraday margin = ₹10 L), PEAD 0.1
     # (₹10,000 per position; the lab's peak of 88 open positions = ₹8.8 L), attention 1.0 (10 × ₹1 L delivery).
     # Loss stops, drawdown kills and gross caps scale with it; decisions never change.
+    # PAPER fills are made this much WORSE than the ideal price (BUY higher, SELL lower), the lab's 5 bps cost
+    # stress: every trading fill (marketable orders, auction entries, closes, stops); official settlements,
+    # reconciliations and corporate actions are booked at their exact price. Default 0 = the old ideal fills (an
+    # overlay defaults to "no change"); production sets PAPER_SLIPPAGE_BPS=5.
+    paper_slippage_bps: float = 0.0
+    # alerts.py: ERROR log lines and a morning / evening all-clear to Telegram (needs TELEGRAM_BOT_TOKEN / _CHAT_ID)
+    alerts_enabled: bool = False
     validated_auction_notional_scale: float = 1.0
     validated_attention_notional_scale: float = 1.0
     validated_pead_notional_scale: float = 1.0

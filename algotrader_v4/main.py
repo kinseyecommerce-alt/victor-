@@ -69,7 +69,7 @@ app.add_middleware(
 
 
 # ── API key / JWT gate (all mutating routes + sensitive GETs) ─────────────────
-_EXEMPT_PATHS = frozenset({"/health", "/openapi.json", "/auth/login-url", "/config/validate", "/v2/health"})
+_EXEMPT_PATHS = frozenset({"/health", "/health/strict", "/openapi.json", "/auth/login-url", "/config/validate", "/v2/health"})
 _EXEMPT_PREFIXES = ("/swagger-static",)
 _SENSITIVE_GETS = frozenset({"/portfolio/positions", "/portfolio/orders", "/sebi/audit-log",
                              "/settings/credentials/status", "/docs", "/redoc"})
@@ -339,13 +339,25 @@ def connection_status():
 
 @app.get("/health", tags=["System"])
 def health():
+    import alerts
     from platform_scheduler import platform_scheduler
-    return {"status": "ok", "version": VERSION, "mode": settings.trading_mode,
+    h = alerts.health_summary()
+    return {"status": "ok" if h["healthy"] else "degraded", "failing": h["failing"], "checks": h["checks"],
+            "version": VERSION, "mode": settings.trading_mode,
             "market_data_source": tick_engine.data_source(), "market_open": is_market_open(),
             "bot": "running" if platform_scheduler.bot_running() else "stopped",
             "agents": {n: a.state.running for n, a in ALL_AGENTS.items()},
             "agent_enabled": dict(bot_state._agent_enabled),
             "time": now_ist().strftime("%H:%M:%S IST")}
+
+
+@app.get("/health/strict", tags=["System"])
+def health_strict():
+    """For an outside uptime monitor: HTTP 503 when a health check fails (scheduler, Kite session from 08:58 on a
+    trading day, price feed in market hours), else 200."""
+    import alerts
+    h = alerts.health_summary()
+    return JSONResponse({"healthy": h["healthy"], "failing": h["failing"]}, status_code=200 if h["healthy"] else 503)
 
 
 @app.get("/config/validate", tags=["System"])
@@ -712,6 +724,12 @@ async def backtest_history_bars(symbol: str, start: str, end: str, interval: str
 @app.on_event("startup")
 async def on_startup():
     import paper_book
+    try:
+        import alerts
+        if alerts.install():
+            logger.info("[alerts] error alerts on (Telegram {})", "ready" if alerts.telegram_ready() else "NOT configured")
+    except Exception as exc:
+        logger.warning("[alerts] not installed: {}", exc)
     tick_engine.start_loop()
     paper_book.restore()                    # PAPER: the book from before a restart (never in LIVE; never raises)
     from platform_scheduler import platform_scheduler
