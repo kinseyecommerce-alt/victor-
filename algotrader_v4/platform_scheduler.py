@@ -472,6 +472,15 @@ class PlatformScheduler:
                         night.get("batches_run"), night.get("batches"), night.get("stopped") or res.get("skipped"),
                         f" ({res.get('reason') or res.get('error')})" if res.get("reason") or res.get("error") else "",
                         (night.get("undrawn") or {}).get("undrawn"), (night.get("undrawn") or {}).get("total"))
+            if night.get("results"):
+                def _n(v):
+                    return len(v) if isinstance(v, (list, tuple, dict)) else int(v or 0)
+                rs = night["results"].values()
+                logger.info("[builder] night results: discovery passers {}, validation passers {}, FINAL confirmed {},"
+                            " proven {} {} — N {}", sum(_n(r.get("discovery_passers")) for r in rs),
+                            sum(_n(r.get("validation_passers")) for r in rs),
+                            sum(_n(r.get("final_confirmed")) for r in rs), len(night.get("proven") or []),
+                            night.get("proven") or [], night.get("n_used"))
         except Exception as exc:
             logger.error("[platform] builder nightly job failed: {}", exc)
 
