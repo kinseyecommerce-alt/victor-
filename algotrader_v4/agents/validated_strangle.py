@@ -188,6 +188,7 @@ class WingedStrangleAgent(ValidatedAgent):
     product = "NRML"
     SETTING = "strangle"                    # settings.validated_strangle_enabled
     COST_KIND = None                        # ledger trade_cost: NFO option round trip per leg (as the lab)
+    POWERED_MIN_TRADES = 26                 # the powered gate counts CYCLES (one structure = one bet), not legs
     LAB_ID = LAB_ID
     VERSION = f"{LAB_ID}/{V.OPT_FILL_MODEL}/v1"
     LAB_FINGERPRINT = LAB_FINGERPRINT
@@ -437,6 +438,21 @@ class WingedStrangleAgent(ValidatedAgent):
                 out.append(g)
         return out
 
+    @staticmethod
+    def settle_regime(expiry: date) -> dict:
+        """The EXCHANGE's final-settlement rule in force on an expiry day, recorded next to our settlement (which is
+        always the lab's: the mean of the 15:00-15:29 NIFTY minute closes). Sources (22 Nov 2026): SEBI circular of
+        15 Oct 2026 "Review of certain aspects of the Closing Auction Session, market timings and settlement
+        methodology for derivatives contracts" (header read; body and NSE's 6 Nov 2026 circulars not read) and two
+        broker summaries. Before 3 Aug 2026 the index's own 30-minute close; 3 Aug - 6 Dec 2026 the index close from
+        the constituents' closing-auction prices; from 7 Dec 2026 the index value from the constituents' VWAP over
+        15:00-15:30. Our model is closest to the first and the last; evidence from the middle window is tagged."""
+        if expiry < date(2026, 8, 3):
+            return {"regime": "index_30min_close", "model_matches": True}
+        if expiry < date(2026, 12, 7):
+            return {"regime": "cas_index_close_2026-08-03_to_2026-12-06", "model_matches": False}
+        return {"regime": "constituent_vwap_15:00-15:30_from_2026-12-07", "model_matches": True}
+
     @serialized
     async def settle_due(self, now: Optional[datetime] = None) -> list[str]:
         """Settle every structure whose expiry close is known (15:31 on the expiry day or later): each leg is closed
@@ -483,8 +499,13 @@ class WingedStrangleAgent(ValidatedAgent):
                                           "SETTLEMENT")
                 self._close(pos, round(px, 2), f"expiry settle S={S:.2f}")
             st = self.structures.setdefault(gid, {})
+            reg = self.settle_regime(exp)
             st.update({"status": "settled", "settle_S": round(S, 2), "settled_at": now.isoformat(timespec="seconds"),
-                       "n_settle_closes": len(closes)})
+                       "n_settle_closes": len(closes), "exchange_settle_regime": reg["regime"],
+                       "model_matches_exchange_rule": reg["model_matches"]})
+            if not reg["model_matches"]:
+                self._deviation("settle_rule_differs", gid, f"expiry {exp}: exchange rule {reg['regime']}; booked at "
+                                                            f"the lab's 15:00-15:29 mean S={S:.2f}")
             if self.flags.get("settlement_pending", "").startswith(gid):
                 self.flags.pop("settlement_pending", None)
             self._save_book(force=True)
@@ -554,6 +575,16 @@ class WingedStrangleAgent(ValidatedAgent):
                 "worst": round(min(nets), 2),
                 "beyond_max_risk": sum(1 for c in cyc if c.get("max_risk") is not None
                                        and c["net"] < -float(c["max_risk"]) - 1e-6)}
+
+    def powered_gate(self, rows=None, net_key: str = "net") -> dict:
+        """The base gate on one row per CYCLE (legs of one structure summed): the legs are not independent bets."""
+        rows = self.ledger_rows() if rows is None else rows
+        cyc: dict = {}
+        for r in rows:
+            c = cyc.setdefault(r.get("group") or r.get("oid"), {"net": 0.0, "gross": 0.0, "cost": 0.0})
+            for k in c:
+                c[k] += float(r.get(k, 0) or 0)
+        return super().powered_gate(list(cyc.values()), net_key)
 
     def live_readiness(self) -> dict:
         st = self.live_stats()

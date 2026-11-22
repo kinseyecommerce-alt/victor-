@@ -352,10 +352,10 @@ def test_trading_state_blocks_entries_but_never_exits():
         assert not kite_client._paper_orders, "nothing reached the paper broker"
         TS.set_strategy("attn_on", "ACTIVE", "test")
         oid, fill = paper_marketable("NHPC", "NSE", "BUY", 10, "CNC", q, "VAL-ATTN-IN")
-        assert fill == 100.1, "paper fill semantics unchanged: the quote's ask"
+        assert fill == round(100.1 * (1 + settings.paper_slippage_bps / 1e4), 2), "the quote's ask + stress slippage"
         TS.set_global("HALTED", "test")
         oid2, px = paper_fill_at("NHPC", "NSE", "SELL", 10, "CNC", 101.0, "VAL-ATTN-OUT", "AUCTION")
-        assert px == 101.0, "the exit (a risk exit) still runs under HALTED"
+        assert px == round(101.0 * (1 - settings.paper_slippage_bps / 1e4), 2), "the exit still runs under HALTED"
         assert next(r for r in kite_client._paper_positions if r["tradingsymbol"] == "NHPC")["quantity"] == 0
         try:
             paper_fill_at("ABB", "NSE", "SELL", 5, "MIS", 100.0, "VAL-AUC-IN", "AUCTION")
@@ -364,6 +364,205 @@ def test_trading_state_blocks_entries_but_never_exits():
             pass
         paper_fill_at("NHPC", "NSE", "BUY", 3, "CNC", 0.0, "VAL-PEAD-CA", "CORPORATE_ACTION")   # book-keeping passes
 
+
+def test_paper_fills_pay_the_stress_slippage_except_official_and_book_keeping_prices():
+    """Every trading fill in PAPER is made worse than its ideal price by settings.paper_slippage_bps (the lab's
+    5 bps cost stress): BUY higher, SELL lower, on marketable orders, auction entries, closes and stops.
+    Settlements, reconciliations and corporate actions keep their exact price. The ideal price is kept on the
+    order, and 0 bps gives back the old fills."""
+    from agents.validated_base import paper_marketable, paper_fill_at
+    assert settings.paper_slippage_bps == 0.0, "an overlay defaults to no change"
+    with isolated_book(), kite_paper(), patch.object(settings, "paper_slippage_bps", 5.0):
+        q = {"ltp": 200.0, "bid": 199.9, "ask": 200.1}
+        oid, fill = paper_marketable("NHPC", "NSE", "BUY", 10, "CNC", q, "VAL-ATTN-IN")
+        assert fill == round(200.1 * 1.0005, 2) == 200.2
+        rec = next(o for o in kite_client._paper_orders if o["order_id"] == oid)
+        assert rec["ideal_price"] == 200.1 and rec["average_price"] == 200.2
+        _o, px = paper_fill_at("NHPC", "NSE", "SELL", 4, "CNC", 210.0, "VAL-ATTN-OUT", "CLOSE")
+        assert px == round(210.0 * 0.9995, 2) == 209.9
+        _o, px = paper_fill_at("NHPC", "NSE", "SELL", 3, "CNC", 210.0, "VAL-ATTN-OUT", "AUCTION")
+        assert px == 209.9
+        for kind in ("SETTLEMENT", "RECONCILE"):
+            _o, px = paper_fill_at("NHPC", "NSE", "SELL", 1, "CNC", 210.0, "VAL-ATTN-OUT", kind)
+            assert px == 210.0, kind
+        _o, px = paper_fill_at("NHPC", "NSE", "BUY", 2, "CNC", 0.0, "VAL-PEAD-CA", "CORPORATE_ACTION")
+        assert px == 0.0
+        with patch.object(settings, "paper_slippage_bps", 0.0):
+            _o, fill = paper_marketable("NHPC", "NSE", "BUY", 1, "CNC", q, "VAL-ATTN-IN")
+            assert fill == 200.1, "0 bps: the old ideal fill"
+
+
+def test_powered_gate_and_one_definition_of_proven():
+    """22 Nov 2026: (1) no kept strategy is labelled proven under the one strict definition (luck test at the
+    current N, executable as tested, positive at the held instrument's costs), each with its reason; (2) the powered
+    paper-to-live gate needs n, a one-sided t >= 2.33 and gross >= 2 x cost, and readiness needs it on top of the
+    agent's own bar; the strangle counts cycles, not legs; (3) the attention swing books CNC delivery costs."""
+    from agents.strategy_agents import PROVEN, WHY_NOT_PROVEN
+    assert not any(PROVEN.values()) and set(WHY_NOT_PROVEN) == set(ALL_AGENTS)
+    a = ALL_AGENTS["auc_fade"]
+    win = [{"net": 900.0 + (i % 5) * 40, "gross": 1400.0, "cost": 500.0} for i in range(120)]
+    pg = a.powered_gate(win)
+    assert pg["passed"] and pg["n"] == 120 and pg["t"] > 2.33 and pg["gross_to_cost"] == 2.8
+    assert not a.powered_gate(win[:99])["passed"], "too few trades"
+    thin = [dict(r, gross=900.0) for r in win]
+    assert not a.powered_gate(thin)["passed"], "gross < 2 x cost: the kill rule"
+    noise = [{"net": (600.0 if i % 2 else -590.0), "gross": 1500.0, "cost": 500.0} for i in range(200)]
+    assert not a.powered_gate(noise)["passed"], "no significant edge"
+    assert a.powered_gate([])["passed"] is False
+    with patch.object(type(a), "live_readiness", lambda self: {"ready": True}), \
+            patch.object(type(a), "powered_gate", lambda self, rows=None, net_key="net": {"passed": False}):
+        r = a.readiness()
+        assert r["own_criteria_ready"] and not r["ready"], "the powered gate is needed on top of the agent's bar"
+    s = ALL_AGENTS["vrp_winged"]
+    legs = [{"group": f"g{i}", "net": 300.0 + (i % 3) * 10, "gross": 400.0, "cost": 100.0} for i in range(20)
+            for _ in range(4)]
+    pg = s.powered_gate(legs)
+    assert pg["n"] == 20 and not pg["passed"], "80 legs are 20 cycles: below 26"
+    assert ALL_AGENTS["attn_on"].COST_KIND == "equity_cnc"
+    from datetime import date as _d
+    R = type(ALL_AGENTS["vrp_winged"]).settle_regime
+    assert R(_d(2026, 7, 30))["model_matches"] and R(_d(2026, 12, 8))["model_matches"]
+    assert not R(_d(2026, 11, 23))["model_matches"] and R(_d(2026, 12, 6))["regime"].startswith("cas_")
+
+def test_alerts_rate_limit_health_checks_and_daily_messages():
+    """alerts.py: error lines are rate limited (same text once per 30 min, a daily cap then one muted note); the
+    health checks fail on a missing Kite session after 08:58 on a trading day and on a stale feed in market hours;
+    /health says degraded and /health/strict answers 503 then; off by default (no sink, no jobs)."""
+    import alerts
+    from datetime import datetime as _dt
+    from fastapi.testclient import TestClient
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    assert settings.alerts_enabled is False and alerts.install() is False
+    alerts._seen.clear()
+    alerts._day.update({"date": "", "n": 0, "muted": False})
+    t0 = 1_000_000.0
+    assert alerts.should_send("x: job failed 12", now=t0, today="2026-11-23")
+    assert alerts.should_send("x: job failed 13", now=t0 + 60, today="2026-11-23") is None, "same text, digits aside"
+    assert alerts.should_send("x: job failed 14", now=t0 + 1801, today="2026-11-23"), "after 30 minutes again"
+    out = [alerts.should_send(f"y{chr(65 + i % 26)}{chr(65 + i // 26)} distinct", now=t0, today="2026-11-23")
+           for i in range(alerts.ALERT_MAX_PER_DAY + 5)]
+    sent = [x for x in out if x]
+    assert len(sent) == alerts.ALERT_MAX_PER_DAY - 2 + 1 and "muted" in sent[-1], "cap, then one muted note"
+    assert alerts.should_send("w other", now=t0, today="2026-11-23") is None
+    assert alerts.should_send("w other", now=t0, today="2026-11-24"), "a new day resets the cap"
+    from kite_client import kite_client as KC
+    from tick_engine import tick_engine as TE
+    mon = _dt(2026, 11, 23, 10, 0, tzinfo=IST)
+    with patch.object(KC, "_kite", None), patch.object(TE, "status", lambda: {"last_tick_age_s": 900.0}):
+        h = alerts.health_summary(mon)
+        assert not h["healthy"] and {"kite_session", "price_feed"} <= set(h["failing"])
+        sun = _dt(2026, 11, 22, 10, 0, tzinfo=IST)
+        assert {c["check"] for c in alerts.checks(sun)} == {"scheduler"}, "no session / feed check off days"
+        with patch.object(alerts, "health_summary", lambda now=None: {"healthy": False, "failing": ["kite_session"],
+                                                                        "checks": []}):
+            import main
+            c = TestClient(main.app)
+            r = c.get("/health/strict")
+            assert r.status_code == 503 and r.json()["failing"] == ["kite_session"]
+            assert c.get("/health").json()["status"] == "degraded"
+    with patch.object(alerts, "health_summary", lambda now=None: {"healthy": True, "failing": [], "checks": []}):
+        assert alerts.morning_text().startswith("✅ Morning check: all clear")
+        assert "Realised today" in alerts.evening_text()
+    with patch.object(alerts, "telegram_ready", lambda: False):
+        assert alerts.send_now("hi") is False
+
+def test_kill_switch_survives_a_restart_until_reset():
+    """A manual kill switch is written next to the ledger; a fresh process (load_persisted_kill) comes back KILLED;
+    reset_kill_switch removes the file. An unreadable file counts as KILLED."""
+    import tempfile as _tf
+    from sebi_compliance import SEBICompliance, KillSwitchState
+    d = _tf.mkdtemp()
+    with patch.dict(os.environ, {"KILL_SWITCH_FILE": os.path.join(d, "kill_switch.json")}):
+        a = SEBICompliance()
+        assert a.load_persisted_kill() is False and a._state == KillSwitchState.ACTIVE
+        a.trigger_kill_switch("owner pressed it")
+        b = SEBICompliance()
+        assert b.load_persisted_kill() and b._state == KillSwitchState.KILLED and "owner" in b._kill_reason
+        assert b.reset_kill_switch(secret=settings.kill_switch_reset_secret)[0]
+        c = SEBICompliance()
+        assert c.load_persisted_kill() is False and c._state == KillSwitchState.ACTIVE
+        with open(os.path.join(d, "kill_switch.json"), "w") as fh:
+            fh.write("{broken")
+        assert SEBICompliance().load_persisted_kill() is True
+
+def test_live_order_path_never_duplicates_tracks_and_reconciles():
+    """LIVE order safety (PAPER behaviour unchanged): every order carries a unique tag (strategy prefix kept); a
+    network error whose order reached the broker returns that order instead of re-sending; an order that did not
+    arrive is retried; no unprotected MARKET order is ever sent; track_order reports part-fills and final states;
+    reconcile_positions lists every app / broker difference."""
+    from kiteconnect.exceptions import NetworkException, InputException
+    from kite_client import KiteClient
+    from agents.validated_base import _agent_of
+    t = KiteClient.unique_tag("VAL-ATTN-IN")
+    assert len(t) <= 20 and t.startswith("VAL-ATTN-IN-") and _agent_of(t) == _agent_of("VAL-ATTN-IN")
+    assert KiteClient.unique_tag("VAL-ATTN-IN") != t
+
+    class FakeKite:
+        VARIETY_REGULAR = "regular"
+
+        def __init__(self, fail_first=0, arrives=True, depth=True):
+            self.placed, self.book, self.fail_first, self.arrives, self.depth = [], [], fail_first, arrives, depth
+
+        def quote(self, ins):
+            if not self.depth:
+                return {ins[0]: {"last_price": 0, "depth": {}}}
+            return {ins[0]: {"last_price": 100.0, "depth": {"buy": [{"price": 99.9}], "sell": [{"price": 100.1}]}}}
+
+        def place_order(self, **kw):
+            self.placed.append(kw)
+            if self.fail_first > 0:
+                self.fail_first -= 1
+                if self.arrives:
+                    self.book.append({"order_id": f"L{len(self.placed)}", "tag": kw["tag"]})
+                raise NetworkException("timeout")
+            self.book.append({"order_id": f"L{len(self.placed)}", "tag": kw["tag"]})
+            return f"L{len(self.placed)}"
+
+        def orders(self):
+            return list(self.book)
+
+        def order_history(self, oid):
+            return [{"status": "OPEN", "filled_quantity": 2, "pending_quantity": 3, "average_price": 100.1}]
+
+        def margins(self):
+            return {"equity": {"available": {"live_balance": 1e9}}}
+
+        def positions(self):
+            return {"net": [{"tradingsymbol": "RELIANCE", "product": "CNC", "quantity": 5},
+                            {"tradingsymbol": "TCS", "product": "MIS", "quantity": -2}]}
+    saved = (settings.trading_mode, settings.kite_access_token)
+    try:
+        settings.trading_mode, settings.kite_access_token = "LIVE", "x"
+        with patch("time.sleep", lambda s: None), patch("drift_monitor.record_fill", lambda *a: None):
+            kc = KiteClient()
+            kc._kite = fk = FakeKite(fail_first=1, arrives=True)
+            oid = kc.place_order("RELIANCE", "NSE", "BUY", 5, order_type="LIMIT", price=100.2, product="CNC",
+                                 tag="VAL-ATTN-IN")
+            assert oid == "L1" and len(fk.placed) == 1, "the order reached the broker: found by tag, not re-sent"
+            kc._kite = fk = FakeKite(fail_first=1, arrives=False)
+            oid = kc.place_order("RELIANCE", "NSE", "BUY", 5, order_type="LIMIT", price=100.2, product="CNC",
+                                 tag="VAL-ATTN-IN")
+            assert oid == "L2" and len(fk.placed) == 2 and fk.placed[0]["tag"] == fk.placed[1]["tag"], \
+                "not in the book: retried once, with the same tag"
+            kc._kite = fk = FakeKite(depth=False)
+            with patch.object(KiteClient, "_paper_ltp", staticmethod(lambda s: 0.0)):
+                try:
+                    kc.place_order("RELIANCE", "NSE", "SELL", 5, order_type="MARKET", product="CNC", tag="X")
+                    raise AssertionError("an unprotected MARKET order went out")
+                except InputException:
+                    pass
+            assert not fk.placed
+            with patch.object(KiteClient, "_paper_ltp", staticmethod(lambda s: 101.0)):
+                kc.place_order("RELIANCE", "NSE", "SELL", 5, order_type="MARKET", product="CNC", tag="X")
+            assert fk.placed[-1]["order_type"] == "LIMIT", "no depth: protected off the price feed"
+            tr = kc.track_order("L1", timeout_s=0)
+            assert tr["status"] == "OPEN" and not tr["final"] and tr["filled_qty"] == 2 and tr["pending_qty"] == 3
+            rc = kc.reconcile_positions({("RELIANCE", "CNC"): 5, ("INFY", "CNC"): 3})
+            assert not rc["ok"] and {(d["symbol"], d["app"], d["broker"]) for d in rc["diffs"]} == \
+                {("INFY", 3, 0), ("TCS", 0, -2)}
+    finally:
+        settings.trading_mode, settings.kite_access_token = saved
 
 def test_approval_mode_gates_entries_by_day_ticket():
     import approvals as AP
@@ -782,8 +981,9 @@ def test_v2_read_endpoints_respond_and_are_json():
             r.json()
         cards = c.get("/api/v2/strategies").json()["strategies"]
         assert [x["name"] for x in cards] == ["auc_fade", "attn_on", "vrp_winged", "pead_h60"]
-        assert {x["name"]: x["status"] for x in cards} == {"auc_fade": "proven", "attn_on": "proven",
-                                                            "vrp_winged": "candidate", "pead_h60": "candidate"}
+        assert {x["name"]: x["status"] for x in cards} == {n: "candidate" for n in ALL_AGENTS}, \
+            "one strict definition of proven (22 Nov 2026): none of the four qualifies"
+        assert all(x["why_not_proven"] for x in cards)
         assert all(x["allocator_scale"] == 1.0 for x in cards)
         assert c.get("/api/v2/strategies/nope").status_code == 404
 

@@ -3,10 +3,17 @@
 Decision: "Re-create entire app with new strategies and trading engine and remove old" → **clean rebuild on core**,
 strategies **"proven + candidates"**, everything **PAPER only**.
 
+**22 Nov 2026: one definition of "proven"** (`agents/strategy_agents.PROVEN` / `WHY_NOT_PROVEN`): Deflated Sharpe
+>= 0.95 at the current trial count N, executable as tested, and positive at the costs of the instrument actually
+held. None of the four qualifies, so all four are candidates (reasons in the API's `why_not_proven`). The same day:
+paper fills pay `PAPER_SLIPPAGE_BPS` (production 5) except settlements / reconciliations / corporate actions; the
+attention swing books CNC delivery costs; every agent's readiness also needs the powered gate
+(`ValidatedAgent.powered_gate`: n, one-sided t >= 2.33, gross >= 2 x cost; the strangle counts cycles).
+
 | Strategy | Key | Status | Default |
 |---|---|---|---|
-| AUC-FADE-2PCT (opening-auction fade; variant via `VALIDATED_AUCTION_VARIANT`, code default 3PCT) | `auc_fade` | proven | on |
-| SWING-ATTN-ON-3X (attention overnight long) | `attn_on` | proven | on |
+| AUC-FADE-2PCT (opening-auction fade; variant via `VALIDATED_AUCTION_VARIANT`, code default 3PCT) | `auc_fade` | candidate (proven before 22 Nov 2026) | on |
+| SWING-ATTN-ON-3X (attention overnight long) | `attn_on` | candidate (proven before 22 Nov 2026) | on |
 | VRP-STRANGLE-016-WINGED (NIFTY weekly winged strangle) | `vrp_winged` | candidate | on |
 | EV-PEAD-LONG-H60 (post-earnings drift) | `pead_h60` | candidate | **off** (`VALIDATED_PEAD_ENABLED=false`) |
 

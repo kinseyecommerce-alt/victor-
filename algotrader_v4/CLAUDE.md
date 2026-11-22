@@ -38,17 +38,18 @@ tick_engine: price feed only (newest Kite tick per symbol; the paper broker's to
 | `main.py` | FastAPI app: auth gate (X-API-Key / JWT), Kite login, vault, bot start/stop, SEBI, ledger, research reads |
 | `api_v2.py` | the dashboard API `/api/v2` (documented in `API_V2.md`) |
 | `platform_scheduler.py` | every job (Kite login, validated jobs, forward test, daily reset, square-off, scoreboard, shadow registry, archiver, risk brake, drift monitor); bot start/stop |
-| `agents/strategy_agents.py` | `ALL_AGENTS` registry of the four agents and `PROVEN` |
+| `agents/strategy_agents.py` | `ALL_AGENTS` registry of the four agents, `PROVEN` (one strict definition: DSR >= 0.95 at the current N, executable as tested, positive at held-instrument costs; none qualifies since 22 Nov 2026) and `WHY_NOT_PROVEN` |
 | `agents/validated_base.py` | shared base: entry gates (settings, trading state, drawdown kill, daily loss stop, approvals), paper order helpers (state guard, quote-vs-fill log), persistence, status |
 | `trading_state.py` | ACTIVE / REDUCE_ONLY / HALTED, global + per strategy + drawdown brake |
 | `approvals.py` | semi-auto approval mode (default off) |
 | `risk_budget.py` | size factor per strategy (default 1.0 = lab sizing) and the latching drawdown brake; reads `lab_risk.json` |
 | `drift_monitor.py` | live-vs-lab drift and fill quality, warnings only |
 | `live_readiness.py` | LIVE prerequisites (static IP …); LIVE stays impossible for the kept strategies |
-| `kite_client.py` | Kite wrapper; PAPER broker (`_paper_orders` / `_paper_positions`, `paper_fill_at`); LIVE MARKET orders become price-protected LIMITs |
+| `kite_client.py` | Kite wrapper; PAPER broker (`_paper_orders` / `_paper_positions`, `paper_fill_at`, stress slippage `PAPER_SLIPPAGE_BPS`); LIVE: MARKET requests become price-protected LIMITs (off the quote, else the price feed) and are REFUSED with no price at all (never an unprotected MARKET order); every LIVE order gets a unique tag (`unique_tag`: strategy prefix + 8 hex) and `_place_once` searches the order book for it before any retry, so an order whose outcome was unknown is never sent twice; `track_order` follows an order to COMPLETE / CANCELLED / REJECTED (part-fills visible); `reconcile_positions` lists app-vs-broker differences (broker = truth, logged as errors) |
+| `alerts.py` | owner alerts (`ALERTS_ENABLED`, default false; Telegram): every ERROR log line (rate limited: same text once per 30 min, 30 a day), a morning all-clear 08:58 and an evening report 15:50 on trading days; health checks (scheduler; Kite session from 08:58 on a trading day; price tick <= 300 s old in market hours) shown by `/health` (`status` ok / degraded) and `/health/strict` (HTTP 503 when failing, for an outside uptime monitor) |
 | `paper_book.py` | PAPER book snapshot / restore (old snapshots load; removed engines' blocks ignored) |
 | `performance.py` | ledger after costs, per-strategy stats, daily scoreboard vs NIFTY 50 |
-| `sebi_compliance.py` | pre-order checks, kill switch / pause, audit log |
+| `sebi_compliance.py` | pre-order checks, kill switch / pause, audit log; a triggered kill switch is persisted (`kill_switch.json` next to the ledger, `KILL_SWITCH_FILE`) and restored KILLED after a restart until `reset_kill_switch` |
 | `forward_test.py`, `shadow_registry.py`, `option_bar_archiver.py` | observers (no orders) |
 | `forward_lab.py` (+ `forward_lab_store.py`, `forward_lab_engine.py`, `forward_lab_build.py`) | forward lab: every lab strategy (608 catalogue + 668 tfgrid + the 4 live rules) on each new session after the close, engine in its own process, hash-chained ledgers, frozen rule `forward_lab_rule.json` (sha256 pinned in `forward_lab.RULE_SHA256`), lab references `forward_lab_baseline.json`; `FORWARD_LAB_ENABLED` default false; `GET /api/v2/forward-lab` |
 | `bot_state.py` | per-agent enable toggles and the persisted operator Stop |
@@ -58,6 +59,10 @@ tick_engine: price feed only (newest Kite tick per symbol; the paper broker's to
 ### Rules that keep paper comparable with the lab
 - The agents' parity tests (`test_pipeline.py`, `test_validated_pead.py`) are the proof that a live decision equals
   the lab decision; they must pass unchanged after any change to an agent, the base or the data layer.
+- Paper fills: `PAPER_SLIPPAGE_BPS` (code default 0, production 5) makes every trading fill worse than its ideal
+  price (BUY higher, SELL lower); settlements, reconciliations and corporate actions stay exact; the order keeps
+  `ideal_price`. Readiness = the agent's own bar AND `ValidatedAgent.powered_gate` (n >= 100, 26 strangle cycles;
+  one-sided t >= 2.33; gross >= 2 x cost).
 - New overlays must default to "no change": trading states ACTIVE, approvals off, allocator scale exactly 1.0, drift
   Telegram off. An overlay may block entries; it must never block an exit the rule schedules.
 - No path may place a real-money order for these strategies: they refuse LIVE (`live_mode_refused`), the paper helpers
@@ -119,8 +124,8 @@ Strategies that passed stratlab's pre-registered protocol run as PAPER-only, sch
 - None of the legacy guards applies (trade gate, debate, MTF, allocator, risk_manager limits, order_guard, pruning,
   trailing stops, GTT): none was in the tested rule. SEBI pre-order checks do. Per-agent daily loss stop, drawdown
   kill and kill switch block entries only; open positions always exit by the rule.
-- Carrier: a CNC delivery long (the app has no stock futures), booked at the lab's futures costs
-  (`performance.record_trade(cost_kind="future", charge_risk=False)`); each row also carries `cost_cnc`.
+- Carrier: a CNC delivery long (the app has no stock futures), booked since 22 Nov 2026 at CNC delivery costs
+  (`COST_KIND = "equity_cnc"`, what is held); each row also carries the lab's futures cost `cost_lab_future`.
 - Quote ↔ bar mapping: 15:21 quote volume = Σ minute volumes 09:15..15:20, LTP = 15:20 close, ask = 15:21 open, next
   session's official open = 09:15 bar open. Session history comes from `validated_data` (built by
   `summarize_sessions` with the lab's cleaning and 200-bar rule). `test_pipeline.py`'s lab-parity test replays every

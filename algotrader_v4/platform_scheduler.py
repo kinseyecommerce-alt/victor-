@@ -136,6 +136,11 @@ class PlatformScheduler:
             self._sched.add_job(self._builder_forward, "cron", hour=7, minute=5, id="builder_forward",
                                 misfire_grace_time=6 * 3600, max_instances=1, coalesce=True)
         # engine upgrades: drawdown brake (every minute), drift monitor (after the last settlement retry)
+        if self._alerts_on():
+            self._sched.add_job(self._alert_morning, "cron", hour=8, minute=58, day_of_week=VALIDATED_DOW,
+                                id="alert_morning", misfire_grace_time=300)
+            self._sched.add_job(self._alert_evening, "cron", hour=15, minute=50, day_of_week=VALIDATED_DOW,
+                                id="alert_evening", misfire_grace_time=600)
         self._sched.add_job(self._risk_brake, "interval", minutes=1, id="risk_brake", misfire_grace_time=60)
         self._sched.add_job(self._drift_monitor, "cron", hour=17, minute=15, day_of_week=VALIDATED_DOW,
                             id="drift_monitor", misfire_grace_time=3600)
@@ -239,6 +244,33 @@ class PlatformScheduler:
                 f"{sb['verdict']}")
         except Exception as exc:
             logger.error("[platform] daily scoreboard failed: {}", exc)
+
+    @staticmethod
+    def _alerts_on() -> bool:
+        try:
+            import alerts
+            return alerts.enabled()
+        except Exception:
+            return False
+
+    async def _alert_morning(self) -> None:
+        """08:58 on trading days: the all-clear (or what is failing). A missing message is itself the alarm."""
+        try:
+            import alerts
+            from ist_clock import is_trading_day
+            if is_trading_day(_now_ist().date()):
+                await asyncio.to_thread(alerts.send_now, alerts.morning_text())
+        except Exception as exc:
+            logger.warning("[alerts] morning message failed: {}", exc)
+
+    async def _alert_evening(self) -> None:
+        try:
+            import alerts
+            from ist_clock import is_trading_day
+            if is_trading_day(_now_ist().date()):
+                await asyncio.to_thread(alerts.send_now, alerts.evening_text())
+        except Exception as exc:
+            logger.warning("[alerts] evening message failed: {}", exc)
 
     async def _risk_brake(self) -> None:
         try:

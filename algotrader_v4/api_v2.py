@@ -73,7 +73,7 @@ def _card(name: str, a, jobs: list[dict], drift: Optional[dict] = None) -> dict:
     import approvals
     import risk_budget
     import trading_state
-    from agents.strategy_agents import PROVEN
+    from agents.strategy_agents import PROVEN, WHY_NOT_PROVEN
     st = a.get_status()
     lab = risk_budget.lab_stats(name)
     live = st.get("live") or {}
@@ -98,6 +98,7 @@ def _card(name: str, a, jobs: list[dict], drift: Optional[dict] = None) -> dict:
     return {
         "name": name, "label": LABELS.get(name, name), "lab_id": st.get("lab_id"), "version": st.get("version"),
         "status": "proven" if PROVEN.get(name) else "candidate", "proven": bool(PROVEN.get(name)),
+        "why_not_proven": None if PROVEN.get(name) else WHY_NOT_PROVEN.get(name),
         "enabled": {"setting": bool(st.get("enabled")), "toggle": bot_state.is_agent_enabled(name)},
         "running": bool(st.get("running")), "entry_block": st.get("entry_block"),
         "trading_state": {"own": trading_state.strategy_state(name), "effective": trading_state.effective(name)},

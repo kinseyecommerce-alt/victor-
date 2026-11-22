@@ -301,6 +301,13 @@ class KiteClient:
         if transaction_type == "BUY" and order_type in ("MARKET", "LIMIT"):
             self._check_margin(tradingsymbol, quantity, price)
 
+        if order_type == "MARKET":
+            # exchanges do not accept MARKET orders from API algos, and an unprotected order into a thin book is
+            # exactly what the protection exists to prevent: refuse instead of sending one
+            raise InputException(f"{tradingsymbol}: no price for a protected LIMIT — refusing an unprotected MARKET "
+                                 "order (LIVE)")
+        tag = self.unique_tag(tag)
+
         def _place():
             return self.kite.place_order(
                 variety=KiteConnect.VARIETY_REGULAR,
@@ -316,13 +323,94 @@ class KiteClient:
                 tag=tag,
             )
 
-        order_id = _with_retry(_place, label="place_order")
+        order_id = self._place_once(_place, tag)
         logger.info("LIVE order | {} {} {} qty={} @ {} (quote {}) | id={}",
                     transaction_type, tradingsymbol, order_type,
                     quantity, price, quote_px or "-", order_id)
         if quote_px:
             self._log_live_fill(order_id, tradingsymbol, transaction_type, quantity, quote_px, tag)
         return order_id
+
+    # ── LIVE order safety: one order per intent, tracked to a final state, positions checked against the broker ──
+    @staticmethod
+    def unique_tag(tag: str) -> str:
+        """The caller's tag (its first 11 chars keep the strategy prefix) + '-' + 8 random hex = at most 20 chars:
+        the order can be found in the broker's order book by its tag when a placement's outcome is unknown."""
+        return f"{(tag or 'ATP')[:11]}-{uuid.uuid4().hex[:8]}"
+
+    def _find_by_tag(self, tag: str) -> Optional[str]:
+        try:
+            for o in self.kite.orders() or []:
+                if o.get("tag") == tag:
+                    return str(o.get("order_id"))
+        except Exception as exc:
+            logger.warning("[kite] order book lookup for tag {} failed: {}", tag, exc)
+        return None
+
+    def _place_once(self, place, tag: str, attempts: int = _RETRY_MAX + 1) -> str:
+        """Place an order without ever duplicating it. A network / server error leaves the outcome unknown: the
+        order book is searched for the order's unique tag before any retry, and a found order is returned instead
+        of placing a second one. Input / token errors are raised at once."""
+        delay = _RETRY_BASE_SEC
+        last: Optional[Exception] = None
+        for attempt in range(attempts):
+            _rest_bucket.acquire()
+            try:
+                return str(place())
+            except (TokenException, InputException):
+                raise
+            except (NetworkException, DataException, GeneralException) as exc:
+                last = exc
+                time.sleep(min(delay, 2.0))
+                found = self._find_by_tag(tag)
+                if found:
+                    logger.warning("[kite] place_order error ({}) but order {} with tag {} exists — not re-sent",
+                                   exc, found, tag)
+                    return found
+                if attempt + 1 < attempts:
+                    logger.warning("[kite] place_order failed ({}) and no order with tag {} — retry {}/{}",
+                                   exc, tag, attempt + 1, attempts - 1)
+                delay *= 2
+        raise last if last else RuntimeError("place_order failed")
+
+    FINAL_STATES = ("COMPLETE", "CANCELLED", "REJECTED")
+
+    def track_order(self, order_id: str, timeout_s: float = 30.0, poll_s: float = 1.0) -> dict:
+        """Follow an order until it is COMPLETE, CANCELLED or REJECTED (or the timeout). Returns status, filled and
+        pending quantity, average price and the broker's status message — a part-fill is visible, never assumed."""
+        t_end = time.monotonic() + max(0.0, timeout_s)
+        last: dict = {}
+        while True:
+            try:
+                hist = self.order_history(order_id) or []
+                last = hist[-1] if hist else last
+            except Exception as exc:
+                logger.warning("[kite] order {} status unknown: {}", order_id, exc)
+            st = str(last.get("status") or "").upper()
+            if st in self.FINAL_STATES or time.monotonic() >= t_end:
+                break
+            time.sleep(poll_s)
+        return {"order_id": order_id, "status": st or "UNKNOWN", "final": st in self.FINAL_STATES,
+                "filled_qty": int(last.get("filled_quantity") or 0), "pending_qty": int(last.get("pending_quantity")
+                                                                                       or 0),
+                "average_price": float(last.get("average_price") or 0.0),
+                "message": last.get("status_message") or ""}
+
+    def reconcile_positions(self, expected: dict) -> dict:
+        """Compare what the app believes it holds ({(symbol, product): signed qty}) with the broker's net positions.
+        The broker is the truth: every difference is returned (and logged as an error, which alerts the owner)."""
+        if settings.trading_mode == "PAPER":
+            broker = {(p["tradingsymbol"], p.get("product")): int(p.get("quantity") or 0)
+                      for p in self._paper_positions}
+        else:
+            net = (_with_retry(self.kite.positions, label="positions") or {}).get("net") or []
+            broker = {(p["tradingsymbol"], p.get("product")): int(p.get("quantity") or 0) for p in net}
+        keys = {k for k, v in expected.items() if v} | {k for k, v in broker.items() if v}
+        diffs = [{"symbol": k[0], "product": k[1], "app": int(expected.get(k, 0)), "broker": int(broker.get(k, 0))}
+                 for k in sorted(keys) if int(expected.get(k, 0)) != int(broker.get(k, 0))]
+        if diffs:
+            logger.error("[reconcile] app and broker positions differ: {}", diffs)
+        return {"ok": not diffs, "diffs": diffs, "checked": len(keys)}
 
     @staticmethod
     def protection_limit(side: str, bid: float, ask: float, ltp: float, band_pct: float) -> tuple[float, float]:
@@ -346,11 +434,13 @@ class KiteClient:
             ask = float(((depth.get("sell") or [{}])[0]).get("price") or 0)
             ltp = float(q.get("last_price") or 0)
         except Exception as exc:
-            logger.warning("[kite] no quote for price protection of {} ({}) — MARKET", symbol, exc)
-            return "MARKET", 0.0, 0.0
+            logger.warning("[kite] no quote for price protection of {} ({})", symbol, exc)
+            bid = ask = ltp = 0.0
+        if not (bid or ask or ltp):
+            ltp = self._paper_ltp(symbol)               # the price feed's newest tick, if any
         px, ref = self.protection_limit(side, bid, ask, ltp, settings.order_protection_band_pct)
         if px <= 0:
-            logger.warning("[kite] no price for protection of {} — MARKET", symbol)
+            logger.error("[kite] no price at all for {}: the order is refused (no unprotected MARKET orders)", symbol)
             return "MARKET", 0.0, 0.0
         return "LIMIT", px, ref
 
@@ -535,6 +625,18 @@ class KiteClient:
 
     # ── Paper trading ──────────────────────────────────────────────────────
 
+    # fill kinds booked at their exact price (no slippage): not trading decisions or official prices
+    _EXACT_FILL_KINDS = ("SETTLEMENT", "RECONCILE", "CORPORATE_ACTION")
+
+    @staticmethod
+    def _paper_slip(price: float, transaction_type: str) -> float:
+        """The paper fill after the stress slippage (settings.paper_slippage_bps): BUY higher, SELL lower."""
+        bps = float(getattr(settings, "paper_slippage_bps", 0.0) or 0.0)
+        if price <= 0 or bps <= 0:
+            return price
+        k = bps / 10_000.0
+        return round(price * (1 + k) if transaction_type == "BUY" else price * (1 - k), 2)
+
     def _paper_place(
         self, tradingsymbol, exchange, transaction_type,
         quantity, order_type, product, price, trigger_price, tag,
@@ -563,6 +665,9 @@ class KiteClient:
             if fill <= 0:
                 logger.warning("[PAPER] {} {} {}: no price for the symbol yet — filled at ₹0",
                                order_type, transaction_type, tradingsymbol)
+        ideal = fill
+        if not resting:
+            fill = self._paper_slip(fill, transaction_type)
         record = {
             "order_id":         order_id,
             "tradingsymbol":    tradingsymbol,
@@ -574,6 +679,7 @@ class KiteClient:
             "price":            fill,
             "average_price":    0.0 if resting else fill,
             "ref_ltp":          0.0 if resting else ltp,   # the LTP at the fill: callers price P&L at it
+            "ideal_price":      0.0 if resting else ideal,  # the fill before the stress slippage
             "trigger_price":    trigger_price,
             "status":           "TRIGGER PENDING" if resting else "COMPLETE",
             "tag":              tag,
@@ -600,11 +706,13 @@ class KiteClient:
             raise InputException(f"Invalid fill price {price} for {tradingsymbol}")
         quantity = self._validated_quantity(tradingsymbol, exchange, product, quantity)
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
-        px = float(price)
+        ideal = float(price)
+        px = ideal if fill_kind in self._EXACT_FILL_KINDS else self._paper_slip(ideal, transaction_type)
         record = {
             "order_id": order_id, "tradingsymbol": tradingsymbol, "exchange": exchange,
             "transaction_type": transaction_type, "quantity": quantity, "order_type": "MARKET",
-            "product": product, "price": px, "average_price": px, "ref_ltp": px, "trigger_price": 0.0,
+            "product": product, "price": px, "average_price": px, "ref_ltp": ideal, "ideal_price": ideal,
+            "trigger_price": 0.0,
             "status": "COMPLETE", "tag": (tag or "")[:_KITE_ORDER_TAG_MAX], "fill_kind": fill_kind,
             "placed_at": now_ist().isoformat(),
         }

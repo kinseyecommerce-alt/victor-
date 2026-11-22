@@ -11,9 +11,10 @@ The tested rule, unchanged (rule function and constants imported from stratlab.a
 
 Carrier and costs. The lab traded ₹1 L "stock futures" priced off the cash price (no lot size, no basis) and costed
 them as futures. The app has no stock futures (real lots are ₹5–15 L), so paper holds the position as a CNC delivery
-long (the 15:15 MIS square-off never touches it) and books the ledger at the lab's FUTURES costs
-(COST_KIND = "future"); every row also carries the CNC delivery cost (`cost_cnc`), and the status shows both.
-At CNC costs the lab result is negative on FINAL (−7.5 bps/trade) — see live_readiness().
+long (the 15:15 MIS square-off never touches it). Since 22 Nov 2026 the ledger books what is actually held: CNC
+DELIVERY costs (COST_KIND = "equity_cnc"); every row also carries the lab's futures cost (`cost_lab_future`) for
+comparison (rows before that date were booked at futures costs and carry `cost_cnc`). At CNC costs the lab result is
+negative on FINAL (−7.5 bps/trade) — see live_readiness().
 
 Live inputs ↔ lab bars: cum_vol_1520 = Kite quote "volume" at 15:21 (≈ the sum of the minute-bar volumes to 15:20),
 close_1520 = the quote LTP, entry = the 15:21 ask (lab: 15:21 bar open), exit = the next session's official open
@@ -124,7 +125,7 @@ class AttentionOvernightAgent(ValidatedAgent):
     name = "attn_on"
     product = "CNC"
     SETTING = "attention"
-    COST_KIND = "future"                 # the lab's cost assumption (round_trip_cost(..., "future"))
+    COST_KIND = "equity_cnc"             # what paper holds (the lab assumed futures: cost_lab_future per row)
     LAB_ID = "SWING-ATTN-ON-3X"
     VERSION = f"SWING-ATTN-ON-3X/{T.FILL_MODEL}/v1"
     LAB_FINGERPRINT = LAB_FINGERPRINT
@@ -151,6 +152,7 @@ class AttentionOvernightAgent(ValidatedAgent):
     # ── ledger extras: the CNC cost next to the futures cost ──
     def _ledger_extra(self, pos: ValidatedPosition, exit_px: float) -> dict:
         return {"cost_cnc": round_trip_cost(pos.entry_px * pos.qty, float(exit_px) * pos.qty, "equity_cnc"),
+                "cost_lab_future": round_trip_cost(pos.entry_px * pos.qty, float(exit_px) * pos.qty, "future"),
                 "carrier": CARRIER, "ratio": round(float(pos.meta.get("ratio", 0.0)), 3)}
 
     # ── 15:21 entry ──
@@ -377,7 +379,8 @@ class AttentionOvernightAgent(ValidatedAgent):
         st["live_cnc_costs"] = self.live_readiness()["at_cnc_costs"]
         st["carrier"] = CARRIER
         st["last_decision"] = self.last_decision
-        st["cost_basis"] = "ledger net at FUTURES costs (lab assumption); live_cnc_costs at CNC delivery costs"
+        st["cost_basis"] = ("ledger net at CNC delivery costs (what is held; futures costs before 22 Nov 2026); "
+                            "cost_lab_future per row = the lab's futures assumption")
         st["open_value"] = round(sum(p.entry_px * p.qty for p in self.positions()), 2)
         st["ledger_trades"] = len(rows)
         return st

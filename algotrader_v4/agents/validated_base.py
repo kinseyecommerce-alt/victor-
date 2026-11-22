@@ -156,8 +156,10 @@ def paper_fill_at(symbol: str, exchange: str, side: str, qty: int, product: str,
     if fill_kind not in _NO_STATE_CHECK:
         _state_check(symbol, product, side, tag)
     oid = kite_client.paper_fill_at(symbol, exchange, side, qty, product, price, tag, fill_kind)
-    _log_fill(tag, symbol, side, qty, float(price), float(price), fill_kind)
-    return oid, float(price)
+    fill = kite_client.fill_price(oid)                 # after the paper stress slippage (exact for book-keeping)
+    fill = float(price) if fill is None else float(fill)
+    _log_fill(tag, symbol, side, qty, float(price), fill, fill_kind)
+    return oid, fill
 
 
 # ── the agent base ────────────────────────────────────────────────────────────
@@ -484,6 +486,47 @@ class ValidatedAgent(BaseAgent):
                 "win_pct": round(100 * sum(x > 0 for x in nets) / n, 1),
                 "net_bps": round(sum(bps) / len(bps), 2) if bps else None}
 
+    # ── the powered paper-to-live gate (fixed 22 Nov 2026, before any of these paper results were looked at) ──
+    POWERED_MIN_TRADES: int = 100       # per agent; the strangle counts cycles (26)
+    POWERED_T: float = 2.33             # one-sided t of the mean net per trade: a zero edge passes ~1 % per look
+    POWERED_GROSS_COST: float = 2.0     # kill rule: mean gross per trade >= 2 x mean round-trip cost
+
+    def powered_gate(self, rows=None, net_key: str = "net") -> dict:
+        """The statistically powered test every agent must ALSO pass before anything could go live (it never
+        switches to LIVE): n >= POWERED_MIN_TRADES, t = mean / (sd / sqrt(n)) of the per-trade net >= POWERED_T, and
+        mean gross >= POWERED_GROSS_COST x mean cost. The older bars (150 trades and PF >= 1.15) let a zero-edge
+        strategy through about 30 % of the time."""
+        import math
+        rows = self.ledger_rows() if rows is None else rows
+        nets = [float(r.get(net_key, 0) or 0) for r in rows]
+        n = len(nets)
+        out = {"criteria": f">= {self.POWERED_MIN_TRADES} trades; one-sided t of the mean net per trade >= "
+                           f"{self.POWERED_T} (a zero edge passes about 1 % of the time); mean gross >= "
+                           f"{self.POWERED_GROSS_COST:g} x mean cost per trade",
+               "n": n, "t": None, "mean_net": None, "gross_to_cost": None, "passed": False}
+        if n < 2:
+            return out
+        mean = sum(nets) / n
+        sd = math.sqrt(sum((x - mean) ** 2 for x in nets) / (n - 1))
+        t = mean / (sd / math.sqrt(n)) if sd > 0 else (math.inf if mean > 0 else 0.0)
+        gross = sum(float(r.get("gross", 0) or 0) for r in rows) / n
+        cost = sum(float(r.get("cost", 0) or 0) for r in rows) / n
+        ratio = gross / cost if cost > 0 else None
+        out.update({"t": round(t, 3) if math.isfinite(t) else None, "mean_net": round(mean, 2),
+                    "gross_to_cost": round(ratio, 2) if ratio is not None else None})
+        out["passed"] = bool(n >= self.POWERED_MIN_TRADES and t >= self.POWERED_T and ratio is not None
+                             and ratio >= self.POWERED_GROSS_COST)
+        return out
+
+    def readiness(self) -> dict:
+        """The agent's own live_readiness() AND the powered gate: ready only when both pass."""
+        own = dict(self.live_readiness())
+        pg = self.powered_gate()
+        own["own_criteria_ready"] = bool(own.get("ready"))
+        own["powered_gate"] = pg
+        own["ready"] = bool(own.get("ready")) and pg["passed"]
+        return own
+
     # ── persistence (paper_book "validated" block) ──
     def export_book(self) -> dict:
         return {"version": self.VERSION, "positions": [asdict(p) for p in self._positions.values()],
@@ -606,6 +649,6 @@ class ValidatedAgent(BaseAgent):
             "realised_today": self.realised_today(), "drawdown": self.drawdown(),
             "limits": {"daily_loss_stop": self.daily_loss_limit(), "dd_kill": self.dd_limit()},
             "size_scale": self._scale(),
-            "dd_killed": self._dd_killed, "live_readiness": self.live_readiness(),
+            "dd_killed": self._dd_killed, "live_readiness": self.readiness(),
         })
         return st
