@@ -40,7 +40,8 @@ WHY_NOT_PROVEN = {
                 "be placed (not executable as tested); DSR below 0.95 at the current N",
     "attn_on": "held as a delivery (CNC) position, and at CNC costs the lab result is negative on FINAL "
                "(-7.5 bps/trade); DSR below 0.95 at the current N",
-    "vrp_winged": "passed on modelled option prices (flat-VIX Black-Scholes, no skew); the real credit is unverified; "
-                  "DSR below 0.95 at the current N",
+    "vrp_winged": "passed only on modelled option prices; re-priced on real NSE closes (stratlab/STRANGLE_REALPRICE.md) "
+                  "the real credit is 0.755 of the model (wings cost 1.73x) and the lab record turns from +Rs 1.95 L to "
+                  "about -Rs 0.97 L (PF 0.88); fails its own 80 % credit bar",
     "pead_h60": "DSR 0.51 at the fair trial count N = 9 (needs 0.95); excess over NIFTY since 2018 not significant",
 }
