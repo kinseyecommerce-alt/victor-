@@ -114,6 +114,11 @@ class Settings(BaseSettings):
     validated_wcfri_max_margin: float = 100_000.0
     validated_wcfri_max_loss: float = 40_000.0
     validated_wcfri_dd_kill: float = 60_000.0
+    # the builder's promoted strategies (agents/builder_promoted.py), off by default
+    validated_builder_promoted_enabled: bool = False
+    validated_builder_promoted_max_gross: float = 5_000_000.0   # all promoted strategies together, open at once
+    validated_builder_promoted_daily_loss: float = 75_000.0
+    validated_builder_promoted_dd_kill: float = 300_000.0
     # EV-PEAD-LONG-H60 candidate (agents/validated_pead.py): PAPER only, OFF by default (no job is scheduled)
     validated_pead_enabled: bool = False
     validated_pead_max_positions: int = 100

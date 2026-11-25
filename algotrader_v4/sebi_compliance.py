@@ -45,6 +45,7 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "vrp_naked": "ALGO-VRN-011",
     "opt_ic2510": "ALGO-IC-012",
     "opt_wcfri": "ALGO-WCF-013",
+    "bld_promoted": "ALGO-BLD-014",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {

@@ -162,6 +162,7 @@ class AgentEnablesRequest(BaseModel):
     vrp_naked: bool | None = None     # VALIDATED_STRANGLE_NAKED_ENABLED stays the master flag
     opt_ic2510: bool | None = None    # VALIDATED_IC2510_ENABLED
     opt_wcfri: bool | None = None     # VALIDATED_WCFRI_ENABLED
+    bld_promoted: bool | None = None  # VALIDATED_BUILDER_PROMOTED_ENABLED
     pead_h60: bool | None = None      # VALIDATED_PEAD_ENABLED stays the master flag
 
 

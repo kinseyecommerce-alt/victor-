@@ -192,6 +192,7 @@ def _hard_caps(a) -> dict:
                             "max_loss": settings.validated_ic2510_max_loss},
              "opt_wcfri": {"lots": settings.validated_wcfri_lots, "max_margin": settings.validated_wcfri_max_margin,
                            "max_loss": settings.validated_wcfri_max_loss},
+             "bld_promoted": {"max_gross": settings.validated_builder_promoted_max_gross},
              "pead_h60": {"max_gross": settings.validated_pead_max_gross,
                           "max_positions": settings.validated_pead_max_positions}}.get(n, {})
     return {**st, **extra}

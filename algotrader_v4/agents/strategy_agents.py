@@ -19,6 +19,7 @@ from agents.validated_auction import AuctionFadeAgent
 from agents.validated_attention import AttentionOvernightAgent
 from agents.validated_strangle import (WingedStrangleAgent, NakedStrangleAgent, IronCondorAgent,
                                       FridayCondorAgent)
+from agents.builder_promoted import BuilderPromotedAgent
 from agents.validated_pead import PeadCandidateAgent
 
 ALL_AGENTS: dict[str, BaseAgent] = {
@@ -29,6 +30,7 @@ ALL_AGENTS: dict[str, BaseAgent] = {
     "vrp_naked": NakedStrangleAgent(),       # VALIDATED_STRANGLE_NAKED_ENABLED (default off)
     "opt_ic2510": IronCondorAgent(),         # VALIDATED_IC2510_ENABLED (default off)
     "opt_wcfri": FridayCondorAgent(),        # VALIDATED_WCFRI_ENABLED (default off)
+    "bld_promoted": BuilderPromotedAgent(),  # VALIDATED_BUILDER_PROMOTED_ENABLED (default off)
 }
 
 # ONE definition of "proven" (22 Nov 2026), used by the app, the API and the dashboard. A strategy is proven only if
@@ -40,7 +42,7 @@ ALL_AGENTS: dict[str, BaseAgent] = {
 # both eras", which marked auc_fade and attn_on proven; the lab README and the pinned forward-lab rule keep their own
 # older wording (pinned files are never rewritten).
 PROVEN = {"auc_fade": False, "attn_on": False, "vrp_winged": False, "pead_h60": False, "vrp_naked": False,
-          "opt_ic2510": False, "opt_wcfri": False}
+          "opt_ic2510": False, "opt_wcfri": False, "bld_promoted": False}
 WHY_NOT_PROVEN = {
     "auc_fade": "signal and entry use the final 09:15 auction price, which is not known while pre-open orders can "
                 "be placed (not executable as tested); DSR below 0.95 at the current N",
@@ -56,4 +58,7 @@ WHY_NOT_PROVEN = {
                   "2023-26 result turns negative (PF 0.95)",
     "opt_wcfri": "proven only on modelled prices; on real NSE closes it stays positive (PF 1.17) but keeps only 0.657 "
                  "of the modelled credit (bar 0.80); luck test at the current N not met",
+    "bld_promoted": "each promoted strategy passed the builder's luck test (DSR >= 0.95 at its N), but they enter at "
+                    "the 09:15 auction print, which is not known while pre-open orders can be placed (not executable "
+                    "as tested), and their edge per trade is small next to real fill costs",
 }

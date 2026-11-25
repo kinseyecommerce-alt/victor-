@@ -179,6 +179,21 @@ Strategies that passed stratlab's pre-registered protocol run as PAPER-only, sch
   (PF 1.17) with credit 0.657 < 0.80. Candidates, PAPER only; `platform_scheduler.OPTION_AGENTS` lists the family
   (settlement and marks run for every member).
 
+#### Candidate agent: the builder's promoted strategies (`agents/builder_promoted.py`, key `bld_promoted`)
+
+- Added 25 Nov 2026: reads `builder.Builder(...).state()["promoted"]` at run time and trades every promoted strategy
+  whose rule it can run live (`supported()`: gap_fade fade_day / idio_gap, entry o0915, exit bracket / bracket_min /
+  time_min, MIS stocks); others are listed as forward-lab only. Decision = the builder engine's: trigger and MAX_GAP,
+  the PREVIOUS session's market type (`builder_engine.market_types`), the frozen `universe_names`, ranking |gap| then
+  name, `MAX_PER_DAY`, no special session; entry at the 09:15 auction print (09:15:05, inside `_validated_open`); exit
+  = `builder_engine.walk_session` on the day's Kite minute bars after the rule's deadline (jobs `validated_bld_exit`
+  09:16-09:59 and 15:16-15:25); size = the candidate's size regime (`trade_qty`). Live-only guards: corporate action
+  on the day; `VALIDATED_BUILDER_PROMOTED_MAX_GROSS` (Rs 50 lakh) over all strategies. Open positions are listed in
+  `overnight_holdings()` so the 15:15 square-off leaves them to their own exit. `VALIDATED_BUILDER_PROMOTED_ENABLED`
+  default false. Parity: `parity_builder_promoted.py` (own process; `t_bp_lab_parity`): 20,320 engine entries of the
+  eight server promotions of 23-25 Nov matched (prices / ids replayed from the seeds). Not executable as tested
+  (auction print), PAPER only, a candidate.
+
 ### Agent Enable/Disable
 
 Per-agent toggles live in `bot_state.py` (persisted `agent_enables.json`; keys of removed agents are kept on disk and
