@@ -186,6 +186,12 @@ def _hard_caps(a) -> dict:
              "attn_on": {"max_gross": settings.validated_attention_max_gross},
              "vrp_winged": {"lots": settings.validated_vrp_lots, "max_margin": settings.validated_vrp_max_margin,
                             "max_loss": settings.validated_vrp_max_loss},
+             "vrp_naked": {"lots": settings.validated_vrp_naked_lots,
+                           "max_margin": settings.validated_vrp_naked_max_margin},
+             "opt_ic2510": {"lots": settings.validated_ic2510_lots, "max_margin": settings.validated_ic2510_max_margin,
+                            "max_loss": settings.validated_ic2510_max_loss},
+             "opt_wcfri": {"lots": settings.validated_wcfri_lots, "max_margin": settings.validated_wcfri_max_margin,
+                           "max_loss": settings.validated_wcfri_max_loss},
              "pead_h60": {"max_gross": settings.validated_pead_max_gross,
                           "max_positions": settings.validated_pead_max_positions}}.get(n, {})
     return {**st, **extra}

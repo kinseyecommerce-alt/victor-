@@ -86,25 +86,33 @@ class StranglePlan:
     lab_fills: list = field(default_factory=list)
 
 
-def cycle_status(now: datetime, is_td: Callable[[date], bool]) -> tuple[Optional[date], str]:
+def cycle_status(now: datetime, is_td: Callable[[date], bool], spec=None) -> tuple[Optional[date], str]:
     """(expiry, "") on a cycle day, else (None, reason): "weekend" / "not_cycle_day" / "short_week".
     Uses the lab strategy's own in_cycle (no spot or vol needed)."""
     if now.weekday() >= 5:
         return None, "weekend"
-    strat = SPEC.strategy()
+    strat = (spec or SPEC).strategy()
     exp = OR.next_expiry(UNDERLYING, now.date(), is_td, skip_today=True)
     view = OR.MarketView(UNDERLYING, now, 1.0, [], [], 0.1, exp, OR.STRIKE_STEP[UNDERLYING],
                          OR.years_between(now, exp), OR.RISK_FREE, is_td)
-    if strat.in_cycle(view):
+    in_cycle = getattr(strat, "in_cycle", None) or strat._scheduled       # options_r3.R3Strategy: _scheduled
+    if in_cycle(view):
         return exp, ""
-    return None, ("short_week" if strat.skipped_short_weeks else "not_cycle_day")
+    return None, ("short_week" if _short_week(strat) else "not_cycle_day")
+
+
+def _short_week(strat) -> bool:
+    """The lab strategy skipped this cycle because too few trading days were left (ShortStrangle:
+    skipped_short_weeks; options_r3.R3Strategy: skipped)."""
+    return bool(getattr(strat, "skipped_short_weeks", None) or getattr(strat, "skipped", None))
 
 
 def plan_strangle(now: datetime, spot: float, vix_prev_close: float, is_td: Callable[[date], bool], lots: int,
-                  lot_size: Optional[int] = None) -> tuple[Optional[StranglePlan], str]:
+                  lot_size: Optional[int] = None, spec=None) -> tuple[Optional[StranglePlan], str]:
     """The lab's 10:20 decision (Replay's decision step with time_basis "calendar"), from spot and the previous
     VIX close. Returns (plan, "") or (None, reason)."""
-    strat = SPEC.strategy()                     # ShortStrangle(10:20, expiry, 0.16, wings 400, weekly, min 3 days)
+    spec = spec or SPEC
+    strat = spec.strategy()                     # ShortStrangle(10:20, expiry, 0.16, wings 400, weekly, min 3 days)
     if now.weekday() >= 5:
         return None, "weekend"
     if not spot or spot <= 0:
@@ -116,7 +124,7 @@ def plan_strangle(now: datetime, spot: float, vix_prev_close: float, is_td: Call
                          OR.STRIKE_STEP[UNDERLYING], OR.years_between(now, exp), OR.RISK_FREE, is_td)
     specs = strat.decide(view)
     if not specs:
-        return None, ("short_week" if strat.skipped_short_weeks else "not_cycle_day")
+        return None, ("short_week" if _short_week(strat) else "not_cycle_day")
     lot = int(lot_size or OR.lot_size_on(V.LOT_SCHEDULE, now.date()))
     qty = int(lots) * lot
     legs = [(s.opt, float(s.strike), int(s.side), OR.bs(view.spot, s.strike, view.T, view.sigma, s.opt, view.r))
@@ -125,7 +133,8 @@ def plan_strangle(now: datetime, spot: float, vix_prev_close: float, is_td: Call
     lab_credit = sum(-side * px for (_, _, side, _), px in zip(legs, fills))
     lab_legs = [OR.Leg(opt, k, side, px) for (opt, k, side, _), px in zip(legs, fills)]
     max_risk = round(OR._max_risk(lab_legs, lab_credit, qty), 2)
-    margin = SPEC.margin(SimpleNamespace(spot_in=view.spot, qty=qty, max_risk=max_risk))
+    margin = spec.margin(SimpleNamespace(spot_in=view.spot, qty=qty, max_risk=max_risk,
+                                         entry_net=lab_credit))     # options_r3.R3Spec.margin reads entry_net
     return StranglePlan(entry=now, expiry=exp, spot=float(spot), sigma=view.sigma, lot=lot, qty=qty, legs=legs,
                         model_credit=round(sum(-side * m for _, _, side, m in legs), 4),
                         lab_credit=round(lab_credit, 4), max_risk=max_risk, margin_est=round(margin, 2),
@@ -190,8 +199,15 @@ class WingedStrangleAgent(ValidatedAgent):
     COST_KIND = None                        # ledger trade_cost: NFO option round trip per leg (as the lab)
     POWERED_MIN_TRADES = 26                 # the powered gate counts CYCLES (one structure = one bet), not legs
     LAB_ID = LAB_ID
+    SPEC = SPEC
     VERSION = f"{LAB_ID}/{V.OPT_FILL_MODEL}/v1"
     LAB_FINGERPRINT = LAB_FINGERPRINT
+    TAG = "VAL-VRP"                         # order tag prefix (validated_base._TAG_AGENT)
+    ENTRY_T = ENTRY_T                       # the tested decision instant (the lab's bar time)
+    ENTRY_DEADLINE = ENTRY_DEADLINE         # a catch-up entry is allowed until one minute after it
+    GID_PREFIX = "VRP"
+    LOTS_KEY, MARGIN_KEY, LOSS_KEY, DD_KEY = ("validated_vrp_lots", "validated_vrp_max_margin",
+                                              "validated_vrp_max_loss", "validated_vrp_dd_kill")
     # dd/vrp/final_run/summary.txt (2 lots; bps of margin = max risk + 2 % of spot notional)
     LAB_EXPECTATION = {
         "DISC": {"n": 107, "net_per_trade": 1268, "bps_of_margin": 100.0, "pf": 1.24, "win_pct": 79.4,
@@ -210,16 +226,16 @@ class WingedStrangleAgent(ValidatedAgent):
 
     # ── limits: the strangle's scale is lots / 2 (the tested size) ──
     def _lots(self) -> int:
-        return max(1, int(getattr(settings, "validated_vrp_lots", SPEC.lots) or SPEC.lots))
+        return max(1, int(getattr(settings, self.LOTS_KEY, self.SPEC.lots) or self.SPEC.lots))
 
     def _lot_scale(self) -> float:
-        return self._lots() / float(SPEC.lots)
+        return self._lots() / float(self.SPEC.lots)
 
     def daily_loss_limit(self) -> float:
         return 0.0                                # P&L lands once a week, at settlement: no daily stop
 
     def dd_limit(self) -> float:
-        return float(getattr(settings, "validated_vrp_dd_kill", 0.0) or 0.0) * self._lot_scale()
+        return float(getattr(settings, self.DD_KEY, 0.0) or 0.0) * self._lot_scale()
 
     # ── helpers ──
     def _legs_of(self, gid: str) -> list[ValidatedPosition]:
@@ -256,17 +272,17 @@ class WingedStrangleAgent(ValidatedAgent):
         await self.settle_due(now)
         await self.unwind_orphans()
         # the cycle needs no market data: on the 4 non-cycle days a week nothing else is looked at
-        sched = datetime.combine(today, ENTRY_T)             # the scheduled instant, naive IST (lab: the bar time)
-        exp, why = cycle_status(sched, is_trading_day)
+        sched = datetime.combine(today, self.ENTRY_T)        # the scheduled instant, naive IST (lab: the bar time)
+        exp, why = cycle_status(sched, is_trading_day, spec=self.SPEC)
         if exp is None:
             if why == "not_cycle_day":                       # info, not a skip
                 self._log("entry", "*", "info", why)
                 out["reason"] = why
                 return out
             return skip(why)
-        if t >= ENTRY_DEADLINE:
+        if t >= self.ENTRY_DEADLINE:
             return skip("entry_window_missed")
-        if t < dtime(10, 19):
+        if t < (datetime.combine(today, self.ENTRY_T) - timedelta(minutes=1)).time():
             return skip("too_early", mark=False)
         block = self.entry_block_reason()
         if block:
@@ -303,7 +319,7 @@ class WingedStrangleAgent(ValidatedAgent):
         lots = self.alloc_lots(self._lots())
         if lots <= 0:
             return skip("allocator_zero")
-        plan, why = plan_strangle(sched, spot, vix, is_trading_day, lots)
+        plan, why = plan_strangle(sched, spot, vix, is_trading_day, lots, spec=self.SPEC)
         if plan is None:
             return skip(why)
         # real contracts: exact expiry and strike from the instrument master
@@ -312,7 +328,7 @@ class WingedStrangleAgent(ValidatedAgent):
         if not listed:
             return skip("no_contract")
         if listed[0] != plan.expiry:
-            logger.warning("[vrp_winged] lab expiry {} vs Kite's nearest listed {} — week skipped",
+            logger.warning("[{}] lab expiry {} vs Kite's nearest listed {} — week skipped", self.name,
                            plan.expiry, listed[0])
             return skip("expiry_mismatch")
         contracts = [ORS.resolve_exact(UNDERLYING, plan.expiry, k, opt) for opt, k, _, _ in plan.legs]
@@ -322,13 +338,13 @@ class WingedStrangleAgent(ValidatedAgent):
         if kite_lot and kite_lot != plan.lot:
             self.flags["lot_mismatch"] = f"{today.isoformat()}: lab {plan.lot} vs Kite {kite_lot}"
             self._log("entry", "*", "flag", f"lot_mismatch lab {plan.lot} vs Kite {kite_lot} (Kite used)")
-            logger.warning("[vrp_winged] lot size: lab schedule {} vs Kite {} — using Kite's", plan.lot, kite_lot)
-            plan, why = plan_strangle(sched, spot, vix, is_trading_day, lots, lot_size=kite_lot)
+            logger.warning("[{}] lot size: lab schedule {} vs Kite {} — using Kite's", self.name, plan.lot, kite_lot)
+            plan, why = plan_strangle(sched, spot, vix, is_trading_day, lots, lot_size=kite_lot, spec=self.SPEC)
             if plan is None:
                 return skip(why)
         scale = self._lot_scale()
-        if plan.margin_est > float(settings.validated_vrp_max_margin) * scale or \
-                plan.max_risk > float(settings.validated_vrp_max_loss) * scale:
+        if plan.margin_est > float(getattr(settings, self.MARGIN_KEY)) * scale or \
+                plan.max_risk > float(getattr(settings, self.LOSS_KEY)) * scale:
             return skip("risk_cap")
         # the four leg quotes: every leg needs a two-sided quote, else no order at all
         lq = await asyncio.to_thread(VD.quotes, [f"NFO:{c.tradingsymbol}" for c in contracts])
@@ -346,14 +362,14 @@ class WingedStrangleAgent(ValidatedAgent):
                 regime="n/a")
             if not ok:
                 return skip(f"sebi: {reason}")
-        gid = f"VRP-{today.strftime('%Y%m%d')}"
+        gid = f"{self.GID_PREFIX}-{today.strftime('%Y%m%d')}"
         self.structures[gid] = {"gid": gid, "entry": sched.isoformat(), "expiry": plan.expiry.isoformat(),
                                 "spot": plan.spot, "sigma": plan.sigma, "vix": vix, "lot": plan.lot, "qty": plan.qty,
                                 "lots": lots, "model_credit": plan.model_credit, "lab_credit": plan.lab_credit,
                                 "max_risk_lab": plan.max_risk, "margin_est": plan.margin_est, "status": "opening",
                                 "late": bool(late)}
         # wings first (BUY at the ask), then the shorts (SELL at the bid)
-        order = sorted(range(4), key=lambda i: 0 if plan.legs[i][2] > 0 else 1)
+        order = sorted(range(len(plan.legs)), key=lambda i: 0 if plan.legs[i][2] > 0 else 1)
         filled: list[ValidatedPosition] = []
         for i in order:
             opt, k, side, m = plan.legs[i]
@@ -361,14 +377,14 @@ class WingedStrangleAgent(ValidatedAgent):
             tside = "BUY" if side > 0 else "SELL"
             try:
                 oid, fill = paper_marketable(c.tradingsymbol, "NFO", tside, plan.qty, "NRML", lq[c.tradingsymbol],
-                                             "VAL-VRP-W" if side > 0 else "VAL-VRP-S")
+                                             f"{self.TAG}-W" if side > 0 else f"{self.TAG}-S")
             except Exception as exc:
                 self._error(f"entry {c.tradingsymbol}", exc)
                 self._unwind(gid, filled, lq, "partial_structure" if side < 0 else "order_failed")
                 return skip("partial_structure" if filled else "order_failed")
             sebi_compliance.record_order_id(self.name, c.tradingsymbol, oid)
             pt = PlannedTrade(symbol=c.tradingsymbol, side=side, qty=plan.qty, entry_ref=round(m, 4),
-                              entry_t="10:20", exit_t="expiry", key=k)
+                              entry_t=self.ENTRY_T.strftime("%H:%M"), exit_t="expiry", key=k)
             pos = self._open(pt, "NRML", "NFO", fill, oid, overnight=True, group=gid,
                              meta={"opt": opt, "strike": k, "model_px": round(m, 4),
                                    "lab_fill": round(plan.lab_fills[i], 4), "expiry": plan.expiry.isoformat(),
@@ -383,21 +399,21 @@ class WingedStrangleAgent(ValidatedAgent):
         self.mark_done("entry")
         out["opened"] = [p.symbol for p in filled]
         out["gid"] = gid
-        logger.info("[vrp_winged] {} opened: expiry {} qty {} credit real {:.2f} vs model {:.2f} (lab fill {:.2f})",
+        logger.info("[{}] {} opened: expiry {} qty {} credit real {:.2f} vs model {:.2f} (lab fill {:.2f})", self.name,
                     gid, plan.expiry, plan.qty, real_credit, plan.model_credit, plan.lab_credit)
         return out
 
     def _unwind(self, gid: str, filled: list[ValidatedPosition], lq: dict, kind: str) -> None:
         """A leg failed after others filled: close the filled legs at once (never hold a partial structure)."""
         if filled:
-            logger.critical("[vrp_winged] {}: {} — closing {} filled leg(s)", gid, kind, len(filled))
+            logger.critical("[{}] {}: {} — closing {} filled leg(s)", self.name, gid, kind, len(filled))
         for pos in filled:
             if not self._still_open(pos):
                 continue
             back = "SELL" if pos.side == "BUY" else "BUY"
             try:
                 _oid, fill = paper_marketable(pos.symbol, "NFO", back, pos.qty, "NRML", lq.get(pos.symbol) or {},
-                                              "VAL-VRP-UNWIND")
+                                              f"{self.TAG}-UNWIND")
             except Exception as exc:
                 self._error(f"unwind {pos.symbol}", exc)
                 continue
@@ -422,7 +438,7 @@ class WingedStrangleAgent(ValidatedAgent):
                        or float((lq or {}).get(p.symbol, {}).get("ltp") or 0) > 0 for p in legs):
                 self._skip(gid, "no_data:unwind_quote", stage="unwind")
                 continue
-            logger.critical("[vrp_winged] {} restored mid-entry with {} of 4 legs — unwinding", gid, len(legs))
+            logger.critical("[{}] {} restored mid-entry with {} legs — unwinding", self.name, gid, len(legs))
             self._unwind(gid, legs, lq or {}, "partial_structure")
             done.append(gid)
             if str(st.get("entry", ""))[:10] == self._today().isoformat():
@@ -480,7 +496,7 @@ class WingedStrangleAgent(ValidatedAgent):
                     n_td += bool(is_trading_day(d))
                 if n_td >= SETTLE_ALERT_TD:
                     self.flags["settlement_pending"] = f"{gid} expiry {exp} ({n_td} trading days)"
-                    logger.error("[vrp_winged] {} expiry {} still unsettled after {} trading days", gid, exp, n_td)
+                    logger.error("[{}] {} expiry {} still unsettled after {} trading days", self.name, gid, exp, n_td)
                 continue
             if len(closes) < SETTLE_N_CLOSES:
                 if exp >= now.date():
@@ -495,7 +511,7 @@ class WingedStrangleAgent(ValidatedAgent):
                 if not self._still_open(pos):
                     continue
                 back = "SELL" if pos.side == "BUY" else "BUY"
-                kite_client.paper_fill_at(pos.symbol, "NFO", back, pos.qty, "NRML", round(px, 2), "VAL-VRP-SETTLE",
+                kite_client.paper_fill_at(pos.symbol, "NFO", back, pos.qty, "NRML", round(px, 2), f"{self.TAG}-SETTLE",
                                           "SETTLEMENT")
                 self._close(pos, round(px, 2), f"expiry settle S={S:.2f}")
             st = self.structures.setdefault(gid, {})
@@ -510,7 +526,7 @@ class WingedStrangleAgent(ValidatedAgent):
                 self.flags.pop("settlement_pending", None)
             self._save_book(force=True)
             settled.append(gid)
-            logger.info("[vrp_winged] {} settled at S={:.2f} ({} closes)", gid, S, len(closes))
+            logger.info("[{}] {} settled at S={:.2f} ({} closes)", self.name, gid, S, len(closes))
         return settled
 
     # ── read-only marks for the status ──
@@ -542,8 +558,8 @@ class WingedStrangleAgent(ValidatedAgent):
         out = {"settled": await self.settle_due(now)}
         out["unwound"] = await self.unwind_orphans()
         t = now.time().replace(tzinfo=None)
-        if is_trading_day(now.date()) and t >= ENTRY_T and not self.done_today("entry"):
-            exp, _why = cycle_status(datetime.combine(now.date(), ENTRY_T), is_trading_day)
+        if is_trading_day(now.date()) and t >= self.ENTRY_T and not self.done_today("entry"):
+            exp, _why = cycle_status(datetime.combine(now.date(), self.ENTRY_T), is_trading_day, spec=self.SPEC)
             if exp is not None:
                 out["entry"] = await self.decide_and_enter(late=True)
         return out
@@ -605,10 +621,10 @@ class WingedStrangleAgent(ValidatedAgent):
         st["recent_structures"] = sorted(self.structures.values(), key=lambda s: s.get("entry", ""))[-6:]
         st["marks"] = self.marks
         st["lots"] = self._lots()
-        st["limits"].update({"max_margin": float(settings.validated_vrp_max_margin) * self._lot_scale(),
-                             "max_loss": float(settings.validated_vrp_max_loss) * self._lot_scale()})
+        st["limits"].update({"max_margin": float(getattr(settings, self.MARGIN_KEY)) * self._lot_scale(),
+                             "max_loss": float(getattr(settings, self.LOSS_KEY)) * self._lot_scale()})
         try:
-            exp, why = cycle_status(datetime.combine(self._now().date(), ENTRY_T), is_trading_day)
+            exp, why = cycle_status(datetime.combine(self._now().date(), self.ENTRY_T), is_trading_day, spec=self.SPEC)
             st["today"] = {"cycle_day": exp is not None, "expiry": exp.isoformat() if exp else None, "reason": why}
         except Exception as exc:
             st["today"] = {"error": str(exc)[:120]}
@@ -626,3 +642,123 @@ class WingedStrangleAgent(ValidatedAgent):
         super().import_book(d, closed, stale)
         for g, s in ((d or {}).get("structures") or {}).items():
             self.structures.setdefault(g, dict(s))
+
+
+# ── VRP-STRANGLE-016-NAKED: the same rule without the wings (added 25 Nov 2026) ─────────────────────────────────────
+NAKED_ID = "VRP-STRANGLE-016-NAKED"
+NAKED_SPEC = V.BY_ID[NAKED_ID]
+NAKED_FINGERPRINT = fingerprint(
+    OR.ShortStrangle, OR.MarketView, OR.next_expiry, OR._expiry_weekday, OR._adjust_back, OR.previous_trading_day,
+    OR.trading_days_left, OR.bs, OR.bs_delta, OR.years_between, OR.fill_price, OR.haircut, OR._max_risk,
+    OR.lot_size_on, OR.Replay._manage, V.OptSpec.strategy, V.OptSpec.margin,
+    consts={"id": NAKED_SPEC.id, "params": sorted(NAKED_SPEC.params.items()), "lots": NAKED_SPEC.lots,
+            "LOT_SCHEDULE": V.LOT_SCHEDULE, "NAKED_MARGIN_PCT": V.NAKED_MARGIN_PCT, "OPT_FILL_MODEL": V.OPT_FILL_MODEL,
+            "RISK_FREE": OR.RISK_FREE, "SETTLE_FROM": OR.SETTLE_FROM, "EXPIRY_CLOSE": OR.EXPIRY_CLOSE,
+            "WEEKLY_SWITCH": OR.WEEKLY_SWITCH, "STRIKE_STEP": OR.STRIKE_STEP["NIFTY"],
+            "SLIP_MIN": OR.SLIP_MIN_PTS["NIFTY"], "SLIP_PCT": OR.SLIP_PCT})
+
+
+class NakedStrangleAgent(WingedStrangleAgent):
+    """VRP-STRANGLE-016-NAKED as a PAPER agent: sell the 0.16-delta NIFTY CE and PE at 10:20 on the first trading day
+    after a weekly expiry, hold to expiry, 1 lot. The decision, settlement and costs are the winged agent's code with
+    the lab's NAKED spec (stratlab.options_vrp.BY_ID). Why it was added: of the lab's option rules proven in both eras,
+    it is the only one still positive on REAL NSE option prices (stratlab/STRANGLE_REALPRICE.md: real credit 0.898 of
+    the model, PF 1.22, about +Rs 0.92 L on 142 trades 2023-26). UNLIMITED RISK: no wings — a crash week can lose many
+    weeks of premium; the drawdown kill and the margin cap are its only limits. PAPER only, like every agent."""
+    name = "vrp_naked"
+    SETTING = "strangle_naked"              # settings.validated_strangle_naked_enabled (default off)
+    LAB_ID = NAKED_ID
+    SPEC = NAKED_SPEC
+    VERSION = f"{NAKED_ID}/{V.OPT_FILL_MODEL}/v1"
+    LAB_FINGERPRINT = NAKED_FINGERPRINT
+    TAG = "VAL-VRN"
+    GID_PREFIX = "VRN"
+    LOTS_KEY, MARGIN_KEY, LOSS_KEY, DD_KEY = ("validated_vrp_naked_lots", "validated_vrp_naked_max_margin",
+                                              "validated_vrp_naked_max_loss", "validated_vrp_naked_dd_kill")
+    # dd/vrp/final_run/results.csv (1 lot; bps of margin = 12 % of spot notional) + the real-price check
+    LAB_EXPECTATION = {
+        "DISC": {"n": 107, "net": 135300, "pf": 1.47, "bps_of_margin": 57.9, "worst": -43209, "max_dd": 62451},
+        "FINAL": {"n": 45, "net": 36393, "pf": 1.26, "bps_of_margin": 39.1, "worst": -38970, "max_dd": 82815},
+        "DISC_net_at_5": {"net": 111147, "pf": 1.38, "screen": "PASS"},
+        "real_prices": {"credit_ratio": 0.898, "net": 92242, "pf": 1.22, "trades": 142,
+                        "source": "stratlab/STRANGLE_REALPRICE.md (NSE bhavcopy closes vs the model at the same close)"},
+        "model_limits": "flat-VIX Black-Scholes credit; no wings, so no max loss (max_risk 0 = unbounded)",
+    }
+
+    def live_readiness(self) -> dict:
+        """As the winged agent's bar, except the max-loss check (a naked structure has no defined max loss)."""
+        st = self.live_stats()
+        n = st.get("n", 0)
+        ratio = (st["mean_real_credit"] / st["mean_model_credit"]
+                 if n and st.get("mean_real_credit") is not None and st.get("mean_model_credit") else None)
+        checks = {"cycles>=26": n >= 26, "real_credit>=80%_of_model": ratio is not None and ratio >= 0.8,
+                  "net>0": st.get("net", 0) > 0, "pf>=1.15": (st.get("pf") or 0) >= 1.15}
+        return {"criterion": "≥ 26 cycles; mean real credit ≥ 80 % of mean model credit; net > 0 and PF ≥ 1.15 "
+                             "(no defined max loss: unlimited-risk structure)",
+                "credit_ratio": round(ratio, 3) if ratio is not None else None, "checks": checks,
+                "ready": all(checks.values()), "never_switches_to_live": True}
+
+
+# ── two lab option rules of stratlab/options_r3.py (added 25 Nov 2026, the owner's request "add all these") ──────────
+# Both passed the lab protocol in both eras on MODELLED prices. On real NSE closes (stratlab/STRANGLE_REALPRICE.md):
+# r3_options_ic_25_10 real credit 0.802 of the model, PF 0.95 (negative); r3_options_wc_fri credit 0.657, PF 1.17
+# (positive, but below the 80 % credit bar). PAPER only, off by default, candidates: their paper fills are real quotes.
+from stratlab import options_r3 as R3  # noqa: E402
+
+R3_FINGERPRINT_FNS = (R3.R3Strategy, R3.R3Replay, R3.R3Spec, R3.vix_pct, R3.first_session_of_week,
+                      R3.last_session_of_week, R3.after_weekly_expiry, OR.Replay._manage, OR.next_expiry, OR.bs,
+                      OR.bs_delta, OR.years_between, OR.fill_price, OR._max_risk, OR.lot_size_on)
+
+
+def _r3_fingerprint(spec) -> str:
+    return fingerprint(*R3_FINGERPRINT_FNS,
+                       consts={"id": spec.id, "params": sorted(spec.params.items()), "lots": spec.lots,
+                               "LOTS": R3.LOTS["NIFTY"], "ELM_PCT": V.ELM_PCT, "OPT_FILL_MODEL": V.OPT_FILL_MODEL,
+                               "RISK_FREE": OR.RISK_FREE, "SLIP_MIN": OR.SLIP_MIN_PTS["NIFTY"],
+                               "SLIP_PCT": OR.SLIP_PCT})
+
+
+class IronCondorAgent(WingedStrangleAgent):
+    """r3_options_ic_25_10: 10:20 on the first trading day after a weekly NIFTY expiry (>= 3 trading days left), sell
+    the 0.25-delta CE / PE, buy the 0.10-delta wings, hold to expiry, 1 lot. Real-price check: negative (PF 0.95)."""
+    name = "opt_ic2510"
+    SETTING = "ic2510"                       # settings.validated_ic2510_enabled (default off)
+    LAB_ID = "r3_options_ic_25_10"
+    SPEC = R3.BY_ID["r3_options_ic_25_10"]
+    VERSION = "r3_options_ic_25_10/o1/v1"
+    LAB_FINGERPRINT = _r3_fingerprint(SPEC)
+    TAG = "VAL-IC"
+    GID_PREFIX = "IC"
+    LOTS_KEY, MARGIN_KEY, LOSS_KEY, DD_KEY = ("validated_ic2510_lots", "validated_ic2510_max_margin",
+                                              "validated_ic2510_max_loss", "validated_ic2510_dd_kill")
+    LAB_EXPECTATION = {
+        "lab_2023_26": {"n": 152, "pf_model": 1.38, "net_model": 146900},
+        "era_2016_23": {"pf": 1.36, "verdict": "OOS-CONFIRMED (model)"},
+        "real_prices": {"credit_ratio": 0.802, "net": -21960, "pf": 0.95, "trades": 142,
+                        "source": "stratlab/STRANGLE_REALPRICE.md"},
+        "model_limits": "flat-VIX Black-Scholes credit; the 0.10-delta wings are much richer in reality (skew)",
+    }
+
+
+class FridayCondorAgent(WingedStrangleAgent):
+    """r3_options_wc_fri: 15:00 on the last trading session of the week (>= 1 trading day to the nearest expiry), sell
+    the 0.16-delta CE / PE, buy +/-400 wings, hold to expiry, 1 lot. Real-price check: PF 1.17, credit 0.657."""
+    name = "opt_wcfri"
+    SETTING = "wcfri"                        # settings.validated_wcfri_enabled (default off)
+    LAB_ID = "r3_options_wc_fri"
+    SPEC = R3.BY_ID["r3_options_wc_fri"]
+    VERSION = "r3_options_wc_fri/o1/v1"
+    LAB_FINGERPRINT = _r3_fingerprint(SPEC)
+    TAG = "VAL-WCF"
+    GID_PREFIX = "WCF"
+    ENTRY_T = dtime(15, 0)
+    ENTRY_DEADLINE = dtime(15, 1)
+    LOTS_KEY, MARGIN_KEY, LOSS_KEY, DD_KEY = ("validated_wcfri_lots", "validated_wcfri_max_margin",
+                                              "validated_wcfri_max_loss", "validated_wcfri_dd_kill")
+    LAB_EXPECTATION = {
+        "lab_2023_26": {"n": 145, "pf_model": 2.10, "net_model": 222685},
+        "era_2016_23": {"pf": 1.63, "verdict": "OOS-CONFIRMED (model)"},
+        "real_prices": {"credit_ratio": 0.657, "net": 40065, "pf": 1.17, "trades": 135,
+                        "source": "stratlab/STRANGLE_REALPRICE.md"},
+        "model_limits": "flat-VIX Black-Scholes credit; the +/-400 wings are much richer in reality (skew)",
+    }

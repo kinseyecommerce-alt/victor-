@@ -22,11 +22,15 @@ API_VERSION = "2.0"
 router = APIRouter(prefix="/v2", tags=["v2"])
 
 LABELS = {"auc_fade": "Opening-auction fade", "attn_on": "Attention overnight long",
-          "vrp_winged": "NIFTY winged strangle", "pead_h60": "Post-earnings drift (60 sessions)"}
-READINESS_TARGET = {"auc_fade": 150, "attn_on": 100, "vrp_winged": 26, "pead_h60": None}
+          "vrp_winged": "NIFTY winged strangle", "pead_h60": "Post-earnings drift (60 sessions)",
+          "vrp_naked": "NIFTY naked strangle", "opt_ic2510": "NIFTY iron condor (0.25 / 0.10 delta)",
+          "opt_wcfri": "NIFTY Friday condor (15:00)"}
+READINESS_TARGET = {"auc_fade": 150, "attn_on": 100, "vrp_winged": 26, "pead_h60": None, "vrp_naked": 26,
+                    "opt_ic2510": 26, "opt_wcfri": 26}
 JOB_PREFIX = {"auc_fade": ("validated_open", "validated_auc_exit", "validated_store", "forward_"),
               "attn_on": ("validated_attn_entry", "validated_open", "validated_store"),
-              "vrp_winged": ("validated_vrp_",), "pead_h60": ("validated_pead_",)}
+              "vrp_winged": ("validated_vrp_",), "pead_h60": ("validated_pead_",), "vrp_naked": ("validated_vrp_",),
+              "opt_ic2510": ("validated_vrp_",), "opt_wcfri": ("validated_vrp_",)}
 
 
 def _agents() -> dict:

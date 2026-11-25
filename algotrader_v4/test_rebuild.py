@@ -176,7 +176,8 @@ def test_agent_enables_with_legacy_keys_load_and_survive_a_save():
     try:
         bot_state._FILE = f
         bot_state._agent_enabled.clear(); bot_state._agent_enabled.update(bot_state._load())
-        assert bot_state._agent_enabled == {"auc_fade": False, "attn_on": True, "vrp_winged": True, "pead_h60": True}
+        assert bot_state._agent_enabled == {"auc_fade": False, "attn_on": True, "vrp_winged": True, "pead_h60": True,
+                                            "vrp_naked": True, "opt_ic2510": True, "opt_wcfri": True}
         assert not bot_state.is_agent_enabled("auc_fade")
         bot_state.set_agent_enabled("vrp_winged", False)
         on_disk = json.loads(f.read_text())
@@ -980,7 +981,8 @@ def test_v2_read_endpoints_respond_and_are_json():
             assert r.status_code == 200, (path, r.status_code, r.text[:200])
             r.json()
         cards = c.get("/api/v2/strategies").json()["strategies"]
-        assert [x["name"] for x in cards] == ["auc_fade", "attn_on", "vrp_winged", "pead_h60"]
+        assert [x["name"] for x in cards] == ["auc_fade", "attn_on", "vrp_winged", "pead_h60", "vrp_naked",
+                                              "opt_ic2510", "opt_wcfri"]
         assert {x["name"]: x["status"] for x in cards} == {n: "candidate" for n in ALL_AGENTS}, \
             "one strict definition of proven (22 Nov 2026): none of the four qualifies"
         assert all(x["why_not_proven"] for x in cards)

@@ -34,6 +34,9 @@ FILES = {
     "AUC-FADE-3PCT": ("dd", "auction_final", "trades_AUC-FADE-3PCT.csv"),
     "SWING-ATTN-ON-3X": ("dd", "r2_swing_out", "trades_SWING-ATTN-ON-3X.csv"),
     "VRP-STRANGLE-016-WINGED": ("dd", "rev18", "repro", "trades", "VRP-STRANGLE-016-WINGED.csv"),
+    "VRP-STRANGLE-016-NAKED": ("dd", "rev18", "repro", "trades", "VRP-STRANGLE-016-NAKED.csv"),
+    "r3_options_ic_25_10": ("r3", "options", "full", "trades", "r3_options_ic_25_10.csv"),
+    "r3_options_wc_fri": ("r3", "options", "full", "trades", "r3_options_wc_fri.csv"),
     "EV-PEAD-LONG-H60": ("events", "run1", "trades", "ev_pead_long_h60_2023-26.csv"),
 }
 FILL_MODEL = {
@@ -43,9 +46,14 @@ FILL_MODEL = {
     "VRP-STRANGLE-016-WINGED": "legs at the 10:20 Black-Scholes credit (flat VIX) less a haircut; settlement at "
                                "intrinsic from the expiry day's 15:00-15:29 mean close",
     "EV-PEAD-LONG-H60": "entry = next session's 09:15 open; exit = stop / 60-session time exit at the close",
+    "VRP-STRANGLE-016-NAKED": "legs at the 10:20 Black-Scholes credit (flat VIX) less a haircut; settlement at "
+                              "intrinsic from the expiry day's 15:00-15:29 mean close (no wings: unlimited risk)",
+    "r3_options_ic_25_10": "legs at the 10:20 Black-Scholes credit (flat VIX) less a haircut; settlement at intrinsic",
+    "r3_options_wc_fri": "legs at the 15:00 Black-Scholes credit (flat VIX) less a haircut; settlement at intrinsic",
 }
 REF_SLIPPAGE_BPS = {"AUC-FADE-2PCT": 2.1, "AUC-FADE-3PCT": 2.1, "SWING-ATTN-ON-3X": 2.0,
-                    "VRP-STRANGLE-016-WINGED": None, "EV-PEAD-LONG-H60": 2.0}
+                    "VRP-STRANGLE-016-WINGED": None, "EV-PEAD-LONG-H60": 2.0, "VRP-STRANGLE-016-NAKED": None,
+                    "r3_options_ic_25_10": None, "r3_options_wc_fri": None}
 
 
 def _pct(a, ps=(5, 50, 95, 99)):

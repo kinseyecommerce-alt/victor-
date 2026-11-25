@@ -154,6 +154,31 @@ Strategies that passed stratlab's pre-registered protocol run as PAPER-only, sch
 - `test_pipeline.py`'s lab-parity test runs all 726 sessions: 152/152 lab trades matched (legs, fills, credit,
   max risk, margin, VIX, settlement), no extra live plans.
 
+#### Candidate agent: VRP-STRANGLE-016-NAKED (`agents/validated_strangle.NakedStrangleAgent`, key `vrp_naked`)
+
+- Added 25 Nov 2026: the winged agent's code with the lab's NAKED spec (no wings, 1 lot; class attributes `SPEC`,
+  `TAG` "VAL-VRN", `GID_PREFIX` "VRN", its own settings `VALIDATED_STRANGLE_NAKED_ENABLED` (default false),
+  `VALIDATED_VRP_NAKED_LOTS` / `_MAX_MARGIN` / `_MAX_LOSS` / `_DD_KILL`). `plan_strangle` / `cycle_status` take
+  `spec=` (default: the winged spec, so the winged agent is unchanged). Lab parity `t_vn_lab_parity`: 152/152.
+- Why: of the lab's option rules proven in both eras it is the only one still positive on real NSE option closes
+  (`stratlab/STRANGLE_REALPRICE.md`: real credit 0.898 of the model, PF 1.22); the winged strangle (0.755, PF 0.88)
+  and r3_options_ic_25_10 (PF 0.95) are negative, r3_options_wc_fri positive (PF 1.17) but credit 0.657 < 0.80.
+- UNLIMITED RISK (max_risk 0 = unbounded): its readiness has no max-loss check; the drawdown kill and the margin cap
+  are its limits. A candidate (`WHY_NOT_PROVEN`), PAPER only. Every other lab strategy runs in the forward lab.
+
+#### Candidate agents: options_r3 rules `opt_ic2510` (r3_options_ic_25_10) and `opt_wcfri` (r3_options_wc_fri)
+
+- Added 25 Nov 2026 at the owner's request ("add all these"): `IronCondorAgent` / `FridayCondorAgent` in
+  `agents/validated_strangle.py`, the same agent code with `stratlab.options_r3.BY_ID[...]` specs (`cycle_status` falls
+  back to `R3Strategy._scheduled`, `plan_strangle` passes `entry_net` to `R3Spec.margin`, the agent's `ENTRY_T` is
+  per class: the Friday condor decides at 15:00 on the last session of the week, its own job
+  `validated_vrp_wcfri_entry`). Settings `VALIDATED_IC2510_*` / `VALIDATED_WCFRI_*` (enabled default false, 1 lot).
+- Lab parity: ic_25_10 152/152; wc_fri 145/145 plus 9 plans on the expiry day of the lab's still-open structure,
+  which the agent skips (`position_open`: one structure at a time, as the lab).
+- Real-price check (`stratlab/STRANGLE_REALPRICE.md`): ic_25_10 negative (credit 0.802, PF 0.95); wc_fri positive
+  (PF 1.17) with credit 0.657 < 0.80. Candidates, PAPER only; `platform_scheduler.OPTION_AGENTS` lists the family
+  (settlement and marks run for every member).
+
 ### Agent Enable/Disable
 
 Per-agent toggles live in `bot_state.py` (persisted `agent_enables.json`; keys of removed agents are kept on disk and

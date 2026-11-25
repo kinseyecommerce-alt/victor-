@@ -581,9 +581,11 @@ class ShadowRegistry:
 #     CNC costs, DISCOVERY + FINAL) — a CANDIDATE, enrolled only once VALIDATED_PEAD_ENABLED=true (agent.shadow_enrol)
 BACKTEST_MAX_DD = {"AUC-FADE-3PCT": 24605.28, "AUC-FADE-2PCT": 29535.33, "AUC-FADE-1TO3PCT": None,
                    "SWING-ATTN-ON-3X": 12951.31, "VRP-STRANGLE-016-WINGED": 129760.0,
+                   "VRP-STRANGLE-016-NAKED": 82815.28, "r3_options_ic_25_10": None, "r3_options_wc_fri": None,
                    "EV-PEAD-LONG-H60": 1118594.0}
 # calendar days, weekends/holidays covered (pead_h60: 60 sessions ≈ 84 days + holidays)
-AGENT_MAX_HOLD_DAYS = {"auc_fade": 0, "attn_on": 5, "vrp_winged": 10, "pead_h60": 95}
+AGENT_MAX_HOLD_DAYS = {"auc_fade": 0, "attn_on": 5, "vrp_winged": 10, "pead_h60": 95, "vrp_naked": 10, "opt_ic2510": 10,
+                       "opt_wcfri": 10}
 
 
 def forward_test_specs() -> list[ShadowSpec]:
