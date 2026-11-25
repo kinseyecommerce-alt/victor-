@@ -1,5 +1,5 @@
 {
- "built": "2026-11-15",
+ "built": "2026-11-25",
  "calendar": {
   "first": 20231110,
   "last": 20261109,
@@ -173,6 +173,44 @@
    "trades_per_session": 1.0661,
    "win_pct": 54.1,
    "worst_day": -6285.91
+  },
+  "VRP-STRANGLE-016-NAKED": {
+   "block_dd": {
+    "p5": 46525.296,
+    "p50": 95691.42,
+    "p95": 197865.18600000002,
+    "p99": 266136.58970000007
+   },
+   "block_total": {
+    "p5": -44892.485000000015,
+    "p50": 180498.34,
+    "p95": 379887.117,
+    "p99": 436482.62879999995
+   },
+   "boot_dd": {
+    "p5": 44555.337999999974,
+    "p50": 82904.34,
+    "p95": 168782.427,
+    "p99": 218512.1258
+   },
+   "daily_mean": 236.49,
+   "daily_std": 4215.64,
+   "fill_model": "legs at the 10:20 Black-Scholes credit (flat VIX) less a haircut; settlement at intrinsic from the expiry day's 15:00-15:29 mean close (no wings: unlimited risk)",
+   "mean20_band": {
+    "p5": -2663.63,
+    "p50": 1323.17,
+    "p95": 4079.45,
+    "p99": 4781.48
+   },
+   "net_mean": 1129.56,
+   "net_std": 9182.14,
+   "net_total": 171693.4,
+   "observed_max_dd": 82815.28,
+   "ref_slippage_bps": null,
+   "trades": 152,
+   "trades_per_session": 0.2094,
+   "win_pct": 80.9,
+   "worst_day": -43208.8
   },
   "VRP-STRANGLE-016-WINGED": {
    "block_dd": {

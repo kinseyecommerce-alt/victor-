@@ -362,14 +362,17 @@ class PlatformScheduler:
     async def _validated_vrp_entry(self) -> None:
         if _trading_today():
             await self._validated_call("vrp_winged", "decide_and_enter")
+            await self._validated_call("vrp_naked", "decide_and_enter")
 
     async def _validated_vrp_settle(self) -> None:
         # not gated on is_trading_day: an expiry's settlement is booked whenever its closes are available
         await self._validated_call("vrp_winged", "settle_due")
+        await self._validated_call("vrp_naked", "settle_due")
 
     async def _validated_vrp_mark(self) -> None:
         if _trading_today():
             await self._validated_call("vrp_winged", "mark")
+            await self._validated_call("vrp_naked", "mark")
 
     def _pead_wanted(self) -> bool:
         a = self._validated_agents().get("pead_h60")

@@ -11,7 +11,8 @@ from datetime import datetime, date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import options_replay as OR
 S = sys.argv[1] if len(sys.argv) > 1 else "."   # the lab scratch dir (dd/vrp/final_run, nse*/fo_parts)
-trades = list(csv.DictReader(open(f"{S}/dd/vrp/final_run/trades/VRP-STRANGLE-016-WINGED.csv")))
+TRADES = sys.argv[2] if len(sys.argv) > 2 else f"{S}/dd/vrp/final_run/trades/VRP-STRANGLE-016-WINGED.csv"
+trades = list(csv.DictReader(open(TRADES)))
 def day_file(d):
     for root in ("nse", "nse_old_view", "nse_old"):
         p = f"{S}/{root}/fo_parts/optidx/{d}.csv.gz"

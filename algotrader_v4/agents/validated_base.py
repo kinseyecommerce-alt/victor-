@@ -94,7 +94,8 @@ def serialized(fn):
 
 
 # ── order helpers (PAPER) ─────────────────────────────────────────────────────
-_TAG_AGENT = (("VAL-AUC", "auc_fade"), ("VAL-ATTN", "attn_on"), ("VAL-VRP", "vrp_winged"), ("VAL-PEAD", "pead_h60"))
+_TAG_AGENT = (("VAL-AUC", "auc_fade"), ("VAL-ATTN", "attn_on"), ("VAL-VRP", "vrp_winged"), ("VAL-PEAD", "pead_h60"),
+              ("VAL-VRN", "vrp_naked"))
 _NO_STATE_CHECK = ("SETTLEMENT", "RECONCILE", "CORPORATE_ACTION")   # book-keeping fills, not trading decisions
 
 

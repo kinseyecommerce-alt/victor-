@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     validated_vrp_max_margin: float = 250_000.0
     validated_vrp_max_loss: float = 75_000.0
     validated_vrp_dd_kill: float = 195_000.0
+    # VRP-STRANGLE-016-NAKED (agents/validated_strangle.NakedStrangleAgent): off by default, 1 lot (the tested size)
+    validated_strangle_naked_enabled: bool = False
+    validated_vrp_naked_lots: int = 1
+    validated_vrp_naked_max_margin: float = 300_000.0   # 12 % of spot notional: ~Rs 2.0 L for 65 units at 26,000
+    validated_vrp_naked_max_loss: float = 1e12          # the lab's max_risk is 0 (unbounded); the cap is the DD kill
+    validated_vrp_naked_dd_kill: float = 125_000.0      # 1.5 x the lab's worst FINAL drawdown (82,815)
     # EV-PEAD-LONG-H60 candidate (agents/validated_pead.py): PAPER only, OFF by default (no job is scheduled)
     validated_pead_enabled: bool = False
     validated_pead_max_positions: int = 100

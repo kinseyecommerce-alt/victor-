@@ -42,6 +42,7 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "attn_on":  "ALGO-ATTN-008",
     "vrp_winged": "ALGO-VRP-009",
     "pead_h60": "ALGO-PEAD-010",
+    "vrp_naked": "ALGO-VRN-011",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
@@ -79,6 +80,17 @@ _STRATEGY_DISCLOSURES: dict[str, dict] = {
         "holding_period": "Entry day to the weekly expiry (settled at intrinsic)",
         "risk_controls": "Defined risk (wings); no stop / target (none tested); per-agent drawdown kill and risk cap",
         "parameters": {"short_delta": 0.16, "wing_pts": 400, "lots": 2, "min_days_left": 3, "entry": "10:20"},
+    },
+    "vrp_naked": {
+        "name": "NIFTY weekly naked short strangle (VRP-STRANGLE-016-NAKED, lab candidate; PAPER only)",
+        "description": ("As the winged strangle without the wings: 10:20 on the first trading day after each weekly "
+                        "NIFTY expiry, sell the CE and PE closest to 0.16 delta, hold to expiry, settle at intrinsic "
+                        "(stratlab/options_vrp.py)"),
+        "instruments": "NFO NIFTY weekly options (NRML; PAPER only)",
+        "order_types": ["LIMIT"],
+        "holding_period": "Entry day to the weekly expiry (settled at intrinsic)",
+        "risk_controls": "UNLIMITED RISK (no wings); no stop / target (none tested); drawdown kill and margin cap",
+        "parameters": {"short_delta": 0.16, "lots": 1, "min_days_left": 3, "entry": "10:20"},
     },
     "attn_on": {
         "name": "Attention overnight long (SWING-ATTN-ON-3X, lab-validated)",

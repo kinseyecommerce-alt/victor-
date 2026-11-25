@@ -159,6 +159,7 @@ class AgentEnablesRequest(BaseModel):
     auc_fade: bool | None = None
     attn_on: bool | None = None
     vrp_winged: bool | None = None
+    vrp_naked: bool | None = None     # VALIDATED_STRANGLE_NAKED_ENABLED stays the master flag
     pead_h60: bool | None = None      # VALIDATED_PEAD_ENABLED stays the master flag
 
 

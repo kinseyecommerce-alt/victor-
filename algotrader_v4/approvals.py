@@ -32,6 +32,7 @@ from loguru import logger
 from ist_clock import now_ist
 
 DEADLINES = {"auc_fade": dtime(9, 16), "pead_h60": dtime(9, 16), "vrp_winged": dtime(10, 21),
+             "vrp_naked": dtime(10, 21),
              "attn_on": dtime(15, 24)}
 DEFAULT_DEADLINE = dtime(15, 30)
 _lock = threading.Lock()
