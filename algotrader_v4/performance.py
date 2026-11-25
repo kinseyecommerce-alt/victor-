@@ -39,6 +39,8 @@ STRATEGY_LABELS = {
     "attn_on": "Attention overnight (validated)",
     "vrp_winged": "NIFTY winged strangle (validated)",
     "vrp_naked": "NIFTY naked strangle (candidate)",
+    "opt_ic2510": "NIFTY iron condor 0.25/0.10 (candidate)",
+    "opt_wcfri": "NIFTY Friday condor (candidate)",
     "pead_h60": "Post-earnings drift 60d (candidate)",
 }
 

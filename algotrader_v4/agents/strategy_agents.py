@@ -17,7 +17,8 @@ from ist_clock import now_ist  # noqa: F401  (module-level clock some tests patc
 from agents.base_agent import BaseAgent
 from agents.validated_auction import AuctionFadeAgent
 from agents.validated_attention import AttentionOvernightAgent
-from agents.validated_strangle import WingedStrangleAgent, NakedStrangleAgent
+from agents.validated_strangle import (WingedStrangleAgent, NakedStrangleAgent, IronCondorAgent,
+                                      FridayCondorAgent)
 from agents.validated_pead import PeadCandidateAgent
 
 ALL_AGENTS: dict[str, BaseAgent] = {
@@ -26,6 +27,8 @@ ALL_AGENTS: dict[str, BaseAgent] = {
     "vrp_winged": WingedStrangleAgent(),
     "pead_h60": PeadCandidateAgent(),
     "vrp_naked": NakedStrangleAgent(),       # VALIDATED_STRANGLE_NAKED_ENABLED (default off)
+    "opt_ic2510": IronCondorAgent(),         # VALIDATED_IC2510_ENABLED (default off)
+    "opt_wcfri": FridayCondorAgent(),        # VALIDATED_WCFRI_ENABLED (default off)
 }
 
 # ONE definition of "proven" (22 Nov 2026), used by the app, the API and the dashboard. A strategy is proven only if
@@ -36,7 +39,8 @@ ALL_AGENTS: dict[str, BaseAgent] = {
 # Everything else is a candidate: paper only. Before 22 Nov "proven" meant "passed the pre-registered protocol in
 # both eras", which marked auc_fade and attn_on proven; the lab README and the pinned forward-lab rule keep their own
 # older wording (pinned files are never rewritten).
-PROVEN = {"auc_fade": False, "attn_on": False, "vrp_winged": False, "pead_h60": False, "vrp_naked": False}
+PROVEN = {"auc_fade": False, "attn_on": False, "vrp_winged": False, "pead_h60": False, "vrp_naked": False,
+          "opt_ic2510": False, "opt_wcfri": False}
 WHY_NOT_PROVEN = {
     "auc_fade": "signal and entry use the final 09:15 auction price, which is not known while pre-open orders can "
                 "be placed (not executable as tested); DSR below 0.95 at the current N",
@@ -48,4 +52,8 @@ WHY_NOT_PROVEN = {
     "pead_h60": "DSR 0.51 at the fair trial count N = 9 (needs 0.95); excess over NIFTY since 2018 not significant",
     "vrp_naked": "positive on real NSE closes (credit 0.898 of the model, PF 1.22) but the luck test at the current N "
                  "is not met (2023-26 t of the model result 1.49), and it carries unlimited risk (no wings)",
+    "opt_ic2510": "proven only on modelled prices; on real NSE closes the credit is 0.802 of the model and the "
+                  "2023-26 result turns negative (PF 0.95)",
+    "opt_wcfri": "proven only on modelled prices; on real NSE closes it stays positive (PF 1.17) but keeps only 0.657 "
+                 "of the modelled credit (bar 0.80); luck test at the current N not met",
 }

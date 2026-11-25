@@ -103,6 +103,17 @@ class Settings(BaseSettings):
     validated_vrp_naked_max_margin: float = 300_000.0   # 12 % of spot notional: ~Rs 2.0 L for 65 units at 26,000
     validated_vrp_naked_max_loss: float = 1e12          # the lab's max_risk is 0 (unbounded); the cap is the DD kill
     validated_vrp_naked_dd_kill: float = 125_000.0      # 1.5 x the lab's worst FINAL drawdown (82,815)
+    # options_r3 rules as paper agents (agents/validated_strangle.IronCondorAgent / FridayCondorAgent), off by default
+    validated_ic2510_enabled: bool = False
+    validated_ic2510_lots: int = 1
+    validated_ic2510_max_margin: float = 100_000.0
+    validated_ic2510_max_loss: float = 40_000.0
+    validated_ic2510_dd_kill: float = 60_000.0
+    validated_wcfri_enabled: bool = False
+    validated_wcfri_lots: int = 1
+    validated_wcfri_max_margin: float = 100_000.0
+    validated_wcfri_max_loss: float = 40_000.0
+    validated_wcfri_dd_kill: float = 60_000.0
     # EV-PEAD-LONG-H60 candidate (agents/validated_pead.py): PAPER only, OFF by default (no job is scheduled)
     validated_pead_enabled: bool = False
     validated_pead_max_positions: int = 100

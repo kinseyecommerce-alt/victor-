@@ -4888,6 +4888,206 @@ def t_vs_drawdown_kill_and_no_telegram():
         assert "VRP-20261111" in a.marks or a.structures["VRP-20261111"]["status"] == "settled"
 
 
+from stratlab import options_r3 as _R3_vs
+
+
+def t_vic_lab_parity():
+    """r3_options_ic_25_10 as the paper agent opt_ic2510 (added 25 Nov 2026): every session of the 3-year NIFTY data through the
+    live decision code with the lab spec, every lab trade's legs, fills, credit, max risk, margin and settlement
+    compared with r3/options/full/trades/r3_options_ic_25_10.csv."""
+    import csv as _csv
+    import validated_parity as _VP
+    rel = "../r3/options/full/trades/r3_options_ic_25_10.csv"
+    if not (_os.path.exists(_os.path.join(_VP.PARITY_BARS, "_NIFTY50_min.json"))
+            and _os.path.exists(_os.path.join(_VP.PARITY_LAB, rel))):
+        print("      SKIP (no lab data)")
+        return
+    bars, vix = _V_vs.load(_VP.PARITY_BARS)
+    lab = {int(r["date"]): r for r in _csv.DictReader(open(_os.path.join(_VP.PARITY_LAB, rel)))}
+    by_day = {}
+    for b in bars:
+        by_day.setdefault(b[0].date(), []).append(b)
+    sessions = sorted(by_day)
+    is_td = _OR_vs.make_trading_day_fn(sessions)
+    tz = _IST_pb
+    kite_min = lambda d: [{"date": b[0].replace(tzinfo=tz), "open": b[1], "high": b[2], "low": b[3], "close": b[4],
+                           "volume": 0} for b in by_day.get(d, [])]
+    kite_vix = [{"date": datetime.combine(d, time(0, 0)).replace(tzinfo=tz), "open": c, "high": c, "low": c,
+                 "close": c, "volume": 0} for d, c in sorted(vix.items())]
+
+    def hist(token, frm, to, interval="day", **k):
+        if interval == "minute":
+            return kite_min(frm.date())
+        return [r for r in kite_vix if frm.date() <= r["date"].date() <= to.date()]
+    plans, reasons, off_1020 = {}, {}, []
+    with _patch.object(_te_kite_client, "historical_data", side_effect=hist), \
+         _patch.object(_VS, "_token", side_effect=lambda s, f: f):
+        for d in sessions:
+            bar = next((b for b in by_day[d] if b[0].time() >= time(10, 20)), None)
+            if bar is None:
+                reasons[d] = "no_bar"
+                continue
+            vx = _VS.vix_prev_close_hist(d)                        # live fallback path: last day candle < d
+            assert vx == (vix[max(k for k in vix if k < d)] if any(k < d for k in vix) else None)
+            p, why = _VS.plan_strangle(bar[0], bar[1], vx, is_td, 1, spec=_R3_vs.BY_ID["r3_options_ic_25_10"])
+            live_p, _ = _VS.plan_strangle(datetime.combine(d, time(10, 20)), bar[1], vx, is_td, 1, spec=_R3_vs.BY_ID["r3_options_ic_25_10"])
+            k = int(d.strftime("%Y%m%d"))
+            if p is not None:
+                plans[k] = p
+                if bar[0].time() != time(10, 20):
+                    off_1020.append(k)
+                elif [x[:3] for x in live_p.legs] != [x[:3] for x in p.legs]:
+                    raise AssertionError(f"{k}: the scheduled-instant plan differs from the bar-time plan")
+            else:
+                reasons[k] = why
+            if not why.startswith("no_data"):
+                cs = _VS.cycle_status(bar[0], is_td, spec=_R3_vs.BY_ID["r3_options_ic_25_10"])
+                assert (cs[0] is not None) == (p is not None) and (p is not None or cs[1] == why), (k, why, cs)
+        matched, mism = 0, []
+        for k, r in sorted(lab.items()):
+            p = plans.get(k)
+            if p is None:
+                mism.append((k, "no live plan", reasons.get(k)))
+                continue
+            legs = [x.split() for x in r["legs"].split(" | ")]
+            want = [(l[1][-2:], float(l[1][:-2]), 1 if l[0] == "B" else -1) for l in legs]
+            errs = []
+            if [(o, kk, s) for o, kk, s, _ in p.legs] != want:
+                errs.append("legs")
+            if p.expiry.isoformat() != r["expiry"] or p.qty != int(r["qty"]) or p.lot != int(r["lot"]):
+                errs.append("expiry/qty")
+            for (o, kk, s, m), l in zip(p.legs, legs):
+                e = float(l[2].split("->")[0])
+                if abs(_OR_vs.fill_price(m, s, "NIFTY") - e) > 0.006:        # model price before the haircut
+                    errs.append(f"fill {o}{kk}")
+            if abs(p.lab_credit - float(r["credit_pts"])) > 0.006 or abs(p.max_risk - float(r["max_risk"])) > 0.02 \
+                    or abs(p.margin_est - float(r["margin"])) > 0.02 or abs(p.sigma * 100 - float(r["vix"])) > 0.006:
+                errs.append("credit/risk/margin/vix")
+            exp = date.fromisoformat(r["expiry"])
+            S, iv = _VS.settle_strangle(p.legs, _VS.expiry_closes(exp))
+            if abs(S - float(r["spot_out"])) > 0.006 or any(abs(v - float(l[2].split("->")[1])) > 0.006
+                                                            for v, l in zip(iv, legs)):
+                errs.append("settlement")
+            if errs:
+                mism.append((k, errs, None))
+            else:
+                matched += 1
+    extra = sorted(set(plans) - set(lab))
+    from collections import Counter as _Cn
+    rc = _Cn(reasons.values())
+    first_short = min((k for k, v in reasons.items() if v == "short_week"), default=None)
+    print(f"      r3_options_ic_25_10 parity: {len(sessions)} sessions, {len(plans)} live plans, lab trades matched {matched}/{len(lab)}; "
+          f"live-only plans {extra}; no-plan reasons {dict(rc)}; first short week {first_short}; "
+          f"cycle days whose 10:20 bar is missing (lab decides on the next bar) {off_1020}")
+    assert not mism, mism[:5]
+    assert matched == len(lab) == 152 and not extra
+    from agents.strategy_agents import ALL_AGENTS as _AA
+    a = _AA["opt_ic2510"]
+    assert a.SPEC is _R3_vs.BY_ID["r3_options_ic_25_10"] and a.LAB_ID == "r3_options_ic_25_10" and a.ENTRY_T == time(10, 20)
+    assert a.enabled_by_setting() is False, "off by default"
+
+
+def t_vwf_lab_parity():
+    """r3_options_wc_fri as the paper agent opt_wcfri (added 25 Nov 2026): every session of the 3-year NIFTY data through the
+    live decision code with the lab spec, every lab trade's legs, fills, credit, max risk, margin and settlement
+    compared with r3/options/full/trades/r3_options_wc_fri.csv."""
+    import csv as _csv
+    import validated_parity as _VP
+    rel = "../r3/options/full/trades/r3_options_wc_fri.csv"
+    if not (_os.path.exists(_os.path.join(_VP.PARITY_BARS, "_NIFTY50_min.json"))
+            and _os.path.exists(_os.path.join(_VP.PARITY_LAB, rel))):
+        print("      SKIP (no lab data)")
+        return
+    bars, vix = _V_vs.load(_VP.PARITY_BARS)
+    lab = {int(r["date"]): r for r in _csv.DictReader(open(_os.path.join(_VP.PARITY_LAB, rel)))}
+    by_day = {}
+    for b in bars:
+        by_day.setdefault(b[0].date(), []).append(b)
+    sessions = sorted(by_day)
+    is_td = _OR_vs.make_trading_day_fn(sessions)
+    tz = _IST_pb
+    kite_min = lambda d: [{"date": b[0].replace(tzinfo=tz), "open": b[1], "high": b[2], "low": b[3], "close": b[4],
+                           "volume": 0} for b in by_day.get(d, [])]
+    kite_vix = [{"date": datetime.combine(d, time(0, 0)).replace(tzinfo=tz), "open": c, "high": c, "low": c,
+                 "close": c, "volume": 0} for d, c in sorted(vix.items())]
+
+    def hist(token, frm, to, interval="day", **k):
+        if interval == "minute":
+            return kite_min(frm.date())
+        return [r for r in kite_vix if frm.date() <= r["date"].date() <= to.date()]
+    plans, reasons, off_1020 = {}, {}, []
+    with _patch.object(_te_kite_client, "historical_data", side_effect=hist), \
+         _patch.object(_VS, "_token", side_effect=lambda s, f: f):
+        for d in sessions:
+            bar = next((b for b in by_day[d] if b[0].time() >= time(15, 0)), None)
+            if bar is None:
+                reasons[d] = "no_bar"
+                continue
+            vx = _VS.vix_prev_close_hist(d)                        # live fallback path: last day candle < d
+            assert vx == (vix[max(k for k in vix if k < d)] if any(k < d for k in vix) else None)
+            p, why = _VS.plan_strangle(bar[0], bar[1], vx, is_td, 1, spec=_R3_vs.BY_ID["r3_options_wc_fri"])
+            live_p, _ = _VS.plan_strangle(datetime.combine(d, time(15, 0)), bar[1], vx, is_td, 1, spec=_R3_vs.BY_ID["r3_options_wc_fri"])
+            k = int(d.strftime("%Y%m%d"))
+            if p is not None:
+                plans[k] = p
+                if bar[0].time() != time(15, 0):
+                    off_1020.append(k)
+                elif [x[:3] for x in live_p.legs] != [x[:3] for x in p.legs]:
+                    raise AssertionError(f"{k}: the scheduled-instant plan differs from the bar-time plan")
+            else:
+                reasons[k] = why
+            if not why.startswith("no_data"):
+                cs = _VS.cycle_status(bar[0], is_td, spec=_R3_vs.BY_ID["r3_options_wc_fri"])
+                assert (cs[0] is not None) == (p is not None) and (p is not None or cs[1] == why), (k, why, cs)
+        matched, mism = 0, []
+        for k, r in sorted(lab.items()):
+            p = plans.get(k)
+            if p is None:
+                mism.append((k, "no live plan", reasons.get(k)))
+                continue
+            legs = [x.split() for x in r["legs"].split(" | ")]
+            want = [(l[1][-2:], float(l[1][:-2]), 1 if l[0] == "B" else -1) for l in legs]
+            errs = []
+            if [(o, kk, s) for o, kk, s, _ in p.legs] != want:
+                errs.append("legs")
+            if p.expiry.isoformat() != r["expiry"] or p.qty != int(r["qty"]) or p.lot != int(r["lot"]):
+                errs.append("expiry/qty")
+            for (o, kk, s, m), l in zip(p.legs, legs):
+                e = float(l[2].split("->")[0])
+                if abs(_OR_vs.fill_price(m, s, "NIFTY") - e) > 0.006:        # model price before the haircut
+                    errs.append(f"fill {o}{kk}")
+            if abs(p.lab_credit - float(r["credit_pts"])) > 0.006 or abs(p.max_risk - float(r["max_risk"])) > 0.02 \
+                    or abs(p.margin_est - float(r["margin"])) > 0.02 or abs(p.sigma * 100 - float(r["vix"])) > 0.006:
+                errs.append("credit/risk/margin/vix")
+            exp = date.fromisoformat(r["expiry"])
+            S, iv = _VS.settle_strangle(p.legs, _VS.expiry_closes(exp))
+            if abs(S - float(r["spot_out"])) > 0.006 or any(abs(v - float(l[2].split("->")[1])) > 0.006
+                                                            for v, l in zip(iv, legs)):
+                errs.append("settlement")
+            if errs:
+                mism.append((k, errs, None))
+            else:
+                matched += 1
+    extra = sorted(set(plans) - set(lab))
+    from collections import Counter as _Cn
+    rc = _Cn(reasons.values())
+    first_short = min((k for k, v in reasons.items() if v == "short_week"), default=None)
+    print(f"      r3_options_wc_fri parity: {len(sessions)} sessions, {len(plans)} live plans, lab trades matched {matched}/{len(lab)}; "
+          f"live-only plans {extra}; no-plan reasons {dict(rc)}; first short week {first_short}; "
+          f"cycle days whose 10:20 bar is missing (lab decides on the next bar) {off_1020}")
+    assert not mism, mism[:5]
+    assert matched == len(lab) == 145
+    # live-only plans: the last session of the week was the expiry day of the lab's still-open structure (Friday a
+    # holiday or missing); the lab holds one structure at a time, and so does the agent (decide_and_enter skips
+    # "position_open" while a structure's expiry >= today), so these never become orders
+    lab_exps = {int(r["expiry"].replace("-", "")) for r in lab.values()}
+    assert len(extra) == 9 and all(k in lab_exps for k in extra), extra
+    from agents.strategy_agents import ALL_AGENTS as _AA
+    a = _AA["opt_wcfri"]
+    assert a.SPEC is _R3_vs.BY_ID["r3_options_wc_fri"] and a.LAB_ID == "r3_options_wc_fri" and a.ENTRY_T == time(15, 0)
+    assert a.enabled_by_setting() is False, "off by default"
+
+
 def t_vn_lab_parity():
     """NAKED twin of t_vs_lab_parity (added 25 Nov 2026): the same live decision code with the lab's NAKED spec,
     1 lot, against dd/vrp/final_run/trades/VRP-STRANGLE-016-NAKED.csv. Acceptance gate: every session of the lab's 3-year NIFTY data through the live decision code
@@ -5121,6 +5321,8 @@ run("strangle: LIVE refused (no orders, no settlement fills); kill switch still 
 run("strangle: drawdown kill (scales with lots); scheduler jobs never send Telegram", t_vs_drawdown_kill_and_no_telegram)
 run("strangle LAB PARITY: 3 years of sessions through the live decision + settlement code", t_vs_lab_parity)
 run("strangle NAKED: lab parity on the 3-year NIFTY data (live plan vs every lab trade, 1 lot, no wings)", t_vn_lab_parity)
+run("options_r3 ic_25_10: lab parity on the 3-year NIFTY data (live plan vs every lab trade)", t_vic_lab_parity)
+run("options_r3 wc_fri: lab parity on the 3-year NIFTY data (15:00 plan vs every lab trade)", t_vwf_lab_parity)
 
 
 # ══════════════════════════════════════════════════════════════════════════

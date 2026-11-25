@@ -166,6 +166,19 @@ Strategies that passed stratlab's pre-registered protocol run as PAPER-only, sch
 - UNLIMITED RISK (max_risk 0 = unbounded): its readiness has no max-loss check; the drawdown kill and the margin cap
   are its limits. A candidate (`WHY_NOT_PROVEN`), PAPER only. Every other lab strategy runs in the forward lab.
 
+#### Candidate agents: options_r3 rules `opt_ic2510` (r3_options_ic_25_10) and `opt_wcfri` (r3_options_wc_fri)
+
+- Added 25 Nov 2026 at the owner's request ("add all these"): `IronCondorAgent` / `FridayCondorAgent` in
+  `agents/validated_strangle.py`, the same agent code with `stratlab.options_r3.BY_ID[...]` specs (`cycle_status` falls
+  back to `R3Strategy._scheduled`, `plan_strangle` passes `entry_net` to `R3Spec.margin`, the agent's `ENTRY_T` is
+  per class: the Friday condor decides at 15:00 on the last session of the week, its own job
+  `validated_vrp_wcfri_entry`). Settings `VALIDATED_IC2510_*` / `VALIDATED_WCFRI_*` (enabled default false, 1 lot).
+- Lab parity: ic_25_10 152/152; wc_fri 145/145 plus 9 plans on the expiry day of the lab's still-open structure,
+  which the agent skips (`position_open`: one structure at a time, as the lab).
+- Real-price check (`stratlab/STRANGLE_REALPRICE.md`): ic_25_10 negative (credit 0.802, PF 0.95); wc_fri positive
+  (PF 1.17) with credit 0.657 < 0.80. Candidates, PAPER only; `platform_scheduler.OPTION_AGENTS` lists the family
+  (settlement and marks run for every member).
+
 ### Agent Enable/Disable
 
 Per-agent toggles live in `bot_state.py` (persisted `agent_enables.json`; keys of removed agents are kept on disk and

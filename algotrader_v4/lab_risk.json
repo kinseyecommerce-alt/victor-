@@ -249,6 +249,82 @@
    "trades_per_session": 0.2094,
    "win_pct": 80.3,
    "worst_day": -51921.72
+  },
+  "r3_options_ic_25_10": {
+   "block_dd": {
+    "p5": 35370.77850000001,
+    "p50": 63187.17999999999,
+    "p95": 122440.35049999999,
+    "p99": 161278.62259999997
+   },
+   "block_total": {
+    "p5": -7608.91249999999,
+    "p50": 146610.94,
+    "p95": 291724.0505,
+    "p99": 346528.91329999996
+   },
+   "boot_dd": {
+    "p5": 35306.12150000004,
+    "p50": 62139.17,
+    "p95": 124463.43000000001,
+    "p99": 157991.01199999993
+   },
+   "daily_mean": 196.0,
+   "daily_std": 3384.91,
+   "fill_model": "legs at the 10:20 Black-Scholes credit (flat VIX) less a haircut; settlement at intrinsic",
+   "mean20_band": {
+    "p5": -1936.37,
+    "p50": 979.28,
+    "p95": 3391.39,
+    "p99": 4243.63
+   },
+   "net_mean": 936.15,
+   "net_std": 7369.82,
+   "net_total": 142295.03,
+   "observed_max_dd": 44929.73,
+   "ref_slippage_bps": null,
+   "trades": 152,
+   "trades_per_session": 0.2094,
+   "win_pct": 68.4,
+   "worst_day": -20674.47
+  },
+  "r3_options_wc_fri": {
+   "block_dd": {
+    "p5": 25774.97000000003,
+    "p50": 40767.950000000004,
+    "p95": 74070.2985,
+    "p99": 93661.69759999998
+   },
+   "block_total": {
+    "p5": 104482.51549999998,
+    "p50": 228506.72499999998,
+    "p95": 337690.764,
+    "p99": 382064.2867
+   },
+   "boot_dd": {
+    "p5": 25774.97,
+    "p50": 44110.84999999999,
+    "p95": 84087.74500000001,
+    "p99": 103113.11579999999
+   },
+   "daily_mean": 308.67,
+   "daily_std": 2749.09,
+   "fill_model": "legs at the 15:00 Black-Scholes credit (flat VIX) less a haircut; settlement at intrinsic",
+   "mean20_band": {
+    "p5": -905.56,
+    "p50": 1652.68,
+    "p95": 3457.76,
+    "p99": 3848.17
+   },
+   "net_mean": 1545.49,
+   "net_std": 6010.42,
+   "net_total": 224095.64,
+   "observed_max_dd": 43112.83,
+   "ref_slippage_bps": null,
+   "trades": 145,
+   "trades_per_session": 0.1997,
+   "win_pct": 84.1,
+   "worst_day": -25890.91
   }
  }
 }

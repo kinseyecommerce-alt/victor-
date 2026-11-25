@@ -44,6 +44,7 @@ from config import settings
 from kite_client import kite_client  # noqa: F401  (tests patch it here)
 from ist_clock import now_ist as _now_ist   # tz-aware IST: the container clock is UTC
 
+OPTION_AGENTS = ("vrp_winged", "vrp_naked", "opt_ic2510", "opt_wcfri")   # agents/validated_strangle.py family
 VALIDATED_DOW = "mon-sun"    # validated jobs gate on is_trading_day (weekend Budget sessions included)
 
 
@@ -79,6 +80,9 @@ class PlatformScheduler:
                                 id=_id, misfire_grace_time=_grace)
         self._sched.add_job(self._validated_vrp_entry, "cron", hour=10, minute=20, second=0, day_of_week=VALIDATED_DOW,
                             id="validated_vrp_entry", misfire_grace_time=50)
+        # r3_options_wc_fri decides at 15:00 on the last session of the week (its own job; off unless enabled)
+        self._sched.add_job(self._validated_wcfri_entry, "cron", hour=15, minute=0, second=0,
+                            day_of_week=VALIDATED_DOW, id="validated_vrp_wcfri_entry", misfire_grace_time=50)
         self._sched.add_job(self._validated_vrp_settle, "cron", hour="15-16", minute="1,11,21,31,41,51",
                             day_of_week=VALIDATED_DOW, id="validated_vrp_settle", misfire_grace_time=300)
         self._sched.add_job(self._validated_vrp_mark, "cron", hour="9-15", minute="*/5", day_of_week=VALIDATED_DOW,
@@ -361,18 +365,22 @@ class PlatformScheduler:
 
     async def _validated_vrp_entry(self) -> None:
         if _trading_today():
-            await self._validated_call("vrp_winged", "decide_and_enter")
-            await self._validated_call("vrp_naked", "decide_and_enter")
+            for n in ("vrp_winged", "vrp_naked", "opt_ic2510"):          # the 10:20 option structures
+                await self._validated_call(n, "decide_and_enter")
+
+    async def _validated_wcfri_entry(self) -> None:
+        if _trading_today():
+            await self._validated_call("opt_wcfri", "decide_and_enter")
 
     async def _validated_vrp_settle(self) -> None:
         # not gated on is_trading_day: an expiry's settlement is booked whenever its closes are available
-        await self._validated_call("vrp_winged", "settle_due")
-        await self._validated_call("vrp_naked", "settle_due")
+        for n in OPTION_AGENTS:
+            await self._validated_call(n, "settle_due")
 
     async def _validated_vrp_mark(self) -> None:
         if _trading_today():
-            await self._validated_call("vrp_winged", "mark")
-            await self._validated_call("vrp_naked", "mark")
+            for n in OPTION_AGENTS:
+                await self._validated_call(n, "mark")
 
     def _pead_wanted(self) -> bool:
         a = self._validated_agents().get("pead_h60")

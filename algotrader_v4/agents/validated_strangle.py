@@ -95,9 +95,16 @@ def cycle_status(now: datetime, is_td: Callable[[date], bool], spec=None) -> tup
     exp = OR.next_expiry(UNDERLYING, now.date(), is_td, skip_today=True)
     view = OR.MarketView(UNDERLYING, now, 1.0, [], [], 0.1, exp, OR.STRIKE_STEP[UNDERLYING],
                          OR.years_between(now, exp), OR.RISK_FREE, is_td)
-    if strat.in_cycle(view):
+    in_cycle = getattr(strat, "in_cycle", None) or strat._scheduled       # options_r3.R3Strategy: _scheduled
+    if in_cycle(view):
         return exp, ""
-    return None, ("short_week" if strat.skipped_short_weeks else "not_cycle_day")
+    return None, ("short_week" if _short_week(strat) else "not_cycle_day")
+
+
+def _short_week(strat) -> bool:
+    """The lab strategy skipped this cycle because too few trading days were left (ShortStrangle:
+    skipped_short_weeks; options_r3.R3Strategy: skipped)."""
+    return bool(getattr(strat, "skipped_short_weeks", None) or getattr(strat, "skipped", None))
 
 
 def plan_strangle(now: datetime, spot: float, vix_prev_close: float, is_td: Callable[[date], bool], lots: int,
@@ -117,7 +124,7 @@ def plan_strangle(now: datetime, spot: float, vix_prev_close: float, is_td: Call
                          OR.STRIKE_STEP[UNDERLYING], OR.years_between(now, exp), OR.RISK_FREE, is_td)
     specs = strat.decide(view)
     if not specs:
-        return None, ("short_week" if strat.skipped_short_weeks else "not_cycle_day")
+        return None, ("short_week" if _short_week(strat) else "not_cycle_day")
     lot = int(lot_size or OR.lot_size_on(V.LOT_SCHEDULE, now.date()))
     qty = int(lots) * lot
     legs = [(s.opt, float(s.strike), int(s.side), OR.bs(view.spot, s.strike, view.T, view.sigma, s.opt, view.r))
@@ -126,7 +133,8 @@ def plan_strangle(now: datetime, spot: float, vix_prev_close: float, is_td: Call
     lab_credit = sum(-side * px for (_, _, side, _), px in zip(legs, fills))
     lab_legs = [OR.Leg(opt, k, side, px) for (opt, k, side, _), px in zip(legs, fills)]
     max_risk = round(OR._max_risk(lab_legs, lab_credit, qty), 2)
-    margin = spec.margin(SimpleNamespace(spot_in=view.spot, qty=qty, max_risk=max_risk))
+    margin = spec.margin(SimpleNamespace(spot_in=view.spot, qty=qty, max_risk=max_risk,
+                                         entry_net=lab_credit))     # options_r3.R3Spec.margin reads entry_net
     return StranglePlan(entry=now, expiry=exp, spot=float(spot), sigma=view.sigma, lot=lot, qty=qty, legs=legs,
                         model_credit=round(sum(-side * m for _, _, side, m in legs), 4),
                         lab_credit=round(lab_credit, 4), max_risk=max_risk, margin_est=round(margin, 2),
@@ -195,6 +203,8 @@ class WingedStrangleAgent(ValidatedAgent):
     VERSION = f"{LAB_ID}/{V.OPT_FILL_MODEL}/v1"
     LAB_FINGERPRINT = LAB_FINGERPRINT
     TAG = "VAL-VRP"                         # order tag prefix (validated_base._TAG_AGENT)
+    ENTRY_T = ENTRY_T                       # the tested decision instant (the lab's bar time)
+    ENTRY_DEADLINE = ENTRY_DEADLINE         # a catch-up entry is allowed until one minute after it
     GID_PREFIX = "VRP"
     LOTS_KEY, MARGIN_KEY, LOSS_KEY, DD_KEY = ("validated_vrp_lots", "validated_vrp_max_margin",
                                               "validated_vrp_max_loss", "validated_vrp_dd_kill")
@@ -262,7 +272,7 @@ class WingedStrangleAgent(ValidatedAgent):
         await self.settle_due(now)
         await self.unwind_orphans()
         # the cycle needs no market data: on the 4 non-cycle days a week nothing else is looked at
-        sched = datetime.combine(today, ENTRY_T)             # the scheduled instant, naive IST (lab: the bar time)
+        sched = datetime.combine(today, self.ENTRY_T)        # the scheduled instant, naive IST (lab: the bar time)
         exp, why = cycle_status(sched, is_trading_day, spec=self.SPEC)
         if exp is None:
             if why == "not_cycle_day":                       # info, not a skip
@@ -270,9 +280,9 @@ class WingedStrangleAgent(ValidatedAgent):
                 out["reason"] = why
                 return out
             return skip(why)
-        if t >= ENTRY_DEADLINE:
+        if t >= self.ENTRY_DEADLINE:
             return skip("entry_window_missed")
-        if t < dtime(10, 19):
+        if t < (datetime.combine(today, self.ENTRY_T) - timedelta(minutes=1)).time():
             return skip("too_early", mark=False)
         block = self.entry_block_reason()
         if block:
@@ -374,7 +384,7 @@ class WingedStrangleAgent(ValidatedAgent):
                 return skip("partial_structure" if filled else "order_failed")
             sebi_compliance.record_order_id(self.name, c.tradingsymbol, oid)
             pt = PlannedTrade(symbol=c.tradingsymbol, side=side, qty=plan.qty, entry_ref=round(m, 4),
-                              entry_t="10:20", exit_t="expiry", key=k)
+                              entry_t=self.ENTRY_T.strftime("%H:%M"), exit_t="expiry", key=k)
             pos = self._open(pt, "NRML", "NFO", fill, oid, overnight=True, group=gid,
                              meta={"opt": opt, "strike": k, "model_px": round(m, 4),
                                    "lab_fill": round(plan.lab_fills[i], 4), "expiry": plan.expiry.isoformat(),
@@ -548,8 +558,8 @@ class WingedStrangleAgent(ValidatedAgent):
         out = {"settled": await self.settle_due(now)}
         out["unwound"] = await self.unwind_orphans()
         t = now.time().replace(tzinfo=None)
-        if is_trading_day(now.date()) and t >= ENTRY_T and not self.done_today("entry"):
-            exp, _why = cycle_status(datetime.combine(now.date(), ENTRY_T), is_trading_day)
+        if is_trading_day(now.date()) and t >= self.ENTRY_T and not self.done_today("entry"):
+            exp, _why = cycle_status(datetime.combine(now.date(), self.ENTRY_T), is_trading_day, spec=self.SPEC)
             if exp is not None:
                 out["entry"] = await self.decide_and_enter(late=True)
         return out
@@ -614,7 +624,7 @@ class WingedStrangleAgent(ValidatedAgent):
         st["limits"].update({"max_margin": float(getattr(settings, self.MARGIN_KEY)) * self._lot_scale(),
                              "max_loss": float(getattr(settings, self.LOSS_KEY)) * self._lot_scale()})
         try:
-            exp, why = cycle_status(datetime.combine(self._now().date(), ENTRY_T), is_trading_day, spec=self.SPEC)
+            exp, why = cycle_status(datetime.combine(self._now().date(), self.ENTRY_T), is_trading_day, spec=self.SPEC)
             st["today"] = {"cycle_day": exp is not None, "expiry": exp.isoformat() if exp else None, "reason": why}
         except Exception as exc:
             st["today"] = {"error": str(exc)[:120]}
@@ -687,3 +697,68 @@ class NakedStrangleAgent(WingedStrangleAgent):
                              "(no defined max loss: unlimited-risk structure)",
                 "credit_ratio": round(ratio, 3) if ratio is not None else None, "checks": checks,
                 "ready": all(checks.values()), "never_switches_to_live": True}
+
+
+# ── two lab option rules of stratlab/options_r3.py (added 25 Nov 2026, the owner's request "add all these") ──────────
+# Both passed the lab protocol in both eras on MODELLED prices. On real NSE closes (stratlab/STRANGLE_REALPRICE.md):
+# r3_options_ic_25_10 real credit 0.802 of the model, PF 0.95 (negative); r3_options_wc_fri credit 0.657, PF 1.17
+# (positive, but below the 80 % credit bar). PAPER only, off by default, candidates: their paper fills are real quotes.
+from stratlab import options_r3 as R3  # noqa: E402
+
+R3_FINGERPRINT_FNS = (R3.R3Strategy, R3.R3Replay, R3.R3Spec, R3.vix_pct, R3.first_session_of_week,
+                      R3.last_session_of_week, R3.after_weekly_expiry, OR.Replay._manage, OR.next_expiry, OR.bs,
+                      OR.bs_delta, OR.years_between, OR.fill_price, OR._max_risk, OR.lot_size_on)
+
+
+def _r3_fingerprint(spec) -> str:
+    return fingerprint(*R3_FINGERPRINT_FNS,
+                       consts={"id": spec.id, "params": sorted(spec.params.items()), "lots": spec.lots,
+                               "LOTS": R3.LOTS["NIFTY"], "ELM_PCT": V.ELM_PCT, "OPT_FILL_MODEL": V.OPT_FILL_MODEL,
+                               "RISK_FREE": OR.RISK_FREE, "SLIP_MIN": OR.SLIP_MIN_PTS["NIFTY"],
+                               "SLIP_PCT": OR.SLIP_PCT})
+
+
+class IronCondorAgent(WingedStrangleAgent):
+    """r3_options_ic_25_10: 10:20 on the first trading day after a weekly NIFTY expiry (>= 3 trading days left), sell
+    the 0.25-delta CE / PE, buy the 0.10-delta wings, hold to expiry, 1 lot. Real-price check: negative (PF 0.95)."""
+    name = "opt_ic2510"
+    SETTING = "ic2510"                       # settings.validated_ic2510_enabled (default off)
+    LAB_ID = "r3_options_ic_25_10"
+    SPEC = R3.BY_ID["r3_options_ic_25_10"]
+    VERSION = "r3_options_ic_25_10/o1/v1"
+    LAB_FINGERPRINT = _r3_fingerprint(SPEC)
+    TAG = "VAL-IC"
+    GID_PREFIX = "IC"
+    LOTS_KEY, MARGIN_KEY, LOSS_KEY, DD_KEY = ("validated_ic2510_lots", "validated_ic2510_max_margin",
+                                              "validated_ic2510_max_loss", "validated_ic2510_dd_kill")
+    LAB_EXPECTATION = {
+        "lab_2023_26": {"n": 152, "pf_model": 1.38, "net_model": 146900},
+        "era_2016_23": {"pf": 1.36, "verdict": "OOS-CONFIRMED (model)"},
+        "real_prices": {"credit_ratio": 0.802, "net": -21960, "pf": 0.95, "trades": 142,
+                        "source": "stratlab/STRANGLE_REALPRICE.md"},
+        "model_limits": "flat-VIX Black-Scholes credit; the 0.10-delta wings are much richer in reality (skew)",
+    }
+
+
+class FridayCondorAgent(WingedStrangleAgent):
+    """r3_options_wc_fri: 15:00 on the last trading session of the week (>= 1 trading day to the nearest expiry), sell
+    the 0.16-delta CE / PE, buy +/-400 wings, hold to expiry, 1 lot. Real-price check: PF 1.17, credit 0.657."""
+    name = "opt_wcfri"
+    SETTING = "wcfri"                        # settings.validated_wcfri_enabled (default off)
+    LAB_ID = "r3_options_wc_fri"
+    SPEC = R3.BY_ID["r3_options_wc_fri"]
+    VERSION = "r3_options_wc_fri/o1/v1"
+    LAB_FINGERPRINT = _r3_fingerprint(SPEC)
+    TAG = "VAL-WCF"
+    GID_PREFIX = "WCF"
+    ENTRY_T = dtime(15, 0)
+    ENTRY_DEADLINE = dtime(15, 1)
+    LOTS_KEY, MARGIN_KEY, LOSS_KEY, DD_KEY = ("validated_wcfri_lots", "validated_wcfri_max_margin",
+                                              "validated_wcfri_max_loss", "validated_wcfri_dd_kill")
+    LAB_EXPECTATION = {
+        "lab_2023_26": {"n": 145, "pf_model": 2.10, "net_model": 222685},
+        "era_2016_23": {"pf": 1.63, "verdict": "OOS-CONFIRMED (model)"},
+        "real_prices": {"credit_ratio": 0.657, "net": 40065, "pf": 1.17, "trades": 135,
+                        "source": "stratlab/STRANGLE_REALPRICE.md"},
+        "model_limits": "flat-VIX Black-Scholes credit; the +/-400 wings are much richer in reality (skew)",
+    }

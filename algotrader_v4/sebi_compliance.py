@@ -43,6 +43,8 @@ APPROVED_ALGO_IDS: dict[str, str] = {
     "vrp_winged": "ALGO-VRP-009",
     "pead_h60": "ALGO-PEAD-010",
     "vrp_naked": "ALGO-VRN-011",
+    "opt_ic2510": "ALGO-IC-012",
+    "opt_wcfri": "ALGO-WCF-013",
 }
 
 _STRATEGY_DISCLOSURES: dict[str, dict] = {
