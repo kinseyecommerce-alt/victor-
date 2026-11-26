@@ -2527,6 +2527,34 @@ def test_bg6_is_bg5_plus_new_daily_blocks():
     assert all(G.BLOCK[b].fn.startswith("be:") and G.BLOCK[b].fn[3:] in BE.EXTRA for b in G.BG6_BLOCKS)
 
 
+def test_pending_daily_entries_equal_the_engines_next_session_plan():
+    """Live support parity: the entries pending_daily computes on data cut at day D are exactly the trades the
+    engine itself plans to enter at D+1 once D+1's data exists (same symbols, same sides, same order)."""
+    E = engine()
+    picks = [("SIDEWAYS", "high52", (("x", 0.03),)), ("HIGH_VOL", "st_rev_winners", (("x", 0.08), ("mode", "winners"))),
+             ("HIGH_VOL", "vix_high_losers", ())]
+    checked = 0
+    for mt, blk, params in picks:
+        c = [x for x in G.cell_grammar("swing", mt, "bg6") if x.block == blk and x.params == params
+             and x.exit == ("hold", 5) and x.universe == "TOP500"][0]
+        days = sorted({int(t) for t in E.signals(c)["t"].tolist()})
+        for t in days[len(days) // 3::max(1, len(days) // 5)][:4]:
+            if t + 1 >= len(E.dcal):
+                continue
+            D, D1 = int(E.dcal[t]), int(E.dcal[t + 1])
+            ED = BE.Engine(SP.ServerSource(syn_root(), upto=D))
+            assert int(ED.dcal[-1]) == D
+            held = {x[1] for x in BE.run_jobs(ED, [BE.Job("k", c, None, 0, D, False)])["k"]["trades"]
+                    if x[-1] == "window_end"}
+            pend = ED.pending_daily(c, ED.signals(c), held)
+            EN = BE.Engine(SP.ServerSource(syn_root(), upto=D1))
+            got = [(x[1], int(x[3])) for x in BE.run_jobs(EN, [BE.Job("k", c, None, 0, D1, False)])["k"]["trades"]
+                   if int(x[2]) == D1]
+            assert sorted(got) == sorted((p[0], p[1]) for p in pend), (blk, D, pend, got)
+            checked += bool(pend)
+    assert checked >= 3, "the check must cover days that actually have entries"
+
+
 def test_rule_v6_pinned_and_v5_unchanged():
     r6 = B.load_rule(B.RULE_FILE_V6)
     assert r6["_sha256"] == B.RULE_SHA256_V6 == hashlib.sha256((HERE / "builder_rule_v6.json").read_bytes()).hexdigest()

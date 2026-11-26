@@ -644,6 +644,36 @@ class Engine:
             per_day[e] = per_day.get(e, 0) + 1
         return out
 
+    def pending_daily(self, c, sig, busy_syms=()) -> list:
+        """Live support (daily stock grid): the entries _plan_daily takes at the NEXT session's open for the signals
+        of the LAST session of the data - which it cannot plan itself (e = T). Same filters in the same order: the
+        signal order (t, -rank, name), point-in-time membership, F&O for futures / swing shorts, a hold >= 1 for
+        event exits, one position per symbol (busy_syms: symbols with an open trade) and MAX_PER_DAY.
+        [(symbol, side, rank)]. Unknown here (decided at the open): the open price itself and a corporate action
+        inside the holding period (the live agent's own guards)."""
+        if c.grid != "daily":
+            raise ValueError(f"pending_daily: {c.grid}")
+        Pn = self.ctx.daily
+        t_last = len(self.dcal) - 1
+        names = self.names(c)
+        busy = set(busy_syms)
+        out = []
+        for s, t, side, h, rk in zip(sig["s"].tolist(), sig["t"].tolist(), sig["side"].tolist(), sig["hold"].tolist(),
+                                     sig["rank"].tolist()):
+            if t != t_last or len(out) >= MAX_PER_DAY:
+                continue
+            sym = names[s]
+            if sym in busy or not Pn.member[s, t]:
+                continue
+            needs_fo = c.agent == "futures" or (c.agent == "swing" and side < 0)
+            if needs_fo and not Pn.fo[s, t]:
+                continue
+            if c.exit[0] == "event" and int(h) < 1:
+                continue
+            out.append((sym, int(side), float(rk)))
+            busy.add(sym)
+        return out
+
     def _plan_minute(self, c, sig, lo, hi) -> list:
         M = self.ctx.minute
         cal = self.mcal
