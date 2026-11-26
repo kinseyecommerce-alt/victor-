@@ -595,7 +595,7 @@ class Engine:
                 if x >= T or not has[s, x] or int(cal[x]) > hi or int(cal[x]) in M.special:
                     continue
                 pout, xl = M.f["o1521"][s, x], "o1521"
-            elif kind in ("time_min", "bracket", "bracket_min", "signal", "signal_min") + G.TRAIL_KINDS:
+            elif kind in ("time_min", "bracket", "bracket_min", "signal", "signal_min") + G.TRAIL_KINDS + G.ATR_KINDS:
                 walk = (ENTRY_MIN[fi], kind) + tuple(ex[1:])
             else:
                 raise ValueError(f"minute exit {ex}")
@@ -627,11 +627,25 @@ class Engine:
             for pi, sd in enumerate(parts):
                 for k, d in enumerate(sd.days.tolist()):
                     index[int(d)] = (pi, k)
+            days = sorted(index)
+            ohlc: dict = {}
             for key, _s, t, side, walk in reqs:
                 loc = index.get(int(self.mcal[t]))
                 if loc is None:
                     res[key] = None
                     continue
+                if walk[1] in G.ATR_KINDS:
+                    d0 = int(self.mcal[t])
+                    prev = [d for d in days[:int(np.searchsorted(days, d0))] if d not in M.special][-(ATR_N + 1):]
+                    for d in prev:
+                        if d not in ohlc:
+                            pp = parts[index[d][0]]
+                            a_, b_ = int(pp.starts[index[d][1]]), int(pp.ends[index[d][1]])
+                            ohlc[d] = session_hlc(pp.h[a_:b_], pp.l[a_:b_], pp.c[a_:b_])
+                    walk = atr_walk(walk, [ohlc[d] for d in prev])
+                    if walk is None:
+                        res[key] = None
+                        continue
                 sd = parts[loc[0]]
                 a, b = int(sd.starts[loc[1]]), int(sd.ends[loc[1]])
                 res[key] = walk_session(sd.t[a:b], sd.o[a:b], sd.h[a:b], sd.l[a:b], sd.c[a:b], sd.v[a:b], side, walk,
@@ -657,6 +671,36 @@ def universe_lists_of(src, M) -> dict:
 
 def _hm(m: int) -> str:
     return f"{m // 60:02d}:{m % 60:02d}"
+
+
+ATR_N = 14                                   # builder/v5: ATR(14) from the 14 sessions before the entry day
+
+
+def session_hlc(h, l, c) -> tuple:
+    """One session's (high, low, close) from its 1-minute bars."""
+    return float(np.max(h)), float(np.min(l)), float(c[-1])
+
+
+def atr_fraction(prev: list, k: float):
+    """k x ATR(14) / previous close from the sessions before the entry day [(high, low, close)], oldest first (the
+    last 15 are used: 14 true ranges); None without 15 sessions or a non-positive ATR / close."""
+    if len(prev) < ATR_N + 1:
+        return None
+    s = prev[-(ATR_N + 1):]
+    tr = [max(hh - ll, abs(hh - pc), abs(ll - pc)) for (hh, ll, _c), (_h, _l, pc) in zip(s[1:], s[:-1])]
+    atr, pc = sum(tr) / ATR_N, s[-1][2]
+    if not (atr > 0 and pc > 0):
+        return None
+    return float(k) * atr / pc
+
+
+def atr_walk(walk: tuple, prev: list):
+    """A bg5 ATR walk (entry_min, kind, k[, minutes]) as the bg4 walk it fills like, at x = atr_fraction(prev, k);
+    None when the ATR is unknown (the trade is not taken)."""
+    x = atr_fraction(prev, walk[2])
+    if x is None:
+        return None
+    return (walk[0], G.ATR_BASE[walk[1]], x) + tuple(walk[3:])
 
 
 def walk_session(tt, o, h, l, c, v, side: int, walk: tuple, day: int, index_tick: bool = False):
