@@ -80,10 +80,13 @@ RULE_FILE_V4 = HERE / "builder_rule_v4.json"
 RULE_SHA256_V4 = "385b3a15760773cb400f00d3688242a6793c3a66cf7e699ba212dec7b32cefbe"
 RULE_FILE_V5 = HERE / "builder_rule_v5.json"
 RULE_SHA256_V5 = "95598403243ec3688f8192c60c981d2a5bfd13828503ee9a780751bbf2d6bd6a"
+# builder/v6 (26 Nov 2026): bg5 + 8 price-history daily stock blocks (grammar bg6); gates, costs, DSR as v5
+RULE_FILE_V6 = HERE / "builder_rule_v6.json"
+RULE_SHA256_V6 = "049f98a3e65c10e24edde9179dbac9b730f229d7d9c2a013ddb294ee4069e2c2"
 # the pinned versions in order: a registry may only move forward along this chain (record "rule_upgrade")
 RULES = (("builder/v1", RULE_FILE, RULE_SHA256), ("builder/v2", RULE_FILE_V2, RULE_SHA256_V2),
          ("builder/v3", RULE_FILE_V3, RULE_SHA256_V3), ("builder/v4", RULE_FILE_V4, RULE_SHA256_V4),
-         ("builder/v5", RULE_FILE_V5, RULE_SHA256_V5))
+         ("builder/v5", RULE_FILE_V5, RULE_SHA256_V5), ("builder/v6", RULE_FILE_V6, RULE_SHA256_V6))
 CURRENT_RULE_FILE, CURRENT_RULE_SHA256 = RULES[-1][1], RULES[-1][2]
 DEFAULT_MAX_MB = 400.0
 MAX_ATTEMPTS = 3            # failed evaluation runs of one batch before it is recorded `failed` (bookkeeping, not a gate)
