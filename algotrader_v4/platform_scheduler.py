@@ -80,6 +80,11 @@ class PlatformScheduler:
                                 id=_id, misfire_grace_time=_grace)
         self._sched.add_job(self._validated_vrp_entry, "cron", hour=10, minute=20, second=0, day_of_week=VALIDATED_DOW,
                             id="validated_vrp_entry", misfire_grace_time=50)
+        # the builder's promoted strategies: entry 09:15:05 (in _validated_open), exits on their own clock
+        self._sched.add_job(self._validated_bld_exit, "cron", hour="9", minute="16-59", second=20,
+                            day_of_week=VALIDATED_DOW, id="validated_bld_exit", misfire_grace_time=50)
+        self._sched.add_job(self._validated_bld_exit, "cron", hour=15, minute="16,20,25", second=20,
+                            day_of_week=VALIDATED_DOW, id="validated_bld_exit_eod", misfire_grace_time=120)
         # r3_options_wc_fri decides at 15:00 on the last session of the week (its own job; off unless enabled)
         self._sched.add_job(self._validated_wcfri_entry, "cron", hour=15, minute=0, second=0,
                             day_of_week=VALIDATED_DOW, id="validated_vrp_wcfri_entry", misfire_grace_time=50)
@@ -340,6 +345,7 @@ class PlatformScheduler:
         q = await asyncio.to_thread(VD.quotes, [f"NSE:{s}" for s in VD.UNIVERSE])
         await self._validated_call("attn_on", "exit_at_open", q)
         await self._validated_call("auc_fade", "enter", q)
+        await self._validated_call("bld_promoted", "enter")       # the builder's promoted gap fades (own quotes)
 
     async def _validated_auc_exit(self) -> None:
         """09:20:00: the auction fade's exit (it retries inside until 09:29:50)."""
@@ -367,6 +373,11 @@ class PlatformScheduler:
         if _trading_today():
             for n in ("vrp_winged", "vrp_naked", "opt_ic2510"):          # the 10:20 option structures
                 await self._validated_call(n, "decide_and_enter")
+
+    async def _validated_bld_exit(self) -> None:
+        a = self._validated_agents().get("bld_promoted")
+        if a is not None and a.positions():
+            await self._validated_call("bld_promoted", "exit_due")
 
     async def _validated_wcfri_entry(self) -> None:
         if _trading_today():

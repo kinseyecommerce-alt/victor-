@@ -33,6 +33,7 @@ from ist_clock import now_ist
 
 DEADLINES = {"auc_fade": dtime(9, 16), "pead_h60": dtime(9, 16), "vrp_winged": dtime(10, 21),
              "vrp_naked": dtime(10, 21), "opt_ic2510": dtime(10, 21), "opt_wcfri": dtime(15, 1),
+             "bld_promoted": dtime(9, 16),
              "attn_on": dtime(15, 24)}
 DEFAULT_DEADLINE = dtime(15, 30)
 _lock = threading.Lock()

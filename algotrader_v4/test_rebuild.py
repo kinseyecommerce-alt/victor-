@@ -177,7 +177,8 @@ def test_agent_enables_with_legacy_keys_load_and_survive_a_save():
         bot_state._FILE = f
         bot_state._agent_enabled.clear(); bot_state._agent_enabled.update(bot_state._load())
         assert bot_state._agent_enabled == {"auc_fade": False, "attn_on": True, "vrp_winged": True, "pead_h60": True,
-                                            "vrp_naked": True, "opt_ic2510": True, "opt_wcfri": True}
+                                            "vrp_naked": True, "opt_ic2510": True, "opt_wcfri": True,
+                                            "bld_promoted": True}
         assert not bot_state.is_agent_enabled("auc_fade")
         bot_state.set_agent_enabled("vrp_winged", False)
         on_disk = json.loads(f.read_text())
@@ -565,6 +566,82 @@ def test_live_order_path_never_duplicates_tracks_and_reconciles():
     finally:
         settings.trading_mode, settings.kite_access_token = saved
 
+def test_builder_promoted_agent_trades_the_registry_rules_with_their_own_exits():
+    """agents/builder_promoted.py: reads the promoted strategies, keeps those of yesterday's market type, enters the
+    builder's ranked gap fades at the auction print (Rs 5 lakh under c10), stops at the gross cap, leaves the 15:15
+    square-off alone, and books each exit with builder_engine.walk_session on the day's minute bars."""
+    import asyncio
+    import numpy as np
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    import agents.builder_promoted as BP
+    a = ALL_AGENTS["bld_promoted"]
+    assert a.enabled_by_setting() is False, "off by default"
+    hv = {"agent": "scalping", "mtype": "HIGH_VOL", "block": "gap_fade", "params": [["g", 0.02], ["mode", "fade_day"]],
+          "entry": "o0915", "exit": ["bracket_min", 0.005, 2.0, 30], "instrument": "STOCKS", "product": "mis",
+          "structure": "", "universe": "NIFTY200", "size": "c10"}
+    sw = dict(hv, mtype="SIDEWAYS", params=[["g", 0.01], ["mode", "fade_day"]])
+    daily = {"agent": "swing", "mtype": "HIGH_VOL", "block": "vol_shock", "params": [["k", 3.0]], "entry": "o0915",
+             "exit": ["hold_d", 5], "instrument": "STOCKS", "product": "cnc", "structure": "", "universe": "NIFTY100",
+             "size": "c10"}
+    rules = [{"id": "bldA", "cand": hv, "universe_names": ["AAA", "BBB", "CCC"], "universe": "NIFTY200", "ok": True,
+              "why": ""},
+             {"id": "bldB", "cand": sw, "universe_names": ["AAA"], "universe": "NIFTY200", "ok": True, "why": ""},
+             {"id": "bldC", "cand": daily, "ok": False, "why": "block vol_shock"}]
+    day = _dt(2026, 11, 26, 9, 15, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
+    quotes = {"AAA": {"open": 103.0, "ltp": 103.0}, "BBB": {"open": 95.0, "ltp": 95.0}, "CCC": {"open": 101.0},
+              "NIFTY 50": {"open": 26000.0}}
+    pcs = {"AAA": 100.0, "BBB": 100.0, "CCC": 100.0, "_NIFTY50_min": 26000.0}
+
+    def bars(sym, d):                                # AAA (short) falls 0.6 % by 09:20: target 1 %? no -> 09:45 open
+        tt = np.arange(555, 600)
+        o = np.full(len(tt), 103.0)
+        if sym == "BBB":                             # BBB long: rises to the 1 % target at 09:18
+            o = np.full(len(tt), 95.0)
+            h = o.copy()
+            h[3:] = 96.5
+            return {"tt": tt, "o": o, "h": h, "l": o - 0.1, "c": o, "v": np.ones(len(tt))}
+        return {"tt": tt, "o": o, "h": o + 0.1, "l": o - 0.1, "c": o, "v": np.ones(len(tt))}
+    with isolated_book(), kite_paper(), patch.object(settings, "validated_builder_promoted_enabled", True), \
+            patch.object(BP, "promoted_rules", lambda: rules), \
+            patch.object(BP, "market_labels", lambda d: {20261125: "HIGH_VOL"}), \
+            patch.object(BP, "prev_closes", lambda names, d: {k: v for k, v in pcs.items() if k in names}), \
+            patch.object(BP.VD, "quotes", lambda ins: quotes), \
+            patch.object(BP.VD, "price_adjusting_actions", lambda s, d: []), \
+            patch.object(BP, "day_minutes", bars):
+        a.state.running = True
+        out = asyncio.run(a.enter(day))
+        assert out["market_type"] == "HIGH_VOL" and out["entered"] == ["bldA:BBB", "bldA:AAA"], out   # |gap| desc
+        pos = {p.symbol: p for p in a.positions()}
+        assert pos["AAA"].side == "SELL" and pos["BBB"].side == "BUY", "against the gap"
+        assert pos["AAA"].qty == int(500_000 // 103.0) and pos["BBB"].qty == int(500_000 // 95.0), "Rs 5 lakh (c10)"
+        assert a.overnight_holdings()[("AAA", "MIS")] == -pos["AAA"].qty, "the square-off leaves them alone"
+        assert asyncio.run(a.enter(day))["entered"] == [], "once a day"
+        early = day.replace(minute=40)
+        assert asyncio.run(a.exit_due(early)) == [], "not before the rule's deadline (09:45)"
+        done = asyncio.run(a.exit_due(day.replace(minute=46)))
+        assert sorted(done) == ["AAA", "BBB"] and not a.positions()
+        rows = {r["symbol"]: r for r in a.ledger_rows()}
+        assert rows["BBB"]["rule"] == "bldA" and rows["BBB"]["exit_reason"] == "target"
+        assert rows["AAA"]["exit_reason"] == "time"
+        assert a.rule_stats()["bldA"]["n"] == 2
+    with isolated_book(), kite_paper(), patch.object(settings, "validated_builder_promoted_enabled", True), \
+            patch.object(settings, "validated_builder_promoted_max_gross", 600_000.0), \
+            patch.object(BP, "promoted_rules", lambda: rules), \
+            patch.object(BP, "market_labels", lambda d: {20261125: "HIGH_VOL"}), \
+            patch.object(BP, "prev_closes", lambda names, d: {k: v for k, v in pcs.items() if k in names}), \
+            patch.object(BP.VD, "quotes", lambda ins: quotes), \
+            patch.object(BP.VD, "price_adjusting_actions", lambda s, d: []):
+        a.state.running = True
+        out = asyncio.run(a.enter(day))
+        assert out["entered"] == ["bldA:BBB"] and out["skipped"] == {"bldA:AAA": "gross_cap"}
+    with isolated_book(), kite_paper(), patch.object(settings, "validated_builder_promoted_enabled", True), \
+            patch.object(BP, "promoted_rules", lambda: rules), \
+            patch.object(BP, "market_labels", lambda d: {20261125: "RISING"}):
+        a.state.running = True
+        out = asyncio.run(a.enter(day))
+        assert out["entered"] == [] and "RISING" in out["reason"], "no promoted strategy of that market type"
+
 def test_approval_mode_gates_entries_by_day_ticket():
     import approvals as AP
     import trading_state as TS
@@ -602,7 +679,8 @@ def test_risk_budget_defaults_to_lab_sizing_and_only_scales_down():
     with isolated_book(), kite_paper():
         assert all(RB.scale(n) == 1.0 for n in ALL_AGENTS), "default: lab sizing"
         assert all(a.alloc_scale() == 1.0 for a in ALL_AGENTS.values()) and ALL_AGENTS["vrp_winged"].alloc_lots(2) == 2
-        lab = {n: RB.lab_stats(n)["daily_std"] for n in ALL_AGENTS}
+        lab = {n: RB.lab_stats(n)["daily_std"] for n in ALL_AGENTS if RB.lab_stats(n).get("daily_std")}
+        assert RB.scale("bld_promoted") == 1.0, "no lab volatility on file: never upsized"
         settings.risk_budget_daily_vol = 3000.0              # 3 active strategies (PEAD off) → ₹1,000 each
         active = RB._active_names()
         assert "pead_h60" not in active and len(active) == 3
@@ -982,7 +1060,7 @@ def test_v2_read_endpoints_respond_and_are_json():
             r.json()
         cards = c.get("/api/v2/strategies").json()["strategies"]
         assert [x["name"] for x in cards] == ["auc_fade", "attn_on", "vrp_winged", "pead_h60", "vrp_naked",
-                                              "opt_ic2510", "opt_wcfri"]
+                                              "opt_ic2510", "opt_wcfri", "bld_promoted"]
         assert {x["name"]: x["status"] for x in cards} == {n: "candidate" for n in ALL_AGENTS}, \
             "one strict definition of proven (22 Nov 2026): none of the four qualifies"
         assert all(x["why_not_proven"] for x in cards)

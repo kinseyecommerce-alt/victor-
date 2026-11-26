@@ -585,7 +585,7 @@ BACKTEST_MAX_DD = {"AUC-FADE-3PCT": 24605.28, "AUC-FADE-2PCT": 29535.33, "AUC-FA
                    "EV-PEAD-LONG-H60": 1118594.0}
 # calendar days, weekends/holidays covered (pead_h60: 60 sessions ≈ 84 days + holidays)
 AGENT_MAX_HOLD_DAYS = {"auc_fade": 0, "attn_on": 5, "vrp_winged": 10, "pead_h60": 95, "vrp_naked": 10, "opt_ic2510": 10,
-                       "opt_wcfri": 10}
+                       "opt_wcfri": 10, "bld_promoted": 0}
 
 
 def forward_test_specs() -> list[ShadowSpec]:

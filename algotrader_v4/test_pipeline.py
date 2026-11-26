@@ -4888,6 +4888,21 @@ def t_vs_drawdown_kill_and_no_telegram():
         assert "VRP-20261111" in a.marks or a.structures["VRP-20261111"]["status"] == "settled"
 
 
+def t_bp_lab_parity():
+    """agents/builder_promoted.py against the builder engine on the lab's 3-year data (parity_builder_promoted.py,
+    in its own process: the lab engine changes module paths that later tests in this process must not see)."""
+    import subprocess as _sp
+    import sys as _sys
+    r = _sp.run([_sys.executable, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                                "parity_builder_promoted.py")], capture_output=True, text=True,
+                timeout=1800)
+    out = [l for l in (r.stdout or "").splitlines() if not l.startswith("20")]
+    for line in out[-10:]:
+        print(line)
+    if r.returncode == 2:
+        return
+    assert r.returncode == 0 and "PARITY OK" in r.stdout, (r.returncode, (r.stderr or "")[-1500:])
+
 from stratlab import options_r3 as _R3_vs
 
 
@@ -5323,6 +5338,7 @@ run("strangle LAB PARITY: 3 years of sessions through the live decision + settle
 run("strangle NAKED: lab parity on the 3-year NIFTY data (live plan vs every lab trade, 1 lot, no wings)", t_vn_lab_parity)
 run("options_r3 ic_25_10: lab parity on the 3-year NIFTY data (live plan vs every lab trade)", t_vic_lab_parity)
 run("options_r3 wc_fri: lab parity on the 3-year NIFTY data (15:00 plan vs every lab trade)", t_vwf_lab_parity)
+run("builder promoted strategies: live decisions == the builder engine on the 3-year lab data", t_bp_lab_parity)
 
 
 # ══════════════════════════════════════════════════════════════════════════
