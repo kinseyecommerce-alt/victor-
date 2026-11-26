@@ -67,8 +67,16 @@ import json
 GRAMMAR_V1 = "bg1"
 GRAMMAR_V2 = "bg2"
 GRAMMAR_V3 = "bg3"
-VERSIONS = (GRAMMAR_V1, GRAMMAR_V2, GRAMMAR_V3)
-GRAMMAR_VERSION = GRAMMAR_V3             # the current version (new batches); bg1 / bg2 stay reproducible byte for byte
+GRAMMAR_V4 = "bg4"
+VERSIONS = (GRAMMAR_V1, GRAMMAR_V2, GRAMMAR_V3, GRAMMAR_V4)
+GRAMMAR_VERSION = GRAMMAR_V4             # the current version (new batches); bg1 / bg2 / bg3 stay reproducible byte for byte
+# bg4 (builder/v4, 25 Nov 2026): bg3 + TRAILING-STOP exits for every minute-grid stock sentence of intraday and scalping
+#   trail / trail_min        a stop x % behind the best price since entry (long: the highest high; short: the lowest
+#                            low), moved after each bar closes (never inside a bar)
+#   trail_be / trail_be_min  a fixed stop x % from entry until the price has moved x % in favour, then the stop goes to
+#                            the entry price (breakeven) and trails x % behind the best price
+#   every trailing exit keeps the agent's hard time limit (intraday 15:15, scalping 30 minutes after entry)
+TRAIL_KINDS = ("trail", "trail_min", "trail_be", "trail_be_min")
 SIZE_LEGACY = ""                         # bg1 / bg2: Rs 1 lakh per stock trade
 SIZE_C10 = "c10"                         # bg3: Rs 10 lakh capital per agent (builder_engine.SIZE_TABLES)
 SIZE_TEXT = {SIZE_C10: "Rs 5 lakh per trade (Rs 10 lakh capital per agent)"}
@@ -282,6 +290,8 @@ class Candidate:
 
     @property
     def version(self) -> str:
+        if self.exit and self.exit[0] in TRAIL_KINDS:
+            return GRAMMAR_V4                 # a trailing-exit sentence exists only in bg4: always a new candidate
         if self.size:
             return GRAMMAR_V3
         return GRAMMAR_V2 if self.universe else GRAMMAR_V1
@@ -305,8 +315,8 @@ class Candidate:
     def v1_key(self) -> str | None:
         """The bg1 key of the SAME sentence: a bg2 candidate whose universe is the one bg1 used implicitly is the bg1
         candidate (never drawn again once its bg1 key was drawn). None when the universe is new (no bg1 twin)."""
-        if self.size:
-            return None                      # a re-sized bg3 sentence is a new candidate: no twin in bg1 / bg2
+        if self.size or (self.exit and self.exit[0] in TRAIL_KINDS):
+            return None                      # a re-sized bg3 / a bg4 trailing sentence is new: no twin in bg1 / bg2
         if not self.universe:
             return self.key
         if self.universe != implied_universe(self.agent, self.block, self.instrument):
@@ -442,6 +452,8 @@ def grammar(agent: str, version: str | None = None) -> list:
     version = version or GRAMMAR_VERSION
     if version == GRAMMAR_V1:
         return _grammar_bg1(agent)
+    if version == GRAMMAR_V4:
+        return _grammar_bg4(agent)
     if version not in (GRAMMAR_V2, GRAMMAR_V3):
         raise KeyError(version)
     out = []
@@ -451,6 +463,31 @@ def grammar(agent: str, version: str | None = None) -> list:
     if version == GRAMMAR_V3:
         out = [row + (size_regime(agent, row[2], row[3], row[0]),) for row in out]
     return out
+
+
+TRAIL_EXITS = {"intraday": [("trail", 0.005), ("trail", 0.01), ("trail_be", 0.005), ("trail_be", 0.01)],
+               "scalping": [("trail_min", 0.003, 30), ("trail_min", 0.005, 30), ("trail_be_min", 0.003, 30),
+                            ("trail_be_min", 0.005, 30)]}
+
+
+def _grammar_bg4(agent: str) -> list:
+    """bg3 byte for byte, then (intraday / scalping only) one row per distinct bg3 minute-grid sentence without its
+    exit, for each trailing exit of TRAIL_EXITS, in bg3's order (first occurrence)."""
+    base = grammar(agent, GRAMMAR_V3)
+    if agent not in TRAIL_EXITS:
+        return base
+    seen, extra = set(), []
+    for row in base:
+        inst, prod, block, p, entry, _ex, st, u, size = row
+        if BLOCK[block].grid != "minute" or inst != "STOCKS":
+            continue
+        k = (inst, prod, block, p, entry, st, u, size)
+        if k in seen:
+            continue
+        seen.add(k)
+        for ex in TRAIL_EXITS[agent]:
+            extra.append((inst, prod, block, p, entry, ex, st, u, size))
+    return base + extra
 
 
 def _grammar_bg1(agent: str) -> list:
@@ -634,6 +671,16 @@ def _exit_text(c: Candidate) -> str:
         return f"stop {e[1]:.2%} / target {e[1] * e[2]:.2%} (1:{e[2]:g}), else exit {e[3]} minutes after entry"
     if k == "signal":
         return "exit when a 1-minute close crosses back through the session VWAP, else at 15:15"
+    if k == "trail":
+        return f"trailing stop {e[1]:.2%} behind the best price since entry, else exit at 15:15"
+    if k == "trail_min":
+        return f"trailing stop {e[1]:.2%} behind the best price since entry, else exit {e[2]} minutes after entry"
+    if k == "trail_be":
+        return (f"stop {e[1]:.2%}; after a {e[1]:.2%} move in favour the stop goes to breakeven and trails {e[1]:.2%} "
+                f"behind the best price, else exit at 15:15")
+    if k == "trail_be_min":
+        return (f"stop {e[1]:.2%}; after a {e[1]:.2%} move in favour the stop goes to breakeven and trails {e[1]:.2%} "
+                f"behind the best price, else exit {e[2]} minutes after entry")
     if k == "signal_min":
         return f"exit when a 1-minute close crosses back through the session VWAP, at the latest {e[2]} minutes after entry"
     if k == "hold":
