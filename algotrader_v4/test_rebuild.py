@@ -641,6 +641,29 @@ def test_builder_promoted_agent_trades_the_registry_rules_with_their_own_exits()
         a.state.running = True
         out = asyncio.run(a.enter(day))
         assert out["entered"] == [] and "RISING" in out["reason"], "no promoted strategy of that market type"
+    # the market type must be the PREVIOUS session's: a lagging NSE archive (newest label 24 Nov) -> no entries
+    with isolated_book(), kite_paper(), patch.object(settings, "validated_builder_promoted_enabled", True), \
+            patch.object(BP, "promoted_rules", lambda: rules), \
+            patch.object(BP, "market_labels", lambda d: {20261124: "HIGH_VOL"}):
+        a.state.running = True
+        out = asyncio.run(a.enter(day))
+        assert out["entered"] == [] and out["reason"].startswith("data unavailable") and "20261125" in out["reason"]
+        assert "market_type" not in out
+    # every entry passes the SEBI pre-order check (kill switch / pause), and its order id is recorded
+    from sebi_compliance import sebi_compliance as SC
+    seen = []
+    with isolated_book(), kite_paper(), patch.object(settings, "validated_builder_promoted_enabled", True), \
+            patch.object(BP, "promoted_rules", lambda: rules), \
+            patch.object(BP, "market_labels", lambda d: {20261125: "HIGH_VOL"}), \
+            patch.object(BP, "prev_closes", lambda names, d: {k: v for k, v in pcs.items() if k in names}), \
+            patch.object(BP.VD, "quotes", lambda ins: quotes), \
+            patch.object(BP.VD, "price_adjusting_actions", lambda s, d: []), \
+            patch.object(SC, "pre_order_check", lambda **k: (k["symbol"] != "BBB", None, "kill switch active")), \
+            patch.object(SC, "record_order_id", lambda strat, sym, oid: seen.append((strat, sym))):
+        a.state.running = True
+        out = asyncio.run(a.enter(day))
+        assert out["entered"] == ["bldA:AAA"] and out["skipped"] == {"bldA:BBB": "sebi: kill switch active"}, out
+        assert seen == [("bld_promoted", "AAA")]
 
 def test_approval_mode_gates_entries_by_day_ticket():
     import approvals as AP

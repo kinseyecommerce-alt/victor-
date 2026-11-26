@@ -90,6 +90,12 @@ def regime_for(day: int, labels: dict[int, str]) -> str:
     return labels[max(prev)] if prev else ""
 
 
+def label_day_for(day: int, labels: dict[int, str]) -> int:
+    """The session whose label regime_for uses for `day` (0 when none): must be the previous trading day."""
+    prev = [d for d in labels if d < int(day)]
+    return max(prev) if prev else 0
+
+
 def _sgn(x: float) -> int:
     return 1 if x > 0 else (-1 if x < 0 else 0)
 
@@ -323,6 +329,15 @@ class BuilderPromotedAgent(ValidatedAgent):
             out["reason"] = "no supported promoted strategy"
             return out
         labels = await asyncio.to_thread(market_labels, today)
+        want = int(_prev_td(today).strftime("%Y%m%d"))
+        have = label_day_for(int(today.strftime("%Y%m%d")), labels)
+        if have != want:
+            # the market type must be the PREVIOUS session's (the NSE archive and the minute store refresh apart)
+            self.mark_done("entry")
+            out["reason"] = f"data unavailable: market label for {want} missing (newest {have or 'none'})"
+            self._skip("*", "market_label_stale")
+            self._log("entry", "*", "info", out["reason"])
+            return out
         mtype = regime_for(int(today.strftime("%Y%m%d")), labels)
         live = [r for r in live if G.Candidate.from_json(r["cand"]).mtype == mtype]
         out["market_type"] = mtype
@@ -354,7 +369,17 @@ class BuilderPromotedAgent(ValidatedAgent):
                     continue
                 side_s = "BUY" if side > 0 else "SELL"
                 try:
+                    from sebi_compliance import sebi_compliance
+                    ok, _algo, why = sebi_compliance.pre_order_check(
+                        strategy=self.name, symbol=sym, exchange="NSE", transaction_type=side_s, quantity=qty,
+                        order_type="MARKET", price_at_signal=px, signal_source=f"validated:{r['id']}",
+                        regime=mtype or "n/a")
+                    if not ok:
+                        out["skipped"][f"{r['id']}:{sym}"] = f"sebi: {why}"
+                        self._skip(sym, f"sebi: {why}", log=False)
+                        continue
                     oid, fill = paper_fill_at(sym, "NSE", side_s, qty, "MIS", px, TAG, "AUCTION")
+                    sebi_compliance.record_order_id(self.name, sym, oid)
                 except Exception as exc:
                     self._error(f"entry {sym}", exc)
                     continue
