@@ -50,12 +50,12 @@ from stratlab import datagen_features as F
 
 ENTRY_T = dtime(9, 15, 5)
 SUPPORTED_BLOCKS = ("gap_fade", "idio_gap")
-SUPPORTED_EXITS = ("bracket", "bracket_min", "time_min") + tuple(G.TRAIL_KINDS)   # builder/v4 trailing stops
+SUPPORTED_EXITS = ("bracket", "bracket_min", "time_min") + tuple(G.TRAIL_KINDS) + tuple(G.ATR_KINDS)  # v4 / v5 trails
 NIFTY_KEY = "_NIFTY50_min"
 TAG = "VAL-BLD"
 
 LAB_FINGERPRINT = fingerprint(
-    BE.walk_session, BE.market_types, BE.cost_kind, BE.trade_notional, F.r_gap_path, F.r_idio_gap,
+    BE.walk_session, BE.atr_walk, BE.atr_fraction, BE.market_types, BE.cost_kind, BE.trade_notional, F.r_gap_path, F.r_idio_gap,
     consts={"MAX_PER_DAY": BE.MAX_PER_DAY, "MAX_GAP": F.MAX_GAP, "SQUARE_MIN": BE.SQUARE_MIN,
             "ENTRY_MIN": sorted(G.ENTRY_MIN.items()), "SIZE_TABLES": repr(BE.SIZE_TABLES),
             "MT": (BE.SMA_N, BE.SLOPE_N, BE.VIX_N, BE.VIX_MIN, BE.VIX_Q), "MARKET_TYPES": list(G.MARKET_TYPES)})
@@ -134,7 +134,7 @@ def exit_deadline_min(c: G.Candidate) -> int:
         d = m0 + int(c.exit[1])
     elif kind == "bracket_min":
         d = m0 + int(c.exit[3])
-    elif kind in ("trail_min", "trail_be_min"):
+    elif kind in ("trail_min", "trail_be_min", "trail_atr_min", "trail_be_atr_min"):
         d = m0 + int(c.exit[2])
     else:
         d = BE.SQUARE_MIN
@@ -253,6 +253,30 @@ def day_minutes(symbol: str, day: date) -> Optional[dict]:
         return None
     return {"tt": np.array(tt, np.int64), "o": np.array(o), "h": np.array(h), "l": np.array(l), "c": np.array(c),
             "v": np.array(v)}
+
+
+def prev_sessions_hlc(symbol: str, day: date, n: int = BE.ATR_N + 1) -> list:
+    """The (high, low, close) of the symbol's last n sessions BEFORE `day` from Kite 1-minute bars, oldest first
+    (special sessions skipped) - the builder engine's ATR input (builder/v5)."""
+    from kite_client import kite_client
+    tok = kite_client.get_instrument_tokens([symbol], "NSE").get(symbol)
+    if not tok:
+        return []
+    start = day - timedelta(days=45)
+    rows = kite_client.historical_data(int(tok), datetime.combine(start, dtime(9, 15)),
+                                       datetime.combine(day - timedelta(days=1), dtime(15, 30)), "minute") or []
+    by: dict = {}
+    for r in rows:
+        ts = r["date"] if not isinstance(r["date"], str) else datetime.fromisoformat(r["date"])
+        d = ts.date()
+        if d >= day or d in SPECIAL_SESSIONS:
+            continue
+        by.setdefault(d, []).append((float(r["high"]), float(r["low"]), float(r["close"])))
+    out = []
+    for d in sorted(by)[-n:]:
+        bars = by[d]
+        out.append((max(b[0] for b in bars), min(b[1] for b in bars), bars[-1][2]))
+    return out
 
 
 def _prev_td(d: date) -> date:
@@ -411,9 +435,15 @@ class BuilderPromotedAgent(ValidatedAgent):
             c = G.Candidate.from_json(pos.meta["cand"])
             bars = await asyncio.to_thread(day_minutes, pos.symbol, day)
             res = None
-            if bars is not None:
+            walk = walk_of(c)
+            if walk[1] in G.ATR_KINDS:                # builder/v5: the distance from ATR(14) of the earlier sessions
+                prev = await asyncio.to_thread(prev_sessions_hlc, pos.symbol, day)
+                walk = BE.atr_walk(walk, prev)
+                if walk is None:
+                    self._deviation("no_atr_history", pos.symbol, "fewer than 15 earlier sessions: exit at the LTP")
+            if bars is not None and walk is not None:
                 res = BE.walk_session(bars["tt"], bars["o"], bars["h"], bars["l"], bars["c"], bars["v"], pos.sign,
-                                      walk_of(c), int(day.strftime("%Y%m%d")))
+                                      walk, int(day.strftime("%Y%m%d")))
             if res is None:
                 q = await asyncio.to_thread(VD.quotes, [f"NSE:{pos.symbol}"])
                 px = float((q.get(pos.symbol) or {}).get("ltp") or 0) or pos.entry_px
