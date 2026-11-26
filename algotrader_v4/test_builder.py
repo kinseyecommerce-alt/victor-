@@ -41,6 +41,10 @@ from stratlab import builder_server_panels as SP  # noqa: E402
 from stratlab import trials as TR  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
+CHAIN = [v for v, _f, _s in B.RULES]                       # the pinned rule versions in order
+CUR_V = CHAIN[-1]                                          # the current rule version
+CUR_G = G.GRAMMAR_VERSION                                  # its grammar
+CUR_TOTAL = 4 * sum(G.grammar_sizes(CUR_G).values())       # every sentence of the current grammar (4 market types)
 _SYN: dict = {}
 SEED1_N = 2552 + 16 + 400 + 2         # N after the sandbox batch 0001 (builder_seed_0001.json)
 SEED_EVAL, SEED_FINALS = 6 * 400, 2 + 2 + 3 + 0 + 2 + 2   # the six sandbox batches 0001-0006 and their FINAL looks
@@ -104,8 +108,8 @@ def test_grammar_determinism():
     assert G.grammar_sha256("bg1") == json.loads((HERE / "builder_rule.json").read_text())["grammar"]["sha256"]
     assert G.grammar_sha256("bg2") == json.loads((HERE / "builder_rule_v2.json").read_text())["grammar"]["sha256"]
     assert G.grammar_sha256("bg3") == json.loads((HERE / "builder_rule_v3.json").read_text())["grammar"]["sha256"]
-    assert G.grammar_sha256() == G.grammar_sha256("bg5") and G.GRAMMAR_VERSION == "bg5"
-    assert G.grammar_sha256("bg5") == json.loads((HERE / "builder_rule_v5.json").read_text())["grammar"]["sha256"]
+    assert G.grammar_sha256() == G.grammar_sha256(CUR_G) and G.GRAMMAR_VERSION == CUR_G
+    assert G.grammar_sha256(CUR_G) == json.loads(B.CURRENT_RULE_FILE.read_text())["grammar"]["sha256"]
     assert G.grammar_sha256("bg4") == json.loads((HERE / "builder_rule_v4.json").read_text())["grammar"]["sha256"]
 
 
@@ -351,7 +355,7 @@ def test_batch_end_to_end_and_n_accounting():
     for a in G.AGENTS:
         assert f"gate_{a}" in s["planted"]
     # a builder/v3 batch: every row carries its universe; the batch records what each universe resolved to
-    assert s["rule_version"] == "builder/v5" and all(r["universe"] in G.UNIVERSES for r in s["rows"])
+    assert s["rule_version"] == CUR_V and all(r["universe"] in G.UNIVERSES for r in s["rows"])
     assert s["universes"]["NIFTY100"]["n"] == 4 and s["universes"]["NIFTY200"]["added_complete"] == []
     assert sum(s["universes"]["counts"].values()) == 20
     out = b.ingest(rec["batch"], s)
@@ -450,7 +454,7 @@ def test_promotion_only_for_proven_and_forward_family():
     ns = {}
     exec(compile(gen, "builder_gen.py", "exec"), ns)
     assert [x["id"] for x in ns["SPECS"]] == [PROVEN_SEEDED, pid]
-    assert ns["RULE_SHA256"] == B.CURRENT_RULE_SHA256 == B.RULE_SHA256_V5
+    assert ns["RULE_SHA256"] == B.CURRENT_RULE_SHA256 == B.RULES[-1][2]
 
 
 def test_forward_family_rule_and_v1_untouched():
@@ -1316,18 +1320,18 @@ def test_api_shows_universes():
     b = new_builder("api_uni")
     rec = b.freeze({"source": "test", "end": 20261109}, per_cell=1)
     st = B.api_status(b.root)
-    assert st["rule_version"] == "builder/v5" and st["grammar_version"] == "bg5"
-    assert [r["version"] for r in st["rules"]] == ["builder/v1", "builder/v2", "builder/v3", "builder/v4", "builder/v5"]
+    assert st["rule_version"] == CUR_V and st["grammar_version"] == CUR_G
+    assert [r["version"] for r in st["rules"]] == CHAIN
     assert set(st["universes"]["choices"]) == {"NIFTY100", "NIFTY200", "TOP500", "INDEX"}
     row = [r for r in st["batches"] if r["id"] == rec["batch"]][0]
-    assert row["rule_version"] == "builder/v5" and sum(row["universes"].values()) == 20
+    assert row["rule_version"] == CUR_V and sum(row["universes"].values()) == 20
     seed_row = [r for r in st["batches"] if r["id"] == "0001"][0]
     assert seed_row["rule_version"] == "builder/v1" and sum(seed_row["universes"].values()) == 400
     assert all("universes" in g for g in st["grid"])
     assert sum(u["candidates"] for g in st["grid"] for u in g["universes"].values()) == SEED_EVAL + 20
     d = B.api_batch(rec["batch"], b.root)
     assert all(c["universe"] in G.UNIVERSES and c["universe_explicit"] for c in d["candidates"])
-    assert d["rule_version"] == "builder/v5" and sum(sum(v.values()) for v in d["cell_universes"].values()) == 20
+    assert d["rule_version"] == CUR_V and sum(sum(v.values()) for v in d["cell_universes"].values()) == 20
 
 
 def test_new_batches_wait_for_the_minute_universe():
@@ -1390,9 +1394,9 @@ def test_rule_v3_pinned_and_only_size_grammar_schedule_changed():
     r2, r3 = B.load_rule(B.RULE_FILE_V2), B.load_rule(B.RULE_FILE_V3)
     assert r3["_sha256"] == B.RULE_SHA256_V3 == \
         hashlib.sha256((HERE / "builder_rule_v3.json").read_bytes()).hexdigest()
-    assert B.CURRENT_RULE_SHA256 == B.RULE_SHA256_V5, "builder/v5 is current; v3 stays pinned and valid"
+    assert B.CURRENT_RULE_SHA256 == B.RULES[-1][2] != B.RULE_SHA256_V3, "a later rule is current; v3 stays pinned and valid"
     assert r3["version"] == "builder/v3" and r3["supersedes"]["sha256"] == B.RULE_SHA256_V2
-    assert [v for v, _f, _s in B.RULES] == ["builder/v1", "builder/v2", "builder/v3", "builder/v4", "builder/v5"]
+    assert [v for v, _f, _s in B.RULES] == CHAIN
     # v1 / v2 files and both grammars are byte for byte what they were
     assert B.RULE_SHA256 == hashlib.sha256((HERE / "builder_rule.json").read_bytes()).hexdigest()
     assert B.RULE_SHA256_V2 == hashlib.sha256((HERE / "builder_rule_v2.json").read_bytes()).hexdigest()
@@ -1467,12 +1471,12 @@ def test_rule_v3_pinned_and_only_size_grammar_schedule_changed():
     assert B.rule_sizes(r2)["per_trade_rs"]["equity_mis"] == 100000
     # before the first run (no registry yet) the API already shows the rule, its size and what is left to test
     api = B.api_status(os.path.join(_TMP, "never_ran"))
-    assert api["rule_version"] == "builder/v5" and api["size"]["regime"] == "c10" and api["n_used"] == V3_N
+    assert api["rule_version"] == CUR_V and api["size"]["regime"] == "c10" and api["n_used"] == V3_N
     # bg4 = bg3's 26,244 sentences + 2,944 trailing-exit sentences (intraday and scalping x 368 x 4 market types)
     # bg5 = bg4 + 2,944 ATR trailing sentences
-    assert api["undrawn"]["total"] == 32132 == 26244 + 2 * 2944 and api["undrawn"]["undrawn"] == 25709 + 2 * 2944
+    assert api["undrawn"]["total"] == CUR_TOTAL and api["undrawn"]["undrawn"] == CUR_TOTAL - 535
     assert api["night_batches"] == 12
-    assert api["undrawn"]["per_agent"]["intraday"] == {"total": 12352, "undrawn": 12352}     # all new
+    assert api["undrawn"]["per_agent"]["intraday"] == {"total": 4 * G.grammar_sizes()["intraday"], "undrawn": 4 * G.grammar_sizes()["intraday"]}     # all new
     assert api["undrawn"]["per_agent"]["options"] == {"total": 2304, "undrawn": 2304}        # option lots re-sized
     assert api["undrawn"]["per_agent"]["futures"]["undrawn"] < api["undrawn"]["per_agent"]["futures"]["total"]
     assert api["size"]["options"] == BO.OPTION_SIZES["c10"] and "IS their Rs 10 lakh result" in api["size"]["unchanged"]
@@ -1741,13 +1745,13 @@ def test_fresh_registry_under_v3_first_batch_0007_and_n_5434():
     b.ensure_genesis()
     assert [r["kind"] for r in b.registry.records()] == SEED_KINDS
     st = b.state()
-    assert st["genesis"]["rule_version"] == "builder/v5" and st["genesis"]["grammar_version"] == "bg5"
-    assert st["rules"] == [B.RULE_SHA256_V5] and st["upgrades"] == []
+    assert st["genesis"]["rule_version"] == CUR_V and st["genesis"]["grammar_version"] == CUR_G
+    assert st["rules"] == [B.CURRENT_RULE_SHA256] and st["upgrades"] == []
     assert st["n_used"] == SEED_N == 4979 and b.next_batch_id(st) == "0007"
     assert all(st["batches"][k].get("rule_sha256") == B.RULE_SHA256 for k in st["batches"])   # the seeds are v1
     rec = b.freeze(syn_source().snapshot(), per_cell=1)
     assert rec["batch"] == "0007" and rec["n_before"] == V3_N == 5434
-    assert rec["rule_version"] == "builder/v5" and rec["generator"]["grammar_version"] == "bg5"
+    assert rec["rule_version"] == CUR_V and rec["generator"]["grammar_version"] == CUR_G
     doc = json.loads(b.candidates_path("0007").read_text())
     cands = [G.Candidate.from_json(r["cand"]) for r in doc["candidates"]]
     seed = _all_seed_keys()
@@ -1757,7 +1761,7 @@ def test_fresh_registry_under_v3_first_batch_0007_and_n_5434():
     assert all(c.size == "" for c in cands if c.single and c.agent == "futures")
     # evaluated at the v3 sizes (the batch rule's): MIS Rs 5 lakh, nothing re-sized trades Rs 1 lakh MIS
     s, seen = _evaluate_recording(b.root, "0007")
-    assert s["rule_version"] == "builder/v5" and s["n_disc"] == V3_N + 20
+    assert s["rule_version"] == CUR_V and s["n_disc"] == V3_N + 20
     assert ("c10", "equity_mis", 500000.0) in seen and not any(k == "equity_mis" and v != 500000.0 for _r, k, v in seen)
     assert all(v == BE.SIZE_TABLES[r][k] for r, k, v in seen)
     b.ingest("0007", s)
@@ -1771,7 +1775,7 @@ def test_fresh_registry_under_v3_first_batch_0007_and_n_5434():
     assert all(G.never_drawn(c, seed | k1) for c in c2)
     # api: the size regime of the rule and of each batch
     api = B.api_status(b.root)
-    assert api["rule_version"] == "builder/v5" and api["size"]["regime"] == "c10"
+    assert api["rule_version"] == CUR_V and api["size"]["regime"] == "c10"
     assert api["size"]["per_trade_rs"]["equity_mis"] == 500000 and "02:30" in api["schedule"]
     rows = {r["id"]: r for r in api["batches"]}
     assert rows["0007"]["size"]["regime"] == "c10" and rows["0001"]["size"]["regime"] == ""
@@ -1789,22 +1793,21 @@ def test_upgrade_v1_to_v3_two_steps_and_pending_v1_batch_at_1_lakh():
     r1 = v1.freeze(syn_source().snapshot(), per_cell=1)           # a builder/v1 batch left pending
     assert r1["batch"] == FIRST and r1["rule_version"] == "builder/v1"
     v3 = B.Builder(root)                                         # the deploy: the current rule is builder/v4
-    assert v3.rule["version"] == "builder/v5"
+    assert v3.rule["version"] == CUR_V
     v3.ensure_genesis()
     st = v3.state()
-    assert st["rules"] == [B.RULE_SHA256, B.RULE_SHA256_V2, B.RULE_SHA256_V3, B.RULE_SHA256_V4, B.RULE_SHA256_V5]
+    assert st["rules"] == [x[2] for x in B.RULES]
     ups = st["upgrades"]
     assert [(u["from_version"], u["to_version"], u["grammar_version"]) for u in ups] == \
-        [("builder/v1", "builder/v2", "bg2"), ("builder/v2", "builder/v3", "bg3"), ("builder/v3", "builder/v4", "bg4"),
-         ("builder/v4", "builder/v5", "bg5")]
+        [(B.RULES[i][0], B.RULES[i + 1][0], B.load_rule(B.RULES[i + 1][1])["grammar"]["version"])
+         for i in range(len(B.RULES) - 1)]
     assert [(u["from_sha256"], u["to_sha256"]) for u in ups] == \
-        [(B.RULE_SHA256, B.RULE_SHA256_V2), (B.RULE_SHA256_V2, B.RULE_SHA256_V3), (B.RULE_SHA256_V3, B.RULE_SHA256_V4),
-         (B.RULE_SHA256_V4, B.RULE_SHA256_V5)]
+        [(B.RULES[i][2], B.RULES[i + 1][2]) for i in range(len(B.RULES) - 1)]
     assert all(u["n_used_before"] == V3_N and u["evaluated_before"] == SEED_EVAL and u["batches_before"] == 7
                and u["final_looks_before"] == SEED_FINALS for u in ups)
     assert st["batches"][FIRST]["frozen_hash"] == r1["frozen_hash"]            # earlier records never rewritten
     B.Builder(root).ensure_genesis()                             # idempotent
-    assert [r["kind"] for r in v3.registry.records()].count("rule_upgrade") == 4
+    assert [r["kind"] for r in v3.registry.records()].count("rule_upgrade") == len(B.RULES) - 1
     # the pending v1 batch is evaluated under builder/v1 at Rs 1 lakh per stock trade
     s, seen = _evaluate_recording(root, FIRST)
     assert s["rule_version"] == "builder/v1" and s["n_disc"] == SEED_N + 20
@@ -1813,7 +1816,7 @@ def test_upgrade_v1_to_v3_two_steps_and_pending_v1_batch_at_1_lakh():
     st = v3.state()
     # new batches are builder/v3 (bg3); N continues
     r2 = v3.freeze({"source": "test", "end": 20261109}, per_cell=1)
-    assert r2["batch"] == SECOND and r2["rule_version"] == "builder/v5" and r2["generator"]["grammar_version"] == "bg5"
+    assert r2["batch"] == SECOND and r2["rule_version"] == CUR_V and r2["generator"]["grammar_version"] == CUR_G
     assert r2["n_before"] == v3.n_base(st) == V3_N + 20 + st["final_looks"] - SEED_FINALS
     keys1 = {c["key"] for c in json.loads(v3.candidates_path(FIRST).read_text())["candidates"]}
     c2 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v3.candidates_path(SECOND).read_text())["candidates"]]
@@ -1826,8 +1829,7 @@ def test_upgrade_v1_to_v3_two_steps_and_pending_v1_batch_at_1_lakh():
             pass
     assert v3.registry.verify()["ok"]
     assert B.api_status(root)["n_used"] >= SEED_N + 20
-    assert [x["version"] for x in B.api_status(root)["rule_chain"]] == ["builder/v1", "builder/v2", "builder/v3",
-                                                                        "builder/v4", "builder/v5"]
+    assert [x["version"] for x in B.api_status(root)["rule_chain"]] == CHAIN
 
 
 def test_upgrade_v2_to_v3_and_pending_v2_batch_at_1_lakh():
@@ -1840,15 +1842,15 @@ def test_upgrade_v2_to_v3_and_pending_v2_batch_at_1_lakh():
     v3 = B.Builder(root)
     v3.ensure_genesis()
     st = v3.state()
-    assert st["rules"] == [B.RULE_SHA256_V2, B.RULE_SHA256_V3, B.RULE_SHA256_V4, B.RULE_SHA256_V5]
-    assert len(st["upgrades"]) == 3
+    assert st["rules"] == [x[2] for x in B.RULES[1:]]
+    assert len(st["upgrades"]) == len(B.RULES) - 2
     assert st["upgrades"][0]["from_version"] == "builder/v2" and st["upgrades"][0]["grammar_version"] == "bg3"
     assert st["upgrades"][1]["from_version"] == "builder/v3" and st["upgrades"][1]["grammar_version"] == "bg4"
     s, seen = _evaluate_recording(root, FIRST)                   # under its own rule, at its own size
     assert s["rule_version"] == "builder/v2" and seen and all(r == "" and v == 100000.0 for r, _k, v in seen)
     v3.ingest(FIRST, s)
     r2 = v3.freeze({"source": "test", "end": 20261109}, per_cell=1)
-    assert r2["batch"] == SECOND and r2["rule_version"] == "builder/v5"
+    assert r2["batch"] == SECOND and r2["rule_version"] == CUR_V
     keys1 = {c["key"] for c in json.loads(v3.candidates_path(FIRST).read_text())["candidates"]}
     c1 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v3.candidates_path(FIRST).read_text())["candidates"]]
     c2 = [G.Candidate.from_json(c["cand"]) for c in json.loads(v3.candidates_path(SECOND).read_text())["candidates"]]
@@ -1923,7 +1925,7 @@ def test_nightly_job_runs_batches_up_to_the_budget():
         fresh = B.Builder(root)
         fresh.ensure_genesis()
         before = B.grammar_progress(fresh)
-        assert before["grammar"] == "bg5" and before["total"] == 4 * sum(G.grammar_sizes("bg5").values()) == 32132
+        assert before["grammar"] == CUR_G and before["total"] == 4 * sum(G.grammar_sizes(CUR_G).values()) == CUR_TOTAL
         assert set(before["per_agent"]) == set(G.AGENTS) and 0 < before["undrawn"] < before["total"]
         out = B.nightly_job(now=t, root=root, runner=_fake_runner(calls), snapshot_fn=snap)
         night = out["night"]
@@ -2002,7 +2004,7 @@ def test_nightly_job_stops_at_0515_market_hours_and_on_a_batch_that_did_not_comp
 
 def test_nightly_job_stops_when_the_grammar_is_exhausted():
     from datetime import datetime
-    every = [c for a in G.AGENTS for m in G.MARKET_TYPES for c in G.cell_grammar(a, m, "bg5")]
+    every = [c for a in G.AGENTS for m in G.MARKET_TYPES for c in G.cell_grammar(a, m, CUR_G)]
     cell = [c for c in every if c.cell == "intraday|RISING"]
     seed = _all_seed_keys()                                      # (an option sentence the seeds did not draw)
     remain = cell[::len(cell) // 25][:25] + [c for c in every if c.cell == "options|FALLING"
@@ -2265,7 +2267,7 @@ def test_v4_scalping_trail_has_a_time_limit():
 
 
 def test_bg4_is_bg3_plus_trailing_sentences_with_new_keys():
-    assert G.GRAMMAR_VERSION == "bg5" and G.grammar_sha256("bg3") == \
+    assert G.GRAMMAR_VERSION in ("bg5", "bg6") and G.grammar_sha256("bg3") == \
         json.loads((HERE / "builder_rule_v3.json").read_text())["grammar"]["sha256"]
     for a in G.AGENTS:
         g3, g4 = G.grammar(a, "bg3"), G.grammar(a, "bg4")
@@ -2387,8 +2389,8 @@ def test_engine_resolves_atr_walks_from_the_symbols_earlier_sessions():
 
 
 def test_rule_v5_pinned_and_v4_unchanged():
-    r5 = B.load_rule()
-    assert r5["_sha256"] == B.RULE_SHA256_V5 == B.CURRENT_RULE_SHA256 == \
+    r5 = B.load_rule(B.RULE_FILE_V5)
+    assert r5["_sha256"] == B.RULE_SHA256_V5 == \
         hashlib.sha256((HERE / "builder_rule_v5.json").read_bytes()).hexdigest()
     assert r5["version"] == "builder/v5" and r5["supersedes"]["sha256"] == B.RULE_SHA256_V4
     assert r5["grammar"]["version"] == "bg5" and r5["grammar"]["sha256"] == G.grammar_sha256("bg5")
@@ -2424,6 +2426,117 @@ def test_live_builder_agent_trades_atr_rules_with_kite_history():
     with patch.object(kite_client, "kite_client", _K()), patch.object(BP, "SPECIAL_SESSIONS", {_d(2026, 10, 30)}):
         out = BP.prev_sessions_hlc("X", _d(2026, 11, 2))
     assert len(out) == 15 and out[-1] == (101 + 28, 89 + 28, 96 + 28), out[-1]     # 29 Oct (30 Oct special)
+
+
+class _P6:
+    """A tiny daily panel (rows = symbols) for the bg6 signal tests."""
+
+    def __init__(self, c, v=None, h=None, l=None, excl=None):
+        import numpy as np
+        self.c = np.asarray(c, float)
+        self.h = self.c * 1.001 if h is None else np.asarray(h, float)
+        self.l = self.c * 0.999 if l is None else np.asarray(l, float)
+        self.o = self.c.copy()
+        self.v = np.ones_like(self.c) * 1000 if v is None else np.asarray(v, float)
+        self.cal = np.arange(20200101, 20200101 + self.c.shape[1], dtype=np.int64)
+        self.excl = excl or {}
+
+    @property
+    def shape(self):
+        return self.c.shape
+
+
+class _C6:
+    def __init__(self, P):
+        self.daily = P
+
+    def d(self, name):
+        from stratlab import datagen_features as F
+        P = self.daily
+        return {"ret5": lambda: P.c / F.lag(P.c, 5) - 1.0, "ret20": lambda: P.c / F.lag(P.c, 20) - 1.0,
+                "vr": lambda: P.v / F.trailing_mean(P.v, 20, 15)}[name]()
+
+
+def test_bg6_price_history_signals():
+    import numpy as np
+    T_ = 300
+    base = np.full(T_, 100.0)
+    # short-term reversal: -10 % over 5 sessions at t=50 (losers x=8 %: long), +13 % at t=100 (winners x=12 %: short)
+    c = base.copy()
+    c[46:51] = [98, 96, 94, 92, 90]
+    c[51:96] = 90
+    c[96:101] = [93, 96, 99, 101, 102]
+    c[101:] = 102
+    trig, side, _r, _h = BE.r_st_reversal(_C6(_P6([c])), 0.08, "losers")
+    assert side[0, 50] == 1 and trig[0, 50] and not trig[0, 45]
+    trig, side, _r, _h = BE.r_st_reversal(_C6(_P6([c])), 0.12, "winners")
+    assert trig[0, 100] and side[0, 100] == -1 and trig.sum() == 1 + int(trig[0, 99])
+    # ... but not while a corporate-action day lies in the 6-session window
+    P = _P6([c], excl={0: [int(_P6([c]).cal[48])]})
+    assert not BE.r_st_reversal(_C6(P), 0.08, "losers")[0][0, 50]
+    assert BE.ca_clean(P, 6)[0, 54] and not BE.ca_clean(P, 6)[0, 53]
+    # 52-week high: a steady rise is always at its high once 200 sessions exist; a fall 5 % below is not (x = 3 %)
+    up = 100 * 1.001 ** np.arange(T_)
+    t6, s6, _r, _h = BE.r_high52(_C6(_P6([up])), 0.03)
+    assert not t6[0, :199].any() and t6[0, 260] and s6[0, 260] == 1
+    dn = up.copy()
+    dn[280:] = up[279] * 0.95
+    assert not BE.r_high52(_C6(_P6([dn])), 0.03)[0][0, 285] and BE.r_high52(_C6(_P6([dn])), 0.01)[0][0, 270]
+    # 12-1 momentum: +60 % between 252 and 21 sessions ago
+    m = np.full(T_, 100.0)
+    m[20:] = np.linspace(100, 160, T_ - 20)
+    t7 = BE.r_mom12_1(_C6(_P6([m])), 0.5)[0]
+    assert not t7[0, :252].any() and t7[0, 299] == (m[299 - 21] / m[299 - 252] - 1 >= 0.5)
+    # 200-day cross on volume: below the mean for 230 sessions, a jump above on 3x volume at t=250
+    x = np.full(T_, 100.0)
+    x[200:250] = 95
+    x[250:] = 110
+    v = np.full(T_, 1000.0)
+    v[250] = 3000
+    t8, s8, _r, _h = BE.r_ma200(_C6(_P6([x], v=[v])), 2.0, "up")
+    assert t8[0, 250] and s8[0, 250] == 1 and t8.sum() == 1
+    assert not BE.r_ma200(_C6(_P6([x], v=[v * 0 + 1000])), 2.0, "up")[0].any(), "the volume filter"
+    # 20-day breakout / breakdown on volume
+    b = np.full(T_, 100.0)
+    b[120] = 104
+    b[200] = 95
+    v2 = np.full(T_, 1000.0)
+    v2[[120, 200]] = 3000
+    P = _P6([b], v=[v2], h=[b * 1.001], l=[b * 0.999])
+    assert BE.r_breakout20(_C6(P), 2.5, "up")[0][0, 120] and BE.r_breakout20(_C6(P), 2.5, "up")[0].sum() == 1
+    t9, s9, _r, _h = BE.r_breakout20(_C6(P), 1.5, "down")
+    assert t9[0, 200] and s9[0, 200] == -1 and t9.sum() == 1
+
+
+def test_bg6_is_bg5_plus_new_daily_blocks():
+    for a in G.AGENTS:
+        g5, g6 = G.grammar(a, "bg5"), G.grammar(a, "bg6")
+        assert g6[:len(g5)] == g5, a
+        extra = g6[len(g5):]
+        assert all(r[2] in G.BG6_BLOCKS for r in extra)
+        assert len(extra) == {"swing": 960, "futures": 180}.get(a, 0), (a, len(extra))
+    assert 4 * sum(G.grammar_sizes("bg6").values()) == 36692 == 32132 + 4 * (960 + 180)
+    fut = {r[2] for r in G.grammar("futures", "bg6")[len(G.grammar("futures", "bg5")):]}
+    assert fut == {"st_rev_winners", "ma200_down", "breakdown20"}, "futures: the short-side blocks only"
+    for v in ("bg1", "bg2", "bg3", "bg4", "bg5"):
+        assert not any(r[2] in G.BG6_BLOCKS for a in G.AGENTS for r in G.grammar(a, v)), v
+    sw = [c for c in G.cell_grammar("swing", "FALLING", "bg6") if c.block in G.BG6_BLOCKS]
+    assert all(c.version == "bg6" and c.v1_key is None and json.loads(c.key)[0] == "bg6" for c in sw)
+    assert {c.size for c in sw if c.block == "high52"} == {""} and {c.size for c in sw if c.block == "breakdown20"} == {"c10"}
+    assert G.Candidate.from_json(sw[0].to_json()) == sw[0] and "5 sessions" in G.describe(sw[0])
+    assert all(G.BLOCK[b].fn.startswith("be:") and G.BLOCK[b].fn[3:] in BE.EXTRA for b in G.BG6_BLOCKS)
+
+
+def test_rule_v6_pinned_and_v5_unchanged():
+    r6 = B.load_rule(B.RULE_FILE_V6)
+    assert r6["_sha256"] == B.RULE_SHA256_V6 == hashlib.sha256((HERE / "builder_rule_v6.json").read_bytes()).hexdigest()
+    assert r6["version"] == "builder/v6" and r6["supersedes"]["sha256"] == B.RULE_SHA256_V5
+    assert r6["grammar"]["version"] == "bg6" and r6["grammar"]["sha256"] == G.grammar_sha256("bg6")
+    r5 = B.load_rule(B.RULE_FILE_V5)
+    for k in r5:
+        if k not in ("version", "written", "supersedes", "grammar", "statement", "_sha256") and \
+                not k.startswith("candidate_note"):
+            assert r6.get(k) == r5[k], k
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]

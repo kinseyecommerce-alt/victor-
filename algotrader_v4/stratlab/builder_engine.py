@@ -158,8 +158,95 @@ def r_index_gap(ctx, g: float, mode: str):
     return F._out(trig, side, np.abs(gap))
 
 
+# ── builder/v6 (bg6): price-history blocks on the daily grid (stocks) ──────────────────────────────────────────────
+def _roll(x, n: int, how: str, min_count: int, include_current: bool = True) -> np.ndarray:
+    """Rolling max / min / mean over the last n sessions per symbol (rows), NaN-aware; NaN with < min_count values."""
+    import pandas as pd
+    df = pd.DataFrame(np.asarray(x, float).T)
+    if not include_current:
+        df = df.shift(1)
+    return getattr(df.rolling(n, min_periods=min_count), how)().to_numpy().T
+
+
+def ca_clean(P, n: int) -> np.ndarray:
+    """[symbols x sessions] True where no corporate-action exclusion day of the symbol falls in the last n sessions
+    (today included): a price-history signal never compares across a split / bonus / large dividend."""
+    T = len(P.cal)
+    E = np.zeros(P.shape, float)
+    for s, ds in (P.excl or {}).items():
+        ds = np.asarray(ds, np.int64)
+        if not len(ds):
+            continue
+        idx = np.searchsorted(P.cal, ds)
+        ok = idx < T
+        idx = idx[ok]
+        E[int(s), idx] = 1.0          # an exclusion between sessions counts on the next session
+    cs = np.cumsum(E, axis=1)
+    w = cs.copy()
+    w[:, n:] -= cs[:, :-n]
+    return w == 0
+
+
+def _fin(x) -> np.ndarray:
+    return np.where(np.isfinite(x), x, np.nan)
+
+
+def r_st_reversal(ctx, x: float, mode: str):
+    """Short-term reversal: the 5-session return <= -x (losers: long) / >= x (winners: short)."""
+    P = ctx.daily
+    r5 = ctx.d("ret5")
+    ok = ca_clean(P, 6)
+    if mode == "losers":
+        return F._out(ok & (r5 <= -x + 1e-12), 1, np.abs(r5))
+    return F._out(ok & (r5 >= x - 1e-12), -1, np.abs(r5))
+
+
+def r_high52(ctx, x: float):
+    """52-week high: the close is within x of its highest close of the last 252 sessions (today included): long."""
+    P = ctx.daily
+    hi = _roll(P.c, 252, "max", 200)
+    ok = ca_clean(P, 253)
+    near = P.c / hi
+    return F._out(ok & np.isfinite(near) & (near >= 1.0 - x - 1e-12), 1, _fin(ctx.d("ret20")))
+
+
+def r_mom12_1(ctx, m: float):
+    """12-1 momentum: the return from 252 to 21 sessions ago >= m: long."""
+    P = ctx.daily
+    mom = F.lag(P.c, 21) / F.lag(P.c, 252) - 1.0
+    ok = ca_clean(P, 253)
+    return F._out(ok & np.isfinite(mom) & (mom >= m - 1e-12), 1, _fin(mom))
+
+
+def r_ma200(ctx, k: float, mode: str):
+    """The close crosses its 200-session mean today (up: from below; down: from above) on volume >= k x its 20-session
+    mean: with the cross."""
+    P = ctx.daily
+    sma = _roll(P.c, 200, "mean", 180)
+    ok = ca_clean(P, 201)
+    vr = ctx.d("vr")
+    c1, s1 = F.lag(P.c, 1), F.lag(sma, 1)
+    if mode == "up":
+        return F._out(ok & (P.c > sma) & (c1 <= s1) & (vr >= k), 1, _fin(vr))
+    return F._out(ok & (P.c < sma) & (c1 >= s1) & (vr >= k), -1, _fin(vr))
+
+
+def r_breakout20(ctx, k: float, mode: str):
+    """20-session breakout: the close above the highest high (up: long) / below the lowest low (down: short) of the
+    previous 20 sessions on volume >= k x its 20-session mean."""
+    P = ctx.daily
+    ok = ca_clean(P, 21)
+    vr = ctx.d("vr")
+    if mode == "up":
+        hi = _roll(P.h, 20, "max", 18, include_current=False)
+        return F._out(ok & (P.c > hi) & (vr >= k), 1, _fin(vr))
+    lo = _roll(P.l, 20, "min", 18, include_current=False)
+    return F._out(ok & (P.c < lo) & (vr >= k), -1, _fin(vr))
+
+
 EXTRA = {"r_vol_shock": r_vol_shock, "r_vix_spike_index": r_vix_spike_index, "r_nifty_move": r_nifty_move,
-         "r_index_gap": r_index_gap}
+         "r_index_gap": r_index_gap, "r_st_reversal": r_st_reversal, "r_high52": r_high52, "r_mom12_1": r_mom12_1,
+         "r_ma200": r_ma200, "r_breakout20": r_breakout20}
 
 
 def block_fn(name: str):
