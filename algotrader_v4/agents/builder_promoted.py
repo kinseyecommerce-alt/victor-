@@ -50,7 +50,7 @@ from stratlab import datagen_features as F
 
 ENTRY_T = dtime(9, 15, 5)
 SUPPORTED_BLOCKS = ("gap_fade", "idio_gap")
-SUPPORTED_EXITS = ("bracket", "bracket_min", "time_min")
+SUPPORTED_EXITS = ("bracket", "bracket_min", "time_min") + tuple(G.TRAIL_KINDS)   # builder/v4 trailing stops
 NIFTY_KEY = "_NIFTY50_min"
 TAG = "VAL-BLD"
 
@@ -128,6 +128,8 @@ def exit_deadline_min(c: G.Candidate) -> int:
         d = m0 + int(c.exit[1])
     elif kind == "bracket_min":
         d = m0 + int(c.exit[3])
+    elif kind in ("trail_min", "trail_be_min"):
+        d = m0 + int(c.exit[2])
     else:
         d = BE.SQUARE_MIN
     return min(d, BE.SQUARE_MIN)

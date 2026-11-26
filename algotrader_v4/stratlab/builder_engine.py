@@ -595,7 +595,7 @@ class Engine:
                 if x >= T or not has[s, x] or int(cal[x]) > hi or int(cal[x]) in M.special:
                     continue
                 pout, xl = M.f["o1521"][s, x], "o1521"
-            elif kind in ("time_min", "bracket", "bracket_min", "signal", "signal_min"):
+            elif kind in ("time_min", "bracket", "bracket_min", "signal", "signal_min") + G.TRAIL_KINDS:
                 walk = (ENTRY_MIN[fi], kind) + tuple(ex[1:])
             else:
                 raise ValueError(f"minute exit {ex}")
@@ -677,6 +677,8 @@ def walk_session(tt, o, h, l, c, v, side: int, walk: tuple, day: int, index_tick
         deadline = m0 + int(walk[4])
     elif kind in ("signal_min",):
         deadline = m0 + int(walk[3])
+    elif kind in ("trail_min", "trail_be_min"):
+        deadline = m0 + int(walk[3])
     else:
         deadline = SQUARE_MIN
     deadline = min(deadline, SQUARE_MIN)
@@ -704,6 +706,31 @@ def walk_session(tt, o, h, l, c, v, side: int, walk: tuple, day: int, index_tick
             tp = sim.target_fill(side, tgt, float(o[k]), float(h[k] if side > 0 else l[k]), tick)
             if tp is not None:
                 return raw, float(tp), _hm(int(tt[k])), "target"
+        return at_lim("time")
+    if kind in G.TRAIL_KINDS:
+        # builder/v4: the stop is checked against each bar (gap through it at the open: filled at the open; touched
+        # inside the bar: filled at the stop), and only then moved with that bar's best price - never inside a bar
+        x = float(walk[2])
+        be = kind in ("trail_be", "trail_be_min")
+        best = raw
+        stop = raw * (1 - side * x)
+        armed = not be                               # trail: trails from the first bar; trail_be: after +x
+        for k in range(j, lim):
+            if k > j and side * (float(o[k]) - stop) <= 0:
+                return raw, float(o[k]), _hm(int(tt[k])), "stop"
+            if (side > 0 and l[k] <= stop) or (side < 0 and h[k] >= stop):
+                return raw, float(stop), _hm(int(tt[k])), "stop"
+            fav = float(h[k]) if side > 0 else float(l[k])
+            if side * (fav - best) > 0:
+                best = fav
+            if be and not armed and side * (best / raw - 1.0) >= x:
+                armed = True
+            if armed:
+                trail = best * (1 - side * x)
+                if be:
+                    trail = max(trail, raw) if side > 0 else min(trail, raw)
+                if side * (trail - stop) > 0:
+                    stop = trail
         return at_lim("time")
     if kind in ("signal", "signal_min"):
         a0 = 0

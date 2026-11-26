@@ -75,9 +75,12 @@ RULE_SHA256_V2 = "7072377b40de2be492773868b962e8dcc10b7392fc099587fcd1b2ef53d451
 # next to v1 / v2, which stay valid and are never rewritten.
 RULE_FILE_V3 = HERE / "builder_rule_v3.json"
 RULE_SHA256_V3 = "bcf23e8d3098427b097870c98a9d888053d2f50f28e86d83aa5456fa9d79f116"
+# builder/v4 (26 Nov 2026): bg3 + trailing-stop exits for intraday / scalping (grammar bg4); gates, costs, DSR as v3
+RULE_FILE_V4 = HERE / "builder_rule_v4.json"
+RULE_SHA256_V4 = "385b3a15760773cb400f00d3688242a6793c3a66cf7e699ba212dec7b32cefbe"
 # the pinned versions in order: a registry may only move forward along this chain (record "rule_upgrade")
 RULES = (("builder/v1", RULE_FILE, RULE_SHA256), ("builder/v2", RULE_FILE_V2, RULE_SHA256_V2),
-         ("builder/v3", RULE_FILE_V3, RULE_SHA256_V3))
+         ("builder/v3", RULE_FILE_V3, RULE_SHA256_V3), ("builder/v4", RULE_FILE_V4, RULE_SHA256_V4))
 CURRENT_RULE_FILE, CURRENT_RULE_SHA256 = RULES[-1][1], RULES[-1][2]
 DEFAULT_MAX_MB = 400.0
 MAX_ATTEMPTS = 3            # failed evaluation runs of one batch before it is recorded `failed` (bookkeeping, not a gate)
