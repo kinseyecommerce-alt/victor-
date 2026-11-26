@@ -665,6 +665,57 @@ def test_builder_promoted_agent_trades_the_registry_rules_with_their_own_exits()
         assert out["entered"] == ["bldA:AAA"] and out["skipped"] == {"bldA:BBB": "sebi: kill switch active"}, out
         assert seen == [("bld_promoted", "AAA")]
 
+def test_builder_promoted_agent_trades_swing_rules_from_the_forward_plan():
+    """Daily-grid swing rules (CNC longs): entries = the builder forward run's pending_daily at the open; exits =
+    the engine's own trade of the same rule / symbol / entry day; a stale plan trades nothing; shorts unsupported."""
+    import asyncio
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    import agents.builder_promoted as BP
+    from stratlab import builder_grammar as G
+    a = ALL_AGENTS["bld_promoted"]
+    lng = {"agent": "swing", "mtype": "HIGH_VOL", "block": "high52", "params": [["x", 0.03]], "entry": "next_open",
+           "exit": ["hold", 5], "instrument": "STOCKS", "product": "cnc/fut", "structure": "", "universe": "TOP500",
+           "size": ""}
+    sht = dict(lng, block="st_rev_winners", params=[["x", 0.08], ["mode", "winners"]], size="c10")
+    assert BP.supported(G.Candidate.from_json(lng)) == (True, "")
+    assert BP.supported(G.Candidate.from_json(sht))[0] is False
+    rules = [{"id": "bldS", "cand": lng, "universe_names": [], "universe": "TOP500", "ok": True, "why": ""}]
+    d1 = _dt(2026, 11, 26, 9, 15, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
+    d2 = _dt(2026, 11, 27, 9, 15, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
+    quotes = {"AAA": {"open": 250.0, "ltp": 251.0}, "BBB": {"open": 400.0, "ltp": 401.0}}
+    plan1 = {"last_daily": 20261125, "pending": {"bldS": [["AAA", 1, 0.5], ["BBB", 1, 0.3]]}, "trades": {}}
+
+    def tr(sym, reason, xd, px):
+        return ["bldS", sym, 20261126, 1, "09:15", quotes[sym]["open"], xd, "15:29", px, 1, "equity_cnc", 0, 0, reason]
+    plan2 = {"last_daily": 20261126, "pending": {"bldS": []},
+             "trades": {"bldS": [tr("AAA", "window_end", 20261126, 255.0), tr("BBB", "stop", 20261126, 380.0)]}}
+    with isolated_book(), kite_paper(), patch.object(settings, "validated_builder_promoted_enabled", True), \
+            patch.object(BP, "promoted_rules", lambda: rules), \
+            patch.object(BP.VD, "quotes", lambda ins: quotes), \
+            patch.object(BP.VD, "price_adjusting_actions", lambda s, d: []):
+        a.state.running = True
+        with patch.object(BP, "forward_plan", lambda d: plan1):
+            out = asyncio.run(a.enter(d1))
+        sw = out["swing"]
+        assert sw["entered"] == ["bldS:AAA", "bldS:BBB"] and sw["exited"] == [], out
+        pos = {p.symbol: p for p in a.positions()}
+        assert pos["AAA"].product == "CNC" and pos["AAA"].overnight and pos["AAA"].qty == int(100_000 // 250.0)
+        assert pos["BBB"].meta["kind"] == "swing" and pos["BBB"].meta["rule"] == "bldS"
+        assert asyncio.run(a.exit_due(d1.replace(hour=15, minute=20))) == [], "the minute exits leave swing alone"
+        with patch.object(BP, "forward_plan", lambda d: plan2):
+            sw2 = asyncio.run(a._swing(d2.date(), rules))
+        assert sw2["exited"] == ["BBB"] and sw2["entered"] == [], sw2
+        assert [p.symbol for p in a.positions()] == ["AAA"], "the engine still holds AAA"
+        row = [r for r in a.ledger_rows() if r["symbol"] == "BBB" and r.get("rule") == "bldS"][-1]
+        assert row["exit"] == 380.0 and row.get("cost_kind", "equity_cnc") in (None, "equity_cnc"), row
+        with patch.object(BP, "forward_plan", lambda d: dict(plan2, last_daily=20261125)):
+            sw3 = asyncio.run(a._swing(d2.date(), rules))
+        assert sw3["reason"].startswith("data unavailable") and sw3["entered"] == [] and sw3["exited"] == []
+        with patch.object(BP, "forward_plan", lambda d: None):
+            assert "missing" in asyncio.run(a._swing(d2.date(), rules))["reason"]
+
+
 def test_approval_mode_gates_entries_by_day_ticket():
     import approvals as AP
     import trading_state as TS

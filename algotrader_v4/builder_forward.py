@@ -262,7 +262,20 @@ def forward_trades(root: str, data_root: Optional[str], day: int, source: str = 
                            names=names))
     res = BE.run_jobs(E, jobs) if jobs else {}
     cal = sorted(set(int(x) for x in E.dcal) & set(int(x) for x in E.mcal))
+    # live support (agents/builder_promoted.py): each daily-grid stock strategy's entries for the NEXT session's open
+    # (signals on the last session of the data), with the symbols it still holds (open at the window end)
+    pending = {}
+    for j in jobs:
+        if j.cand.grid != "daily":
+            continue
+        try:
+            held = {t[1] for t in res.get(j.key, {}).get("trades", []) if t[-1] == "window_end"}
+            sig = E.signals(j.cand, names=j.names)
+            pending[j.key] = [list(x) for x in E.pending_daily(j.cand, sig, held)]
+        except Exception as exc:                       # one strategy's failure never stops the forward run
+            pending[j.key] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     return {"day": int(day), "calendar": [d for d in cal if d <= int(day)],
+            "last_daily": int(E.dcal[-1]) if len(E.dcal) else None, "pending": pending,
             "trades": {k: [list(t) for t in v["trades"]] for k, v in res.items()}}
 
 

@@ -62,8 +62,19 @@ LAB_FINGERPRINT = fingerprint(
 
 
 # ── pure decision functions (the parity target) ───────────────────────────────
+def is_swing(c: G.Candidate) -> bool:
+    """A daily-grid stock swing rule (decided on the evening's close, entered at the next open)."""
+    return c.agent == "swing" and G.BLOCK[c.block].grid == "daily" and c.instrument == "STOCKS"
+
+
 def supported(c: G.Candidate) -> tuple[bool, str]:
     """Can this promoted candidate be traded live by this agent? (ok, reason)."""
+    if is_swing(c):
+        # entries: the builder forward run's pending_daily (the engine's own filters); exits: the engine's own trade
+        # (any exit kind). Shorts would be stock futures: not yet.
+        if G.size_regime(c.agent, c.block, c.params, c.instrument) != G.SIZE_LEGACY:
+            return False, "swing shorts (stock futures): live support pending"
+        return True, ""
     if c.block not in SUPPORTED_BLOCKS:
         return False, f"block {c.block}"
     if c.block == "gap_fade" and dict(c.params).get("mode") != "fade_day":
@@ -279,6 +290,23 @@ def prev_sessions_hlc(symbol: str, day: date, n: int = BE.ATR_N + 1) -> list:
     return out
 
 
+def forward_plan(day: date) -> Optional[dict]:
+    """The builder forward run of `day` (07:05): {last_daily, pending {id: [[symbol, side, rank]]}, trades {id: [...]}}
+    or None when it has not run."""
+    import gzip
+    import json
+    try:
+        import builder
+        f = builder.default_root() / "forward" / "work" / f"forward_{day.strftime('%Y%m%d')}.json.gz"
+        if not f.exists():
+            return None
+        with gzip.open(f, "rt") as fh:
+            return json.load(fh)
+    except Exception as exc:
+        logger.warning("[bld_promoted] forward plan unreadable: {}", exc)
+        return None
+
+
 def _prev_td(d: date) -> date:
     x = d - timedelta(days=1)
     while not is_trading_day(x):
@@ -348,6 +376,10 @@ class BuilderPromotedAgent(ValidatedAgent):
         rules = await asyncio.to_thread(promoted_rules)
         self.last_rules = [{k: r.get(k) for k in ("id", "ok", "why", "universe")} for r in rules]
         live = [r for r in rules if r.get("ok")]
+        swing = [r for r in live if is_swing(G.Candidate.from_json(r["cand"]))]
+        live = [r for r in live if r not in swing]
+        if swing:
+            out["swing"] = await self._swing(today, swing)
         if not live:
             self.mark_done("entry")
             out["reason"] = "no supported promoted strategy"
@@ -427,7 +459,7 @@ class BuilderPromotedAgent(ValidatedAgent):
         mins = now.hour * 60 + now.minute
         done = []
         for pos in list(self._positions.values()):
-            if not self._still_open(pos):
+            if not self._still_open(pos) or pos.meta.get("kind") == "swing":
                 continue
             day = date.fromisoformat(pos.meta.get("day") or now.date().isoformat())
             if day == now.date() and mins <= int(pos.meta.get("deadline_min", BE.SQUARE_MIN)):
@@ -460,6 +492,91 @@ class BuilderPromotedAgent(ValidatedAgent):
         if done:
             self._save_book()
         return done
+
+    # ── swing rules (daily grid, CNC longs): exits mirror the engine's own trade, entries its pending_daily ──
+    async def _swing(self, today: date, rules: list) -> dict:
+        res = {"entered": [], "exited": [], "skipped": {}}
+        plan = await asyncio.to_thread(forward_plan, today)
+        want = int(_prev_td(today).strftime("%Y%m%d"))
+        if plan is None or plan.get("last_daily") != want:
+            res["reason"] = (f"data unavailable: forward plan of {today} "
+                             + ("missing" if plan is None else f"ends {plan.get('last_daily')}, not {want}"))
+            self._skip("*", "swing_plan_unavailable")
+            self._log("entry", "*", "info", res["reason"])
+            return res
+        trades = plan.get("trades") or {}
+        # 1) exits: each open swing position follows the engine's trade of the same rule, symbol and entry day
+        for pos in list(self._positions.values()):
+            if not self._still_open(pos) or pos.meta.get("kind") != "swing":
+                continue
+            if pos.meta.get("day") == today.isoformat():
+                continue
+            ed = int(date.fromisoformat(pos.meta["day"]).strftime("%Y%m%d"))
+            tr = [t for t in trades.get(pos.meta.get("rule"), []) if t[1] == pos.symbol and int(t[2]) == ed]
+            if tr and tr[0][-1] == "window_end":
+                continue                                     # the engine still holds it
+            if tr:
+                px, reason, kind = float(tr[0][8]), f"{tr[0][-1]} on {tr[0][6]}", "CLOSE"
+            else:
+                q = await asyncio.to_thread(VD.quotes, [f"NSE:{pos.symbol}"])
+                px = float((q.get(pos.symbol) or {}).get("ltp") or 0) or pos.entry_px
+                reason, kind = "not in the engine's trades", "RECONCILE"
+                self._deviation("swing_not_in_engine", pos.symbol, "exit at the LTP")
+            pos.meta["exit_reason"] = reason
+            _oid, fill = paper_fill_at(pos.symbol, "NSE", "SELL", pos.qty, "CNC", round(px, 2), TAG, kind)
+            self._close(pos, fill, f"{pos.meta.get('rule')}: {reason}")
+            res["exited"].append(pos.symbol)
+        # 2) entries at today's open: the engine's pending entries (longs only: supported())
+        todo = [(r, p) for r in rules for p in (plan.get("pending") or {}).get(r["id"]) or []
+                if isinstance(p, list)]
+        if todo:
+            syms = sorted({p[0] for _r, p in todo})
+            q = await asyncio.to_thread(VD.quotes, [f"NSE:{x}" for x in syms])
+            cap = float(getattr(settings, "validated_builder_promoted_max_gross", 5_000_000.0)) * self._scale()
+            gross = sum(p.entry_px * p.qty for p in self._positions.values() if self._still_open(p))
+            from sebi_compliance import sebi_compliance
+            for r, (sym, side, rank) in todo:
+                key = f"{r['id']}:{sym}"
+                px = float((q.get(sym) or {}).get("open") or 0)
+                if int(side) != 1 or px <= 0:
+                    res["skipped"][key] = "no open price" if px <= 0 else "short"
+                    continue
+                if VD.price_adjusting_actions(sym, today):
+                    res["skipped"][key] = "corporate action"
+                    continue
+                if any(p.symbol == sym and p.meta.get("rule") == r["id"] for p in self._positions.values()
+                       if self._still_open(p)):
+                    res["skipped"][key] = "already held"
+                    continue
+                c = G.Candidate.from_json(r["cand"])
+                qty = max(1, int(trade_qty(c, 1, px) * self._scale()))
+                if gross + qty * px > cap:
+                    res["skipped"][key] = "gross_cap"
+                    self._skip(sym, "gross_cap", log=False)
+                    continue
+                try:
+                    ok, _algo, why = sebi_compliance.pre_order_check(
+                        strategy=self.name, symbol=sym, exchange="NSE", transaction_type="BUY", quantity=qty,
+                        order_type="MARKET", price_at_signal=px, signal_source=f"validated:{r['id']}", regime="n/a")
+                    if not ok:
+                        res["skipped"][key] = f"sebi: {why}"
+                        continue
+                    oid, fill = paper_fill_at(sym, "NSE", "BUY", qty, "CNC", px, TAG, "AUCTION")
+                    sebi_compliance.record_order_id(self.name, sym, oid)
+                except Exception as exc:
+                    self._error(f"swing entry {sym}", exc)
+                    continue
+                pt = PlannedTrade(symbol=sym, side=1, qty=qty, entry_ref=px, entry_t="09:15", exit_t=c.exit[0],
+                                  key=r["id"])
+                self._open(pt, "CNC", "NSE", fill, oid, overnight=True,
+                           meta={"rule": r["id"], "kind": "swing", "rank": round(float(rank), 6), "cand": r["cand"],
+                                 "day": today.isoformat()})
+                gross += qty * px
+                res["entered"].append(key)
+        self._save_book()
+        logger.info("[bld_promoted] swing: {} entered, {} exited, {} skipped", len(res["entered"]),
+                    len(res["exited"]), len(res["skipped"]))
+        return res
 
     async def catch_up(self, now: Optional[datetime] = None) -> dict:
         now = now or self._now()
