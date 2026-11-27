@@ -665,6 +665,15 @@ def test_builder_promoted_agent_trades_the_registry_rules_with_their_own_exits()
         assert out["entered"] == ["bldA:AAA"] and out["skipped"] == {"bldA:BBB": "sebi: kill switch active"}, out
         assert seen == [("bld_promoted", "AAA")]
 
+def test_builder_promoted_shares_a_binding_cap_in_turns():
+    import agents.builder_promoted as BP
+    plans = {"A": [("a1", 1, 3.0), ("a2", 1, 2.0), ("a3", -1, 1.0)], "B": [("b1", -1, 5.0)], "C": []}
+    rules = [({"id": k}, None) for k in ("A", "B", "C")]
+    got = [(r["id"], sym) for r, _c, sym, _side, _rk in BP.fair_order(rules, lambda r, c: plans[r["id"]])]
+    assert got == [("A", "a1"), ("B", "b1"), ("A", "a2"), ("A", "a3")], got
+    assert BP.fair_order([], lambda r, c: []) == []
+
+
 def test_builder_promoted_agent_trades_swing_rules_from_the_forward_plan():
     """Daily-grid swing rules (CNC longs): entries = the builder forward run's pending_daily at the open; exits =
     the engine's own trade of the same rule / symbol / entry day; a stale plan trades nothing; shorts unsupported."""

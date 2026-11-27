@@ -317,6 +317,19 @@ def forward_plan(day: date) -> Optional[dict]:
         return None
 
 
+def fair_order(rules: list, plan_of) -> list:
+    """The day's entries of every strategy, taken in turns: each strategy's 1st entry, then each one's 2nd, ... (each
+    strategy keeps its own order). A gross cap that binds is then shared across the strategies instead of going to
+    the first ones in the registry. [(rule, cand, symbol, side, rank)]."""
+    plans = [(r, c, list(plan_of(r, c))) for r, c in rules]
+    out = []
+    for i in range(max((len(p) for _r, _c, p in plans), default=0)):
+        for r, c, p in plans:
+            if i < len(p):
+                out.append((r, c) + tuple(p[i]))
+    return out
+
+
 def _prev_td(d: date) -> date:
     x = d - timedelta(days=1)
     while not is_trading_day(x):
@@ -424,9 +437,9 @@ class BuilderPromotedAgent(ValidatedAgent):
         excluded = {s for s in allnames if VD.price_adjusting_actions(s, today)}
         cap = float(getattr(settings, "validated_builder_promoted_max_gross", 5_000_000.0)) * self._scale()
         gross = sum(p.entry_px * p.qty for p in self._positions.values())
-        for r in live:
-            c = G.Candidate.from_json(r["cand"])
-            for sym, side, rank in plan_rule(c, gaps, nifty_gap, names_of[r["id"]], excluded):
+        for r, c, sym, side, rank in fair_order(
+                [(r, G.Candidate.from_json(r["cand"])) for r in live],
+                lambda r, c: plan_rule(c, gaps, nifty_gap, names_of[r["id"]], excluded)):
                 px = opens[sym]
                 qty = max(1, int(trade_qty(c, side, px) * self._scale()))
                 if gross + qty * px > cap:
