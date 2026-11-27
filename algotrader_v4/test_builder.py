@@ -2555,6 +2555,39 @@ def test_pending_daily_entries_equal_the_engines_next_session_plan():
     assert checked >= 3, "the check must cover days that actually have entries"
 
 
+def test_live_time_and_vwap_exits_match_the_engine():
+    """bld_promoted's walk_of for "time" (14:30 / 15:15), "signal" and "signal_min" (VWAP) exits, walked on the day's
+    1-minute bars, gives the engine's own entry and exit prices for every planned trade."""
+    from agents import builder_promoted as BP
+    E = engine()
+    M = E.ctx.minute
+    n = 0
+    for agent, kinds in (("intraday", ("time", "signal")), ("scalping", ("signal_min",))):
+        for ex_kind in kinds:
+            cs = [c for m in G.MARKET_TYPES for c in G.cell_grammar(agent, m, "bg6")
+                  if c.block == "gap_fade" and c.exit[0] == ex_kind and BP.supported(c)[0]]
+            assert cs, (agent, ex_kind)
+            for c in cs[:6]:
+                rows = E.plan(c, E.signals(c), int(E.mcal[0]), int(E.mcal[-1]))
+                walks = E.resolve_walks([(k, r[0], r[1], r[2], r[9]) for k, r in enumerate(rows) if r[9] is not None])
+                for k, (s_, t, side, _e, _x, pin, pout, _fi, _xl, walk) in enumerate(rows[:15]):
+                    sym, d = M.syms[s_], int(E.mcal[t])
+                    parts = E.src.minute_parts(sym)
+                    hit = [(sd, i) for sd in parts for i, dd in enumerate(sd.days.tolist()) if int(dd) == d]
+                    sd, i = hit[0]
+                    a, b = int(sd.starts[i]), int(sd.ends[i])
+                    live = BE.walk_session(sd.t[a:b], sd.o[a:b], sd.h[a:b], sd.l[a:b], sd.c[a:b], sd.v[a:b], side,
+                                           BP.walk_of(c), d)
+                    if walk is None:                         # a time exit: the engine's panel prices
+                        assert live is not None and abs(live[0] - pin) < 1e-9 and abs(live[1] - pout) < 1e-9, \
+                            (c.exit, sym, d, live, pin, pout)
+                    else:
+                        assert live == walks[k], (c.exit, sym, d, live, walks[k])
+                    assert BP.exit_deadline_min(c) >= G.ENTRY_MIN[c.entry]
+                    n += 1
+    assert n >= 30, n
+
+
 def test_rule_v6_pinned_and_v5_unchanged():
     r6 = B.load_rule(B.RULE_FILE_V6)
     assert r6["_sha256"] == B.RULE_SHA256_V6 == hashlib.sha256((HERE / "builder_rule_v6.json").read_bytes()).hexdigest()
