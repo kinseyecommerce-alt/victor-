@@ -50,7 +50,8 @@ from stratlab import datagen_features as F
 
 ENTRY_T = dtime(9, 15, 5)
 SUPPORTED_BLOCKS = ("gap_fade", "idio_gap")
-SUPPORTED_EXITS = ("bracket", "bracket_min", "time_min") + tuple(G.TRAIL_KINDS) + tuple(G.ATR_KINDS)  # v4 / v5 trails
+SUPPORTED_EXITS = ("bracket", "bracket_min", "time_min", "time", "signal", "signal_min") + tuple(G.TRAIL_KINDS) + \
+    tuple(G.ATR_KINDS)   # time = the open of the 14:30 / 15:15 bar; signal = the VWAP cross; v4 / v5 trails
 NIFTY_KEY = "_NIFTY50_min"
 TAG = "VAL-BLD"
 
@@ -134,8 +135,13 @@ def plan_rule(c: G.Candidate, gaps: dict, nifty_gap: Optional[float], names, exc
 
 
 def walk_of(c: G.Candidate) -> tuple:
-    """The builder's walk tuple of a candidate's exit (builder_engine.Engine._plan_minute)."""
-    return (G.ENTRY_MIN[c.entry], c.exit[0]) + tuple(c.exit[1:])
+    """The builder's walk tuple of a candidate's exit (builder_engine.Engine._plan_minute). A "time" exit (the engine
+    books the open of the first bar at / after 14:30 or 15:15, the panel's o1430 / o1515) is the time_min walk that
+    ends at that minute."""
+    m0 = G.ENTRY_MIN[c.entry]
+    if c.exit[0] == "time":
+        return (m0, "time_min", G.ENTRY_MIN[c.exit[1]] - m0)
+    return (m0, c.exit[0]) + tuple(c.exit[1:])
 
 
 def exit_deadline_min(c: G.Candidate) -> int:
@@ -143,6 +149,10 @@ def exit_deadline_min(c: G.Candidate) -> int:
     m0, kind = G.ENTRY_MIN[c.entry], c.exit[0]
     if kind == "time_min":
         d = m0 + int(c.exit[1])
+    elif kind == "time":
+        d = G.ENTRY_MIN[c.exit[1]]
+    elif kind == "signal_min":
+        d = m0 + int(c.exit[2])
     elif kind == "bracket_min":
         d = m0 + int(c.exit[3])
     elif kind in ("trail_min", "trail_be_min", "trail_atr_min", "trail_be_atr_min"):
