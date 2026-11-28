@@ -12,7 +12,7 @@
  "grammar": {
   "module": "stratlab/builder_grammar.py",
   "version": "bg7",
-  "sha256": "849a8159f538a2ff89adf0cdbd8979e12f277b5c6aa1dca58fc14917733b4c2a",
+  "sha256": "ee31f50c962a459efe7259f53790be8a20a28570785a577d1c701cabf46d341c",
   "agents": {
    "intraday": "NIFTY-100 stocks, MIS, minute grid; signals = minute blocks + the previous evening's end-of-day blocks; entry at a decision minute (09:15 auction .. 09:45); exit by 15:15 (time 14:30 / 15:15, stop 0.5 / 1 / 1.5 % with 1:1.5 / 1:2 / 1:3 targets, VWAP signal exit)",
    "scalping": "NIFTY-100 stocks, MIS, 1-5-minute opening signals; exit <= 30 minutes after entry (5 / 10 / 15 / 25 minutes, stop 0.3 / 0.5 % with 1:2 / 1:3 within 30 minutes, VWAP signal within 30 minutes)",
@@ -45,11 +45,11 @@
    "frozen_at_proof": "the names a universe resolved to on the batch's frozen data are recorded with the batch (summary 'universes') and with every proven candidate (proof 'universe_names'); its forward family entry trades exactly those names"
   },
   "sizes": {
-   "intraday": 3088,
-   "scalping": 1564,
+   "intraday": 4904,
+   "scalping": 1636,
    "swing": 4215,
-   "options": 576,
-   "futures": 1230
+   "options": 1488,
+   "futures": 1610
   },
   "v2": {
    "version": "bg2",
@@ -139,7 +139,8 @@
   },
   "atr_trailing": "bg5 = bg4 byte for byte (every earlier key unchanged, never re-drawn) + ATR trailing-stop exits for the same sentences as bg4's trailing block (each distinct bg3 minute-grid stock sentence of intraday / scalping): intraday trail_atr / trail_be_atr at k = 0.5 / 1.0 to the 15:15 square-off; scalping trail_atr_min / trail_be_atr_min at k = 0.25 / 0.5 with a 30-minute limit. Distance = k x ATR(14) / previous close; ATR(14) = mean true range of the 14 sessions before the entry day, session high / low / close from the symbol's own 1-minute bars, special sessions skipped; fewer than 15 earlier sessions: the trade is not taken. Fills exactly as the bg4 trailing kinds at that distance (builder_engine.atr_walk -> walk_session). New keys start with 'bg5' and have no bg1 twin.",
   "price_history_blocks": "bg6 = bg5 byte for byte (every earlier key unchanged, never re-drawn) + 8 NEW daily stock blocks (builder_grammar.BLOCKS_BG6, signal functions builder_engine.r_st_reversal / r_high52 / r_mom12_1 / r_ma200 / r_breakout20) from the daily OHLCV panel, no new data: st_rev_losers / st_rev_winners (5-session return <= -x / >= x, x 8 / 12 %: long / short), high52 (close within 1 / 3 % of its 252-session closing high: long), mom12_1 (return 252 -> 21 sessions ago >= 50 / 100 %: long), ma200_up / ma200_down (close crosses its 200-session mean on >= 1 / 2 x the 20-session volume: with the cross), breakout20 / breakdown20 (close beyond the previous 20 sessions' high / low on >= 1.5 / 2.5 x volume). Every price-history signal is suppressed while a corporate-action exclusion day of the stock lies in its look-back window (builder_engine.ca_clean). The sentences follow the rules of every earlier daily block: swing (all exits, CNC longs / futures shorts, universes TOP500 / NIFTY100 / NIFTY200) and futures (the short-side blocks); sizes by bg3's size regime. New keys start with 'bg6' and have no bg1 twin.",
-  "mean_reversion_blocks": "bg7 = bg6 byte for byte + 10 NEW daily stock blocks (builder_grammar.BLOCKS_BG7) from the daily OHLCV panel, buy side: rsi2_dip (Wilder RSI(2) <= 5 / 10 above the 200-session mean), ibs_low ((close - low) / (high - low) <= 0.1 / 0.2 above the 200-session mean), down_streak (3 / 4 lower closes above the 200-session mean), nr7_up (narrowest range of 7 sessions, close in the top half / quarter), gap_up_hold (open >= 3 / 5 % above the previous close, close >= open); sell side, their mirror images: rsi2_spike (RSI(2) >= 95 / 90 below the 200-session mean), ibs_high (IBS >= 0.9 / 0.8 below it), up_streak (3 / 4 higher closes below it), nr7_down (NR7, close in the bottom half / quarter), gap_down_hold (open >= 3 / 5 % below the previous close, close <= open). Corporate-action exclusion days in the look-back window suppress the signal (ca_clean). Swing sentences for all 10 (longs CNC at Rs 1 lakh, shorts stock futures at the c10 size, F&O names only) and futures-agent sentences for the 5 sell-side blocks (its short-side rule); TOP500 / NIFTY100 / NIFTY200. New keys start with 'bg7'."
+  "mean_reversion_blocks": "bg7 = bg6 byte for byte + 10 NEW daily stock blocks (builder_grammar.BLOCKS_BG7) from the daily OHLCV panel, buy side: rsi2_dip (Wilder RSI(2) <= 5 / 10 above the 200-session mean), ibs_low ((close - low) / (high - low) <= 0.1 / 0.2 above the 200-session mean), down_streak (3 / 4 lower closes above the 200-session mean), nr7_up (narrowest range of 7 sessions, close in the top half / quarter), gap_up_hold (open >= 3 / 5 % above the previous close, close >= open); sell side, their mirror images: rsi2_spike (RSI(2) >= 95 / 90 below the 200-session mean), ibs_high (IBS >= 0.9 / 0.8 below it), up_streak (3 / 4 higher closes below it), nr7_down (NR7, close in the bottom half / quarter), gap_down_hold (open >= 3 / 5 % below the previous close, close <= open). Corporate-action exclusion days in the look-back window suppress the signal (ca_clean). Swing sentences for all 10 (longs CNC at Rs 1 lakh, shorts stock futures at the c10 size, F&O names only) and futures-agent sentences for the 5 sell-side blocks (its short-side rule); TOP500 / NIFTY100 / NIFTY200. New keys start with 'bg7'.",
+  "every_agent": "bg7 also gives every other agent new sentences: options and index futures (NIFTY / BANKNIFTY on NIFTY 50's daily signal, builder_grammar.BLOCKS_BG7_IDX: NIFTY RSI(2) dip above / spike below its 200-day mean, 3 / 4-day down / up streaks, the turn of the month, 200-day crosses up / down, 20-session close breakouts up / down, a 0.5 / 1 % gap that holds up / down, an India VIX drop of 10 / 15 %; signals builder_engine.r_idx_*, r_vix_drop) under bg1's option / futures rules; intraday: every BLOCKS_BG6 / BLOCKS_BG7 daily stock block traded intraday the next morning (entries 09:15 / 09:20, intraday exits, bg1's previous-evening rule) and the 14:30 intraday-momentum block (BLOCKS_BG7_MIN halfhour_mom: |return from yesterday's close to 09:44 / 14:29| >= 0.5 / 1 %, traded WITH it from 14:30; exits 15:15, every bracket, the VWAP signal); scalping: halfhour_mom from 14:30 with the scalping exits. 18,720 new bg7 sentences in all; 55,412 sentences."
  },
  "batch": {
   "per_cell": 20,

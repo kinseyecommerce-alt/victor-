@@ -287,9 +287,46 @@ BLOCKS_BG7 = [
     _b("gap_down_hold", "daily", "be:r_gap_down_hold", {"g": (0.03, 0.05)}, "", "short", S_MR,
        "the stock opens >= {g:%} below yesterday's close and closes at or below its open"),
 ]
-BLOCK = {b.name: b for b in BLOCKS + BLOCKS_BG6 + BLOCKS_BG7}
+S_IDX = ("Index-level versions of the same effects: short-term index over-reaction inside its trend reverts, trend "
+         "crosses / breakouts and a gap that holds continue, month-end / month-start flows lift the index, a VIX drop "
+         "is fear unwinding.")
+S_MOM = ("Intraday momentum: the market's move over the day so far predicts the last hour, as late traders and "
+         "hedgers trade in the same direction (Gao, Han, Li and Zhou 2018).")
+# bg7 index blocks (options and index futures, NIFTY / BANKNIFTY on NIFTY 50's signal) and the 14:30 intraday
+# momentum block (intraday / scalping); plus every bg6 / bg7 daily stock block traded INTRADAY the next morning.
+BLOCKS_BG7_IDX = [
+    _b("idx_rsi2_dip", "idx_daily", "be:r_idx_rsi2", {"thr": (5.0, 10.0), "mode": ("dip",)}, "", "long", S_IDX,
+       "NIFTY 50's RSI(2) <= {thr} while it closes above its 200-day average"),
+    _b("idx_rsi2_spike", "idx_daily", "be:r_idx_rsi2", {"thr": (5.0, 10.0), "mode": ("spike",)}, "", "short", S_IDX,
+       "NIFTY 50's RSI(2) >= 100 - {thr} while it closes below its 200-day average"),
+    _b("idx_down_streak", "idx_daily", "be:r_idx_streak", {"n": (3, 4), "mode": ("down",)}, "", "long", S_IDX,
+       "NIFTY 50 closes lower {n} days in a row while above its 200-day average"),
+    _b("idx_up_streak", "idx_daily", "be:r_idx_streak", {"n": (3, 4), "mode": ("up",)}, "", "short", S_IDX,
+       "NIFTY 50 closes higher {n} days in a row while below its 200-day average"),
+    _b("idx_tom", "idx_daily", "be:r_idx_tom", {}, "", "long", S_IDX,
+       "today is the last session of the month (turn of the month)"),
+    _b("idx_ma200_up", "idx_daily", "be:r_idx_ma200", {"mode": ("up",)}, "", "long", S_IDX,
+       "NIFTY 50 closes above its 200-day average after closing below it"),
+    _b("idx_ma200_down", "idx_daily", "be:r_idx_ma200", {"mode": ("down",)}, "", "short", S_IDX,
+       "NIFTY 50 closes below its 200-day average after closing above it"),
+    _b("idx_breakout", "idx_daily", "be:r_idx_breakout", {"mode": ("up",)}, "", "long", S_IDX,
+       "NIFTY 50 closes above its highest close of the last 20 sessions"),
+    _b("idx_breakdown", "idx_daily", "be:r_idx_breakout", {"mode": ("down",)}, "", "short", S_IDX,
+       "NIFTY 50 closes below its lowest close of the last 20 sessions"),
+    _b("idx_gap_up_hold", "idx_daily", "be:r_idx_gap_hold", {"g": (0.005, 0.01), "mode": ("up",)}, "", "long", S_IDX,
+       "NIFTY 50 opens >= {g:%} up and closes at or above its open"),
+    _b("idx_gap_down_hold", "idx_daily", "be:r_idx_gap_hold", {"g": (0.005, 0.01), "mode": ("down",)}, "", "short",
+       S_IDX, "NIFTY 50 opens >= {g:%} down and closes at or below its open"),
+    _b("vix_drop", "idx_daily", "be:r_vix_drop", {"x": (0.10, 0.15)}, "", "long", S_IDX,
+       "India VIX falls >= {x:%} today"),
+]
+BLOCKS_BG7_MIN = [
+    _b("halfhour_mom", "minute", "be:r_halfhour_mom", {"x": (0.005, 0.01), "src": ("open30", "day")}, "o1430", "with",
+       S_MOM, "the stock is >= {x:%} away from yesterday's close at {src} (open30 = 09:44, day = 14:29)"),
+]
+BLOCK = {b.name: b for b in BLOCKS + BLOCKS_BG6 + BLOCKS_BG7 + BLOCKS_BG7_IDX + BLOCKS_BG7_MIN}
 BG6_BLOCKS = frozenset(b.name for b in BLOCKS_BG6)
-BG7_BLOCKS = frozenset(b.name for b in BLOCKS_BG7)
+BG7_BLOCKS = frozenset(b.name for b in BLOCKS_BG7 + BLOCKS_BG7_IDX + BLOCKS_BG7_MIN)
 
 PREV_EOD_FOR_INTRADAY = ("deliv_up", "deliv_down", "oi_long_buildup", "oi_short_buildup", "oi_short_covering",
                          "oi_long_unwinding", "ban_entry_short", "ban_entry_long", "inst_buy", "other_sell",
@@ -354,8 +391,8 @@ class Candidate:
 
     @property
     def version(self) -> str:
-        if self.block in BG7_BLOCKS:
-            return GRAMMAR_V7                 # a bg7 block exists only in bg7: always a new candidate
+        if self.block in BG7_BLOCKS or (self.block in BG6_BLOCKS and self.agent == "intraday"):
+            return GRAMMAR_V7                 # bg7 blocks, and bg6 blocks traded intraday: only in bg7, always new
         if self.block in BG6_BLOCKS:
             return GRAMMAR_V6                 # a bg6 block exists only in bg6: always a new candidate
         if self.exit and self.exit[0] in ATR_KINDS:
@@ -592,13 +629,40 @@ def _grammar_bg5(agent: str) -> list:
 
 
 def _grammar_bg7(agent: str) -> list:
-    """bg6 byte for byte, then the BLOCKS_BG7 sentences of the swing agent (every block) and the futures agent (its rule
-    takes the short-side blocks) under the same rules as every earlier daily block."""
+    """bg6 byte for byte, then, in this order, the new bg7 sentences of each agent under bg1's exits / bg2's universes
+    / bg3's size regime:
+      swing, futures   BLOCKS_BG7 (every block; the futures rule takes the sell side) and BLOCKS_BG7_IDX (futures:
+                       NIFTY / BANKNIFTY futures, both sides)
+      options          BLOCKS_BG7_IDX (NIFTY / BANKNIFTY options, directional structures, every expiry and exit)
+      intraday         every BLOCKS_BG6 / BLOCKS_BG7 daily STOCK block traded intraday the next morning (entries
+                       09:15 / 09:20, intraday exits: bg1's previous-evening rule) and BLOCKS_BG7_MIN from 14:30
+                       (exits: 15:15 time, every bracket, the VWAP signal)
+      scalping         BLOCKS_BG7_MIN from 14:30 (scalping exits, all within 30 minutes)"""
     base = grammar(agent, GRAMMAR_V6)
-    if agent not in ("swing", "futures"):
-        return base
+    rows = []
+    if agent in ("swing", "futures"):
+        rows += _grammar_bg1(agent, BLOCKS_BG7)
+        if agent == "futures":
+            rows += _grammar_bg1(agent, BLOCKS_BG7_IDX)
+    elif agent == "options":
+        rows += _grammar_bg1(agent, BLOCKS_BG7_IDX)
+    elif agent == "intraday":
+        for b in BLOCKS_BG6 + BLOCKS_BG7:
+            for p in b.combos():
+                for en in ("o0915", "o0920"):
+                    for ex in _exits(agent):
+                        if ex[0] == "time" and ENTRY_MIN[ex[1]] <= ENTRY_MIN[en] + 30:
+                            continue
+                        rows.append(("STOCKS", "mis", b.name, p, en, ex, ""))
+    if agent in ("intraday", "scalping"):
+        for b in BLOCKS_BG7_MIN:
+            for p in b.combos():
+                for ex in _exits(agent):
+                    if ex[0] == "time" and ENTRY_MIN[ex[1]] <= ENTRY_MIN[b.ready] + 30:
+                        continue
+                    rows.append(("STOCKS", "mis", b.name, p, b.ready, ex, ""))
     extra = []
-    for row in _grammar_bg1(agent, BLOCKS_BG7):
+    for row in rows:
         for u in universes_for(agent, row[2], row[0]):
             extra.append(row + (u, size_regime(agent, row[2], row[3], row[0])))
     return base + extra

@@ -2669,6 +2669,41 @@ def test_bg7_mean_reversion_signals():
     P10.o = np.asarray([o10])
     t10, s10, _r, _h = BE.r_gap_down_hold(_C6(P10), 0.03)
     assert t10[0, 100] and s10[0, 100] == -1 and not t10[0, 150] and t10.sum() == 1
+    # index blocks on NIFTY 50 (one signal row) and the 14:30 momentum block
+    class _N:
+        pass
+    PN = _P6([up])
+    PN.nifty = {"o": up.copy(), "c": c.copy()}
+    PN.vix = {"c": np.full(T_, 15.0)}
+    tn = BE.r_idx_rsi2(_C6(PN), 5.0, "dip")
+    assert tn[0].shape == (1, T_) and tn[0][0, 241] and tn[1][0, 241] == 1
+    PN.cal = np.array([20250100 + (i // 21) * 100 + (i % 21) + 1 for i in range(T_)], dtype=np.int64)
+    tm = BE.r_idx_tom(_C6(PN))[0][0]
+    assert tm[20] and tm[41] and not tm[19] and not tm[T_ - 1], "the last session of each month (never the last row)"
+    go = np.full(T_, 100.0)
+    go2 = go.copy()
+    go2[100] = 101.0                                     # opens 1 % up, closes at 101.5 >= open
+    PN.nifty = {"o": go2, "c": np.where(np.arange(T_) == 100, 101.5, go)}
+    tg = BE.r_idx_gap_hold(_C6(PN), 0.01, "up")
+    assert tg[0][0, 100] and tg[0].sum() == 1 and not BE.r_idx_gap_hold(_C6(PN), 0.01, "down")[0][0, 100]
+    assert BE.r_idx_gap_hold(_C6(PN), 0.01, "down")[0][0, 101], "101.5 -> opens 100 (-1.5 %), closes at the open"
+
+    class _M:
+        pass
+    M = _M()
+    M.f = {"pc": np.full((2, 5), 100.0), "c0944": np.array([[100.2] * 5, [101.5] * 5]),
+           "c1429": np.array([[98.5] * 5, [100.1] * 5]), "nb": np.full((2, 5), 375.0)}
+    M.shape, M.stocks = (2, 5), [0, 1]
+
+    class _CM:
+        minute = M
+
+        def m(self, name):
+            return np.ones((2, 5), bool)
+    t11, s11, _r, _h = BE.r_halfhour_mom(_CM(), 0.01, "day")
+    assert t11[0].all() and (s11[0] == -1).all() and not t11[1].any(), "day: -1.5 % -> short from 14:30"
+    t12, s12, _r, _h = BE.r_halfhour_mom(_CM(), 0.01, "open30")
+    assert t12[1].all() and (s12[1] == 1).all() and not t12[0].any(), "open30: +1.5 % at 09:44 -> long"
     # corporate actions suppress (3 lower closes inside a split window)
     P = _P6([d], excl={0: [int(_P6([d]).cal[240])]})
     assert not BE.r_down_streak(_C6(P), 3)[0][0, 247]
@@ -2680,20 +2715,34 @@ def test_bg7_is_bg6_plus_buy_and_sell_daily_blocks_traded_live():
         g6, g7 = G.grammar(a, "bg6"), G.grammar(a, "bg7")
         assert g7[:len(g6)] == g6, a
         extra = g7[len(g6):]
-        assert len(extra) == {"swing": 1200, "futures": 300}.get(a, 0), (a, len(extra))
-        assert all(r[2] in G.BG7_BLOCKS for r in extra)
+        want = {"swing": 1200, "futures": 680, "options": 912, "intraday": 1816, "scalping": 72}[a]
+        assert len(extra) == want, (a, len(extra))
+        assert all(r[2] in G.BG7_BLOCKS | G.BG6_BLOCKS for r in extra)
         assert all(r[8] == ("" if G.BLOCK[r[2]].side == "long" else "c10") for r in extra if a == "swing")
-    assert 4 * sum(G.grammar_sizes("bg7").values()) == 42692 == 36692 + 4 * (1200 + 300)
-    fut = {r[2] for r in G.grammar("futures", "bg7")[len(G.grammar("futures", "bg6")):]}
-    assert fut == {"rsi2_spike", "ibs_high", "up_streak", "nr7_down", "gap_down_hold"}, "futures: sell side only"
-    sides = {G.BLOCK[b].side for b in G.BG7_BLOCKS}
-    assert sides == {"long", "short"} and sum(G.BLOCK[b].side == "short" for b in G.BG7_BLOCKS) == 5
+    assert 4 * sum(G.grammar_sizes("bg7").values()) == 55412 == 36692 + 4 * 4680
+    fx = G.grammar("futures", "bg7")[len(G.grammar("futures", "bg6")):]
+    assert {r[2] for r in fx if r[0] == "STOCKS"} == {"rsi2_spike", "ibs_high", "up_streak", "nr7_down",
+                                                        "gap_down_hold"}, "futures stocks: sell side only"
+    assert {r[0] for r in fx} == {"STOCKS", "NIFTY", "BANKNIFTY"} and len({r[2] for r in fx if r[0] == "NIFTY"}) == 12
+    ox = G.grammar("options", "bg7")[len(G.grammar("options", "bg6")):]
+    assert {r[2] for r in ox} == {b.name for b in G.BLOCKS_BG7_IDX} and all(r[1] == "opt" for r in ox)
+    ix = G.grammar("intraday", "bg7")[len(G.grammar("intraday", "bg6")):]
+    assert {r[2] for r in ix} == {b.name for b in G.BLOCKS_BG6 + G.BLOCKS_BG7} | {"halfhour_mom"}
+    assert {r[4] for r in ix if r[2] == "halfhour_mom"} == {"o1430"} and \
+        {r[4] for r in ix if r[2] != "halfhour_mom"} == {"o0915", "o0920"}
+    sx = G.grammar("scalping", "bg7")[len(G.grammar("scalping", "bg6")):]
+    assert {r[2] for r in sx} == {"halfhour_mom"} and all(r[5][0] in ("time_min", "bracket_min", "signal_min")
+                                                         for r in sx)
+    sides = {b.side for b in G.BLOCKS_BG7}
+    assert sides == {"long", "short"} and sum(b.side == "short" for b in G.BLOCKS_BG7) == 5
+    assert sum(b.side == "short" for b in G.BLOCKS_BG7_IDX) == 5 and len(G.BLOCKS_BG7_IDX) == 12
     for v in ("bg1", "bg2", "bg3", "bg4", "bg5", "bg6"):
         assert not any(r[2] in G.BG7_BLOCKS for a in G.AGENTS for r in G.grammar(a, v)), v
-    c7 = [c for a in ("swing", "futures") for m in G.MARKET_TYPES for c in G.cell_grammar(a, m, "bg7")
-          if c.block in G.BG7_BLOCKS]
-    assert all(c.version == "bg7" and c.v1_key is None and json.loads(c.key)[0] == "bg7" for c in c7)
-    assert all(BP.supported(c) == (True, "") for c in c7), "every bg7 sentence is tradeable live the day it passes"
+    c7 = [c for a in G.AGENTS for m in G.MARKET_TYPES for c in G.cell_grammar(a, m, "bg7") if c.version == "bg7"]
+    assert len(c7) == 4 * 4680 and all(c.v1_key is None and json.loads(c.key)[0] == "bg7" for c in c7)
+    stock_daily = [c for c in c7 if c.agent in ("swing", "futures") and c.instrument == "STOCKS"]
+    assert stock_daily and all(BP.supported(c) == (True, "") for c in stock_daily), \
+        "every swing / futures stock sentence is tradeable live (PAPER) the day it passes"
     assert all(G.BLOCK[b].fn[3:] in BE.EXTRA for b in G.BG7_BLOCKS)
 
 

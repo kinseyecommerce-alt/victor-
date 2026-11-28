@@ -362,12 +362,108 @@ def r_gap_down_hold(ctx, g: float):
     return F._out(ok & np.isfinite(gap) & (gap <= -g + 1e-12) & (gap >= -0.20) & (P.c <= P.o), -1, _fin(-gap))
 
 
+# ── bg7: index blocks (options / index futures) on NIFTY 50's daily open / close and India VIX ──────────────────────
+def _nifty(ctx):
+    P = ctx.daily
+    return np.asarray(P.nifty["o"], float), np.asarray(P.nifty["c"], float)
+
+
+def _row(x):
+    return np.asarray(x, float)[None, :]
+
+
+def r_idx_rsi2(ctx, thr: float, mode: str):
+    """NIFTY 50 RSI(2) <= thr above its 200-session mean (dip: long) / >= 100 - thr below it (spike: short)."""
+    _o, c = _nifty(ctx)
+    r = rsi2(c[None, :])[0]
+    sma = _roll(c[None, :], 200, "mean", 180)[0]
+    if mode == "dip":
+        return F._out(_row(np.isfinite(r) & (r <= thr + 1e-12) & (c > sma)) > 0, 1, _row(100.0 - r))
+    return F._out(_row(np.isfinite(r) & (r >= 100.0 - thr - 1e-12) & (c < sma)) > 0, -1, _row(r))
+
+
+def r_idx_streak(ctx, n: int, mode: str):
+    """n lower closes in a row of NIFTY 50 above its 200-session mean (down: long) / n higher closes below it (up:
+    short)."""
+    _o, c = _nifty(ctx)
+    c2 = c[None, :]
+    sma = _roll(c2, 200, "mean", 180)[0]
+    m = np.ones(len(c), bool)
+    for k in range(int(n)):
+        cur = c2 if k == 0 else F.lag(c2, k)
+        m &= ((cur < F.lag(c2, k + 1)) if mode == "down" else (cur > F.lag(c2, k + 1)))[0]
+    move = np.abs(c / F.lag(c2, int(n))[0] - 1.0)
+    if mode == "down":
+        return F._out(_row(m & (c > sma)) > 0, 1, _row(move))
+    return F._out(_row(m & (c < sma)) > 0, -1, _row(move))
+
+
+def r_idx_tom(ctx):
+    """Turn of the month: the last session of a calendar month (entered at the next open = the first session of the
+    new month): long."""
+    cal = np.asarray(ctx.daily.cal, np.int64)
+    last = np.zeros(len(cal), bool)
+    last[:-1] = (cal[:-1] // 100) != (cal[1:] // 100)
+    return F._out(_row(last) > 0, 1, _row(np.ones(len(cal))))
+
+
+def r_idx_ma200(ctx, mode: str):
+    """NIFTY 50 closes across its 200-session mean today (up: long / down: short)."""
+    _o, c = _nifty(ctx)
+    c2 = c[None, :]
+    sma = _roll(c2, 200, "mean", 180)[0]
+    c1, s1 = F.lag(c2, 1)[0], np.r_[np.nan, sma[:-1]]
+    if mode == "up":
+        return F._out(_row((c > sma) & (c1 <= s1)) > 0, 1, _row(np.abs(c / sma - 1.0)))
+    return F._out(_row((c < sma) & (c1 >= s1)) > 0, -1, _row(np.abs(c / sma - 1.0)))
+
+
+def r_idx_breakout(ctx, mode: str):
+    """NIFTY 50 closes above the highest (up: long) / below the lowest (down: short) close of the previous 20
+    sessions."""
+    _o, c = _nifty(ctx)
+    c2 = c[None, :]
+    if mode == "up":
+        hi = _roll(c2, 20, "max", 18, include_current=False)[0]
+        return F._out(_row(c > hi) > 0, 1, _row(np.abs(c / hi - 1.0)))
+    lo = _roll(c2, 20, "min", 18, include_current=False)[0]
+    return F._out(_row(c < lo) > 0, -1, _row(np.abs(c / lo - 1.0)))
+
+
+def r_idx_gap_hold(ctx, g: float, mode: str):
+    """NIFTY 50 opens >= g above (up: long) / below (down: short) yesterday's close and closes beyond its open."""
+    o, c = _nifty(ctx)
+    gap = o / F.lag(c[None, :], 1)[0] - 1.0
+    if mode == "up":
+        return F._out(_row(np.isfinite(gap) & (gap >= g - 1e-12) & (c >= o)) > 0, 1, _row(np.abs(gap)))
+    return F._out(_row(np.isfinite(gap) & (gap <= -g + 1e-12) & (c <= o)) > 0, -1, _row(np.abs(gap)))
+
+
+def r_vix_drop(ctx, x: float):
+    """India VIX falls >= x today (fear unwinding): long the index."""
+    vc = ctx.d("vix_chg")
+    return F._out((np.isfinite(vc) & (vc <= -x + 1e-12))[None, :], 1, np.abs(vc)[None, :])
+
+
+# ── bg7: intraday momentum (minute grid, stocks): the day's move so far predicts the last hour ──────────────────
+def r_halfhour_mom(ctx, x: float, src: str):
+    """The stock's return from yesterday's close to 09:44 (open30) / to 14:29 (day) is >= x in size: trade WITH it
+    from 14:30 (intraday momentum, Gao-Han-Li-Zhou 2018)."""
+    M = ctx.minute
+    Fm = M.f
+    r = (Fm["c0944"] if src == "open30" else Fm["c1429"]) / Fm["pc"] - 1.0
+    trig = F._stock_rows(M, np.isfinite(r) & (np.abs(r) >= x - 1e-12) & (np.abs(r) <= F.MAX_GAP) & ctx.m("prev_ok"))
+    return F._out(trig, F._sgn(r), np.abs(r))
+
+
 EXTRA = {"r_vol_shock": r_vol_shock, "r_vix_spike_index": r_vix_spike_index, "r_nifty_move": r_nifty_move,
          "r_index_gap": r_index_gap, "r_st_reversal": r_st_reversal, "r_high52": r_high52, "r_mom12_1": r_mom12_1,
          "r_ma200": r_ma200, "r_breakout20": r_breakout20, "r_rsi2_dip": r_rsi2_dip, "r_ibs_low": r_ibs_low,
          "r_down_streak": r_down_streak, "r_nr7_up": r_nr7_up, "r_gap_up_hold": r_gap_up_hold,
          "r_rsi2_spike": r_rsi2_spike, "r_ibs_high": r_ibs_high, "r_up_streak": r_up_streak, "r_nr7_down": r_nr7_down,
-         "r_gap_down_hold": r_gap_down_hold}
+         "r_gap_down_hold": r_gap_down_hold, "r_idx_rsi2": r_idx_rsi2, "r_idx_streak": r_idx_streak,
+         "r_idx_tom": r_idx_tom, "r_idx_ma200": r_idx_ma200, "r_idx_breakout": r_idx_breakout,
+         "r_idx_gap_hold": r_idx_gap_hold, "r_vix_drop": r_vix_drop, "r_halfhour_mom": r_halfhour_mom}
 
 
 def block_fn(name: str):
