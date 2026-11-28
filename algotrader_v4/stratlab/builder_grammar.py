@@ -70,8 +70,9 @@ GRAMMAR_V3 = "bg3"
 GRAMMAR_V4 = "bg4"
 GRAMMAR_V5 = "bg5"
 GRAMMAR_V6 = "bg6"
-VERSIONS = (GRAMMAR_V1, GRAMMAR_V2, GRAMMAR_V3, GRAMMAR_V4, GRAMMAR_V5, GRAMMAR_V6)
-GRAMMAR_VERSION = GRAMMAR_V6             # the current version (new batches); bg1 / bg2 / bg3 stay reproducible byte for byte
+GRAMMAR_V7 = "bg7"
+VERSIONS = (GRAMMAR_V1, GRAMMAR_V2, GRAMMAR_V3, GRAMMAR_V4, GRAMMAR_V5, GRAMMAR_V6, GRAMMAR_V7)
+GRAMMAR_VERSION = GRAMMAR_V7             # the current version (new batches); bg1 / bg2 / bg3 stay reproducible byte for byte
 # bg4 (builder/v4, 25 Nov 2026): bg3 + TRAILING-STOP exits for every minute-grid stock sentence of intraday and scalping
 #   trail / trail_min        a stop x % behind the best price since entry (long: the highest high; short: the lowest
 #                            low), moved after each bar closes (never inside a bar)
@@ -258,8 +259,26 @@ BLOCKS_BG6 = [
     _b("breakdown20", "daily", "be:r_breakout20", {"k": (1.5, 2.5), "mode": ("down",)}, "", "short", S_PRICE,
        "the stock closes below its 20-day low on >= {k}x its 20-day volume"),
 ]
-BLOCK = {b.name: b for b in BLOCKS + BLOCKS_BG6}
+S_MR = ("Short-term over-reaction inside a long-term uptrend reverts (RSI(2) / internal bar strength / down-streak "
+        "dips above the 200-day mean); a volatility contraction or a gap that holds through the session resolves in "
+        "its direction.")
+# builder/v7 (bg7): NEW long-only daily stock blocks (swing CNC longs: tradeable live by bld_promoted the day they
+# pass). Kept out of BLOCKS / BLOCKS_BG6 so every earlier grammar stays byte for byte.
+BLOCKS_BG7 = [
+    _b("rsi2_dip", "daily", "be:r_rsi2_dip", {"thr": (5.0, 10.0)}, "", "long", S_MR,
+       "RSI(2) <= {thr} while the stock closes above its 200-day average"),
+    _b("ibs_low", "daily", "be:r_ibs_low", {"x": (0.1, 0.2)}, "", "long", S_MR,
+       "the stock closes in the bottom {x:%} of its day's range while above its 200-day average"),
+    _b("down_streak", "daily", "be:r_down_streak", {"n": (3, 4)}, "", "long", S_MR,
+       "{n} lower closes in a row while the stock is above its 200-day average"),
+    _b("nr7_up", "daily", "be:r_nr7_up", {"p": (0.5, 0.75)}, "", "long", S_MR,
+       "the narrowest day of the last 7 (NR7) with the close in the top part of the range (>= {p:%})"),
+    _b("gap_up_hold", "daily", "be:r_gap_up_hold", {"g": (0.03, 0.05)}, "", "long", S_MR,
+       "the stock opens >= {g:%} above yesterday's close and closes at or above its open"),
+]
+BLOCK = {b.name: b for b in BLOCKS + BLOCKS_BG6 + BLOCKS_BG7}
 BG6_BLOCKS = frozenset(b.name for b in BLOCKS_BG6)
+BG7_BLOCKS = frozenset(b.name for b in BLOCKS_BG7)
 
 PREV_EOD_FOR_INTRADAY = ("deliv_up", "deliv_down", "oi_long_buildup", "oi_short_buildup", "oi_short_covering",
                          "oi_long_unwinding", "ban_entry_short", "ban_entry_long", "inst_buy", "other_sell",
@@ -324,6 +343,8 @@ class Candidate:
 
     @property
     def version(self) -> str:
+        if self.block in BG7_BLOCKS:
+            return GRAMMAR_V7                 # a bg7 block exists only in bg7: always a new candidate
         if self.block in BG6_BLOCKS:
             return GRAMMAR_V6                 # a bg6 block exists only in bg6: always a new candidate
         if self.exit and self.exit[0] in ATR_KINDS:
@@ -353,7 +374,7 @@ class Candidate:
     def v1_key(self) -> str | None:
         """The bg1 key of the SAME sentence: a bg2 candidate whose universe is the one bg1 used implicitly is the bg1
         candidate (never drawn again once its bg1 key was drawn). None when the universe is new (no bg1 twin)."""
-        if self.size or (self.exit and self.exit[0] in TRAIL_KINDS + ATR_KINDS) or self.block in BG6_BLOCKS:
+        if self.size or (self.exit and self.exit[0] in TRAIL_KINDS + ATR_KINDS) or self.block in BG6_BLOCKS | BG7_BLOCKS:
             return None                      # a re-sized bg3 / a bg4 trailing sentence is new: no twin in bg1 / bg2
         if not self.universe:
             return self.key
@@ -496,6 +517,8 @@ def grammar(agent: str, version: str | None = None) -> list:
         return _grammar_bg5(agent)
     if version == GRAMMAR_V6:
         return _grammar_bg6(agent)
+    if version == GRAMMAR_V7:
+        return _grammar_bg7(agent)
     if version not in (GRAMMAR_V2, GRAMMAR_V3):
         raise KeyError(version)
     out = []
@@ -554,6 +577,19 @@ def _grammar_bg5(agent: str) -> list:
         seen.add(k)
         for ex in ATR_EXITS[agent]:
             extra.append((inst, prod, block, p, entry, ex, st, u, size))
+    return base + extra
+
+
+def _grammar_bg7(agent: str) -> list:
+    """bg6 byte for byte, then the BLOCKS_BG7 sentences of the swing agent (long-only blocks: the futures agent's rule
+    takes only short-side blocks, so none there) under the same rules as every earlier daily block."""
+    base = grammar(agent, GRAMMAR_V6)
+    if agent not in ("swing", "futures"):
+        return base
+    extra = []
+    for row in _grammar_bg1(agent, BLOCKS_BG7):
+        for u in universes_for(agent, row[2], row[0]):
+            extra.append(row + (u, size_regime(agent, row[2], row[3], row[0])))
     return base + extra
 
 

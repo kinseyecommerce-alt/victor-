@@ -244,9 +244,78 @@ def r_breakout20(ctx, k: float, mode: str):
     return F._out(ok & (P.c < lo) & (vr >= k), -1, _fin(vr))
 
 
+# ── builder/v7 (bg7): long-only daily mean-reversion / continuation blocks (stocks) ──────────────────────────────
+def _sma200(P):
+    return _roll(P.c, 200, "mean", 180)
+
+
+def rsi2(c) -> np.ndarray:
+    """Wilder RSI(2) of each row's closes (NaN until defined)."""
+    import pandas as pd
+    df = pd.DataFrame(np.asarray(c, float).T)
+    d = df.diff()
+    up = d.clip(lower=0).ewm(alpha=0.5, adjust=False, min_periods=2).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=0.5, adjust=False, min_periods=2).mean()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r = 100.0 - 100.0 / (1.0 + up / dn)
+    r = r.where(~((dn == 0) & (up > 0)), 100.0).where(~((dn == 0) & (up == 0)), 50.0)
+    return r.to_numpy().T
+
+
+def r_rsi2_dip(ctx, thr: float):
+    """RSI(2) <= thr while the close is above its 200-session mean (a dip inside an uptrend): long."""
+    P = ctx.daily
+    r = rsi2(P.c)
+    ok = ca_clean(P, 201)
+    return F._out(ok & np.isfinite(r) & (r <= thr + 1e-12) & (P.c > _sma200(P)), 1, _fin(100.0 - r))
+
+
+def r_ibs_low(ctx, x: float):
+    """Internal bar strength (close - low) / (high - low) <= x above the 200-session mean: long."""
+    P = ctx.daily
+    rng = P.h - P.l
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ibs = (P.c - P.l) / rng
+    ok = ca_clean(P, 201) & (rng > 0)
+    return F._out(ok & np.isfinite(ibs) & (ibs <= x + 1e-12) & (P.c > _sma200(P)), 1, _fin(1.0 - ibs))
+
+
+def r_down_streak(ctx, n: int):
+    """n consecutive lower closes above the 200-session mean: long."""
+    P = ctx.daily
+    dn = np.ones(P.shape, bool)
+    for k in range(int(n)):
+        cur = P.c if k == 0 else F.lag(P.c, k)
+        dn &= cur < F.lag(P.c, k + 1)
+    ok = ca_clean(P, 201)
+    move = np.abs(P.c / F.lag(P.c, n) - 1.0)
+    return F._out(ok & dn & (P.c > _sma200(P)), 1, _fin(move))
+
+
+def r_nr7_up(ctx, p: float):
+    """NR7: today's high-low range is the narrowest of the last 7 sessions and the close sits in the top (1 - p) of
+    it: long (volatility contraction resolving up)."""
+    P = ctx.daily
+    rng = P.h - P.l
+    mn = _roll(rng, 7, "min", 7)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pos = (P.c - P.l) / rng
+    ok = ca_clean(P, 8) & (rng > 0)
+    return F._out(ok & np.isfinite(pos) & (rng <= mn + 1e-12) & (pos >= p - 1e-12), 1, _fin(P.c / rng))
+
+
+def r_gap_up_hold(ctx, g: float):
+    """The stock opens >= g above yesterday's close and closes at / above its open (the gap holds): long."""
+    P = ctx.daily
+    gap = P.o / F.lag(P.c, 1) - 1.0
+    ok = ca_clean(P, 2)
+    return F._out(ok & np.isfinite(gap) & (gap >= g - 1e-12) & (gap <= 0.20) & (P.c >= P.o), 1, _fin(gap))
+
+
 EXTRA = {"r_vol_shock": r_vol_shock, "r_vix_spike_index": r_vix_spike_index, "r_nifty_move": r_nifty_move,
          "r_index_gap": r_index_gap, "r_st_reversal": r_st_reversal, "r_high52": r_high52, "r_mom12_1": r_mom12_1,
-         "r_ma200": r_ma200, "r_breakout20": r_breakout20}
+         "r_ma200": r_ma200, "r_breakout20": r_breakout20, "r_rsi2_dip": r_rsi2_dip, "r_ibs_low": r_ibs_low,
+         "r_down_streak": r_down_streak, "r_nr7_up": r_nr7_up, "r_gap_up_hold": r_gap_up_hold}
 
 
 def block_fn(name: str):

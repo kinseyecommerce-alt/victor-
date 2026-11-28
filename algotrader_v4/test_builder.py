@@ -2532,10 +2532,10 @@ def test_pending_daily_entries_equal_the_engines_next_session_plan():
     engine itself plans to enter at D+1 once D+1's data exists (same symbols, same sides, same order)."""
     E = engine()
     picks = [("SIDEWAYS", "high52", (("x", 0.03),)), ("HIGH_VOL", "st_rev_winners", (("x", 0.08), ("mode", "winners"))),
-             ("HIGH_VOL", "vix_high_losers", ())]
+             ("HIGH_VOL", "vix_high_losers", ()), ("SIDEWAYS", "nr7_up", (("p", 0.5),))]
     checked = 0
     for mt, blk, params in picks:
-        c = [x for x in G.cell_grammar("swing", mt, "bg6") if x.block == blk and x.params == params
+        c = [x for x in G.cell_grammar("swing", mt, "bg7") if x.block == blk and x.params == params
              and x.exit == ("hold", 5) and x.universe == "TOP500"][0]
         days = sorted({int(t) for t in E.signals(c)["t"].tolist()})
         for t in days[len(days) // 3::max(1, len(days) // 5)][:4]:
@@ -2552,7 +2552,7 @@ def test_pending_daily_entries_equal_the_engines_next_session_plan():
                    if int(x[2]) == D1]
             assert sorted(got) == sorted((p[0], p[1]) for p in pend), (blk, D, pend, got)
             checked += bool(pend)
-    assert checked >= 3, "the check must cover days that actually have entries"
+    assert checked >= 4, "the check must cover days that actually have entries"
 
 
 def test_live_time_and_vwap_exits_match_the_engine():
@@ -2598,6 +2598,81 @@ def test_rule_v6_pinned_and_v5_unchanged():
         if k not in ("version", "written", "supersedes", "grammar", "statement", "_sha256") and \
                 not k.startswith("candidate_note"):
             assert r6.get(k) == r5[k], k
+
+
+def test_bg7_mean_reversion_signals():
+    import numpy as np
+    T_ = 260
+    up = 100 * 1.002 ** np.arange(T_)                      # a steady uptrend: above its 200-day mean
+    # RSI(2): two sharp down days after a rise -> RSI(2) near 0; flat -> 50
+    c = up.copy()
+    c[240], c[241] = c[239] * 0.97, c[239] * 0.94
+    r = BE.rsi2([c])
+    assert r[0, 241] < 5 and r[0, 230] > 90 and abs(BE.rsi2([np.full(10, 5.0)])[0, 9] - 50.0) < 1e-9
+    t, sd, _r, _h = BE.r_rsi2_dip(_C6(_P6([c])), 5.0)
+    assert t[0, 241] and sd[0, 241] == 1 and not t[0, 230]
+    down = 100 * 0.998 ** np.arange(T_)
+    down[240], down[241] = down[239] * 0.97, down[239] * 0.94
+    assert not BE.r_rsi2_dip(_C6(_P6([down])), 5.0)[0][0, 241], "below the 200-day mean: no trade"
+    # IBS: close at the day's low inside the uptrend
+    h, l = up * 1.01, up * 0.99
+    cc = up.copy()
+    cc[250] = l[250] + 0.05 * (h[250] - l[250])
+    t2 = BE.r_ibs_low(_C6(_P6([cc], h=[h], l=[l])), 0.1)[0]
+    assert t2[0, 250] and not t2[0, 249]
+    # down streak: 3 lower closes in a row (not 2) above the mean
+    d = up.copy()
+    d[245:248] = [d[244] * 0.995, d[244] * 0.99, d[244] * 0.985]
+    t3 = BE.r_down_streak(_C6(_P6([d])), 3)[0]
+    assert t3[0, 247] and not t3[0, 246] and not BE.r_down_streak(_C6(_P6([d])), 4)[0][0, 247]
+    # NR7 with the close high in the range
+    hh, ll = up * 1.02, up * 0.98
+    hh[200], ll[200] = up[200] * 1.002, up[200] * 0.999
+    c4 = up.copy()
+    c4[200] = ll[200] + 0.9 * (hh[200] - ll[200])
+    t4 = BE.r_nr7_up(_C6(_P6([c4], h=[hh], l=[ll])), 0.75)[0]
+    assert t4[0, 200] and t4.sum() >= 1 and not t4[0, 199]
+    # gap up that holds (close >= open), and one that fades
+    c5 = np.full(T_, 100.0)
+    o5 = c5.copy()
+    o5[100], c5[100] = 104.0, 105.0
+    o5[150], c5[150] = 106.0, 101.0
+    P5 = _P6([c5])
+    P5.o = np.asarray([o5])
+    t5 = BE.r_gap_up_hold(_C6(P5), 0.03)[0]
+    assert t5[0, 100] and not t5[0, 150] and t5.sum() == 1
+    # corporate actions suppress (3 lower closes inside a split window)
+    P = _P6([d], excl={0: [int(_P6([d]).cal[240])]})
+    assert not BE.r_down_streak(_C6(P), 3)[0][0, 247]
+
+
+def test_bg7_is_bg6_plus_long_only_swing_blocks_traded_live():
+    from agents import builder_promoted as BP
+    for a in G.AGENTS:
+        g6, g7 = G.grammar(a, "bg6"), G.grammar(a, "bg7")
+        assert g7[:len(g6)] == g6, a
+        extra = g7[len(g6):]
+        assert len(extra) == (600 if a == "swing" else 0), (a, len(extra))
+        assert all(r[2] in G.BG7_BLOCKS and r[8] == "" for r in extra)
+    assert 4 * sum(G.grammar_sizes("bg7").values()) == 39092 == 36692 + 2400
+    for v in ("bg1", "bg2", "bg3", "bg4", "bg5", "bg6"):
+        assert not any(r[2] in G.BG7_BLOCKS for a in G.AGENTS for r in G.grammar(a, v)), v
+    c7 = [c for m in G.MARKET_TYPES for c in G.cell_grammar("swing", m, "bg7") if c.block in G.BG7_BLOCKS]
+    assert all(c.version == "bg7" and c.v1_key is None and json.loads(c.key)[0] == "bg7" for c in c7)
+    assert all(BP.supported(c) == (True, "") for c in c7), "every bg7 sentence is tradeable live the day it passes"
+    assert all(G.BLOCK[b].fn[3:] in BE.EXTRA for b in G.BG7_BLOCKS)
+
+
+def test_rule_v7_pinned_and_v6_unchanged():
+    r7 = B.load_rule(B.RULE_FILE_V7)
+    assert r7["_sha256"] == B.RULE_SHA256_V7 == hashlib.sha256((HERE / "builder_rule_v7.json").read_bytes()).hexdigest()
+    assert r7["version"] == "builder/v7" and r7["supersedes"]["sha256"] == B.RULE_SHA256_V6
+    assert r7["grammar"]["version"] == "bg7" and r7["grammar"]["sha256"] == G.grammar_sha256("bg7")
+    r6 = B.load_rule(B.RULE_FILE_V6)
+    for k in r6:
+        if k not in ("version", "written", "supersedes", "grammar", "statement", "_sha256") and \
+                not k.startswith("candidate_note"):
+            assert r7.get(k) == r6[k], k
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]
