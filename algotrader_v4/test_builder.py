@@ -1477,7 +1477,8 @@ def test_rule_v3_pinned_and_only_size_grammar_schedule_changed():
     assert api["undrawn"]["total"] == CUR_TOTAL and api["undrawn"]["undrawn"] == CUR_TOTAL - 535
     assert api["night_batches"] == 12
     assert api["undrawn"]["per_agent"]["intraday"] == {"total": 4 * G.grammar_sizes()["intraday"], "undrawn": 4 * G.grammar_sizes()["intraday"]}     # all new
-    assert api["undrawn"]["per_agent"]["options"] == {"total": 2304, "undrawn": 2304}        # option lots re-sized
+    n_opt = 4 * G.grammar_sizes()["options"]                    # bg3 re-sized lots (2304) + later new sentences
+    assert n_opt >= 2304 and api["undrawn"]["per_agent"]["options"] == {"total": n_opt, "undrawn": n_opt}
     assert api["undrawn"]["per_agent"]["futures"]["undrawn"] < api["undrawn"]["per_agent"]["futures"]["total"]
     assert api["size"]["options"] == BO.OPTION_SIZES["c10"] and "IS their Rs 10 lakh result" in api["size"]["unchanged"]
 
@@ -2267,7 +2268,7 @@ def test_v4_scalping_trail_has_a_time_limit():
 
 
 def test_bg4_is_bg3_plus_trailing_sentences_with_new_keys():
-    assert G.GRAMMAR_VERSION in ("bg5", "bg6") and G.grammar_sha256("bg3") == \
+    assert G.VERSIONS.index(G.GRAMMAR_VERSION) >= G.VERSIONS.index("bg5") and G.grammar_sha256("bg3") == \
         json.loads((HERE / "builder_rule_v3.json").read_text())["grammar"]["sha256"]
     for a in G.AGENTS:
         g3, g4 = G.grammar(a, "bg3"), G.grammar(a, "bg4")
