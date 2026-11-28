@@ -1477,7 +1477,8 @@ def test_rule_v3_pinned_and_only_size_grammar_schedule_changed():
     assert api["undrawn"]["total"] == CUR_TOTAL and api["undrawn"]["undrawn"] == CUR_TOTAL - 535
     assert api["night_batches"] == 12
     assert api["undrawn"]["per_agent"]["intraday"] == {"total": 4 * G.grammar_sizes()["intraday"], "undrawn": 4 * G.grammar_sizes()["intraday"]}     # all new
-    assert api["undrawn"]["per_agent"]["options"] == {"total": 2304, "undrawn": 2304}        # option lots re-sized
+    n_opt = 4 * G.grammar_sizes()["options"]                    # bg3 re-sized lots (2304) + later new sentences
+    assert n_opt >= 2304 and api["undrawn"]["per_agent"]["options"] == {"total": n_opt, "undrawn": n_opt}
     assert api["undrawn"]["per_agent"]["futures"]["undrawn"] < api["undrawn"]["per_agent"]["futures"]["total"]
     assert api["size"]["options"] == BO.OPTION_SIZES["c10"] and "IS their Rs 10 lakh result" in api["size"]["unchanged"]
 
@@ -2267,7 +2268,7 @@ def test_v4_scalping_trail_has_a_time_limit():
 
 
 def test_bg4_is_bg3_plus_trailing_sentences_with_new_keys():
-    assert G.GRAMMAR_VERSION in ("bg5", "bg6") and G.grammar_sha256("bg3") == \
+    assert G.VERSIONS.index(G.GRAMMAR_VERSION) >= G.VERSIONS.index("bg5") and G.grammar_sha256("bg3") == \
         json.loads((HERE / "builder_rule_v3.json").read_text())["grammar"]["sha256"]
     for a in G.AGENTS:
         g3, g4 = G.grammar(a, "bg3"), G.grammar(a, "bg4")
@@ -2532,10 +2533,10 @@ def test_pending_daily_entries_equal_the_engines_next_session_plan():
     engine itself plans to enter at D+1 once D+1's data exists (same symbols, same sides, same order)."""
     E = engine()
     picks = [("SIDEWAYS", "high52", (("x", 0.03),)), ("HIGH_VOL", "st_rev_winners", (("x", 0.08), ("mode", "winners"))),
-             ("HIGH_VOL", "vix_high_losers", ())]
+             ("HIGH_VOL", "vix_high_losers", ()), ("SIDEWAYS", "nr7_up", (("p", 0.5),))]
     checked = 0
     for mt, blk, params in picks:
-        c = [x for x in G.cell_grammar("swing", mt, "bg6") if x.block == blk and x.params == params
+        c = [x for x in G.cell_grammar("swing", mt, "bg7") if x.block == blk and x.params == params
              and x.exit == ("hold", 5) and x.universe == "TOP500"][0]
         days = sorted({int(t) for t in E.signals(c)["t"].tolist()})
         for t in days[len(days) // 3::max(1, len(days) // 5)][:4]:
@@ -2552,7 +2553,7 @@ def test_pending_daily_entries_equal_the_engines_next_session_plan():
                    if int(x[2]) == D1]
             assert sorted(got) == sorted((p[0], p[1]) for p in pend), (blk, D, pend, got)
             checked += bool(pend)
-    assert checked >= 3, "the check must cover days that actually have entries"
+    assert checked >= 4, "the check must cover days that actually have entries"
 
 
 def test_live_time_and_vwap_exits_match_the_engine():
@@ -2598,6 +2599,164 @@ def test_rule_v6_pinned_and_v5_unchanged():
         if k not in ("version", "written", "supersedes", "grammar", "statement", "_sha256") and \
                 not k.startswith("candidate_note"):
             assert r6.get(k) == r5[k], k
+
+
+def test_bg7_mean_reversion_signals():
+    import numpy as np
+    T_ = 260
+    up = 100 * 1.002 ** np.arange(T_)                      # a steady uptrend: above its 200-day mean
+    # RSI(2): two sharp down days after a rise -> RSI(2) near 0; flat -> 50
+    c = up.copy()
+    c[240], c[241] = c[239] * 0.97, c[239] * 0.94
+    r = BE.rsi2([c])
+    assert r[0, 241] < 5 and r[0, 230] > 90 and abs(BE.rsi2([np.full(10, 5.0)])[0, 9] - 50.0) < 1e-9
+    t, sd, _r, _h = BE.r_rsi2_dip(_C6(_P6([c])), 5.0)
+    assert t[0, 241] and sd[0, 241] == 1 and not t[0, 230]
+    down = 100 * 0.998 ** np.arange(T_)
+    down[240], down[241] = down[239] * 0.97, down[239] * 0.94
+    assert not BE.r_rsi2_dip(_C6(_P6([down])), 5.0)[0][0, 241], "below the 200-day mean: no trade"
+    # IBS: close at the day's low inside the uptrend
+    h, l = up * 1.01, up * 0.99
+    cc = up.copy()
+    cc[250] = l[250] + 0.05 * (h[250] - l[250])
+    t2 = BE.r_ibs_low(_C6(_P6([cc], h=[h], l=[l])), 0.1)[0]
+    assert t2[0, 250] and not t2[0, 249]
+    # down streak: 3 lower closes in a row (not 2) above the mean
+    d = up.copy()
+    d[245:248] = [d[244] * 0.995, d[244] * 0.99, d[244] * 0.985]
+    t3 = BE.r_down_streak(_C6(_P6([d])), 3)[0]
+    assert t3[0, 247] and not t3[0, 246] and not BE.r_down_streak(_C6(_P6([d])), 4)[0][0, 247]
+    # NR7 with the close high in the range
+    hh, ll = up * 1.02, up * 0.98
+    hh[200], ll[200] = up[200] * 1.002, up[200] * 0.999
+    c4 = up.copy()
+    c4[200] = ll[200] + 0.9 * (hh[200] - ll[200])
+    t4 = BE.r_nr7_up(_C6(_P6([c4], h=[hh], l=[ll])), 0.75)[0]
+    assert t4[0, 200] and t4.sum() >= 1 and not t4[0, 199]
+    # gap up that holds (close >= open), and one that fades
+    c5 = np.full(T_, 100.0)
+    o5 = c5.copy()
+    o5[100], c5[100] = 104.0, 105.0
+    o5[150], c5[150] = 106.0, 101.0
+    P5 = _P6([c5])
+    P5.o = np.asarray([o5])
+    t5 = BE.r_gap_up_hold(_C6(P5), 0.03)[0]
+    assert t5[0, 100] and not t5[0, 150] and t5.sum() == 1
+    # the SELL side: the mirror images inside a downtrend
+    dn = 100 * 0.998 ** np.arange(T_)
+    sp = dn.copy()
+    sp[240], sp[241] = sp[239] * 1.03, sp[239] * 1.06
+    t6, s6, _r, _h = BE.r_rsi2_spike(_C6(_P6([sp])), 5.0)
+    assert t6[0, 241] and s6[0, 241] == -1 and not BE.r_rsi2_spike(_C6(_P6([c])), 5.0)[0][0, 241]
+    hd, ld = dn * 1.01, dn * 0.99
+    ch = dn.copy()
+    ch[250] = ld[250] + 0.95 * (hd[250] - ld[250])
+    t7, s7, _r, _h = BE.r_ibs_high(_C6(_P6([ch], h=[hd], l=[ld])), 0.1)
+    assert t7[0, 250] and s7[0, 250] == -1 and not t7[0, 249]
+    us = dn.copy()
+    us[245:248] = [us[244] * 1.005, us[244] * 1.01, us[244] * 1.015]
+    t8 = BE.r_up_streak(_C6(_P6([us])), 3)
+    assert t8[0][0, 247] and t8[1][0, 247] == -1 and not t8[0][0, 246]
+    h9, l9 = dn * 1.02, dn * 0.98
+    h9[200], l9[200] = dn[200] * 1.002, dn[200] * 0.999
+    c9 = dn.copy()
+    c9[200] = l9[200] + 0.1 * (h9[200] - l9[200])
+    t9, s9, _r, _h = BE.r_nr7_down(_C6(_P6([c9], h=[h9], l=[l9])), 0.75)
+    assert t9[0, 200] and s9[0, 200] == -1
+    c10, o10 = np.full(T_, 100.0), np.full(T_, 100.0)
+    o10[100], c10[100] = 96.0, 95.0
+    o10[150], c10[150] = 94.0, 99.0
+    P10 = _P6([c10])
+    P10.o = np.asarray([o10])
+    t10, s10, _r, _h = BE.r_gap_down_hold(_C6(P10), 0.03)
+    assert t10[0, 100] and s10[0, 100] == -1 and not t10[0, 150] and t10.sum() == 1
+    # index blocks on NIFTY 50 (one signal row) and the 14:30 momentum block
+    class _N:
+        pass
+    PN = _P6([up])
+    PN.nifty = {"o": up.copy(), "c": c.copy()}
+    PN.vix = {"c": np.full(T_, 15.0)}
+    tn = BE.r_idx_rsi2(_C6(PN), 5.0, "dip")
+    assert tn[0].shape == (1, T_) and tn[0][0, 241] and tn[1][0, 241] == 1
+    PN.cal = np.array([20250100 + (i // 21) * 100 + (i % 21) + 1 for i in range(T_)], dtype=np.int64)
+    tm = BE.r_idx_tom(_C6(PN))[0][0]
+    assert tm[20] and tm[41] and not tm[19] and not tm[T_ - 1], "the last session of each month (never the last row)"
+    go = np.full(T_, 100.0)
+    go2 = go.copy()
+    go2[100] = 101.0                                     # opens 1 % up, closes at 101.5 >= open
+    PN.nifty = {"o": go2, "c": np.where(np.arange(T_) == 100, 101.5, go)}
+    tg = BE.r_idx_gap_hold(_C6(PN), 0.01, "up")
+    assert tg[0][0, 100] and tg[0].sum() == 1 and not BE.r_idx_gap_hold(_C6(PN), 0.01, "down")[0][0, 100]
+    assert BE.r_idx_gap_hold(_C6(PN), 0.01, "down")[0][0, 101], "101.5 -> opens 100 (-1.5 %), closes at the open"
+
+    class _M:
+        pass
+    M = _M()
+    M.f = {"pc": np.full((2, 5), 100.0), "c0944": np.array([[100.2] * 5, [101.5] * 5]),
+           "c1429": np.array([[98.5] * 5, [100.1] * 5]), "nb": np.full((2, 5), 375.0)}
+    M.shape, M.stocks = (2, 5), [0, 1]
+
+    class _CM:
+        minute = M
+
+        def m(self, name):
+            return np.ones((2, 5), bool)
+    t11, s11, _r, _h = BE.r_halfhour_mom(_CM(), 0.01, "day")
+    assert t11[0].all() and (s11[0] == -1).all() and not t11[1].any(), "day: -1.5 % -> short from 14:30"
+    t12, s12, _r, _h = BE.r_halfhour_mom(_CM(), 0.01, "open30")
+    assert t12[1].all() and (s12[1] == 1).all() and not t12[0].any(), "open30: +1.5 % at 09:44 -> long"
+    # corporate actions suppress (3 lower closes inside a split window)
+    P = _P6([d], excl={0: [int(_P6([d]).cal[240])]})
+    assert not BE.r_down_streak(_C6(P), 3)[0][0, 247]
+
+
+def test_bg7_is_bg6_plus_buy_and_sell_daily_blocks_traded_live():
+    from agents import builder_promoted as BP
+    for a in G.AGENTS:
+        g6, g7 = G.grammar(a, "bg6"), G.grammar(a, "bg7")
+        assert g7[:len(g6)] == g6, a
+        extra = g7[len(g6):]
+        want = {"swing": 1200, "futures": 680, "options": 912, "intraday": 1816, "scalping": 72}[a]
+        assert len(extra) == want, (a, len(extra))
+        assert all(r[2] in G.BG7_BLOCKS | G.BG6_BLOCKS for r in extra)
+        assert all(r[8] == ("" if G.BLOCK[r[2]].side == "long" else "c10") for r in extra if a == "swing")
+    assert 4 * sum(G.grammar_sizes("bg7").values()) == 55412 == 36692 + 4 * 4680
+    fx = G.grammar("futures", "bg7")[len(G.grammar("futures", "bg6")):]
+    assert {r[2] for r in fx if r[0] == "STOCKS"} == {"rsi2_spike", "ibs_high", "up_streak", "nr7_down",
+                                                        "gap_down_hold"}, "futures stocks: sell side only"
+    assert {r[0] for r in fx} == {"STOCKS", "NIFTY", "BANKNIFTY"} and len({r[2] for r in fx if r[0] == "NIFTY"}) == 12
+    ox = G.grammar("options", "bg7")[len(G.grammar("options", "bg6")):]
+    assert {r[2] for r in ox} == {b.name for b in G.BLOCKS_BG7_IDX} and all(r[1] == "opt" for r in ox)
+    ix = G.grammar("intraday", "bg7")[len(G.grammar("intraday", "bg6")):]
+    assert {r[2] for r in ix} == {b.name for b in G.BLOCKS_BG6 + G.BLOCKS_BG7} | {"halfhour_mom"}
+    assert {r[4] for r in ix if r[2] == "halfhour_mom"} == {"o1430"} and \
+        {r[4] for r in ix if r[2] != "halfhour_mom"} == {"o0915", "o0920"}
+    sx = G.grammar("scalping", "bg7")[len(G.grammar("scalping", "bg6")):]
+    assert {r[2] for r in sx} == {"halfhour_mom"} and all(r[5][0] in ("time_min", "bracket_min", "signal_min")
+                                                         for r in sx)
+    sides = {b.side for b in G.BLOCKS_BG7}
+    assert sides == {"long", "short"} and sum(b.side == "short" for b in G.BLOCKS_BG7) == 5
+    assert sum(b.side == "short" for b in G.BLOCKS_BG7_IDX) == 5 and len(G.BLOCKS_BG7_IDX) == 12
+    for v in ("bg1", "bg2", "bg3", "bg4", "bg5", "bg6"):
+        assert not any(r[2] in G.BG7_BLOCKS for a in G.AGENTS for r in G.grammar(a, v)), v
+    c7 = [c for a in G.AGENTS for m in G.MARKET_TYPES for c in G.cell_grammar(a, m, "bg7") if c.version == "bg7"]
+    assert len(c7) == 4 * 4680 and all(c.v1_key is None and json.loads(c.key)[0] == "bg7" for c in c7)
+    stock_daily = [c for c in c7 if c.agent in ("swing", "futures") and c.instrument == "STOCKS"]
+    assert stock_daily and all(BP.supported(c) == (True, "") for c in stock_daily), \
+        "every swing / futures stock sentence is tradeable live (PAPER) the day it passes"
+    assert all(G.BLOCK[b].fn[3:] in BE.EXTRA for b in G.BG7_BLOCKS)
+
+
+def test_rule_v7_pinned_and_v6_unchanged():
+    r7 = B.load_rule(B.RULE_FILE_V7)
+    assert r7["_sha256"] == B.RULE_SHA256_V7 == hashlib.sha256((HERE / "builder_rule_v7.json").read_bytes()).hexdigest()
+    assert r7["version"] == "builder/v7" and r7["supersedes"]["sha256"] == B.RULE_SHA256_V6
+    assert r7["grammar"]["version"] == "bg7" and r7["grammar"]["sha256"] == G.grammar_sha256("bg7")
+    r6 = B.load_rule(B.RULE_FILE_V6)
+    for k in r6:
+        if k not in ("version", "written", "supersedes", "grammar", "statement", "_sha256") and \
+                not k.startswith("candidate_note"):
+            assert r7.get(k) == r6[k], k
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]

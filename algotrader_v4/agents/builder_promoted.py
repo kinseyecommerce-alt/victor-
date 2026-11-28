@@ -64,17 +64,18 @@ LAB_FINGERPRINT = fingerprint(
 
 # ── pure decision functions (the parity target) ───────────────────────────────
 def is_swing(c: G.Candidate) -> bool:
-    """A daily-grid stock swing rule (decided on the evening's close, entered at the next open)."""
-    return c.agent == "swing" and G.BLOCK[c.block].grid == "daily" and c.instrument == "STOCKS"
+    """A daily-grid STOCK rule of the swing or futures agent (decided on the evening's close, entered at the next
+    open): swing longs in delivery (CNC); swing shorts and every futures-agent stock trade at the stock's own price
+    with futures costs, exactly as the builder engine books them (builder_engine.cost_kind)."""
+    return c.agent in ("swing", "futures") and G.BLOCK[c.block].grid == "daily" and c.instrument == "STOCKS"
 
 
 def supported(c: G.Candidate) -> tuple[bool, str]:
     """Can this promoted candidate be traded live by this agent? (ok, reason)."""
     if is_swing(c):
-        # entries: the builder forward run's pending_daily (the engine's own filters); exits: the engine's own trade
-        # (any exit kind). Shorts would be stock futures: not yet.
-        if G.size_regime(c.agent, c.block, c.params, c.instrument) != G.SIZE_LEGACY:
-            return False, "swing shorts (stock futures): live support pending"
+        # entries: the builder forward run's pending_daily (the engine's own filters, F&O names only for shorts);
+        # exits: the engine's own trade (any exit kind). PAPER books a short at the stock's price with futures costs
+        # (the engine's booking); a LIVE short needs the futures contract order path (not built: LIVE is refused).
         return True, ""
     if c.block not in SUPPORTED_BLOCKS:
         return False, f"block {c.block}"
@@ -516,6 +517,19 @@ class BuilderPromotedAgent(ValidatedAgent):
             self._save_book()
         return done
 
+    def _close(self, pos, exit_px, note, kind="normal"):
+        """The ledger cost of a position is its own booking: a swing / futures-agent short at FUTURES costs (the
+        builder engine's cost_kind), everything else by its product (MIS / CNC)."""
+        ck = (pos.meta or {}).get("cost_kind")
+        if ck == "future":
+            old = self.COST_KIND
+            self.COST_KIND = "future"
+            try:
+                return super()._close(pos, exit_px, note, kind)
+            finally:
+                self.COST_KIND = old
+        return super()._close(pos, exit_px, note, kind)
+
     # ── swing rules (daily grid, CNC longs): exits mirror the engine's own trade, entries its pending_daily ──
     async def _swing(self, today: date, rules: list) -> dict:
         res = {"entered": [], "exited": [], "skipped": {}}
@@ -546,7 +560,8 @@ class BuilderPromotedAgent(ValidatedAgent):
                 reason, kind = "not in the engine's trades", "RECONCILE"
                 self._deviation("swing_not_in_engine", pos.symbol, "exit at the LTP")
             pos.meta["exit_reason"] = reason
-            _oid, fill = paper_fill_at(pos.symbol, "NSE", "SELL", pos.qty, "CNC", round(px, 2), TAG, kind)
+            back = "SELL" if pos.side == "BUY" else "BUY"
+            _oid, fill = paper_fill_at(pos.symbol, "NSE", back, pos.qty, "CNC", round(px, 2), TAG, kind)
             self._close(pos, fill, f"{pos.meta.get('rule')}: {reason}")
             res["exited"].append(pos.symbol)
         # 2) entries at today's open: the engine's pending entries (longs only: supported())
@@ -561,9 +576,10 @@ class BuilderPromotedAgent(ValidatedAgent):
             for r, (sym, side, rank) in todo:
                 key = f"{r['id']}:{sym}"
                 px = float((q.get(sym) or {}).get("open") or 0)
-                if int(side) != 1 or px <= 0:
-                    res["skipped"][key] = "no open price" if px <= 0 else "short"
+                if px <= 0:
+                    res["skipped"][key] = "no open price"
                     continue
+                side = 1 if int(side) > 0 else -1
                 if VD.price_adjusting_actions(sym, today):
                     res["skipped"][key] = "corporate action"
                     continue
@@ -572,28 +588,32 @@ class BuilderPromotedAgent(ValidatedAgent):
                     res["skipped"][key] = "already held"
                     continue
                 c = G.Candidate.from_json(r["cand"])
-                qty = max(1, int(trade_qty(c, 1, px) * self._scale()))
+                qty = max(1, int(trade_qty(c, side, px) * self._scale()))
+                ck = BE.cost_kind(c, side)                  # equity_cnc (swing long) or future (shorts, futures agent)
+                side_s = "BUY" if side > 0 else "SELL"
                 if gross + qty * px > cap:
                     res["skipped"][key] = "gross_cap"
                     self._skip(sym, "gross_cap", log=False)
                     continue
                 try:
                     ok, _algo, why = sebi_compliance.pre_order_check(
-                        strategy=self.name, symbol=sym, exchange="NSE", transaction_type="BUY", quantity=qty,
+                        strategy=self.name, symbol=sym, exchange="NSE", transaction_type=side_s, quantity=qty,
                         order_type="MARKET", price_at_signal=px, signal_source=f"validated:{r['id']}", regime="n/a")
                     if not ok:
                         res["skipped"][key] = f"sebi: {why}"
                         continue
-                    oid, fill = paper_fill_at(sym, "NSE", "BUY", qty, "CNC", px, TAG, "AUCTION")
+                    oid, fill = paper_fill_at(sym, "NSE", side_s, qty, "CNC", px, TAG, "AUCTION")
                     sebi_compliance.record_order_id(self.name, sym, oid)
                 except Exception as exc:
                     self._error(f"swing entry {sym}", exc)
                     continue
-                pt = PlannedTrade(symbol=sym, side=1, qty=qty, entry_ref=px, entry_t="09:15", exit_t=c.exit[0],
+                pt = PlannedTrade(symbol=sym, side=side, qty=qty, entry_ref=px, entry_t="09:15", exit_t=c.exit[0],
                                   key=r["id"])
                 self._open(pt, "CNC", "NSE", fill, oid, overnight=True,
                            meta={"rule": r["id"], "kind": "swing", "rank": round(float(rank), 6), "cand": r["cand"],
-                                 "day": today.isoformat()})
+                                 "day": today.isoformat(), "cost_kind": ck,
+                                 **({"paper_only": "short at the stock price with futures costs (engine booking)"}
+                                    if ck == "future" else {})})
                 gross += qty * px
                 res["entered"].append(key)
         self._save_book()
