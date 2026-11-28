@@ -84,6 +84,8 @@ def write_bundle(src, dest: str, log=None) -> dict:
     arr["f_part"] = json.dumps({k: [None if x != x else float(x) for x in v.tolist()] for k, v in part.items()})
     arr["f_ca"] = json.dumps(ctx.d("ca"), default=lambda o: int(o) if isinstance(o, np.integer) else float(o))
     arr["f_pre"] = ctx.m("pre")
+    from . import builder_engine as _BE
+    arr["f_bm_next"] = _BE.bm_next(ctx)                  # bg8: weekdays to the next known results meeting
     arr["f_exp"] = json.dumps(ctx.m("exp"))
     nd = src.nifty_daily()
     if nd is not None:
@@ -181,6 +183,8 @@ class BundleSource:
             ca = json.loads(str(z["f_ca"]))
             ctx._c["d:ca"] = {k: [tuple(x) for x in v] for k, v in ca.items()}
             ctx._c["m:pre"] = z["f_pre"]
+            if "f_bm_next" in z.files:                     # bundles frozen before bg8 have none (never needed)
+                ctx._c["d:bm_next"] = z["f_bm_next"]
             ctx._c["m:exp"] = json.loads(str(z["f_exp"]))
             self._nd = ({k: z["nd_" + k] for k in ("date", "o", "h", "l", "c")} if "nd_date" in z.files else None)
             self._ul = json.loads(str(z["universe"])) if "universe" in z.files else None

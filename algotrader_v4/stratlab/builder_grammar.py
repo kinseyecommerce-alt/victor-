@@ -71,8 +71,9 @@ GRAMMAR_V4 = "bg4"
 GRAMMAR_V5 = "bg5"
 GRAMMAR_V6 = "bg6"
 GRAMMAR_V7 = "bg7"
-VERSIONS = (GRAMMAR_V1, GRAMMAR_V2, GRAMMAR_V3, GRAMMAR_V4, GRAMMAR_V5, GRAMMAR_V6, GRAMMAR_V7)
-GRAMMAR_VERSION = GRAMMAR_V7             # the current version (new batches); bg1 / bg2 / bg3 stay reproducible byte for byte
+GRAMMAR_V8 = "bg8"
+VERSIONS = (GRAMMAR_V1, GRAMMAR_V2, GRAMMAR_V3, GRAMMAR_V4, GRAMMAR_V5, GRAMMAR_V6, GRAMMAR_V7, GRAMMAR_V8)
+GRAMMAR_VERSION = GRAMMAR_V8             # the current version (new batches); bg1 / bg2 / bg3 stay reproducible byte for byte
 # bg4 (builder/v4, 25 Nov 2026): bg3 + TRAILING-STOP exits for every minute-grid stock sentence of intraday and scalping
 #   trail / trail_min        a stop x % behind the best price since entry (long: the highest high; short: the lowest
 #                            low), moved after each bar closes (never inside a bar)
@@ -324,7 +325,17 @@ BLOCKS_BG7_MIN = [
     _b("halfhour_mom", "minute", "be:r_halfhour_mom", {"x": (0.005, 0.01), "src": ("open30", "day")}, "o1430", "with",
        S_MOM, "the stock is >= {x:%} away from yesterday's close at {src} (open30 = 09:44, day = 14:29)"),
 ]
-BLOCK = {b.name: b for b in BLOCKS + BLOCKS_BG6 + BLOCKS_BG7 + BLOCKS_BG7_IDX + BLOCKS_BG7_MIN}
+S_EVT = ("Scheduled corporate events draw attention and demand before they happen: stocks earn a premium in the days "
+         "before a results announcement (Frazzini and Lamont 2007) and are bid up before a sizeable dividend's ex-date.")
+# builder/v8 (bg8): scheduled-event blocks (swing CNC longs: tradeable live by bld_promoted the day they pass)
+BLOCKS_BG8 = [
+    _b("pre_results", "daily", "be:r_pre_results", {"lead": (5, 10)}, "", "long", S_EVT,
+       "a results board meeting is at most {lead} weekdays away (notice public by today's close)"),
+    _b("div_runup", "daily", "be:r_div_runup", {"y": (0.01, 0.02)}, "", "long", S_EVT,
+       "a dividend of at least {y:%} of the price is known and the ex-date is 6 weekdays away"),
+]
+BLOCK = {b.name: b for b in BLOCKS + BLOCKS_BG6 + BLOCKS_BG7 + BLOCKS_BG7_IDX + BLOCKS_BG7_MIN + BLOCKS_BG8}
+BG8_BLOCKS = frozenset(b.name for b in BLOCKS_BG8)
 BG6_BLOCKS = frozenset(b.name for b in BLOCKS_BG6)
 BG7_BLOCKS = frozenset(b.name for b in BLOCKS_BG7 + BLOCKS_BG7_IDX + BLOCKS_BG7_MIN)
 
@@ -391,6 +402,8 @@ class Candidate:
 
     @property
     def version(self) -> str:
+        if self.block in BG8_BLOCKS:
+            return GRAMMAR_V8                 # a bg8 block exists only in bg8: always a new candidate
         if self.block in BG7_BLOCKS or (self.block in BG6_BLOCKS and self.agent == "intraday"):
             return GRAMMAR_V7                 # bg7 blocks, and bg6 blocks traded intraday: only in bg7, always new
         if self.block in BG6_BLOCKS:
@@ -422,7 +435,7 @@ class Candidate:
     def v1_key(self) -> str | None:
         """The bg1 key of the SAME sentence: a bg2 candidate whose universe is the one bg1 used implicitly is the bg1
         candidate (never drawn again once its bg1 key was drawn). None when the universe is new (no bg1 twin)."""
-        if self.size or (self.exit and self.exit[0] in TRAIL_KINDS + ATR_KINDS) or self.block in BG6_BLOCKS | BG7_BLOCKS:
+        if self.size or (self.exit and self.exit[0] in TRAIL_KINDS + ATR_KINDS) or self.block in BG6_BLOCKS | BG7_BLOCKS | BG8_BLOCKS:
             return None                      # a re-sized bg3 / a bg4 trailing sentence is new: no twin in bg1 / bg2
         if not self.universe:
             return self.key
@@ -567,6 +580,8 @@ def grammar(agent: str, version: str | None = None) -> list:
         return _grammar_bg6(agent)
     if version == GRAMMAR_V7:
         return _grammar_bg7(agent)
+    if version == GRAMMAR_V8:
+        return _grammar_bg8(agent)
     if version not in (GRAMMAR_V2, GRAMMAR_V3):
         raise KeyError(version)
     out = []
@@ -625,6 +640,26 @@ def _grammar_bg5(agent: str) -> list:
         seen.add(k)
         for ex in ATR_EXITS[agent]:
             extra.append((inst, prod, block, p, entry, ex, st, u, size))
+    return base + extra
+
+
+BG8_EXITS = {"pre_results": [("event",)] + [("bracket_d", s, rr, 20) for s in (0.03, 0.05) for rr in (2.0, 3.0)],
+             "div_runup": [("event",)]}
+
+
+def _grammar_bg8(agent: str) -> list:
+    """bg7 byte for byte, then the BLOCKS_BG8 swing sentences (CNC longs; exits BG8_EXITS: the event exit = sell at the
+    close before the event, and for the results run-up also the 3 / 5 % brackets within 20 sessions), every universe."""
+    base = grammar(agent, GRAMMAR_V7)
+    if agent != "swing":
+        return base
+    extra = []
+    for b in BLOCKS_BG8:
+        for p in b.combos():
+            for ex in BG8_EXITS[b.name]:
+                row = ("STOCKS", "cnc/fut", b.name, p, "next_open", ex, "")
+                for u in universes_for(agent, b.name, "STOCKS"):
+                    extra.append(row + (u, size_regime(agent, b.name, p, "STOCKS")))
     return base + extra
 
 

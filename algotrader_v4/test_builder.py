@@ -2450,8 +2450,11 @@ class _P6:
 class _C6:
     def __init__(self, P):
         self.daily = P
+        self._c = {}
 
     def d(self, name):
+        if "d:" + name in self._c:
+            return self._c["d:" + name]
         from stratlab import datagen_features as F
         P = self.daily
         return {"ret5": lambda: P.c / F.lag(P.c, 5) - 1.0, "ret20": lambda: P.c / F.lag(P.c, 20) - 1.0,
@@ -2757,6 +2760,71 @@ def test_rule_v7_pinned_and_v6_unchanged():
         if k not in ("version", "written", "supersedes", "grammar", "statement", "_sha256") and \
                 not k.startswith("candidate_note"):
             assert r7.get(k) == r6[k], k
+
+
+def test_bg8_event_signals_point_in_time():
+    import csv
+    import gzip
+    import numpy as np
+    from stratlab import datagen_features as F
+    cal = [20250106, 20250107, 20250108, 20250109, 20250110, 20250113, 20250114, 20250115, 20250116, 20250117]
+    P = _P6([np.full(len(cal), 100.0), np.full(len(cal), 50.0)])
+    P.cal = np.asarray(cal, np.int64)
+    P.syms, P.six = ["AAA", "BBB"], {"AAA": 0, "BBB": 1}
+    d = os.path.join(_TMP, "ev_bg8")
+    os.makedirs(d, exist_ok=True)
+    with gzip.open(os.path.join(d, "boardmeet.csv.gz"), "wt", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["symbol", "isin", "meeting_date", "purpose", "is_results", "notice_ts"])
+        w.writerow(["AAA", "x", "2025-01-15", "results", "1", "2025-01-07 16:10:00"])   # after the 7th's close
+        w.writerow(["BBB", "x", "2025-01-15", "dividend", "0", "2025-01-06 10:00:00"])  # not a results meeting
+    old = F.EVENTS
+    try:
+        F.EVENTS = d
+        C = _C6(P)
+        C._c = {}
+        nb = BE.bm_next(C)
+    finally:
+        F.EVENTS = old
+    # known from the 8th (notice after the 7th's 15:30 close); weekdays to Wed 15 Jan; none for the non-results row
+    assert nb[0, 1] == 0 and nb[0, 2] == 5 and nb[0, 5] == 2 and nb[0, 6] == 1 and nb[0, 7] == 0, nb[0]
+    assert not nb[1].any()
+    t, sd, _r, hold = BE.r_pre_results(C, 5)
+    assert t[0, 2] and hold[0, 2] == 4 and t[0, 5] and hold[0, 5] == 1 and not t[0, 6] and (sd[t] == 1).all()
+    assert not BE.r_pre_results(C, 3)[0][0, 2], "lead 3: 5 weekdays away is too early"
+    # dividend run-up: 2 % dividend known on the 7th, ex-date Thu 16 Jan -> 6 weekdays before = Wed 8 Jan
+    C._c["d:ca"] = {"splitbonus": [], "dividend": [(0, 20250107, 20250116, 2.0), (1, 20250110, 20250116, 5.0)]}
+    t2, s2, r2, h2 = BE.r_div_runup(C, 0.01)
+    assert t2[0, 2] and h2[0, 2] == 5 and abs(r2[0, 2] - 0.02) < 1e-12 and t2[0].sum() == 1
+    assert not t2[1].any(), "BBB's dividend became known after the decision day"
+    assert not BE.r_div_runup(C, 0.03)[0].any()
+
+
+def test_bg8_is_bg7_plus_event_swing_blocks_traded_live():
+    from agents import builder_promoted as BP
+    for a in G.AGENTS:
+        g7, g8 = G.grammar(a, "bg7"), G.grammar(a, "bg8")
+        assert g8[:len(g7)] == g7, a
+        assert len(g8) - len(g7) == (36 if a == "swing" else 0), a
+    assert 4 * sum(G.grammar_sizes("bg8").values()) == 55556 == 55412 + 144
+    c8 = [c for m in G.MARKET_TYPES for c in G.cell_grammar("swing", m, "bg8") if c.version == "bg8"]
+    assert len(c8) == 144 and all(json.loads(c.key)[0] == "bg8" and c.v1_key is None and c.size == "" for c in c8)
+    assert all(BP.supported(c) == (True, "") for c in c8), "CNC longs: traded live the morning after a pass"
+    assert {c.exit[0] for c in c8 if c.block == "div_runup"} == {"event"}
+    for v in G.VERSIONS[:-1]:
+        assert not any(r[2] in G.BG8_BLOCKS for a in G.AGENTS for r in G.grammar(a, v)), v
+
+
+def test_rule_v8_pinned_and_v7_unchanged():
+    r8 = B.load_rule(B.RULE_FILE_V8)
+    assert r8["_sha256"] == B.RULE_SHA256_V8 == hashlib.sha256((HERE / "builder_rule_v8.json").read_bytes()).hexdigest()
+    assert r8["version"] == "builder/v8" and r8["supersedes"]["sha256"] == B.RULE_SHA256_V7
+    assert r8["grammar"]["version"] == "bg8" and r8["grammar"]["sha256"] == G.grammar_sha256("bg8")
+    r7 = B.load_rule(B.RULE_FILE_V7)
+    for k in r7:
+        if k not in ("version", "written", "supersedes", "grammar", "statement", "_sha256") and \
+                not k.startswith("candidate_note"):
+            assert r8.get(k) == r7[k], k
 
 
 TESTS = [(n, f) for n, f in list(globals().items()) if n.startswith("test_") and callable(f)]

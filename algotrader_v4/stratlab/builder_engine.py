@@ -456,6 +456,84 @@ def r_halfhour_mom(ctx, x: float, src: str):
     return F._out(trig, F._sgn(r), np.abs(r))
 
 
+# ── bg8: scheduled-event blocks (swing longs). Weekday counts to the event, so a backtest and the live forward run
+# (whose data ends before the event) decide identically; an exchange holiday in between shifts the exit one session.
+def _cal_dates(cal) -> np.ndarray:
+    c = np.asarray(cal, np.int64)
+    return np.array([f"{d // 10000:04d}-{d // 100 % 100:02d}-{d % 100:02d}" for d in c], dtype="datetime64[D]")
+
+
+def _d64(d: int):
+    return np.datetime64(f"{d // 10000:04d}-{d // 100 % 100:02d}-{d % 100:02d}", "D")
+
+
+def bm_next(ctx) -> np.ndarray:
+    """[symbols x sessions] int16: weekdays from session t to the next RESULTS board meeting whose notice was public
+    by t's close (15:30), 0 = none known. From <events>/boardmeet.csv.gz (notice_ts, meeting_date, is_results); frozen
+    in the batch bundle as f_bm_next."""
+    key = "d:bm_next"
+    if key in ctx._c:
+        return ctx._c[key]
+    import csv
+    import gzip
+    P = ctx.daily
+    cal = np.asarray(P.cal, np.int64)
+    T = len(cal)
+    out = np.zeros(P.shape, np.int16)
+    path = os.path.join(F.EVENTS, "boardmeet.csv.gz")
+    if os.path.exists(path) and T:
+        dates = _cal_dates(cal)
+        closes = cal * 10000 + 1530
+        with gzip.open(path, "rt", newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("is_results") != "1":
+                    continue
+                s_ = P.six.get((r.get("symbol") or "").strip().upper())
+                nt, md = r.get("notice_ts") or "", r.get("meeting_date") or ""
+                if s_ is None or len(nt) < 16 or len(md) < 10:
+                    continue
+                ts = int(nt[0:4] + nt[5:7] + nt[8:10] + nt[11:13] + nt[14:16])
+                m = int(md.replace("-", ""))
+                j = int(np.searchsorted(closes, ts, side="right"))       # first session whose close is after it
+                k = int(np.searchsorted(cal, m))                          # sessions strictly before the meeting
+                if j >= min(k, T):
+                    continue
+                nb = np.busday_count(dates[j:min(k, T)], _d64(m)).astype(np.int16)
+                cur = out[s_, j:min(k, T)]
+                out[s_, j:min(k, T)] = np.where((cur == 0) | ((nb > 0) & (nb < cur)), nb, cur)
+    ctx._c[key] = out
+    return out
+
+
+def r_pre_results(ctx, lead: int):
+    """Results run-up (the earnings-announcement premium, Frazzini-Lamont 2007): a results board meeting is 2 .. lead
+    weekdays away (its notice public by today's close): buy at the next open, sell at the close before the meeting
+    (hold = weekdays to the meeting - 1, the "event" exit)."""
+    nb = bm_next(ctx).astype(np.int64)
+    trig = (nb >= 2) & (nb <= int(lead))
+    hold = np.where(trig, nb - 1, 0).astype(np.int32)
+    return F._out(trig, 1, np.where(trig, 1.0 / np.maximum(nb, 1), np.nan), hold)
+
+
+def r_div_runup(ctx, y: float):
+    """Dividend run-up: a dividend >= y of the close, known by today, with the ex-date 6 weekdays away: buy at the next
+    open, sell at the close of the last cum-dividend session (hold 5)."""
+    P = ctx.daily
+    cal = np.asarray(P.cal, np.int64)
+    trig = np.zeros(P.shape, bool)
+    rank = np.full(P.shape, np.nan)
+    if len(cal):
+        dates = _cal_dates(cal)
+        for i, kn, ex, dv in ctx.d("ca")["dividend"]:
+            nb = np.busday_count(dates, _d64(int(ex)))
+            for t in np.nonzero(nb == 6)[0]:
+                c = P.c[i, t]
+                if kn <= int(cal[t]) and np.isfinite(c) and c > 0 and dv / c >= y - 1e-12:
+                    trig[i, t], rank[i, t] = True, dv / c
+    hold = np.where(trig, 5, 0).astype(np.int32)
+    return F._out(trig, 1, rank, hold)
+
+
 EXTRA = {"r_vol_shock": r_vol_shock, "r_vix_spike_index": r_vix_spike_index, "r_nifty_move": r_nifty_move,
          "r_index_gap": r_index_gap, "r_st_reversal": r_st_reversal, "r_high52": r_high52, "r_mom12_1": r_mom12_1,
          "r_ma200": r_ma200, "r_breakout20": r_breakout20, "r_rsi2_dip": r_rsi2_dip, "r_ibs_low": r_ibs_low,
@@ -463,7 +541,8 @@ EXTRA = {"r_vol_shock": r_vol_shock, "r_vix_spike_index": r_vix_spike_index, "r_
          "r_rsi2_spike": r_rsi2_spike, "r_ibs_high": r_ibs_high, "r_up_streak": r_up_streak, "r_nr7_down": r_nr7_down,
          "r_gap_down_hold": r_gap_down_hold, "r_idx_rsi2": r_idx_rsi2, "r_idx_streak": r_idx_streak,
          "r_idx_tom": r_idx_tom, "r_idx_ma200": r_idx_ma200, "r_idx_breakout": r_idx_breakout,
-         "r_idx_gap_hold": r_idx_gap_hold, "r_vix_drop": r_vix_drop, "r_halfhour_mom": r_halfhour_mom}
+         "r_idx_gap_hold": r_idx_gap_hold, "r_vix_drop": r_vix_drop, "r_halfhour_mom": r_halfhour_mom,
+         "r_pre_results": r_pre_results, "r_div_runup": r_div_runup}
 
 
 def block_fn(name: str):
