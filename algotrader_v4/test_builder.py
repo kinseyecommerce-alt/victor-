@@ -2641,23 +2641,57 @@ def test_bg7_mean_reversion_signals():
     P5.o = np.asarray([o5])
     t5 = BE.r_gap_up_hold(_C6(P5), 0.03)[0]
     assert t5[0, 100] and not t5[0, 150] and t5.sum() == 1
+    # the SELL side: the mirror images inside a downtrend
+    dn = 100 * 0.998 ** np.arange(T_)
+    sp = dn.copy()
+    sp[240], sp[241] = sp[239] * 1.03, sp[239] * 1.06
+    t6, s6, _r, _h = BE.r_rsi2_spike(_C6(_P6([sp])), 5.0)
+    assert t6[0, 241] and s6[0, 241] == -1 and not BE.r_rsi2_spike(_C6(_P6([c])), 5.0)[0][0, 241]
+    hd, ld = dn * 1.01, dn * 0.99
+    ch = dn.copy()
+    ch[250] = ld[250] + 0.95 * (hd[250] - ld[250])
+    t7, s7, _r, _h = BE.r_ibs_high(_C6(_P6([ch], h=[hd], l=[ld])), 0.1)
+    assert t7[0, 250] and s7[0, 250] == -1 and not t7[0, 249]
+    us = dn.copy()
+    us[245:248] = [us[244] * 1.005, us[244] * 1.01, us[244] * 1.015]
+    t8 = BE.r_up_streak(_C6(_P6([us])), 3)
+    assert t8[0][0, 247] and t8[1][0, 247] == -1 and not t8[0][0, 246]
+    h9, l9 = dn * 1.02, dn * 0.98
+    h9[200], l9[200] = dn[200] * 1.002, dn[200] * 0.999
+    c9 = dn.copy()
+    c9[200] = l9[200] + 0.1 * (h9[200] - l9[200])
+    t9, s9, _r, _h = BE.r_nr7_down(_C6(_P6([c9], h=[h9], l=[l9])), 0.75)
+    assert t9[0, 200] and s9[0, 200] == -1
+    c10, o10 = np.full(T_, 100.0), np.full(T_, 100.0)
+    o10[100], c10[100] = 96.0, 95.0
+    o10[150], c10[150] = 94.0, 99.0
+    P10 = _P6([c10])
+    P10.o = np.asarray([o10])
+    t10, s10, _r, _h = BE.r_gap_down_hold(_C6(P10), 0.03)
+    assert t10[0, 100] and s10[0, 100] == -1 and not t10[0, 150] and t10.sum() == 1
     # corporate actions suppress (3 lower closes inside a split window)
     P = _P6([d], excl={0: [int(_P6([d]).cal[240])]})
     assert not BE.r_down_streak(_C6(P), 3)[0][0, 247]
 
 
-def test_bg7_is_bg6_plus_long_only_swing_blocks_traded_live():
+def test_bg7_is_bg6_plus_buy_and_sell_daily_blocks_traded_live():
     from agents import builder_promoted as BP
     for a in G.AGENTS:
         g6, g7 = G.grammar(a, "bg6"), G.grammar(a, "bg7")
         assert g7[:len(g6)] == g6, a
         extra = g7[len(g6):]
-        assert len(extra) == (600 if a == "swing" else 0), (a, len(extra))
-        assert all(r[2] in G.BG7_BLOCKS and r[8] == "" for r in extra)
-    assert 4 * sum(G.grammar_sizes("bg7").values()) == 39092 == 36692 + 2400
+        assert len(extra) == {"swing": 1200, "futures": 300}.get(a, 0), (a, len(extra))
+        assert all(r[2] in G.BG7_BLOCKS for r in extra)
+        assert all(r[8] == ("" if G.BLOCK[r[2]].side == "long" else "c10") for r in extra if a == "swing")
+    assert 4 * sum(G.grammar_sizes("bg7").values()) == 42692 == 36692 + 4 * (1200 + 300)
+    fut = {r[2] for r in G.grammar("futures", "bg7")[len(G.grammar("futures", "bg6")):]}
+    assert fut == {"rsi2_spike", "ibs_high", "up_streak", "nr7_down", "gap_down_hold"}, "futures: sell side only"
+    sides = {G.BLOCK[b].side for b in G.BG7_BLOCKS}
+    assert sides == {"long", "short"} and sum(G.BLOCK[b].side == "short" for b in G.BG7_BLOCKS) == 5
     for v in ("bg1", "bg2", "bg3", "bg4", "bg5", "bg6"):
         assert not any(r[2] in G.BG7_BLOCKS for a in G.AGENTS for r in G.grammar(a, v)), v
-    c7 = [c for m in G.MARKET_TYPES for c in G.cell_grammar("swing", m, "bg7") if c.block in G.BG7_BLOCKS]
+    c7 = [c for a in ("swing", "futures") for m in G.MARKET_TYPES for c in G.cell_grammar(a, m, "bg7")
+          if c.block in G.BG7_BLOCKS]
     assert all(c.version == "bg7" and c.v1_key is None and json.loads(c.key)[0] == "bg7" for c in c7)
     assert all(BP.supported(c) == (True, "") for c in c7), "every bg7 sentence is tradeable live the day it passes"
     assert all(G.BLOCK[b].fn[3:] in BE.EXTRA for b in G.BG7_BLOCKS)

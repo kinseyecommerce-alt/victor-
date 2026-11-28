@@ -312,10 +312,62 @@ def r_gap_up_hold(ctx, g: float):
     return F._out(ok & np.isfinite(gap) & (gap >= g - 1e-12) & (gap <= 0.20) & (P.c >= P.o), 1, _fin(gap))
 
 
+# the SELL side of bg7: the mirror images (a spike inside a downtrend, a gap down that holds ...): short
+def r_rsi2_spike(ctx, thr: float):
+    """RSI(2) >= 100 - thr while the close is below its 200-session mean (a rally inside a downtrend): short."""
+    P = ctx.daily
+    r = rsi2(P.c)
+    ok = ca_clean(P, 201)
+    return F._out(ok & np.isfinite(r) & (r >= 100.0 - thr - 1e-12) & (P.c < _sma200(P)), -1, _fin(r))
+
+
+def r_ibs_high(ctx, x: float):
+    """Internal bar strength >= 1 - x below the 200-session mean: short."""
+    P = ctx.daily
+    rng = P.h - P.l
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ibs = (P.c - P.l) / rng
+    ok = ca_clean(P, 201) & (rng > 0)
+    return F._out(ok & np.isfinite(ibs) & (ibs >= 1.0 - x - 1e-12) & (P.c < _sma200(P)), -1, _fin(ibs))
+
+
+def r_up_streak(ctx, n: int):
+    """n consecutive higher closes below the 200-session mean: short."""
+    P = ctx.daily
+    upm = np.ones(P.shape, bool)
+    for k in range(int(n)):
+        cur = P.c if k == 0 else F.lag(P.c, k)
+        upm &= cur > F.lag(P.c, k + 1)
+    ok = ca_clean(P, 201)
+    move = np.abs(P.c / F.lag(P.c, n) - 1.0)
+    return F._out(ok & upm & (P.c < _sma200(P)), -1, _fin(move))
+
+
+def r_nr7_down(ctx, p: float):
+    """NR7 with the close in the bottom (1 - p) of the range: short."""
+    P = ctx.daily
+    rng = P.h - P.l
+    mn = _roll(rng, 7, "min", 7)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        pos = (P.c - P.l) / rng
+    ok = ca_clean(P, 8) & (rng > 0)
+    return F._out(ok & np.isfinite(pos) & (rng <= mn + 1e-12) & (pos <= 1.0 - p + 1e-12), -1, _fin(P.c / rng))
+
+
+def r_gap_down_hold(ctx, g: float):
+    """The stock opens >= g below yesterday's close and closes at / below its open (the gap holds): short."""
+    P = ctx.daily
+    gap = P.o / F.lag(P.c, 1) - 1.0
+    ok = ca_clean(P, 2)
+    return F._out(ok & np.isfinite(gap) & (gap <= -g + 1e-12) & (gap >= -0.20) & (P.c <= P.o), -1, _fin(-gap))
+
+
 EXTRA = {"r_vol_shock": r_vol_shock, "r_vix_spike_index": r_vix_spike_index, "r_nifty_move": r_nifty_move,
          "r_index_gap": r_index_gap, "r_st_reversal": r_st_reversal, "r_high52": r_high52, "r_mom12_1": r_mom12_1,
          "r_ma200": r_ma200, "r_breakout20": r_breakout20, "r_rsi2_dip": r_rsi2_dip, "r_ibs_low": r_ibs_low,
-         "r_down_streak": r_down_streak, "r_nr7_up": r_nr7_up, "r_gap_up_hold": r_gap_up_hold}
+         "r_down_streak": r_down_streak, "r_nr7_up": r_nr7_up, "r_gap_up_hold": r_gap_up_hold,
+         "r_rsi2_spike": r_rsi2_spike, "r_ibs_high": r_ibs_high, "r_up_streak": r_up_streak, "r_nr7_down": r_nr7_down,
+         "r_gap_down_hold": r_gap_down_hold}
 
 
 def block_fn(name: str):

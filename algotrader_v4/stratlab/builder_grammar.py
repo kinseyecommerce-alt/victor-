@@ -262,8 +262,8 @@ BLOCKS_BG6 = [
 S_MR = ("Short-term over-reaction inside a long-term uptrend reverts (RSI(2) / internal bar strength / down-streak "
         "dips above the 200-day mean); a volatility contraction or a gap that holds through the session resolves in "
         "its direction.")
-# builder/v7 (bg7): NEW long-only daily stock blocks (swing CNC longs: tradeable live by bld_promoted the day they
-# pass). Kept out of BLOCKS / BLOCKS_BG6 so every earlier grammar stays byte for byte.
+# builder/v7 (bg7): NEW daily stock blocks, buy and sell side (swing longs in CNC, shorts in stock futures; the
+# futures agent takes the sell-side ones): tradeable live in PAPER by bld_promoted the day they pass. Kept out of BLOCKS / BLOCKS_BG6 so every earlier grammar stays byte for byte.
 BLOCKS_BG7 = [
     _b("rsi2_dip", "daily", "be:r_rsi2_dip", {"thr": (5.0, 10.0)}, "", "long", S_MR,
        "RSI(2) <= {thr} while the stock closes above its 200-day average"),
@@ -275,6 +275,17 @@ BLOCKS_BG7 = [
        "the narrowest day of the last 7 (NR7) with the close in the top part of the range (>= {p:%})"),
     _b("gap_up_hold", "daily", "be:r_gap_up_hold", {"g": (0.03, 0.05)}, "", "long", S_MR,
        "the stock opens >= {g:%} above yesterday's close and closes at or above its open"),
+    # the SELL side: mirror images (swing shorts in stock futures; also the futures agent's short-side rule)
+    _b("rsi2_spike", "daily", "be:r_rsi2_spike", {"thr": (5.0, 10.0)}, "", "short", S_MR,
+       "RSI(2) >= 100 - {thr} while the stock closes below its 200-day average"),
+    _b("ibs_high", "daily", "be:r_ibs_high", {"x": (0.1, 0.2)}, "", "short", S_MR,
+       "the stock closes in the top {x:%} of its day's range while below its 200-day average"),
+    _b("up_streak", "daily", "be:r_up_streak", {"n": (3, 4)}, "", "short", S_MR,
+       "{n} higher closes in a row while the stock is below its 200-day average"),
+    _b("nr7_down", "daily", "be:r_nr7_down", {"p": (0.5, 0.75)}, "", "short", S_MR,
+       "the narrowest day of the last 7 (NR7) with the close in the bottom part of the range"),
+    _b("gap_down_hold", "daily", "be:r_gap_down_hold", {"g": (0.03, 0.05)}, "", "short", S_MR,
+       "the stock opens >= {g:%} below yesterday's close and closes at or below its open"),
 ]
 BLOCK = {b.name: b for b in BLOCKS + BLOCKS_BG6 + BLOCKS_BG7}
 BG6_BLOCKS = frozenset(b.name for b in BLOCKS_BG6)
@@ -581,8 +592,8 @@ def _grammar_bg5(agent: str) -> list:
 
 
 def _grammar_bg7(agent: str) -> list:
-    """bg6 byte for byte, then the BLOCKS_BG7 sentences of the swing agent (long-only blocks: the futures agent's rule
-    takes only short-side blocks, so none there) under the same rules as every earlier daily block."""
+    """bg6 byte for byte, then the BLOCKS_BG7 sentences of the swing agent (every block) and the futures agent (its rule
+    takes the short-side blocks) under the same rules as every earlier daily block."""
     base = grammar(agent, GRAMMAR_V6)
     if agent not in ("swing", "futures"):
         return base

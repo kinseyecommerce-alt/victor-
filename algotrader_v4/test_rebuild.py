@@ -688,17 +688,21 @@ def test_builder_promoted_agent_trades_swing_rules_from_the_forward_plan():
            "size": ""}
     sht = dict(lng, block="st_rev_winners", params=[["x", 0.08], ["mode", "winners"]], size="c10")
     assert BP.supported(G.Candidate.from_json(lng)) == (True, "")
-    assert BP.supported(G.Candidate.from_json(sht))[0] is False
-    rules = [{"id": "bldS", "cand": lng, "universe_names": [], "universe": "TOP500", "ok": True, "why": ""}]
+    assert BP.supported(G.Candidate.from_json(sht)) == (True, ""), "swing shorts trade in PAPER too"
+    rules = [{"id": "bldS", "cand": lng, "universe_names": [], "universe": "TOP500", "ok": True, "why": ""},
+             {"id": "bldT", "cand": sht, "universe_names": [], "universe": "TOP500", "ok": True, "why": ""}]
     d1 = _dt(2026, 11, 26, 9, 15, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
     d2 = _dt(2026, 11, 27, 9, 15, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
-    quotes = {"AAA": {"open": 250.0, "ltp": 251.0}, "BBB": {"open": 400.0, "ltp": 401.0}}
-    plan1 = {"last_daily": 20261125, "pending": {"bldS": [["AAA", 1, 0.5], ["BBB", 1, 0.3]]}, "trades": {}}
+    quotes = {"AAA": {"open": 250.0, "ltp": 251.0}, "BBB": {"open": 400.0, "ltp": 401.0},
+              "CCC": {"open": 500.0, "ltp": 499.0}}
+    plan1 = {"last_daily": 20261125, "pending": {"bldS": [["AAA", 1, 0.5], ["BBB", 1, 0.3]], "bldT": [["CCC", -1, 0.4]]},
+             "trades": {}}
 
-    def tr(sym, reason, xd, px):
-        return ["bldS", sym, 20261126, 1, "09:15", quotes[sym]["open"], xd, "15:29", px, 1, "equity_cnc", 0, 0, reason]
-    plan2 = {"last_daily": 20261126, "pending": {"bldS": []},
-             "trades": {"bldS": [tr("AAA", "window_end", 20261126, 255.0), tr("BBB", "stop", 20261126, 380.0)]}}
+    def tr(sym, reason, xd, px, rid="bldS", side=1):
+        return [rid, sym, 20261126, side, "09:15", quotes[sym]["open"], xd, "15:29", px, 1, "equity_cnc", 0, 0, reason]
+    plan2 = {"last_daily": 20261126, "pending": {"bldS": [], "bldT": []},
+             "trades": {"bldS": [tr("AAA", "window_end", 20261126, 255.0), tr("BBB", "stop", 20261126, 380.0)],
+                        "bldT": [tr("CCC", "target", 20261126, 470.0, "bldT", -1)]}}
     with isolated_book(), kite_paper(), patch.object(settings, "validated_builder_promoted_enabled", True), \
             patch.object(BP, "promoted_rules", lambda: rules), \
             patch.object(BP.VD, "quotes", lambda ins: quotes), \
@@ -707,17 +711,23 @@ def test_builder_promoted_agent_trades_swing_rules_from_the_forward_plan():
         with patch.object(BP, "forward_plan", lambda d: plan1):
             out = asyncio.run(a.enter(d1))
         sw = out["swing"]
-        assert sw["entered"] == ["bldS:AAA", "bldS:BBB"] and sw["exited"] == [], out
+        assert sw["entered"] == ["bldS:AAA", "bldS:BBB", "bldT:CCC"] and sw["exited"] == [], out
         pos = {p.symbol: p for p in a.positions()}
         assert pos["AAA"].product == "CNC" and pos["AAA"].overnight and pos["AAA"].qty == int(100_000 // 250.0)
         assert pos["BBB"].meta["kind"] == "swing" and pos["BBB"].meta["rule"] == "bldS"
+        assert pos["CCC"].side == "SELL" and pos["CCC"].qty == int(500_000 // 500.0), "c10 futures size: Rs 5 lakh"
+        assert pos["CCC"].meta["cost_kind"] == "future" and "paper_only" in pos["CCC"].meta
+        assert pos["AAA"].meta["cost_kind"] == "equity_cnc"
         assert asyncio.run(a.exit_due(d1.replace(hour=15, minute=20))) == [], "the minute exits leave swing alone"
         with patch.object(BP, "forward_plan", lambda d: plan2):
             sw2 = asyncio.run(a._swing(d2.date(), rules))
-        assert sw2["exited"] == ["BBB"] and sw2["entered"] == [], sw2
+        assert sorted(sw2["exited"]) == ["BBB", "CCC"] and sw2["entered"] == [], sw2
         assert [p.symbol for p in a.positions()] == ["AAA"], "the engine still holds AAA"
         row = [r for r in a.ledger_rows() if r["symbol"] == "BBB" and r.get("rule") == "bldS"][-1]
         assert row["exit"] == 380.0 and row.get("cost_kind", "equity_cnc") in (None, "equity_cnc"), row
+        rc = [r for r in a.ledger_rows() if r["symbol"] == "CCC" and r.get("rule") == "bldT"][-1]
+        assert rc["exit"] == 470.0 and rc["side"] == "SELL" and rc.get("cost_kind") == "future", rc
+        assert rc["gross"] == round((500.0 - 470.0) * pos["CCC"].qty, 2), "a short gains when the price falls"
         with patch.object(BP, "forward_plan", lambda d: dict(plan2, last_daily=20261125)):
             sw3 = asyncio.run(a._swing(d2.date(), rules))
         assert sw3["reason"].startswith("data unavailable") and sw3["entered"] == [] and sw3["exited"] == []
