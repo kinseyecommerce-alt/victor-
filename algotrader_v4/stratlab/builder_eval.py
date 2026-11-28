@@ -104,7 +104,7 @@ def planted_candidates(rule: dict) -> dict:
     """{agent: Candidate} — the planted-edge carriers (rule["controls"]["planted"]["carriers"]). Under a bg3 rule a
     carrier takes the size regime of its own sentence (builder_grammar.size_regime; bg4 as bg3); bg1 / bg2: Rs 1 lakh."""
     out = {}
-    sized = (rule.get("grammar") or {}).get("version") in (G.GRAMMAR_V3, G.GRAMMAR_V4, G.GRAMMAR_V5, G.GRAMMAR_V6, G.GRAMMAR_V7)   # bg4 / bg5 = bg3 + trailing exits
+    sized = (rule.get("grammar") or {}).get("version") in (G.GRAMMAR_V3, G.GRAMMAR_V4, G.GRAMMAR_V5, G.GRAMMAR_V6, G.GRAMMAR_V7, G.GRAMMAR_V8)   # bg4 / bg5 = bg3 + trailing exits
     for agent, d in rule["controls"]["planted"]["carriers"].items():
         params = tuple(tuple(p) for p in d.get("params", []))
         size = G.size_regime(agent, d["block"], params, d["instrument"]) if sized else ""

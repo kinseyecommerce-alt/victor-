@@ -1,0 +1,333 @@
+{
+ "version": "builder/v8",
+ "written": "2026-11-28",
+ "supersedes": {
+  "version": "builder/v7",
+  "file": "builder_rule_v7.json",
+  "sha256": "b9284e06ce4c7fb82374d9437aa8e61fdcad2e32f6b8a43a5de2cbb54ea1c65b",
+  "how": "builder/v1 to v7 stay valid and are never rewritten: their batches, results and promoted strategies keep their records; a batch frozen before the upgrade is still evaluated under its own rule. Every batch frozen after the upgrade is a builder/v8 batch.",
+  "chain": "builder/v1 (builder_rule.json) -> v2 -> v3 -> v4 -> v5 -> v6 -> builder/v7 (builder_rule_v7.json) -> builder/v8 (this file)"
+ },
+ "statement": "Written before any builder candidate was evaluated. The builder builds strategies ONLY from the lab's own data (no published strategy is searched for or tested). Every candidate it ever makes is evaluated and counted in the luck correction; nothing is promoted by eye. Do not tune on results: a changed rule, grammar or gate is a new version (and the old counts carry over: N never shrinks). Nothing here switches trading on: a promoted strategy goes to the forward lab's builder/v1 family; paper trading after its forward qualification is a human decision (only a 'ready' flag is exposed). PAPER only; LIVE stays impossible. builder/v2 (written before any v2 candidate was drawn) adds ONE dimension, the stock UNIVERSE, so strategies are tested on more stocks; every widened sentence is a NEW candidate counted in N (no verdict of an earlier sentence is re-used, no proof is inherited); gates, controls, splits, costs, carry, DSR and promotion are builder/v1's, unchanged. builder/v3 (written before any v3 candidate was drawn) changes ONE thing, the SIZE of a test trade, to the owner's stated capital of Rs 10 lakh per agent. Why, stated plainly: on 2026-11-16 the DISCOVERY results of the 2,400 candidates of batches 0001-0006 were split into edge before costs, slippage and fees (no VALIDATION or FINAL return was used for it); at Rs 1 lakh per trade Zerodha's flat Rs 20-per-order brokerage is about half the fee of an intraday trade (Rs 83 per Rs 1 lakh round trip; Rs 45 per Rs 1 lakh at Rs 5 lakh), which is not the size an agent with Rs 10 lakh trades. This is a change made after seeing results, so it is a NEW rule version and nothing is inherited: every re-sized sentence is a NEW candidate with a new key, drawn by the same hash order and counted in N like any other (the FINAL windows of the re-sized sentences overlap the earlier ones: each look is a trial in N); no verdict, proof or promotion of an earlier batch is changed. Gates, controls, splits, slippage, fee schedule, carry, DSR and promotion are builder/v1's, unchanged; the universes are builder/v2's, unchanged. builder/v4 (26 Nov 2026) adds trailing-stop exits to the grammar (grammar.trailing); gates, splits, costs, controls and DSR are builder/v3's, and N carries over. builder/v5 (26 Nov 2026) adds ATR-based trailing-stop exits (grammar.atr_trailing); gates, splits, costs, controls, DSR and schedule are builder/v4's, and N carries over. builder/v6 (26 Nov 2026) adds 8 price-history daily stock blocks (grammar.price_history_blocks); gates, splits, costs, controls, DSR and schedule are builder/v5's, and N carries over. builder/v7 (28 Nov 2026) adds 10 daily mean-reversion / continuation blocks, buy and sell side, (grammar.mean_reversion_blocks); gates, splits, costs, controls, DSR and schedule are builder/v6's, and N carries over. builder/v8 (28 Nov 2026) adds 2 scheduled-event swing blocks (grammar.event_blocks); gates, splits, costs, controls, DSR and schedule are builder/v7's, and N carries over.",
+ "grammar": {
+  "module": "stratlab/builder_grammar.py",
+  "version": "bg8",
+  "sha256": "f1999ce90bdb9a6a0a1bb985f7b2151f51f205af78957c8838c846892fd26cf2",
+  "agents": {
+   "intraday": "NIFTY-100 stocks, MIS, minute grid; signals = minute blocks + the previous evening's end-of-day blocks; entry at a decision minute (09:15 auction .. 09:45); exit by 15:15 (time 14:30 / 15:15, stop 0.5 / 1 / 1.5 % with 1:1.5 / 1:2 / 1:3 targets, VWAP signal exit)",
+   "scalping": "NIFTY-100 stocks, MIS, 1-5-minute opening signals; exit <= 30 minutes after entry (5 / 10 / 15 / 25 minutes, stop 0.3 / 0.5 % with 1:2 / 1:3 within 30 minutes, VWAP signal within 30 minutes)",
+   "swing": "point-in-time top-500 stocks, decided in the evening, entered at the next open; long = CNC delivery, short = stock futures (F&O names only); 2-60 sessions (hold, bracket 3 / 5 / 8 % x 1:2 / 1:3 on the daily range within 20 / 60 sessions, close through the 10-session mean, event date)",
+   "options": "NIFTY / BANKNIFTY options on REAL end-of-day prices through nsedata's simulator (stratlab/builder_options.py); long ATM / debit spread in the block's direction, short strangle / iron condor for premium blocks; weekly / monthly expiry; hold 1 / 3 / 5, to expiry, premium bracket 1:3, signal exit",
+   "futures": "NIFTY / BANKNIFTY futures (index spot stands in) and stock futures (cash price, futures costs): daily blocks of both directions 1-10 sessions, overnight / 5-session minute blocks, index-gap intraday rules"
+  },
+  "market_types": {
+   "RISING": "NIFTY 50 close > its 50-session SMA and the SMA above its value 10 sessions earlier",
+   "FALLING": "NIFTY 50 close < its 50-session SMA and the SMA below its value 10 sessions earlier",
+   "SIDEWAYS": "neither RISING nor FALLING",
+   "HIGH_VOL": "India VIX close >= the 75th percentile of its previous 252 sessions (>= 200 values); overrides the three",
+   "point_in_time": "a daily-grid decision in the evening of t uses the type of t (closes <= t); a minute-grid decision during t uses the type of the previous daily session; options decided in the evening of t enter at t+1's close",
+   "rule": "each candidate trades only on sessions whose market type is its own"
+  },
+  "v1": {
+   "version": "bg1",
+   "sha256": "2084ade2c07de51ab95700e54c200e3d60c76f97d0ee38eba0ce464f899589ea",
+   "note": "bg1 is kept byte for byte in the same module (grammar(agent, 'bg1')); bg1 keys never change"
+  },
+  "candidate": "bg2's sentence (agent x market type x signal block (+ its round parameters) x entry timing x exit rule x instrument x UNIVERSE) x SIZE regime: a re-sized sentence has the key ['bg3', ..., universe, 'c10']; a sentence of unchanged size keeps its bg2 key",
+  "universes": {
+   "NIFTY100": "the lab's 97 NIFTY-100 names (forward_test.UNIVERSE), as builder/v1 used them on the minute grid",
+   "NIFTY200": "NIFTY100 + the names the builder data layer added to its minute store (builder_universe.py: the current NIFTY 200 list from NSE Indices and every historical NIFTY 100 member since 2016 that Kite still lists). Minute grid: only the added names with COMPLETE minute data over the candidate's whole split (bars on >= 98 % of the minute calendar's sessions from its first session to T, including one of the first 5 and one of the last 5); daily grid: point-in-time top-500 members among those names. Membership is NOT point-in-time for the added names (only the current list exists for NIFTY 200; delisted names are not served by Kite): survivorship bias, recorded with every batch",
+   "TOP500": "the point-in-time top 500 by traded value (builder/v1's daily-grid universe); daily-grid stock blocks only",
+   "INDEX": "NIFTY / BANKNIFTY instruments (options, index futures): no stock universe",
+   "choices": "minute-grid stock sentences (intraday incl. its previous-evening blocks, scalping, the futures agent's 15:21 stock blocks): NIFTY100 | NIFTY200; daily-grid stock sentences (swing, the futures agent's daily stock blocks): TOP500 | NIFTY100 | NIFTY200; index sentences: INDEX",
+   "v1_twin": "a bg2 sentence whose universe is the one bg1 used implicitly (NIFTY100 on the minute grid, TOP500 on the daily grid, INDEX) IS the bg1 sentence: never drawn when its bg1 key was drawn in any earlier batch (the sandbox seed included)",
+   "proven_rules": "the NIFTY200 versions of the two proven lab rules (auction gap fade >= 2 % / >= 3 % at 09:15 exited at 09:20 = scalping gap_fade o0915 time_min 5; the 3x-volume up-day overnight long = futures attention_swing o1521 overnight) are ordinary sentences of bg2: drawn only when the hash order reaches them, judged by the same gates, no credit from their NIFTY-100 proof",
+   "frozen_at_proof": "the names a universe resolved to on the batch's frozen data are recorded with the batch (summary 'universes') and with every proven candidate (proof 'universe_names'); its forward family entry trades exactly those names"
+  },
+  "sizes": {
+   "intraday": 4904,
+   "scalping": 1636,
+   "swing": 4251,
+   "options": 1488,
+   "futures": 1610
+  },
+  "v2": {
+   "version": "bg2",
+   "sha256": "8bbb31f2d0c3b911b5a1581be8b458159e74358792883f9db87cb40f4e41eef3",
+   "note": "bg2 is kept byte for byte in the same module (grammar(agent, 'bg2')); bg1 / bg2 keys never change"
+  },
+  "size_regime": {
+   "c10": "the sentence's trades are booked at a size builder/v3 changed (builder_grammar.size_regime, from the engine's cost_kind): every MIS stock sentence of intraday and scalping; every stock sentence of the futures agent (futures costs); every swing sentence that can go short (shorts are booked at stock-futures costs; its delivery longs, if any, stay Rs 1 lakh); EVERY options sentence (its lots follow the capital). A NEW candidate: drawn again, counted in N",
+   "unchanged": "swing sentences that only go long (CNC delivery: the block's story side is long, or a volume-shock block on an up day) and every index-FUTURES sentence (1 real lot): the sentence IS its bg2 sentence (same key and JSON, through it its bg1 twin) and is never drawn again once that key or its bg1 twin was drawn in any earlier batch (the sandbox seeds included). Its existing result IS its Rs 10 lakh result: delivery fees are proportional to the traded value (the same profit factor, Sharpe and verdict at any size), and an index future is traded at its real indivisible unit, one lot, on which the flat brokerage is about 0.2 bps of the contract value at 2026 index levels (about 1 bps at 2012 levels): more lots would change the result by less than that",
+   "counts": {
+    "intraday": {
+     "re_sized": 2352,
+     "unchanged": 0
+    },
+    "scalping": {
+     "re_sized": 828,
+     "unchanged": 0
+    },
+    "swing": {
+     "re_sized": 900,
+     "unchanged": 1155
+    },
+    "options": {
+     "re_sized": 576,
+     "unchanged": 0
+    },
+    "futures": {
+     "re_sized": 542,
+     "unchanged": 208
+    }
+   }
+  },
+  "v3": {
+   "version": "bg3",
+   "sha256": "811fc4f85a382bd37b91b94ee344636634253a724152f7ffda63b98c7e9d7512",
+   "note": "bg3 is kept byte for byte in the same module (grammar(agent, 'bg3')); bg1 / bg2 / bg3 keys never change"
+  },
+  "trailing": {
+   "what": "bg4 = bg3 + TRAILING-STOP exits (the owner's request, 25 Nov 2026) for every minute-grid stock sentence of the intraday and scalping agents: one new sentence per distinct bg3 sentence (signal block and its parameters, entry, universe, size regime) for each trailing exit below; every other part of the sentence is bg3's",
+   "exits": {
+    "intraday": [
+     [
+      "trail",
+      0.005
+     ],
+     [
+      "trail",
+      0.01
+     ],
+     [
+      "trail_be",
+      0.005
+     ],
+     [
+      "trail_be",
+      0.01
+     ]
+    ],
+    "scalping": [
+     [
+      "trail_min",
+      0.003,
+      30
+     ],
+     [
+      "trail_min",
+      0.005,
+      30
+     ],
+     [
+      "trail_be_min",
+      0.003,
+      30
+     ],
+     [
+      "trail_be_min",
+      0.005,
+      30
+     ]
+    ]
+   },
+   "trail": "a stop x % behind the best price since entry (long: the highest high; short: the lowest low), starting x % from the entry price; hard time limit 15:15 (intraday) or 30 minutes after entry (scalping)",
+   "trail_be": "a fixed stop x % from the entry price until the best price has moved x % in favour; then the stop goes to the entry price (breakeven) and trails x % behind the best price; same time limits",
+   "fills": "builder_engine.walk_session: each 1-minute bar is checked against the stop BEFORE the stop moves with that bar (a bar that opens through the stop exits at its open, a bar whose low (long) / high (short) touches it exits at the stop); the stop never moves inside a bar and never moves back; slippage and fees as bg3",
+   "keys": "a trailing sentence's key starts with 'bg4' and it has no bg1 / bg2 twin: always a NEW candidate, drawn once and counted in N",
+   "not_included": "volatility (ATR) trails: they need a per-trade volatility input the minute walk does not carry; left for a later version"
+  },
+  "atr_trailing": "bg5 = bg4 byte for byte (every earlier key unchanged, never re-drawn) + ATR trailing-stop exits for the same sentences as bg4's trailing block (each distinct bg3 minute-grid stock sentence of intraday / scalping): intraday trail_atr / trail_be_atr at k = 0.5 / 1.0 to the 15:15 square-off; scalping trail_atr_min / trail_be_atr_min at k = 0.25 / 0.5 with a 30-minute limit. Distance = k x ATR(14) / previous close; ATR(14) = mean true range of the 14 sessions before the entry day, session high / low / close from the symbol's own 1-minute bars, special sessions skipped; fewer than 15 earlier sessions: the trade is not taken. Fills exactly as the bg4 trailing kinds at that distance (builder_engine.atr_walk -> walk_session). New keys start with 'bg5' and have no bg1 twin.",
+  "price_history_blocks": "bg6 = bg5 byte for byte (every earlier key unchanged, never re-drawn) + 8 NEW daily stock blocks (builder_grammar.BLOCKS_BG6, signal functions builder_engine.r_st_reversal / r_high52 / r_mom12_1 / r_ma200 / r_breakout20) from the daily OHLCV panel, no new data: st_rev_losers / st_rev_winners (5-session return <= -x / >= x, x 8 / 12 %: long / short), high52 (close within 1 / 3 % of its 252-session closing high: long), mom12_1 (return 252 -> 21 sessions ago >= 50 / 100 %: long), ma200_up / ma200_down (close crosses its 200-session mean on >= 1 / 2 x the 20-session volume: with the cross), breakout20 / breakdown20 (close beyond the previous 20 sessions' high / low on >= 1.5 / 2.5 x volume). Every price-history signal is suppressed while a corporate-action exclusion day of the stock lies in its look-back window (builder_engine.ca_clean). The sentences follow the rules of every earlier daily block: swing (all exits, CNC longs / futures shorts, universes TOP500 / NIFTY100 / NIFTY200) and futures (the short-side blocks); sizes by bg3's size regime. New keys start with 'bg6' and have no bg1 twin.",
+  "mean_reversion_blocks": "bg7 = bg6 byte for byte + 10 NEW daily stock blocks (builder_grammar.BLOCKS_BG7) from the daily OHLCV panel, buy side: rsi2_dip (Wilder RSI(2) <= 5 / 10 above the 200-session mean), ibs_low ((close - low) / (high - low) <= 0.1 / 0.2 above the 200-session mean), down_streak (3 / 4 lower closes above the 200-session mean), nr7_up (narrowest range of 7 sessions, close in the top half / quarter), gap_up_hold (open >= 3 / 5 % above the previous close, close >= open); sell side, their mirror images: rsi2_spike (RSI(2) >= 95 / 90 below the 200-session mean), ibs_high (IBS >= 0.9 / 0.8 below it), up_streak (3 / 4 higher closes below it), nr7_down (NR7, close in the bottom half / quarter), gap_down_hold (open >= 3 / 5 % below the previous close, close <= open). Corporate-action exclusion days in the look-back window suppress the signal (ca_clean). Swing sentences for all 10 (longs CNC at Rs 1 lakh, shorts stock futures at the c10 size, F&O names only) and futures-agent sentences for the 5 sell-side blocks (its short-side rule); TOP500 / NIFTY100 / NIFTY200. New keys start with 'bg7'.",
+  "every_agent": "bg7 also gives every other agent new sentences: options and index futures (NIFTY / BANKNIFTY on NIFTY 50's daily signal, builder_grammar.BLOCKS_BG7_IDX: NIFTY RSI(2) dip above / spike below its 200-day mean, 3 / 4-day down / up streaks, the turn of the month, 200-day crosses up / down, 20-session close breakouts up / down, a 0.5 / 1 % gap that holds up / down, an India VIX drop of 10 / 15 %; signals builder_engine.r_idx_*, r_vix_drop) under bg1's option / futures rules; intraday: every BLOCKS_BG6 / BLOCKS_BG7 daily stock block traded intraday the next morning (entries 09:15 / 09:20, intraday exits, bg1's previous-evening rule) and the 14:30 intraday-momentum block (BLOCKS_BG7_MIN halfhour_mom: |return from yesterday's close to 09:44 / 14:29| >= 0.5 / 1 %, traded WITH it from 14:30; exits 15:15, every bracket, the VWAP signal); scalping: halfhour_mom from 14:30 with the scalping exits. 18,720 new bg7 sentences in all; 55,412 sentences.",
+  "event_blocks": "bg8 = bg7 byte for byte + 2 NEW scheduled-event swing blocks (builder_grammar.BLOCKS_BG8, CNC longs): pre_results (the earnings-announcement premium: a RESULTS board meeting whose notice is public by today's 15:30 close is 2 .. lead weekdays away, lead 5 / 10; buy at the next open; exits: 'event' = sell at the close before the meeting, hold = weekdays to the meeting - 1, or a 3 / 5 % bracket x 1:2 / 1:3 within 20 sessions; data <events>/boardmeet.csv.gz notice_ts / meeting_date / is_results, frozen in the bundle as f_bm_next = builder_engine.bm_next) and div_runup (a dividend >= 1 / 2 % of the close, known by today, ex-date 6 weekdays away; buy at the next open, sell at the close of the last cum-dividend session, hold 5; data: the corporate-action table already frozen as f_ca). Weekday counts (not session indices) so a backtest and the live forward run, whose data ends before the event, decide identically; an exchange holiday in between shifts the exit by one session. TOP500 / NIFTY100 / NIFTY200; 144 new sentences, keys 'bg8'."
+ },
+ "batch": {
+  "per_cell": 20,
+  "cells": "5 agents x 4 market types",
+  "size": 400,
+  "draw": "per cell, the bg3 grammar list ordered by sha256('bg3|<batch id>|<agent>|<market type>|<candidate key>'); the first 20 whose key was never drawn in an earlier batch, whose bg1 twin (if any; only sentences of unchanged size have one) was never drawn in an earlier batch, and that are not near-duplicates of one already taken in this batch (deterministic in the batch id and the registry). The universe is part of the draw: the 400 places are shared by all universes",
+  "near_duplicate": "same agent, market type, block, exit kind and instrument and at most ONE other signature field (each block parameter, entry time, option structure, each exit parameter, the universe) different",
+  "exhaustion": "a cell whose grammar has no undrawn, non-duplicate sentence left contributes fewer than 20 (recorded); the grammar is never widened inside builder/v3"
+ },
+ "freeze": "before any return is computed: the batch's full candidate list (ids, keys, grammar sentences), the generator version + grammar sha256 and the data snapshot ids (sha256 / sizes of every input, snapshot end T) are hashed and appended to the hash-chained builder registry; the evaluation refuses a batch whose candidate file or data snapshot does not match its registry record",
+ "splits": {
+  "T": "the batch's data snapshot end (min of the daily and minute calendars' last session)",
+  "discovery": "the oldest data of the candidate's grid .. T - 24 months (halves by session count)",
+  "validation_months_before_end": 24,
+  "final_months_before_end": 12,
+  "validation": "(T - 24 months, T - 12 months]",
+  "final": "(T - 12 months, T]",
+  "membership": "a trade belongs to the window of its entry date; a hold passing a window end exits at the window's last close (overnight minute exits beyond it are skipped)"
+ },
+ "costs": {
+  "fill_model": "datagen_run._trade: slippage against us on BOTH fills, 2 bps per side stocks / 1 bps index futures; options: nsedata haircut max(Rs 0.05, 1 %) per leg per fill",
+  "fees": "costs.round_trip_cost (2026 Zerodha / NSE schedule): equity_mis intraday + scalping, equity_cnc delivery longs, future for stock / index futures; options: options_replay.leg_cost",
+  "size": "Rs 10 lakh capital per agent. MIS stock trades (intraday + scalping): Rs 5 lakh per trade (whole shares; <= 10 entries a day x Rs 5 lakh x 20 % intraday margin = Rs 10 lakh). Stock trades booked at futures costs (the futures agent's stock sentences, swing shorts): Rs 5 lakh per trade (about one real lot, ~20 % margin). CNC delivery longs (swing): Rs 1 lakh per trade, unchanged (delivery fees are proportional to the traded value, so the profit factor does not depend on the size). Index futures: 1 real lot (sim.LOT_SIZES), unchanged. OPTIONS: the lot size is nsedata.lot_size; the NUMBER of lots, the same for every leg, is decided at entry from the entry fills only (builder_options.option_lots; no later price is read): long ATM options and debit spreads max(1, floor(Rs 1,00,000 / net premium paid per lot)) - Rs 1 lakh of premium at risk, 10 % of the capital; iron condors max(1, floor(Rs 1,00,000 / maximum loss per lot)) with maximum loss = (widest wing - net credit) x lot - Rs 1 lakh of maximum loss; naked short strangles max(1, floor(Rs 5,00,000 / margin per lot)) with margin = 12 % of the spot notional per lot (the lab's own estimate, options_vrp.NAKED_MARGIN_PCT: the builder's option engine has no SPAN margin; spot = the index close of the entry session, else the mean of the two short strikes); at most 1,800 (NIFTY) / 600 (BANKNIFTY) units per leg, i.e. one un-sliced order per leg (about NSE's freeze quantities - a conservative cap added so that the flat brokerage per order stays honest). Fees: options_replay.leg_cost per leg at the real quantity; the haircut per unit is unchanged. <= 10 entries per day per candidate (strongest first), 1 for index instruments, one open position per symbol. A v1 / v2 candidate (and every bg3 sentence of unchanged size) trades Rs 1 lakh per stock trade / 1 option lot as before",
+  "size_rs": {
+   "regime": "c10",
+   "equity_mis": 500000,
+   "future": 500000,
+   "equity_cnc": 100000,
+   "options": {
+    "premium_rs": 100000,
+    "max_loss_rs": 100000,
+    "naked_margin_rs": 500000,
+    "naked_margin_pct": 0.12,
+    "max_units_per_leg": {
+     "NIFTY": 1800,
+     "BANKNIFTY": 600
+    }
+   }
+  },
+  "unchanged": "CNC delivery longs (swing long-only sentences) and index futures at 1 real lot keep their size, their bg2 key and their earlier result: that result IS their Rs 10 lakh result (delivery fees are proportional: the same profit factor at any size; on one real index-futures lot the flat brokerage is about 0.2 bps of the contract value at 2026 index levels, about 1 bps at 2012 levels, so more lots would change the result by less than that). They are never re-drawn; every other sentence is re-tested as a new candidate",
+  "capital": {
+   "per_agent_rs": 1000000,
+   "exact_for": "intraday and scalping: at most 10 open MIS trades of Rs 5 lakh at 20 % margin; options: one open position per index, Rs 1 lakh of premium / of maximum loss or Rs 5 lakh of naked margin",
+   "limitation": "for multi-session holds (swing 2-60 sessions, futures 1-10 sessions) the number of concurrent positions is NOT capped by the capital (up to 10 new entries a day): a Rs 10 lakh account has to scale every position down. That scaling is exact for CNC delivery (proportional fees: the same profit factor at any size); stock-futures lots are indivisible, so a Rs 10 lakh account cannot hold every signalled lot and its result would differ from the test's",
+   "slippage": "unchanged (2 bps per side, stress 5 bps): a Rs 5 lakh order in a NIFTY 100 / NIFTY 200 stock is assumed to fill like a Rs 1 lakh order; this is an assumption, measured only in paper trading"
+  }
+ },
+ "discovery_gates": {
+  "both_halves_net_positive": true,
+  "min_pf": 1.15,
+  "min_trades_per_half": {
+   "intraday": 150,
+   "positional": 60
+  },
+  "max_symbol_share": 0.35,
+  "stress": "net > 0 in both halves again at 5 bps (index 2.5 bps; options 2.5 x the haircut)",
+  "source": "stratlab.datagen_run.judge_discovery's gates on the builder's windows (stratlab.builder_engine.judge_discovery)"
+ },
+ "carry": {
+  "K_per_cell": 3,
+  "rank": "discovery passers ranked by DISCOVERY DSR at N_disc (below) and V; ties by id; at most K per (agent, market type) cell go to VALIDATION"
+ },
+ "validation": "protocol.screen on the VALIDATION window (its own halves by sessions): both halves net > 0, PF >= 1.15, >= 150 intraday / 60 positional trades, top symbol <= 35 % (not for one-instrument candidates)",
+ "final": {
+  "verdict": "protocol.final_verdict: net > 0 and PF >= 1.05 -> CONFIRMED",
+  "looks": "one look per validation passer; the look is appended to the registry BEFORE the FINAL return is computed and counts in N (FINAL windows of later batches overlap this one, so every FINAL look ever is a trial)"
+ },
+ "dsr": {
+  "min": 0.95,
+  "formula": "trials.dsr (Bailey & Lopez de Prado): daily Sharpe, skew, non-excess kurtosis",
+  "series": "proof: daily net P&L of DISCOVERY + VALIDATION + FINAL (trials.daily_pnl convention); carry ranking: DISCOVERY only",
+  "lab_trials_count": 2552,
+  "lab_retest_trials": 455,
+  "lab_retest": "the lab's own re-test of its catalogue at this size regime (stratlab/SIZE10L.md, pre-registered in stratlab/PREREGISTERED_SIZE10L.json + PREREGISTERED_SIZE10L_AMENDMENT1.json, run 2026-11-16 before this rule was first used): 435 strategies re-tested as new trials + 20 FINAL looks = 455, 0 proven. They are trials at the Rs 10 lakh size on the same data, so they count in this rule's N: lab_count = max(lab_trials_count + lab_retest_trials, the trials ledger's 2023-26 count when it is readable). A fresh registry under builder/v3 therefore starts at N = 2552 + 455 + 16 + 2400 + 11 = 5,434",
+  "development_evaluations": 16,
+  "N": "N_disc = lab_count + development_evaluations (16 DISCOVERY-only engine checks on real data while the engine was written, draw id 'try') + every builder candidate ever evaluated (all earlier batches + this batch's) + every FINAL look of earlier batches; N_proof = N_disc + this batch's FINAL looks; lab_count = max(2552, the trials ledger's 2023-26 variant count when it is readable); the registry keeps N_used = max(previous N_used, N_proof): N never shrinks. N is ONE count across builder/v1 and builder/v2: the registry is shared, every candidate of every v1 batch (the sandbox seed included) and of every v2 batch, and every FINAL look of either version, counts; the upgrade record carries N at the upgrade and N continues from it (it never shrinks); builder/v3 continues the same count: every re-sized sentence drawn under v3 is one more candidate in N, every FINAL look one more trial; no development evaluation was run for builder/v3 (synthetic-data tests only), so development_evaluations stays 16",
+  "V": "max(robust (1.4826 x MAD)^2 variance of the batch's DISCOVERY daily Sharpes, the median noise floor 1 / (T_days - 1))"
+ },
+ "controls": {
+  "shuffle": {
+   "what": "every candidate's trigger cells permuted to random eligible dates of the same symbol and market type inside DISCOVERY (seed sha256(version|batch|id|shuffle)), run through the identical pipeline",
+   "report": "per batch and per cell: discovery passers observed vs shuffled passers (the expected count under no information)",
+   "gate": "a candidate whose own shuffled version passes the DISCOVERY gates cannot be proven (its result is market exposure, not the signal)"
+  },
+  "placebo": {
+   "n": 50,
+   "what": "random eligible cells of the candidate's market type on VALIDATION + FINAL, same trade count, same long share, same hold",
+   "gate": "the candidate's VALIDATION + FINAL net > the 95th percentile of the 50 placebo nets"
+  },
+  "planted": {
+   "p": 0.65,
+   "p_random": 0.5,
+   "what": "per agent, a fraction of eligible DISCOVERY cells whose side is the sign of the realised move of the carrier's own entry -> exit with probability p (p_random = coin flip), through the identical pipeline",
+   "gate": "for the candidate's agent: the p = 0.65 control passes the DISCOVERY gates on its GROSS P&L (before fees; slippage included) AND the coin-flip control does not (a power check of the signal -> trade -> judge pipeline, independent of the cost wall the candidate itself must clear); otherwise no candidate of that agent can be proven in the batch. The after-fees result of both controls is reported next to it (whether a 65 %-right signal of that agent can pay Zerodha's costs at all)",
+   "carriers": {
+    "intraday": {
+     "block": "gap_fade",
+     "entry": "o0920",
+     "exit": [
+      "time",
+      "o1515"
+     ],
+     "instrument": "STOCKS",
+     "product": "mis",
+     "frac": 0.02
+    },
+    "scalping": {
+     "block": "gap_fade",
+     "entry": "o0920",
+     "exit": [
+      "time_min",
+      25
+     ],
+     "instrument": "STOCKS",
+     "product": "mis",
+     "frac": 0.02
+    },
+    "swing": {
+     "block": "deliv_up",
+     "entry": "next_open",
+     "exit": [
+      "hold",
+      5
+     ],
+     "instrument": "STOCKS",
+     "product": "cnc/fut",
+     "frac": 0.01
+    },
+    "futures": {
+     "block": "fii_flow",
+     "entry": "next_open",
+     "exit": [
+      "hold",
+      5
+     ],
+     "instrument": "NIFTY",
+     "product": "fut",
+     "frac": 0.3
+    },
+    "options": {
+     "block": "fii_flow",
+     "entry": "close",
+     "exit": [
+      "opt_hold",
+      3
+     ],
+     "instrument": "NIFTY",
+     "product": "opt",
+     "structure": "long_atm:weekly",
+     "frac": 0.3
+    }
+   }
+  }
+ },
+ "controls_note": "the planted-edge carriers are builder/v1's (implicit universes: NIFTY100 minute, TOP500 daily, INDEX): a power check of each agent's pipeline, independent of the candidate's universe; under builder/v3 a carrier takes the size regime of its own sentence (intraday and scalping carriers: Rs 5 lakh per trade; the options carrier: lots from the capital; the swing carrier is long-only CNC and the futures carrier is one index lot: unchanged). The shuffle and placebo controls of a candidate always trade the candidate's own size",
+ "proven": "VALIDATION passed AND FINAL CONFIRMED AND DSR >= 0.95 (N_proof, V) AND placebo gate AND own shuffle failed AND planted gate of its agent",
+ "promotion": {
+  "what": "a proven candidate becomes a catalogue-compatible spec in the generated module <builder root>/catalog/builder_gen.py (written by code: batch id, candidate key, grammar sentence, registry hash) and is registered with the forward lab's SEPARATE family builder/v1 (builder_forward_rule.json); forward_lab_rule.json (family 1,276) is not touched",
+  "paper": "only after its builder/v1 qualification, and only by a human: the API exposes a 'ready' flag, nothing switches on",
+  "universe": "a candidate proven on a universe is promoted like any other; the generated spec and its builder/v1 forward family entry carry the universe's frozen name list; the forward step reads the builder data layer's minute store (every name of the NIFTY 200 extension is there; the forward lab's own store keeps its 97). builder_forward_rule.json (family builder/v1) is unchanged",
+  "size": "a promoted candidate carries its size regime in its sentence (candidate JSON 'size'); its builder/v1 forward family entry trades that size (a v1 / v2 strategy: Rs 1 lakh, its reference series unchanged)"
+ },
+ "trials_ledger": "every candidate's DISCOVERY row (stage builder_discovery), every VALIDATION screen (builder_validation) and every FINAL look (builder_final) is appended to the lab trials ledger when it is configured (era builder-v1 / builder-v2 / builder-v3, family builder, cost_model builder/v3 for v3 batches; the lab's 2023-26 count is unchanged by them)",
+ "schedule": {
+  "when": "every night at 02:30 IST (outside market hours, after the data layer's 23:45 Kite run), batch after batch: each batch of 400 candidates is frozen, evaluated and ingested in full before the next one is frozen (N grows batch by batch exactly as with one batch a night; every batch holds the data layer's lock on its own). The night stops when (a) the grammar has no undrawn sentence left (status grammar_exhausted: every sentence was tested), (b) BUILDER_NIGHT_BATCHES batches ran (default 12) or the night window closed - no batch is started at or after 05:15 IST or inside market hours, and an evaluation's wall-clock limit ends at 08:30 IST - or (c) a batch did not complete (failed, error, disk cap, waiting for data). A pending batch is always resumed first",
+  "flag": "BUILDER_ENABLED (default false: no job scheduled, nothing read or written)",
+  "process": "freeze in the app process, evaluation in a separate process (python -m builder_run), nice 10, <= 2 workers, address-space limit BUILDER_MEM_MB, wall-clock limit BUILDER_TIME_LIMIT_S; resumable (finished units are kept); its results are ingested only after a successful run",
+  "disk": "BUILDER_MAX_MB (default 400) for the builder directory; at the cap nothing more is written (status disk_cap), nothing is deleted; caches (compact option tables) live on ephemeral disk (BUILDER_CACHE_DIR)",
+  "isolation": "no order entry point, agent, risk or trading state is imported, read or changed; PAPER only",
+  "data": "a new builder/v3 batch is frozen only once (1) the data layer's minute universe is complete (every added name Kite lists fully backfilled; BUILDER_MINUTE_UNIVERSE=nifty200), so NIFTY200 is never drawn on a half-filled store, and (2) the data layer's NSE archive backfill (2012-01-01 ->) is complete (builder.nse_archive_status, read from the data layer's own state with its own finality rule): every calendar day up to 10 days ago is final (cash archive and, on a session, index closes, F&O parts, participant OI / volume, ban list, FII statistics; a day in an error status is not final and the gate waits), and every quarterly / monthly feed window (deals, corporate actions, index membership, filing feeds) that ended more than 10 days ago was fetched at least once after its end (a window whose last answer was an error is reported, not waited for: NSE does not serve some old months). A pending batch is resumed regardless",
+  "night": {
+   "start": "02:30 IST",
+   "max_batches_setting": "BUILDER_NIGHT_BATCHES",
+   "max_batches_default": 12,
+   "no_new_batch_from": "05:15 IST",
+   "evaluation_ends_by": "08:30 IST",
+   "order": "the batch ids are consecutive; the draw of batch k+1 sees every key of batch k (never re-drawn)"
+  },
+  "data_gates": [
+   "minute_universe",
+   "nse_archives"
+  ]
+ },
+ "candidate_note_v4": "bg4's sentence = bg3's sentence, or a bg3 minute-grid stock sentence of intraday / scalping with a trailing exit; the draw order is sha256('bg4' | batch | cell | key)",
+ "candidate_note_v5": "bg5's sentence = bg4's sentence, or a bg3 minute-grid stock sentence of intraday / scalping with an ATR trailing exit; the draw order is sha256('bg5' | batch | cell | key)",
+ "candidate_note_v6": "bg6's sentence = bg5's sentence, or a swing / futures sentence of a BLOCKS_BG6 block; the draw order is sha256('bg6' | batch | cell | key)",
+ "candidate_note_v7": "bg7's sentence = bg6's sentence, or a swing sentence of a BLOCKS_BG7 block; the draw order is sha256('bg7' | batch | cell | key)",
+ "candidate_note_v8": "bg8's sentence = bg7's sentence, or a swing sentence of a BLOCKS_BG8 block; the draw order is sha256('bg8' | batch | cell | key)"
+}
